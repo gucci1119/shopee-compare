@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261024-1600';
+var SRC_VER = '20261024-1700';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -114,10 +114,11 @@ function baAiYenToday_() {
    上限 cfg.aiYenCapMonth（既定 30,000）に達したら 🤖/🃏/監査/写真直し を止める。上げるのは本人だけ */
 function baAiYenMonth_() {
   var mon = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM'), todayU = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
-  var usd = 0, days = 0, hasToday = false;
+  var usd = 0, days = 0, hasToday = false, unreadable = false;
   try { var rows = sbSelect_('app_kv', 'select=v&k=eq.ai_actual') || []; var dd = (rows[0] && rows[0].v && rows[0].v.days) || {};
-    Object.keys(dd).forEach(function (d) { if (String(d).slice(0, 7) !== mon) return; days++; if (d === todayU) hasToday = true; var o = dd[d] || {}; Object.keys(o).forEach(function (m) { Object.keys(o[m] || {}).forEach(function (t) { usd += Number(o[m][t]) || 0; }); }); }); } catch (e) {}
+    Object.keys(dd).forEach(function (d) { if (String(d).slice(0, 7) !== mon) return; days++; if (d === todayU) hasToday = true; var o = dd[d] || {}; Object.keys(o).forEach(function (m) { Object.keys(o[m] || {}).forEach(function (t) { usd += Number(o[m][t]) || 0; }); }); }); } catch (e) { unreadable = true; }   /* ★2026-10-24 全体レビュー（出品管理 #15）：読めない＝0円ではない */
   var est = 0; try { if (!hasToday) est = (baAiYenToday_() || {}).yen || 0; } catch (e2) {}
+  if (unreadable) return { mon: mon, yen: Number.MAX_SAFE_INTEGER, actual: '読めず', est: Math.round(est), days: days, unreadable: true };   /* 上限を超えていないか確かめられない＝超えている扱い（門で止まる） */
   return { mon: mon, yen: Math.round(usd * 150 + est), actual: Math.round(usd * 150), est: Math.round(est), days: days };
 }
 function baAiMonthCap_(cfg) { var c = cfg && cfg.aiYenCapMonth; return (c === undefined || c === null || c === '') ? 30000 : Number(c); }
@@ -1433,7 +1434,7 @@ function doGetInner_(e) {
         var dvwt = P_().getProperty('WRITE_TOKEN');
         if (!dvwt || p.token !== dvwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         var dvshop = parseInt(p.shop_id, 10); if (!getToken_(dvshop)) throw new Error('未認可 shop_id=' + p.shop_id);
-        dvout = removeVariation_(dvshop, p.item_id, String(p.names || '').split('\u0001').filter(String), String(p.idx || ''), String(p.mids || ''));
+        dvout = removeVariation_(dvshop, p.item_id, String(p.names || '').split('\u0001').filter(String), String(p.idx || ''), String(p.mids || ''), String(p.vnames || '').split('\u0001'));
       } catch (err) { dvout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dvcb + '(' + JSON.stringify(dvout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -1671,7 +1672,7 @@ function doGetInner_(e) {
         var dswt = P_().getProperty('WRITE_TOKEN');
         if (!dswt || p.token !== dswt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         var dsshop = parseInt(p.shop_id, 10); if (!getToken_(dsshop)) throw new Error('未認可 shop_id=' + p.shop_id);
-        dsout = removeVariationShift_(dsshop, p.item_id, String(p.mids || ''));
+        dsout = removeVariationShift_(dsshop, p.item_id, String(p.mids || ''), String(p.vnames || '').split('\u0001'));
       } catch (err) { dsout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dscb + '(' + JSON.stringify(dsout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -3236,7 +3237,7 @@ function cleanVariation_(shopId, itemId) {
 // ★明細(バリエ)を削除。delete_model でモデルを消し、tierのオプションも取り除いて番号を詰め直す。
 //   ・残り0件にはできない（Shopeeがバリエ商品として成立しなくなる）
 //   ・売れた実績のあるモデルもShopee側の判断で削除不可のことがある（その場合はエラーを返す）
-function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
+function removeVariation_(shopId, itemId, names, idxCsv, midCsv, vnames) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
@@ -3250,10 +3251,13 @@ function removeVariation_(shopId, itemId, names, idxCsv, midCsv) {
     var byMid = {};
     models.forEach(function (m) { byMid[String(m.model_id)] = m; });
     want = mids.length;
-    mids.forEach(function (mid) {
+    mids.forEach(function (mid, mk) {
       var m = byMid[String(mid)];
       var oi = m ? (m.tier_index || [])[0] : null;
       if (m == null || oi == null) { unknown.push('ID ' + mid); return; }
+      /* ★2026-10-24 全体レビュー（出品管理 #7）：名前も送られてきた時は、今その番号に入っている明細の名前と同じか確かめる。
+         詰め直し削除の後は同じ番号に【次の作品】が入る＝押し直し・2台から消すと隣の作品を消していた（10/6 と同じ型） */
+      if (vnames && vnames[mk] && vnNorm_(cur[oi]) !== vnNorm_(vnames[mk])) { unknown.push('ID ' + mid + '（今の名前は「' + cur[oi] + '」で「' + vnames[mk] + '」ではない＝別の明細に入れ替わった・もう消えた）'); return; }
       if (!delIdx[oi]) { delIdx[oi] = 1; resolved.push(cur[oi]); }
     });
   } else {
@@ -3379,13 +3383,13 @@ function bulkEdit_(kv, jobKey, from) {
   var items = pay.items || [];
   if (!items.length) throw new Error('対象が空です');
   var start = Math.max(0, parseInt(from || 0, 10) || 0);
-  var ok = 0, ng = 0, errs = [];
+  var ok = 0, ng = 0, errs = [], failIds = [];   /* ★2026-10-24 全体レビュー（出品管理 #38）：failIds＝'国|item_id'（上限なし） */
   for (var i = start; i < items.length; i++) {
     // 1件も処理していないうちは締切でも必ず1件はやる（無限ループ防止）
     if (i > start && new Date().getTime() - t0 > BULK_DEADLINE_MS) {
       if (jobKey) jobSet_(jobKey, { pct: Math.round(i / items.length * 100),
         step: i + '/' + items.length + '件目まで完了。続きを実行します…' });
-      return { ok: true, done: ok, failed: ng, errors: errs.slice(0, 20), next: i, total: items.length };
+      return { ok: true, done: ok, failed: ng, errors: errs.slice(0, 20), failed_ids: failIds, next: i, total: items.length };
     }
     if (jobCancelled_(jobKey)) throw new Error('中止しました');
     var it = items[i] || {};
@@ -3419,11 +3423,11 @@ function bulkEdit_(kv, jobKey, from) {
       if (it.video) { sub('動画をアップロード中'); setItemVideo_(it.shop_id, it.item_id, it.video, jobKey); sDone++; }
       else if (it.video_remove) { sub('動画を削除'); callShop_(parseInt(it.shop_id, 10), '/api/v2/product/update_item', null, 'post', { item_id: parseInt(it.item_id, 10), video_upload_id: '' }); sDone++; }
       ok++;
-    } catch (e) { ng++; errs.push((it.cc || '') + ' ' + (it.item_id || '') + ': ' + String((e && e.message) || e).slice(0, 90)); }
+    } catch (e) { ng++; failIds.push(String(it.cc || '') + '|' + String(it.item_id || '')); errs.push((it.cc || '') + ' ' + (it.item_id || '') + ': ' + String((e && e.message) || e).slice(0, 90)); }
   }
   try { sbDelete_('app_kv', 'k=eq.' + encodeURIComponent(kv)); } catch (e2) { }
   // next を返さない＝最後まで到達。完了表示は呼び出し側が全チャンクの累計で出す
-  return { ok: true, done: ok, failed: ng, errors: errs.slice(0, 20), next: null, total: items.length };
+  return { ok: true, done: ok, failed: ng, errors: errs.slice(0, 20), failed_ids: failIds, next: null, total: items.length };
 }
 // 明細名と明細画像を1回の update_tier_variation でまとめて反映（対象外の画像・名前はそのまま維持）
 // ★【順番を崩さずに】途中の明細を消す（詰め直し方式）。2026-08-22 本人要望「1個、2個を消すことがほとんど」。
@@ -3433,7 +3437,7 @@ function bulkEdit_(kv, jobKey, from) {
 //     ② あまった末尾の枠を delete_model（末尾なので安全）
 //     ③ option_list を残り件数に詰める（残る側の位置は 0..k-1 のままで動かない）
 //   ⚠ model_id は枠に残るため、**販売数(sold)は枠についたまま1つずれる**。価格・在庫・SKU・画像は正しく移る。
-function removeVariationShift_(shopId, itemId, midCsv) {
+function removeVariationShift_(shopId, itemId, midCsv, vnames) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   var priceOf = function (m) { var pi = (m.price_info || [])[0] || {}; return pi.original_price != null ? pi.original_price : (pi.current_price != null ? pi.current_price : 0); };
   var stockOf = function (m) { var sv = m.stock_info_v2 || {}; var ss = (sv.seller_stock || [])[0] || {}; if (ss.stock != null) return ss.stock; var su = sv.summary_info || {}; return su.total_available_stock != null ? su.total_available_stock : 0; };
@@ -3461,10 +3465,12 @@ function removeVariationShift_(shopId, itemId, midCsv) {
   var mids = String(midCsv || '').split(',').map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
   if (!mids.length) throw new Error('削除する明細が空です');
   var del = {}, resolved = [];
-  mids.forEach(function (mid) {
+  mids.forEach(function (mid, mk) {
     var found = null;
     for (var i = 0; i < n; i++) { if (String(bySlot[i].model_id) === String(mid)) { found = i; break; } }
     if (found == null) throw new Error('この明細が今のShopee側に見つかりません（画面を開き直してください）: ID ' + mid);
+    /* ★2026-10-24 全体レビュー（出品管理 #7）：名前も送られてきた時は、今その枠にある明細の名前と同じ時だけ消す（詰め直しの後は同じ番号に次の作品が入る） */
+    if (vnames && vnames[mk] && vnNorm_(optList[found].option) !== vnNorm_(vnames[mk])) throw new Error('消す明細の名前が違います（ID ' + mid + ' は今「' + optList[found].option + '」＝番号が別の明細に移った・もう消えた）。何も消していません。画面を🔄更新してからもう一度');
     if (!del[found]) { del[found] = 1; resolved.push(optList[found].option); }
   });
   if (Object.keys(del).length !== mids.length) throw new Error('消す対象の数が合いません（' + Object.keys(del).length + '/' + mids.length + '）。安全のため中止しました');
@@ -3501,6 +3507,8 @@ function removeVariationShift_(shopId, itemId, midCsv) {
     var pr1 = parseFloat(priceOf(mSrc)); if (pr1 > 0) fixPr.push({ model_id: midDst, price: pr1 });
     var st1 = parseInt(stockOf(mSrc), 10); if (!isNaN(st1)) fixSt.push({ model_id: midDst, stock: st1 });
   }
+  /* ★2026-10-24 全体レビュー（出品管理 #8）：あまった末尾の枠は②で消すが、消すのを断られると「__delN」の名前で元の在庫・値段のまま残り【買える】。先に在庫0にする */
+  for (var s0 = k; s0 < n; s0++) { var st0 = parseInt(stockOf(bySlot[s0]), 10); if (st0 > 0) fixSt.push({ model_id: bySlot[s0].model_id, stock: 0 }); }
   var fixErr = [];
   for (var f1 = 0; f1 < fixSku.length; f1 += 50) { try { updateModelSku_(shopId, itemId, fixSku.slice(f1, f1 + 50)); } catch (eS) { fixErr.push('SKU ' + String((eS && eS.message) || eS).slice(0, 80)); } }
   if (fixPr.length) { try { updatePriceList_(shopId, itemId, fixPr); } catch (eP) { fixErr.push('価格 ' + String((eP && eP.message) || eP).slice(0, 80)); } }
@@ -3556,6 +3564,10 @@ function removeVariationShift_(shopId, itemId, midCsv) {
   }
   return {
     ok: bad4.length === 0, mode: 'shift', removed: mids.length, names: resolved.slice(0, 20),
+    /* ★2026-10-24 全体レビュー（出品管理 #9）：moves＝[移す元の model_id, 移した先の model_id]（先の枠に元の作品が入った）・gone＝消えた末尾の枠・dels＝消した明細 */
+    moves: (function () { var mv = []; for (var sm = 0; sm < k; sm++) if (keep[sm] !== sm) mv.push([String(bySlot[keep[sm]].model_id), String(bySlot[sm].model_id)]); return mv; })(),
+    gone: (function () { var gn = []; for (var sg = k; sg < n; sg++) gn.push(String(bySlot[sg].model_id)); return gn; })(),
+    dels: mids.map(String),
     remain: r4.opt.length, models_remain: r4.models.length,
     fixed: { sku: fixSku.length, price: fixPr.length, stock: fixSt.length }, fix_errors: fixErr, retried: retried,
     mismatch: bad4.slice(0, 30), error: bad4.length ? '⚠ 消した後、残した明細 ' + bad4.length + ' 件の値段・在庫・SKU が消す前と違います（やり直しても直らない）: ' + bad4.slice(0, 5).map(function (b) { return b.name; }).join(' / ') : undefined,
@@ -3570,12 +3582,20 @@ function bulkEditTier_(shopId, itemId, opts, imgs) {
   if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
   var tier = tiers[0], optList = tier.option_list || [];
   var idBy = {}, imgErr = [];
-  (imgs || []).forEach(function (x) {
-    try { var id = uploadImageUrl_(x.url); if (id) idBy[String(x.oi)] = id; else imgErr.push(String(x.oi)); }
+  /* ★2026-10-24 全体レビュー（出品管理 #39）：DB が古い（詰め直し削除の後など）・名前の無い明細が途中にあると、添字が1つずれて別の作品の名前・写真を書き換えていた */
+  var slotOf = function (x) {
+    if (x.name0 == null || x.name0 === '') return String(x.oi);
+    var hit = []; optList.forEach(function (o, i) { if (vnNorm_(o.option) === vnNorm_(x.name0)) hit.push(i); });
+    if (hit.length !== 1) throw new Error('明細「' + String(x.name0).slice(0, 30) + '」が今の Shopee に' + (hit.length ? hit.length + '個あって1つに決まりません' : '見つかりません（消した・名前が変わった）') + '。このカタログの明細名・明細画像は書いていません（🔄更新してからもう一度）');
+    return String(hit[0]);
+  };
+  var _imgSlot = (imgs || []).map(slotOf), _optSlot = (opts || []).map(slotOf);   /* 画像を上げる前に全部確かめる */
+  (imgs || []).forEach(function (x, xi) {
+    try { var id = uploadImageUrl_(x.url); if (id) idBy[_imgSlot[xi]] = id; else imgErr.push(String(x.oi)); }
     catch (e) { imgErr.push(String(x.oi) + ':' + String((e && e.message) || e).slice(0, 40)); }
   });
   var nameBy = {};
-  (opts || []).forEach(function (x) { var n = String(x.name || '').trim().slice(0, 30); if (n) nameBy[String(x.oi)] = n; });
+  (opts || []).forEach(function (x, xi) { var n = String(x.name || '').trim().slice(0, 30); if (n) nameBy[_optSlot[xi]] = n; });
   var objs = optList.map(function (o, oi) { return tierOpt_(o, nameBy[String(oi)] || null, idBy[String(oi)] || null); });
   var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
   updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: objs }], remap);
@@ -3853,6 +3873,17 @@ function setVariationImage_(shopId, itemId, optionName, imageUrl) {
   return { ok: true, item_id: itemId, option: optionName, image_id: imageId };
 }
 // バリエ名→model_id を公式get_model_listで解決（listingsにmodel_idが無いため）
+/* ★2026-10-24 全体レビュー（出品管理 #7・#10）：明細名の比べ方（空白の違い・大文字小文字を無視）。 */
+function vnNorm_(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase(); }
+/* ★2026-10-24 全体レビュー（出品管理 #10）：🤖の控え（st.added・partials 等）の model_id は、詰め直し削除の後に【別の作品】へ移る。
+   在庫・値段を書く前に、今の Shopee の明細を読んで名前で引き直す。名前で見つからなければ null（＝書かない）。get_model_list 1回 */
+function baMidByName_(shopId, itemId, mid, en) {
+  var want = vnNorm_(en); if (!want) return null;
+  var ms = (getModels_(shopId, itemId) || {}).models || [];
+  for (var i = 0; i < ms.length; i++) if (String(ms[i].model_id) === String(mid) && vnNorm_(ms[i].name) === want) return ms[i].model_id;
+  var hit = ms.filter(function (m) { return vnNorm_(m.name) === want; });
+  return hit.length === 1 ? hit[0].model_id : null;   /* 同じ名前が2つ以上＝1つに決まらない＝書かない */
+}
 function resolveModelId_(shopId, itemId, modelName) {
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
@@ -4193,6 +4224,10 @@ function mandatoryAttrFill_(shopId, catId, list) {
 }
 function addItem_(body) {
   var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
+  /* ★2026-10-24 全体レビュー（出品管理 #24）：VN は 909,090 VND を超えると出品ごと非公開になる（2026-10-09 Shopee 通知）。明細の追加（3613）と同じ確かめを新規作成にも */
+  { var _ccA = ''; try { _ccA = baCcOfShop_(shopId); } catch (eCcA) {}
+    if (_ccA === 'VN') { var _vpA = [parseFloat(body.price)].concat((body.variations || []).map(function (v) { return parseFloat(v.price != null ? v.price : body.price); })); var _ovA = _vpA.filter(function (x) { return x > 909090; });
+      if (_ovA.length) throw new Error('VN の値段は 909,090 VND までです（超えると出品ごと非公開）。上限超え ' + _ovA.length + '件：' + _ovA.slice(0, 4).join(' / ') + '（何も作っていません）'); } }
   /* ★2026-10-05 カテゴリの指定が無ければ、題名から機種のカテゴリを当てる（「Games」で探すと Video Games > Others に入り、Shopee に降格されていた） */
   var categoryId = body.category_id ? parseInt(body.category_id, 10) : ((!body.category && baCatByName_(body.item_name)) || resolveCategoryId_(shopId, body.category || 'Games'));
   // Locker系を除いた使える全チャネルを有効化（高額品がLockerのmax price上限で弾かれるのを防ぐ＝手動出品と同じ）
@@ -4299,10 +4334,15 @@ function addItem_(body) {
     });
     var tvBody = { item_id: itemId, tier_variation: [{ name: String(body.tier_name || 'バージョン').slice(0, 30), option_list: optionList }], model: modelList };
     /* ★2026-10-23 作った直後だと Shopee が「The item is still being created. Please wait 5 seconds」で断る＝入れ物だけ残った（TW のコライドン）。この返事の時だけ6秒待って最大3回やり直す */
-    var jt;
+    var jt, _tvErr = null;
     for (var _tv = 0; ; _tv++) {
       try { jt = callShop_(shopId, '/api/v2/product/init_tier_variation', null, 'post', tvBody); break; }
-      catch (eTv) { if (_tv < 3 && /still being created|wait 5 seconds/i.test(String((eTv && eTv.message) || eTv))) { Utilities.sleep(6000); continue; } throw eTv; }
+      catch (eTv) { if (_tv < 3 && /still being created|wait 5 seconds/i.test(String((eTv && eTv.message) || eTv))) { Utilities.sleep(6000); continue; } _tvErr = eTv; break; }
+    }
+    /* ★2026-10-24 全体レビュー（出品管理 #22）：明細の設定だけ断られた時も item_id を返す（捨てると押し直しで2つ目ができる）。公開で作っていたら非公開に（1番目の明細の値段の単品が買えないように） */
+    if (_tvErr) {
+      jt = { error: 'init_tier_failed', message: String((_tvErr && _tvErr.message) || _tvErr).slice(0, 300) };
+      if (body.publish) { try { callShop_(shopId, '/api/v2/product/unlist_item', null, 'post', { item_list: [{ item_id: itemId, unlist: true }] }); result.unlisted = true; } catch (eUl) { result.unlist_err = String((eUl && eUl.message) || eUl).slice(0, 160); } }
     }
     result.variations = vars.length;
     result.tier_options = optionList.map(function (o) { return o.option; }); // 生成した一意オプション名（確認用）
@@ -5015,7 +5055,8 @@ function stockRestoreRun_() {
       m = models[0];
     }
     /* ★2026-10-22 本人「化粧箱付きの商品は絶対に出さない」：限定版の明細は売れて0になっても戻さない（自動の決めがあっても）・確認待ちにも並べない */
-    if (/\blimited\b|限定|特装|豪華|collector|black\s*box|premium\s*box/i.test(String(m.name || '') + ' ' + String(c.variation || ''))) { out.skip++; mark('limited'); return; }
+    /* ★2026-10-24 全体レビュー（出品管理 #12）：単品（明細なし）は版の語がカタログ名にしか無い＝カタログ名も見る（明細つきは明細名だけ＝カタログ名で全明細を止めない） */
+    if (/\blimited\b|限定|特装|豪華|collector|black\s*box|premium\s*box/i.test(String(m.name || '') + ' ' + String(c.variation || '') + (real.length ? '' : ' ' + String(li.name || c.name || '')))) { out.skip++; mark('limited'); return; }
     if (m.stock == null || isNaN(Number(m.stock))) { out.err++; return; }
     var stock = Number(m.stock);
     if (stock > 0) { out.still++; done[c.k] = { at: nowIso, r: 'still' }; return; }
@@ -7161,6 +7202,7 @@ function baPreMerge_(byKey) {
 }
 function baKvPrefetch_(keys) {
   try {
+    BA_KV_AT = Date.now();
     var q = keys.slice(); var wantPre = q.indexOf('boshu_auto_pre') >= 0; if (wantPre) q = q.concat(baPreShardKeys_());
     var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + q.map(encodeURIComponent).join(',') + ')');
     BA_KV_CACHE = {}; keys.forEach(function (k) { BA_KV_CACHE[k] = null; });
@@ -7170,12 +7212,13 @@ function baKvPrefetch_(keys) {
   } catch (e) {
     /* ★2026-10-20 14:2x 🤖が 13:0x から毎回「cfg_unreadable」で降りていた（一括読み＝大きな控え15本＋写真の控えの分割を1回で読むのが失敗）。
        一括が失敗しても設定が1本で読めるなら、控えを1本ずつ読む形（BA_KV_CACHE={}＝読んだ物は控える）に切り替えて続ける。理由は BA_KV_PREFETCH_ERR に残す */
-    BA_KV_PREFETCH_ERR = String((e && e.message) || e).slice(0, 300);
+    BA_KV_PREFETCH_ERR = String((e && e.message) || e).slice(0, 300); BA_KV_AT = 0;
     BA_KV_CACHE = null; BA_KV_ERR = true;
     try { var _rc = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(BA_CFG)); BA_KV_CACHE = {}; BA_KV_CACHE[BA_CFG] = (_rc && _rc[0] && _rc[0].v) || null; BA_KV_ERR = false; } catch (e2) {}
   }
 }
 var BA_KV_PREFETCH_ERR = '';
+var BA_KV_AT = 0;   /* ★2026-10-24 全体レビュー（出品管理 #6）：先読みを始めた時刻（0＝分からない）。書く前に「この後に誰かが書いたか」を比べる */
 function baKv_(k) {
   if (BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k)) return BA_KV_CACHE[k];
   if (k === 'boshu_auto_pre') {
@@ -7751,7 +7794,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   if (!todo.length) return;
   /* 本人「何でアドバンスで箱説明書付きのを出してんの？」＝古い基準で出た分。カセットの機種（箱NG）と DS（ソフトだけNG）を先に見直す・1回8件まで */
   todo.sort(function (p, q) { var w = function (x) { var h = String(x.hw || ''); return (BA_CART_ONLY_HW[h] || BA_CASE_REQUIRED_HW[h]) ? 0 : 1; }; return w(p) - w(q); });
-  var n = 0, tStart = Date.now(), changed = false;
+  var n = 0, tStart = Date.now(), changed = false, _usedDirtyRp = false;
   /* ★2026-09-20 本人「これはなんかずっと終わってないけど」＝1回8件だと153件で9時間かかる。1回の上限を設定で変えられるように（既定40）。
      枠が少ない時は上の `ufTotal_() > ufStopLine_() - 2500` で丸ごと見送るので、増やしても枠は守られる */
   var rpMax = Math.max(1, Math.min(80, Number(cfg && cfg.rephotoPerTick) || 40));
@@ -7776,7 +7819,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
       try {
         var r = setVariationImagesBulk_(a.shop_id, a.item_id, [{ option: a.en, url: cu, expect: a.img }]);
         if (r && !r.applied && r.changed && r.changed.length) { rp.items[id] = { s: 'manual', v: BA_RULE_VER, at: new Date().toISOString(), cc: a.cc }; baLog_(st, '📷 人が差し替えた写真なので触らない: ' + a.en); done = true; break; }
-        if (r && r.applied) { used[cuKey] = baUsedTag_(a.key, a.hw); try { baKvSet_(BA_IMGS, used); } catch (eU) {} rp.items[id] = { s: 'replaced', v: BA_RULE_VER, at: new Date().toISOString(), was: j0.kind, cc: a.cc, src: cands[k].src || '' }; baLog_(st, '📷 写真を差し替え（' + j0.kind + '）: ' + a.cc + ' ' + a.en); done = true; }
+        if (r && r.applied) { used[cuKey] = baUsedTag_(a.key, a.hw); _usedDirtyRp = true;   /* ★#18 書くのは回の最後に1回（相方の分も残す） */ rp.items[id] = { s: 'replaced', v: BA_RULE_VER, at: new Date().toISOString(), was: j0.kind, cc: a.cc, src: cands[k].src || '' }; baLog_(st, '📷 写真を差し替え（' + j0.kind + '）: ' + a.cc + ' ' + a.en); done = true; }
       } catch (eS) { baLog_(st, '写真の差し替えに失敗: ' + a.en + ' ' + String(eS).slice(0, 160)); rp.items[id] = { s: 'error', v: BA_RULE_VER, at: new Date().toISOString(), was: j0.kind, cc: a.cc, err: String(eS).slice(0, 80) }; done = true; }
     }
     if (!done) { rp.items[id] = { s: 'nophoto', v: BA_RULE_VER, at: new Date().toISOString(), was: lastKind, cc: a.cc, item_id: a.item_id, shop_id: a.shop_id, en: a.en, hw: hw }; baLog_(st, '📷 写真が基準外（' + lastKind + '）だが代わりが無い: ' + a.cc + ' ' + a.en); }
@@ -7784,6 +7827,8 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
   try { var cnt = { ok: 0, ng: 0, wait: 0, ver: BA_RULE_VER, todo: todo.length, at: new Date().toISOString() };
     Object.keys(rp.items).forEach(function (k) { var m2 = rp.items[k]; if (!m2 || Number(m2.v || 0) !== BA_RULE_VER) return; if (m2.s === 'keep') cnt.ok++; else if (m2.s === 'replaced') cnt.ng++; else if (m2.s === 'nophoto') cnt.wait++; });
     st.rephoto = cnt; } catch (eC) {}
+  /* ★2026-10-24 全体レビュー（出品管理 #18）：使った写真の印は新しい値を読んで自分の分を重ねて書く（別の台が足した印を消さない＝同じ写真が別の作品に付かない） */
+  if (_usedDirtyRp) { try { baKvSetMerged_(BA_IMGS, used, baKvFreshMany_([BA_IMGS]), 0); } catch (eUr) { baLog_(st, '使った写真の印の保存に失敗: ' + String(eUr).slice(0, 100)); } }
   if (changed) {
     /* ★2026-09-26 2台（child/child2）とポータルが丸ごと書いて相手の結果を消していた（H.A.W.X. 2 を 07:04Z と 07:11Z に2回見直し）。変えた明細だけ新しい値に重ねる */
     try { var _rpF = baKvFresh_('boshu_auto_rephoto') || {}; _rpF.items = _rpF.items || {}; Object.keys(rp.items).forEach(function (k) { if (rp.items[k] !== _rp0[k]) _rpF.items[k] = rp.items[k]; }); baKvSet_('boshu_auto_rephoto', _rpF); } catch (eR) {}
@@ -7967,6 +8012,10 @@ function boshuAutoRecheck() {
       a.lastChk = Date.now(); a.lastHits = hits; out.checked++;
       if (hits < minHits) {
         var sid = shopByItem[String(a.item_id)]; if (!sid) continue;
+        /* ★2026-10-24 全体レビュー（出品管理 #10）：詰め直し削除の後は別の作品（売れている物）を止めていた＝名前で引き直す。無ければ書かない */
+        var _midR = null; try { _midR = baMidByName_(sid, a.item_id, a.model_id, a.en); } catch (eMr) { _midR = null; }
+        if (!_midR) { baLog_(st, '在庫0にできず: ' + a.cc + ' ' + a.en + '（今のカタログに同じ名前の明細が無い・読めない）'); continue; }
+        a.model_id = _midR;
         try { updateStock_(sid, a.item_id, a.model_id, 0); a.stock = 0; a.zeroedAt = new Date().toISOString(); out.zeroed++; baLog_(st, '在庫0に: ' + a.cc + ' ' + a.en + '（ヤフオクの定額出品が ' + hits + '件に減った）'); }
         catch (e) { baLog_(st, '在庫0にできず: ' + a.cc + ' ' + a.en + ' ' + String(e).slice(0, 80)); }
       }
@@ -8044,12 +8093,13 @@ function anthropicReceiptsToExpenses_(force) {
   return out;
 }
 function boshuAutoTick(manual) {
+  var _tEnter = Date.now();   /* ★2026-10-24 全体レビュー（出品管理 #14）：鍵待ち（最大90秒）の後に時計を始めると 90＋290秒＞GAS の上限360秒＝途中で殺され、出した明細が控えに残らなかった */
   try { anthropicReceiptsToExpenses_(false); } catch (eAR) {}   /* 🧾 6時間に1回・領収書が届く台（3台目）だけが実際に入れる */
   var lock = LockService.getScriptLock();
   /* ★v198：30分ごとの実行は鍵を90秒まで待つ。📸写真の索引（condIndexTick）と同じ鍵を使っているので、5秒で諦めると索引が走っている間🤖が1回も回らない
      （2026-09-19 実測：索引を手動で連続実行している間、🤖が10:28から1時間以上止まっていた）。索引の側は1回75秒で手を離す */
   if (!lock.tryLock(manual === true ? 5000 : 90000)) return { ok: false, error: 'いま走っています' };
-  var t0 = Date.now(), DEADLINE = 250000;   // 鍵待ち90秒＋4分10秒で必ず抜ける（6分制限）
+  var t0 = _tEnter, DEADLINE = 250000;   // ★#14 関数に入った時刻から4分10秒（鍵待ちもこの中）で必ず抜ける（6分制限）
   BA_FAM_TICK = 0; BA_CTX_ROWS = null; BA_CTX_SOLD = null;
   /* ★2026-10-12 Supabase が繰り返し落ちた（10/11 22:33 の時間切れはこの下の束ね読みそのもの）。担当でない台・ゲームの機種が空の時も、
      先に約12MB（写真の控え6MB・product_ids 4.5MB…）を読んでから「何もしない」で戻っていた＝ポータルから1時間に約20回。
@@ -8153,7 +8203,10 @@ function boshuAutoTick(manual) {
     var aiCap = (cfg.aiYenCap === undefined || cfg.aiYenCap === null || cfg.aiYenCap === '') ? 1000 : Number(cfg.aiYenCap);
     try { st.aiYen = baAiYenToday_(); st.aiYen.cap = aiCap; } catch (eY) { st.aiYen = null; }
     if (aiCap > 0 && st.aiYen && st.aiYen.yen >= aiCap && manual !== true) { st.lastMsg = '💴 今日のAI料金が上限に達したので明日まで休み（約¥' + Math.round(st.aiYen.yen) + '／上限 ¥' + aiCap + '）'; return finish_(st.lastMsg); }
-    try { var aym0 = baAiYenMonth_(); st.aiYenMonth = aym0; var capM0 = baAiMonthCap_(cfg); if (capM0 > 0 && aym0.yen >= capM0 && manual !== true) { st.lastMsg = '💴 今月のAI料金が上限 ¥' + capM0 + ' に達したので止めています（実績 ¥' + aym0.actual + '＋今日の見積 ¥' + aym0.est + '）。上げるには本人の許可が要ります'; return finish_(st.lastMsg); } } catch (eM0) {}
+    try { var aym0 = baAiYenMonth_(); st.aiYenMonth = aym0; var capM0 = baAiMonthCap_(cfg);
+      /* ★2026-10-24 全体レビュー（出品管理 #15・#16）：①実績を読めない回は止める（次の回にまた読む）②▶（手動）でも月の上限は効かせる（前は manual だと素通り） */
+      if (capM0 > 0 && aym0.unreadable) { st.lastMsg = '💴 今月のAI料金の実績（ai_actual）を読めなかったので、この回は止めました（上限を超えていないか確かめられないため・次の回にまた読みます）'; return finish_(st.lastMsg); }
+      if (capM0 > 0 && aym0.yen >= capM0) { st.lastMsg = '💴 今月のAI料金が上限 ¥' + capM0 + ' に達したので止めています（実績 ¥' + aym0.actual + '＋今日の見積 ¥' + aym0.est + '）。上げるには本人の許可が要ります'; return finish_(st.lastMsg); } } catch (eM0) {}
     var dailyMax = Number(cfg.dailyMax) || 100;
     if (st.today.n >= dailyMax && manual !== true) { st.lastMsg = '今日の上限 ' + dailyMax + '件に達したので明日まで休み'; return finish_(st.lastMsg); }
     var hws = (cfg.hws || []).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey) && (!_myHws || _myHws.indexOf(String(h)) >= 0); });
@@ -8330,7 +8383,8 @@ function boshuAutoTick(manual) {
           pm = null;
         }
       }
-      if (pm && pm.img && baUsedOk_(used, pm.img, c.key, hw)) {
+      /* ★2026-10-24 全体レビュー（出品管理 #17）：メルカリの控えから仕入れ目安が出ない（0）時はこの道を使わない＝ヤフオク／Yahoo!フリマの相場で決める（そこでも0なら下で出さない） */
+      if (pm && pm.img && baUsedOk_(used, pm.img, c.key, hw) && (costChk || baCostFromPre_(pm, hw, c.ja, en)) > 0) {
         var imageIdM = null; try { imageIdM = uploadImageUrl_(pm.img); } catch (eM) { if (pm.thumb && pm.thumb !== pm.img) { try { imageIdM = uploadImageUrl_(pm.thumb); } catch (eM2) {} } }
         if (imageIdM) {
           var costM = costChk || baCostFromPre_(pm, hw, c.ja, en), hitsM = Number(pm.hits) || 1;   /* 上限を見た時と同じ値を使う（写真を控えに差し替えると alts が消えて別の値になる・Codex指摘） */
@@ -8364,6 +8418,7 @@ function boshuAutoTick(manual) {
       var cost = baCostOfHits_(hits);
       if (!img) { var whyY = triedY ? 'noimg_ai' : (sameUnj ? 'aiwait' : (sameNgY ? 'nosame' : 'noimg'));   /* aiwait＝AIが判定できなかった（上限/障害）→台帳の除外には入れず次回また試す（Codex指摘） */ baMark_(ledger, c.key, ccsHw, 'skip:' + whyY); out.skipped++; baSkipRec_(st, hw, '', c, whyY, hits.length); baLog_(st, (triedY ? '📷 実物の写真が無い（AI判定）: ' : (sameNgY ? '🔎 同じ作品の出品が無い（AI判定）: ' : '写真なし: ')) + (c.ja || c.en)); Utilities.sleep(1500); continue; }
       if (cost > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', hits.length); continue; }
+      if (!(cost > 0)) { out.skipped++; baSkipRec_(st, hw, '', c, 'nocost', hits.length); continue; }   /* ★2026-10-24 全体レビュー（出品管理 #17）：仕入れ目安が無い＝出さない（前は在庫0で出していた）。写真を上げる前に見る */
       if (cost >= highCost && hits.length < highNeed) { out.skipped++; baSkipRec_(st, hw, '', c, 'highfew', hits.length); continue; }
       if (hits.length < minHits) { out.skipped++; baSkipRec_(st, hw, '', c, 'fewsupply', hits.length); continue; }   /* ★2026-10-22 市場在庫が少ない＝出さない */
       var stock = (hits.length >= minHits && cost > 0 && cost <= maxCost) ? 1 : 0;
@@ -8535,6 +8590,8 @@ function boshuAutoPrejudge_(hw, maxN) {
     if (!hw || !cfg.family || !cfg.family[hw]) return { ok: false, error: '機種が選ばれていません' };
     if (!bgAllowed_()) return { ok: false, error: 'urlfetch 予約枠を確保するため今回は見送り' };
     var hasKey = false; try { hasKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (e) {} if (!hasKey) return { ok: false, error: 'GAS に CLAUDE_KEY がありません' };
+    /* ★2026-10-24 全体レビュー（出品管理 #16）：🔍は1回で最大40枚×6回を有料で判定するのに、月の上限を見ていなかった */
+    { var aymP = baAiYenMonth_(), capP = baAiMonthCap_(cfg); if (capP > 0 && (aymP.unreadable || aymP.yen >= capP)) return { ok: false, error: aymP.unreadable ? '💴 今月のAI料金の実績を読めなかったので判定しません（もう一度押してください）' : ('💴 今月のAI料金が上限 ¥' + capP + '（実績 ¥' + aymP.actual + '＋今日 ¥' + aymP.est + '）＝上げるには本人の許可が要ります') }; }
     var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
     var ctx = baLoadCtx_(cfg, hw, ccs); var st = baKv_(BA_ST) || {}; st.log = st.log || [];
     var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'); if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0 };
@@ -9638,6 +9695,8 @@ function baPartialRepair_(st) {
     try {
       var g = getModels_(p.shop_id, p.item_id) || {}, ms = g.models || [], cur = null;
       for (var j = 0; j < ms.length; j++) if (String(ms[j].model_id) === String(p.model_id)) { cur = ms[j]; break; }
+      /* ★2026-10-24 全体レビュー（出品管理 #10）：詰め直し削除の後は同じ番号に別の作品が入る＝名前が違えば名前で探し直す（1つに決まる時だけ）。無ければ何も書かない */
+      if (cur && vnNorm_(cur.name) !== vnNorm_(p.en)) { var _hp = ms.filter(function (m) { return vnNorm_(m.name) === vnNorm_(p.en); }); cur = _hp.length === 1 ? _hp[0] : null; if (cur) p.model_id = cur.model_id; }
       if (!cur) continue;   /* 明細が無い＝消えた。直す物が無い */
       var okName = String(cur.name || '').trim() === String(p.en).trim();
       var okPrice = Math.abs((Number(cur.price) || 0) - Number(p.price)) < Math.max(1, Number(p.price) * 0.02);
@@ -10002,7 +10061,27 @@ function baWriteJan_(q) {
     pid.items[k] = Object.assign({}, cur || {}, { at: Date.now(), jp: e.ja || (cur && cur.jp) || '', jan: hasJ ? e.jan : ((cur && cur.jan) || ''), mpn: (cur && cur.mpn) || e.mpn || '', own: (cur && cur.own) || '', src: (typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[e.hw]) ? '自動出品（トレカ）' : '自動出品（母数の空白）', cond: (cur && cur.cond) || '', srcUrl: e.src || '', f: Object.assign({}, (cur && cur.f) || {}, { '機種': BA_HW_LABEL[e.hw] || String(e.hw || '').toUpperCase() }) });
     n++;
   });
-  if (n) baKvSet_('product_ids', pid);
+  if (n) {
+    /* ★2026-10-24 全体レビュー（出品管理 #6）：pid は巡回の頭で読んだ写し。ポータル（JAN の手入力・📥取り込み・型番の自動入れ）がその後に書いていれば丸ごと書くと消える
+       → 更新時刻だけ読み、先読みの1分前より後に書かれていたら（ポータルの時計のずれを見込む）product_ids を読み直して、この回の明細だけ重ねる（既に JAN・型番がある鍵は触らない＝元と同じ決まり）。読めなければ書かない */
+    var _stale = true;
+    try { var _ua = sbSelect_('app_kv', 'select=updated_at&k=eq.product_ids'); var _at = Date.parse((_ua && _ua[0] && _ua[0].updated_at) || ''); _stale = !(BA_KV_AT && _at && _at < BA_KV_AT - 60000); } catch (eUa) { _stale = true; }
+    if (_stale) {
+      var _fr = null; try { var _rr = sbSelect_('app_kv', 'select=v&k=eq.product_ids'); _fr = (_rr && _rr[0] && _rr[0].v) || null; } catch (eFr) { _fr = null; }
+      if (!_fr || typeof _fr !== 'object') throw new Error('product_ids を読み直せなかったので書きません（ポータルで入れた JAN を古い写しで消さないため）');
+      _fr.items = _fr.items || {};
+      q.forEach(function (e) {
+        var k2 = 'id:' + e.item_id + '#' + e.model_id, m2 = pid.items[k2]; if (!m2) return;
+        var c2 = _fr.items[k2]; if (!c2) { _fr.items[k2] = m2; return; }
+        if (!String(c2.jan || '').trim() && String(m2.jan || '').trim()) c2.jan = m2.jan;
+        if (!String(c2.mpn || '').trim() && String(m2.mpn || '').trim()) c2.mpn = m2.mpn;
+        if (!c2.jp && m2.jp) c2.jp = m2.jp; if (!c2.src && m2.src) c2.src = m2.src;
+      });
+      pid = _fr; try { delete BA_KV_FAIL['product_ids']; } catch (eDf) {}
+    }
+    baKvSet_('product_ids', pid);   // B8_OK 2026-10-24：前からある1回の書き込み（if (n) baKvSet_）の置き換え＝回数は同じ。増えたのは updated_at だけの読み（数十バイト）と、他が書いた後だけの読み直し
+    try { if (BA_KV_CACHE) BA_KV_CACHE['product_ids'] = pid; } catch (eKc) {}
+  }
   q.length = 0;
   return n;
 }
@@ -10038,6 +10117,10 @@ function baSoldSync_(st) {
     var sk2 = a.key + '@' + (a.hw || ''); if (!soldKeys[sk2] || a.sold) return;   // 売れた国そのものは Shopee が在庫を減らしている。★2026-10-03 鍵に機種を足した（前は作品だけ＝PS3版が売れるとPS4版の在庫も0にしていた）
     var sid = a.shop_id; if (!sid) { try { var r = sbSelect_('listings', 'select=shop_id&item_id=eq.' + a.item_id + '&limit=1'); sid = r && r[0] && r[0].shop_id; } catch (e) {} }
     if (!sid) return;
+    /* ★2026-10-24 全体レビュー（出品管理 #10）：model_id は詰め直し削除で別の作品に移る＝名前（a.en）で今の明細を引き直す。見つからなければ書かずに記録へ（手で確かめる） */
+    var _midZ = null; try { _midZ = baMidByName_(sid, a.item_id, a.model_id, a.en); } catch (eMz) { baLog_(st, '在庫0にできず（' + a.cc + ' ' + a.en + '）: 今の明細を読めず ' + String(eMz).slice(0, 60)); return; }
+    if (!_midZ) { baLog_(st, '⚠ 在庫0にできず（' + a.cc + ' ' + a.en + '）: 今のカタログに同じ名前の明細が無い（番号が別の作品に移った・名前を変えた）＝手で確かめてください'); return; }
+    a.model_id = _midZ;
     try { updateStock_(sid, a.item_id, a.model_id, 0); a.stock = 0; a.zeroedAt = new Date().toISOString(); a.zeroedWhy = 'sold:' + soldKeys[sk2]; zeroed++; }
     catch (e) { baLog_(st, '在庫0にできず（' + a.cc + ' ' + a.en + '）: ' + String(e).slice(0, 60)); }
   });
@@ -10436,9 +10519,10 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
 }
 var BA_PRE_DIRTY_TCG = false;
 function tcgTick(manual) {
+  var _tEnterT = Date.now();   /* ★2026-10-24 全体レビュー（出品管理 #14）：鍵待ち60秒＋300秒＝上限360秒ちょうどで殺されていた */
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(manual === true ? 5000 : 60000)) return { ok: false, error: 'いま走っています（🤖と同じ鍵）' };
-  var t0 = Date.now(), DEADLINE = 300000;   /* ★2026-10-12 4分→5分（GAS の1回は6分まで）。カタログ作り＋写真判定でブラジルまでで時間切れ＝タイ・ベトナムに届かなかった */
+  var t0 = _tEnterT, DEADLINE = 300000;   /* ★#14 関数に入った時刻から。★2026-10-12 4分→5分（GAS の1回は6分まで）。カタログ作り＋写真判定でブラジルまでで時間切れ＝タイ・ベトナムに届かなかった */
   BA_FAM_TICK = 0; BA_CTX_ROWS = null; BA_CTX_SOLD = null;
   /* ★2026-10-12 本人「分散させてもいいけど」「二重で同じもの出したりして無駄にならないように」「ちゃんとしてくれるなら」：トレカを複数の台で回す。
      ①シリーズ（hw）を台ごとに分ける（cfg.tcg.runners＝{child:[...],child2:[...],child3:[...]}）。出した印（boshu_auto_done_<hw>）とカタログは hw ごと＝2台が同じ台帳・同じカタログを触らない＝二重に出ない
@@ -10477,7 +10561,9 @@ function tcgTick(manual) {
     if (!hasKey) return finish_('🔒 CLAUDE_KEY が無いので出しません（カードは写真の判定なしでは出さない）');
     var aiCap = (cfg.aiYenCap === undefined || cfg.aiYenCap === null || cfg.aiYenCap === '') ? 1000 : Number(cfg.aiYenCap);
     try { var ay = baAiYenToday_(); if (aiCap > 0 && ay && ay.yen >= aiCap && manual !== true) return finish_('💴 今日のAI料金が上限（¥' + Math.round(ay.yen) + '／' + aiCap + '）'); } catch (eY) {}
-    try { var aym = baAiYenMonth_(); st.aiYenMonth = aym; var capM = baAiMonthCap_(cfg); if (capM > 0 && aym.yen >= capM && manual !== true) return finish_('💴 今月のAI料金が上限 ¥' + capM + ' に達したので止めています（実績 ¥' + aym.actual + '＋今日の見積 ¥' + aym.est + '）。上げるには本人の許可が要ります'); } catch (eM) {}
+    try { var aym = baAiYenMonth_(); st.aiYenMonth = aym; var capM = baAiMonthCap_(cfg);
+      if (capM > 0 && aym.unreadable) return finish_('💴 今月のAI料金の実績（ai_actual）を読めなかったので、この回は止めました（次の回にまた読みます）');   /* ★#15 */
+      if (capM > 0 && aym.yen >= capM) return finish_('💴 今月のAI料金が上限 ¥' + capM + ' に達したので止めています（実績 ¥' + aym.actual + '＋今日の見積 ¥' + aym.est + '）。上げるには本人の許可が要ります'); } catch (eM) {}
     var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
     if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0, judged: 0 };
     var dailyMax = Math.ceil((Number(tc.dailyMax) || 60) / TCG_RUNNERS_N);   /* ★2026-10-12 台ごとに数えるので台数で割る＝全体の上限 cfg.tcg.dailyMax は今まで通り */
@@ -10788,6 +10874,8 @@ function baLimitedFix_(p) {
       var row = (sbSelect_('listings', 'select=cc,shop_id,models&item_id=eq.' + mm[1]) || [])[0]; if (!row) { v.fix = { s: 'nolisting', at: new Date().toISOString() }; continue; }
       var ms = row.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e1) { ms = []; } }
       var md = (ms || []).filter(function (m) { return m && String(m.id) === mm[2]; })[0]; if (!md) { v.fix = { s: 'nomodel', at: new Date().toISOString() }; continue; }
+      /* ★2026-10-24 全体レビュー（出品管理 #10）：監査した時の名前と今の明細名が違う＝番号が別の作品に移った。別の作品に写真を貼り在庫を戻さない */
+      if (v.en && md.n && vnNorm_(v.en) !== vnNorm_(md.n)) { v.fix = { s: 'moved', at: new Date().toISOString(), now: String(md.n).slice(0, 60) }; out.nophoto.push({ id: id, why: 'moved' }); continue; }
       var en = String(md.n || v.en || ''); var c = { key: key, ja: key, en: en };
       var pm = baPreOf_(pre, key, hw); var cands = pm ? baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 8) : [];
       var ex = { key: 'fix:' + id, ja: key, en: en, hw: BA_HW_WORD[hw] || hw.toUpperCase(), hwKey: hw };
@@ -10804,17 +10892,17 @@ function baLimitedFix_(p) {
         /* ★2026-10-13 本人「本当に直ってるの？」：差し替えが0件（applied:0＝いまの画像が控えと違う明細は触らない作り）でも ok:true が返り、
            写真が限定版の箱のまま在庫を1に戻していた（160件中116件・在庫1が96件）。【実際に差し替わった時だけ】在庫を戻す */
         if (!(Number(r.applied) > 0)) { why = 'notapplied' + (r.changed && r.changed.length ? ':changed' : ''); break; }
-        try { updateStock_(String(row.shop_id), mm[1], mm[2], 1); } catch (eS) {}
+        try { var _midL = baMidByName_(String(row.shop_id), mm[1], mm[2], en); if (_midL) updateStock_(String(row.shop_id), mm[1], _midL, 1); } catch (eS) {}   /* ★#10 名前で引き直した明細にだけ */
         v.fix = { s: 'replaced', at: new Date().toISOString(), url: cu, src: cm.src || '', name: String(cm.name || '').slice(0, 80), stock: 1 };
         try { used[cuKey] = baUsedTag_(key, hw); } catch (eU) {}   /* 使った写真の印（baUsedOk_ と同じ形） */
         out.replaced.push({ id: id, cc: v.cc, en: en, src: cm.src || '' }); done = true;
       }
-      if (!done) { if (!/^ai:/.test(why)) { try { updateStock_(String(row.shop_id), mm[1], mm[2], 0); } catch (eS0) {} }   /* 差し替えられない＝写真が商品と違うまま売らせない（監査が在庫0にしていない分も含めて） */
+      if (!done) { if (!/^ai:/.test(why)) { try { var _midL0 = baMidByName_(String(row.shop_id), mm[1], mm[2], en); if (_midL0) updateStock_(String(row.shop_id), mm[1], _midL0, 0); } catch (eS0) {} }   /* ★#10 名前で引き直した明細にだけ */   /* 差し替えられない＝写真が商品と違うまま売らせない（監査が在庫0にしていない分も含めて） */
         if (/^ai:/.test(why)) { out.note = 'AIが使えない→ここで止める（この明細は次の回に見直す）'; out.tried--; break; }   /* ★2026-10-11 AIが使えなかった明細に fix を書かない＝永久に飛ばされない */
         v.fix = { s: 'nophoto', at: new Date().toISOString(), why: why, stock: 0 }; out.nophoto.push({ id: id, cc: v.cc, en: en, why: why }); }
     } catch (e) { v.fix = { s: 'error', at: new Date().toISOString(), why: String(e).slice(0, 120) }; out.err.push({ id: id, e: String(e).slice(0, 120) }); }
   }
   try { baKvSet_('limited_audit', res); } catch (eW) { out.saveErr = String(eW).slice(0, 100); }
-  try { baKvSet_(BA_IMGS, used); } catch (eW2) {}
+  if (out.replaced.length) { try { baKvSetMerged_(BA_IMGS, used, baKvFreshMany_([BA_IMGS]), 0); } catch (eW2) {} }   /* ★2026-10-24 全体レビュー（出品管理 #18 と同じ型）：古い写しで丸ごと書かない */
   return out;
 }
