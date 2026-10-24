@@ -8477,7 +8477,7 @@
     [/^追跡の最終取り込み (.+)$/, 'Tracking last synced $1'], [/^（(\d+)分前）。取り込みは$/, '($1 min ago). It syncs'],
     [/^到着 (.+)$/, 'Arrived $1'], [/^最新 (.+)$/, 'Last scan $1'], [/^入金 (.+)$/, 'Paid $1'],
     [/^発送期限が過ぎています：(.+)$/, 'Shipping deadline has passed: $1'], [/^今日が発送期限です：(.+)$/, 'Shipping deadline is today: $1'],
-    [/^調整金が入りました：(.+)$/, 'Adjustment received: $1'],
+    [/^調整金が入りました：(.+)$/, 'Adjustment received: $1'], [/^（(\d+)秒）( 時間がかかっています。読めない時は失敗として表示します)?$/, (m, a, b) => '(' + a + 's)' + (b ? ' Taking a while. If it cannot be read, it will show as failed' : '')],
     [/^関税が払い戻されました$/, 'Duty refunded'], [/^税が払い戻されました$/, 'Tax refunded'], [/^返金の補償が入りました$/, 'Refund compensation received'],
     [/^SLS\+の補償が入りました$/, 'SLS+ compensation received'], [/^補償が入りました（争いの判定）$/, 'Compensation received (dispute ruling)'],
     [/^返送料の補助が入りました$/, 'Return shipping subsidy received'], [/^返送料が戻りました$/, 'Return shipping fee reimbursed'],
@@ -12754,10 +12754,17 @@
     const key = settings.sbKey || settings.sbSecret;
     if (!key) throw new Error('⚙️設定でSupabaseキーを入力してください');
     const hdr = (extra) => ({ apikey: key, Authorization: 'Bearer ' + key, ...extra });
-    const first = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: hdr({ Range: '0-999', Prefer: 'count=exact' }) });
-    if (first.status === 416) return [];
-    if (!first.ok) throw new Error(`DB読取 HTTP ${first.status}`);
-    const out = await first.json();
+    /* ★2026-10-25 本人「このページ、全然表示されへん」（出品管理 › 値段・利益 › 値付けの見直しが「読み込み中…」のまま）：
+       fetch に時間切れが無く、返事が返らない1本があると、それを待つ画面が永久に止まる（読み直しても同じ待ちに合流する）。1本90秒で打ち切って失敗として出す */
+    const ac0 = new AbortController(), tm0 = setTimeout(() => ac0.abort(), 90000);
+    let first, out;
+    try {
+      first = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: hdr({ Range: '0-999', Prefer: 'count=exact' }), signal: ac0.signal });
+      if (first.status === 416) return [];
+      if (!first.ok) throw new Error(`DB読取 HTTP ${first.status}`);
+      out = await first.json();
+    } catch (e0) { if (ac0.signal.aborted) throw new Error(`DB読取 時間切れ（${table}・90秒）`); throw e0; }
+    finally { clearTimeout(tm0); }
     if (out.length < 1000) return maskDemo(table, out); // 1ページで完結
     // content-range: "0-999/12345" から総件数を得て残りページを並列取得
     const totalStr = ((first.headers.get('content-range') || '').split('/')[1] || '').trim();
@@ -12771,8 +12778,9 @@
       const one = async (off) => {
         for (let tryN = 0; ; tryN++) {
           let r = null, err = null;
-          try { r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: hdr({ Range: `${off}-${off + 999}` }) }); } catch (e) { err = e; }
-          if (r && r.ok) return r.json();
+          { const ac1 = new AbortController(), tm1 = setTimeout(() => ac1.abort(), 90000);   /* ★2026-10-25 1本90秒で打ち切る（上と同じ） */
+            try { r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: hdr({ Range: `${off}-${off + 999}` }), signal: ac1.signal }); if (r.ok) { const j = await r.json(); clearTimeout(tm1); return j; } } catch (e) { err = e; if (ac1.signal.aborted) r = null; }
+            finally { clearTimeout(tm1); } }
           if (tryN >= 1) throw new Error(`DB読取 HTTP ${r ? r.status : 'fetch失敗'}（${off}〜。件数不足のまま集計しないため中断）`);
           await new Promise(res => setTimeout(res, 800));
         }
@@ -23774,6 +23782,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-25', items: [
+      '⏳ <b>「値付けの見直し」が「読み込み中…」のまま止まることがあったのを直しました</b>（本人「このページ、全然表示されへん」）：データベースからの読み込みに時間切れが無く、返事が返らない1本があると、その画面がいつまでも待ち続けていました（読み直しても同じ待ちに合流する）。1本90秒で打ち切って失敗として出すようにし、読み込み中は経過秒を出します（60秒を超えたら「時間がかかっています」）。この読み込みはポータル全体の共通の部品なので、他の画面の読み込みも同じく止まらなくなります。',
       '💰 <b>お知らせのお金の行に「＋／−」と名目を付けました</b>（本人「もしマイナス分であればマイナス、プラスであればプラスと分かるように」・きっかけは TH の ฿111）：前は払い出しの調整のうちプラスの分だけを、全部「調整金が入りました」と出していました。TH の ฿111 などは補償ではなく<b>関税の払い戻し</b>（Physical Products Duty Refund）でした。いまは名目で見出しを分けます（「SLS+の補償が入りました」「関税が払い戻されました」「関税が引かれました」「通関手数料が引かれました」「物流の手数料が引かれました」など）。金額は入った分を緑の「＋」、引かれた分を赤の「−」で出します。<b>引かれた分も出す</b>ようにしました。物流の手数料は約780件あるので、<b>同じ日・同じ国・同じ名目は1行にまとめて件数と合計</b>を出します。名目が分からない時は「調整（＋）／（−）」と書き、元の英語の名目を下に出します。今ある1,294件は全部、名目のある見出しに分かれました。',
       '💴 <b>お知らせのお金の行に、日本円の目安を並べました</b>（本人「これ現地の為替だから、日本円でいくら入ってきたかが分かるようにしておいてください」）：「＋฿7,337（約＋¥34,3xx）」のように出します。円は「↩️ 返品・キャンセル」の補償の集計と同じ式（払い出し日のレート×国別の実効スプレッド・1件ずつ四捨五入して足す）なので、両方の画面で同じ額になります。為替をまだ読めていない時は、古い既定のレートで出さずに「（円換算待ち）」と出します。お金の行が20行を超えた時は「ほか N件あります」を出すようにしました（前は黙って隠れていました）。',
     ] },
@@ -42453,7 +42462,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const old = document.getElementById('rank-old');
     if (PA.sub === 'old') { root.style.display = 'none'; if (old) old.style.display = ''; try { renderGrid(); } catch (_) {} return; }
     root.style.display = ''; if (old) old.style.display = 'none';
-    if (!PA.data || force) root.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>売れた注文・入金・仕入・出品を読み込み中…</div>';
+    if (!PA.data || force) {
+      root.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>売れた注文・入金・仕入・出品を読み込み中…<span id="pa-ld-t" style="margin-left:6px"></span></div>';
+      /* ★2026-10-25 本人「このページ、全然表示されへん」：経過秒を出す。読み込みは1本90秒で打ち切るので、最長でも数分で表か失敗が出る */
+      const t0 = Date.now(), iv = setInterval(() => { const el = document.getElementById('pa-ld-t'); if (!el) { clearInterval(iv); return; } const sec = Math.round((Date.now() - t0) / 1000); el.textContent = sec >= 5 ? '（' + sec + '秒）' + (sec >= 60 ? ' 時間がかかっています。読めない時は失敗として表示します' : '') : ''; }, 1000);
+    }
     let D; try { D = await paLoad(force); } catch (e) { root.innerHTML = `<div class="tool-card" style="max-width:none;color:#d93025">⚠️ 読み込めませんでした（${esc((e && e.message) || e)}）。<b>読めないまま「赤字0件」とは出しません。</b>少し置いて 🔄 を押してください。</div>`; return; }
     if (!document.getElementById('pa-root') || PA.sub !== 'adj') return;
     const targets = new Set(accountTargets().map(r => r.cc));
