@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-1100';
+var SRC_VER = '20261025-1130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3653,8 +3653,10 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
   /* ★2026-10-22 レビュー：①外せない／再送も失敗した時に元の文言（in_promotion）を残すと、🤖が「販促中＝見送らない」と扱い30分ごとに外す・戻すを繰り返した
      → 文言を消して【promo_hard】の印にする（🤖は普通の失敗として見送る）。②戻せたかを文面に正しく出し、外した割引・値下げの ID を app_kv promo_unlock_log に控える（後で promo_bundle_add で戻せる） */
   var clean = function (t) { return String(t || '').replace(/product\.error_cannt_init_tier_in_promotion|in_promotion|has promotion/ig, '販促中'); };
+  BA_ADD_OLD_FIRST = null;
   try { return addVariationsBulk0_(shopId, itemId, items, jobKey); }
   catch (e) {
+    var _first = (BA_ADD_OLD_FIRST && BA_ADD_OLD_FIRST.k === parseInt(shopId, 10) + '|' + parseInt(itemId, 10)) ? BA_ADD_OLD_FIRST.ids : null;   /* 1回目の頭で取った「前からの番号」 */
     var em = String((e && e.message) || e);
     if (!/in_promotion|has promotion/i.test(em)) throw e;
     var promo = priceUnlockPromo_(shopId, itemId);
@@ -3663,7 +3665,7 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
     if (promo.other.length || (!promo.bundleOut.length && !promo.discountOut.length)) { priceRelockPromo_(shopId, itemId, promo); note('cannot_unlock'); throw new Error('promo_hard: ' + clean(em).slice(0, 160) + ' ／販促を外せませんでした: ' + clean(promo.other.join(',') || String(promo.raw || '')).slice(0, 160) + ' ' + backTxt()); }
     Utilities.sleep(1500);
     var r;
-    try { r = addVariationsBulk0_(shopId, itemId, items, jobKey); }
+    try { r = addVariationsBulk0_(shopId, itemId, items, jobKey, _first); }
     catch (e2) { priceRelockPromo_(shopId, itemId, promo); note('retry_failed'); throw new Error('promo_hard: ' + clean((e2 && e2.message) || e2).slice(0, 200) + ' ／販促から外して再送しても失敗（' + backTxt() + '）'); }
     priceRelockPromo_(shopId, itemId, promo);
     if ((promo.bundleBack || []).length < (promo.bundleOut || []).length || (promo.discountOut || []).length) note('added');
@@ -3671,11 +3673,16 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
     return r;
   }
 }
-function addVariationsBulk0_(shopId, itemId, items, jobKey) {
+/* ★2026-10-25 05：「前からの番号」の控えは、割引から外して足し直す前ではなく【1回目の追加の前】に取る（1回目に途中まで作られた明細が「前から」に入り、正しい明細を在庫0にしていた＝MY GB ④ 13件・TH GB ⑤ 1件）。
+   1回目の頭で取った番号の一覧を BA_ADD_OLD_FIRST に置き、足し直し（addVariationsBulk_ の2回目）はそれを引き継ぐ＝接続の回数は増えない */
+var BA_ADD_OLD_FIRST = null;
+function addVariationsBulk0_(shopId, itemId, items, jobKey, preOld) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   if (!items || !items.length) throw new Error('対象が空です');
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
+  var _oldList = (preOld && preOld.length) ? preOld.map(String) : models.map(function (m) { return String(m.model_id); });
+  if (!preOld) BA_ADD_OLD_FIRST = { k: shopId + '|' + itemId, ids: _oldList.slice() };
   if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
   var tier = tiers[0], opts = (tier.option_list || []).map(function (o) { return o.option; });
   /* ★2026-10-24 枠（option）と中身（model）の数が合わない＝枠だけの明細があるカタログには足さない。足すと名前と中身がずれる元になる
@@ -3814,7 +3821,7 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey) {
   var newList = [], mismatch = [];
   try {
     var fo = (((finalRv || {}).tier_variation || [])[0] || {}).option_list || [];
-    var oldIds = {}; models.forEach(function (m) { oldIds[String(m.model_id)] = 1; });
+    var oldIds = {}; _oldList.forEach(function (id) { oldIds[id] = 1; });
     var sentSku = {}; items.forEach(function (x) { var nm0 = String(x.option || '').trim().toLowerCase(); if (nm0 && x.sku) sentSku[nm0] = String(x.sku); });
     ((finalRv || {}).model || []).forEach(function (m) {
       var oi = (m.tier_index || [])[0]; var on = fo[oi] ? String(fo[oi].option || '') : ''; if (!on || newNames.indexOf(on.toLowerCase()) < 0) return;
@@ -3826,7 +3833,7 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey) {
     if (mismatch.length) { try { updateStockList_(shopId, itemId, mismatch.map(function (x) { return { model_id: x.model_id, stock: 0 }; })); } catch (eMs) { mismatch.forEach(function (x) { x.stockErr = String((eMs && eMs.message) || eMs).slice(0, 80); }); } }
   } catch (e5) {}
   var sentN = newModels.length, gotN = (addResp && Array.isArray(addResp.model)) ? addResp.model.length : -1;   /* add_model の返事の明細数（一部だけ通ったかの手がかり・-1＝返事に無い） */
-  return { ok: true, models: newList, mismatch: mismatch.slice(0, 20), oldIds: models.map(function (m) { return String(m.model_id); }), addSent: sentN, addGot: gotN, middleGhost: (finalOpt !== finalModel) ? (finalOpt - finalModel) : 0, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40), noImgSkipped: noImgSkipped.slice(0, 40),
+  return { ok: true, models: newList, mismatch: mismatch.slice(0, 20), oldIds: _oldList.slice(), addSent: sentN, addGot: gotN, middleGhost: (finalOpt !== finalModel) ? (finalOpt - finalModel) : 0, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40), noImgSkipped: noImgSkipped.slice(0, 40),
            healed: healed, opt_count: finalOpt, model_count: finalModel };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
