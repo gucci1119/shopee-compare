@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261024-2210';
+var SRC_VER = '20261024-2300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3634,6 +3634,10 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey) {
   var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
   if (tiers.length !== 1) throw new Error('1層バリエ商品のみ対応です');
   var tier = tiers[0], opts = (tier.option_list || []).map(function (o) { return o.option; });
+  /* ★2026-10-24 枠（option）と中身（model）の数が合わない＝枠だけの明細があるカタログには足さない。足すと名前と中身がずれる元になる
+     （10/22〜23 TW 55069068333・BR 58219725881・01 商品部の調査）。🤖は「満杯扱い」で別のカタログへ回す（baAddBatch_） */
+  { var _usedB = {}; models.forEach(function (m) { _usedB[(m.tier_index || [])[0]] = 1; }); var _ghB = []; opts.forEach(function (o, ix) { if (!_usedB[ix]) _ghB.push(ix + ':' + o); });
+    if (_ghB.length) throw new Error('枠だけの明細が ' + _ghB.length + '件あるカタログには足しません（位置: ' + _ghB.slice(0, 5).join(' / ') + '）'); }
   if (opts.length + items.length > 100) throw new Error('明細は1商品100件までです（現在' + opts.length + '件・追加' + items.length + '件）');
   /* ★2026-10-24 価格計算のレビューの残り「GAS 側でも値段の上限を確かめる」：VN の明細は 909,090 VND を超えると出品ごと非公開になる（2026-10-09 Shopee 通知）。
      🤖は自分で上限に収めているが、ポータルの Request page 追加・手動の一括追加はここを通るだけ＝画像を上げる前に止める（比率 BR4倍/他5倍は Shopee 自身が断るのでここでは見ない） */
@@ -3717,9 +3721,9 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey) {
   /* ★2026-09-22 BRだけ add_model が「Model tier_index error」で落ちる（21件・全部BR・他の国は0件）。
      オプションを足した直後はまだ反映されていない形。すぐ巻き戻さず、待って読み直し→反映を確かめてから送り直す。
      失敗した時だけ通信が増える（成功時は今までどおり）。結果は tierRetry に残してログで裏を取る。 */
-  var tierRetry = '';
+  var tierRetry = '', addResp = null;
   try {
-    addModel_(shopId, itemId, newModels);
+    addResp = addModel_(shopId, itemId, newModels);
   } catch (eAdd) {
     var eMsg = String((eAdd && eAdd.message) || eAdd), okRetry = false;
     if (/enabled together/i.test(eMsg)) {   /* ★2026-10-11 SG：関連チャネル（SPX Express Lockers (Overseas)）を足して1回だけ送り直す */
@@ -3761,12 +3765,23 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey) {
     }
   } catch (e4) {}
   // ★今回入った明細の model_id を返す（自動出品の台帳が「どの明細になったか」を持てるように）
-  var newList = [];
+  /* ★2026-10-24 01 商品部の調査：枠と中身がずれると、前からある明細の番号が新しい名前の枠を指し、それを新しい作品の番号として控えていた。
+     → 前からある番号・送った SKU と違う SKU の明細は新しい明細と見なさず、在庫0にして返す（位置は動かさない・名前の枠は残す） */
+  var newList = [], mismatch = [];
   try {
     var fo = (((finalRv || {}).tier_variation || [])[0] || {}).option_list || [];
-    ((finalRv || {}).model || []).forEach(function (m) { var oi = (m.tier_index || [])[0]; var on = fo[oi] ? String(fo[oi].option || '') : ''; if (on && newNames.indexOf(on.toLowerCase()) >= 0) newList.push({ option: on, model_id: m.model_id }); });
+    var oldIds = {}; models.forEach(function (m) { oldIds[String(m.model_id)] = 1; });
+    var sentSku = {}; items.forEach(function (x) { var nm0 = String(x.option || '').trim().toLowerCase(); if (nm0 && x.sku) sentSku[nm0] = String(x.sku); });
+    ((finalRv || {}).model || []).forEach(function (m) {
+      var oi = (m.tier_index || [])[0]; var on = fo[oi] ? String(fo[oi].option || '') : ''; if (!on || newNames.indexOf(on.toLowerCase()) < 0) return;
+      var sk0 = sentSku[on.toLowerCase()];
+      if (oldIds[String(m.model_id)] || (sk0 && String(m.model_sku || '').trim().toUpperCase() !== sk0.trim().toUpperCase())) { mismatch.push({ option: on, model_id: m.model_id, sku: String(m.model_sku || ''), old: !!oldIds[String(m.model_id)] }); return; }
+      newList.push({ option: on, model_id: m.model_id });
+    });
+    if (mismatch.length) { try { updateStockList_(shopId, itemId, mismatch.map(function (x) { return { model_id: x.model_id, stock: 0 }; })); } catch (eMs) { mismatch.forEach(function (x) { x.stockErr = String((eMs && eMs.message) || eMs).slice(0, 80); }); } }
   } catch (e5) {}
-  return { ok: true, models: newList, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40), noImgSkipped: noImgSkipped.slice(0, 40),
+  var sentN = newModels.length, gotN = (addResp && Array.isArray(addResp.model)) ? addResp.model.length : -1;   /* add_model の返事の明細数（一部だけ通ったかの手がかり・-1＝返事に無い） */
+  return { ok: true, models: newList, mismatch: mismatch.slice(0, 20), addSent: sentN, addGot: gotN, middleGhost: (finalOpt !== finalModel) ? (finalOpt - finalModel) : 0, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40), noImgSkipped: noImgSkipped.slice(0, 40),
            healed: healed, opt_count: finalOpt, model_count: finalModel };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
@@ -7209,8 +7224,12 @@ function baKvPrefetch_(keys) {
        失敗したらこの台では3時間、一括を試さず最初から1本ずつ読む（読む量が半分になる）。どの鍵が太ったかは kvSz で数える */
     var _skipU = 0; try { _skipU = Number(P_().getProperty('BA_PF_SKIP_UNTIL') || 0); } catch (eSk) {}
     if (_skipU > Date.now()) throw new Error('一括読みは休み中（前回の失敗から3時間・' + new Date(_skipU).toISOString().slice(11, 16) + 'Z まで）');
-    var q = keys.slice(); var wantPre = q.indexOf('boshu_auto_pre') >= 0; if (wantPre) q = q.concat(baPreShardKeys_());
+    var q = keys.slice(); var wantPre = q.indexOf('boshu_auto_pre') >= 0;
+    /* ★2026-10-24 写真の控えは 9/26 から8分割（boshu_auto_pre_s0〜s7）。古い1本 boshu_auto_pre は 9/25 から更新されていないのに毎回一緒に読んでいた（一括読み 約4,580万字の一部）。
+       分割を先に読み、8つそろっていなければ古い1本を後から読む（移行途中でも壊れない） */
+    if (wantPre) q = q.filter(function (k) { return k !== 'boshu_auto_pre'; }).concat(baPreShardKeys_());
     SB_LAST_LEN = 0; var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + q.map(encodeURIComponent).join(',') + ')'); BA_KV_SZ.__batch = SB_LAST_LEN; BA_KV_SZ.__batchN = q.length;
+    if (wantPre) { var _hv = {}; (r || []).forEach(function (x) { _hv[x.k] = 1; }); if (baPreShardKeys_().some(function (k) { return !_hv[k]; })) { SB_LAST_LEN = 0; var rl = sbSelect_('app_kv', 'select=k,v&k=eq.boshu_auto_pre'); BA_KV_SZ['boshu_auto_pre(古い1本)'] = SB_LAST_LEN; r = (r || []).concat(rl || []); } }
     BA_KV_CACHE = {}; keys.forEach(function (k) { BA_KV_CACHE[k] = null; });
     var byKey = {}; (r || []).forEach(function (x) { byKey[x.k] = x.v; if (keys.indexOf(x.k) >= 0) BA_KV_CACHE[x.k] = x.v; });
     if (wantPre) BA_KV_CACHE['boshu_auto_pre'] = baPreMerge_(byKey);
@@ -7229,7 +7248,9 @@ var BA_KV_AT = 0;   /* ★2026-10-24 全体レビュー（出品管理 #6）：�
 function baKv_(k) {
   if (BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k)) return BA_KV_CACHE[k];
   if (k === 'boshu_auto_pre') {
-    try { SB_LAST_LEN = 0; var rp = sbSelect_('app_kv', 'select=k,v&k=in.(' + ['boshu_auto_pre'].concat(baPreShardKeys_()).join(',') + ')'); BA_KV_SZ[k] = SB_LAST_LEN; var bk = {}; (rp || []).forEach(function (x) { bk[x.k] = x.v; }); var vp = baPreMerge_(bk); if (BA_KV_CACHE) BA_KV_CACHE[k] = vp; delete BA_KV_FAIL[k]; return vp; } catch (eP) { BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
+    try { SB_LAST_LEN = 0; var rp = sbSelect_('app_kv', 'select=k,v&k=in.(' + baPreShardKeys_().join(',') + ')'); BA_KV_SZ[k] = SB_LAST_LEN;   /* ★2026-10-24 分割だけ。そろっていない時だけ古い1本を読む */
+      { var _hv2 = {}; (rp || []).forEach(function (x) { _hv2[x.k] = 1; }); if (baPreShardKeys_().some(function (kk) { return !_hv2[kk]; })) { SB_LAST_LEN = 0; rp = (rp || []).concat(sbSelect_('app_kv', 'select=k,v&k=eq.boshu_auto_pre') || []); BA_KV_SZ['boshu_auto_pre(古い1本)'] = SB_LAST_LEN; } }
+      var bk = {}; (rp || []).forEach(function (x) { bk[x.k] = x.v; }); var vp = baPreMerge_(bk); if (BA_KV_CACHE) BA_KV_CACHE[k] = vp; delete BA_KV_FAIL[k]; return vp; } catch (eP) { BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
   }
   try { SB_LAST_LEN = 0; var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); BA_KV_SZ[k] = SB_LAST_LEN; var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; delete BA_KV_FAIL[k]; return v; } catch (e) { BA_KV_SZ[k] = -SB_LAST_LEN; BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
 }
@@ -8287,7 +8308,7 @@ function boshuAutoTick(manual) {
         });
       }
       if (cfg.autoBrake !== false && manual !== true && recentB.length >= 4 && goneB.length >= 3) {
-        st.brake = { at: new Date().toISOString(), kind: 'gone', why: '直近 ' + recentB.length + '件のうち ' + goneB.length + '件が消されています（例: ' + goneB.slice(0, 3).map(function (a) { return a.en; }).join(' / ') + '）' };
+        st.brake = { at: new Date().toISOString(), kind: 'gone', why: '直近 ' + recentB.length + '件のうち ' + goneB.length + '件が、足したはずのカタログの明細に見当たりません（名前のずれ・枠だけの明細・消された のどれか。例: ' + goneB.slice(0, 3).map(function (a) { return a.en; }).join(' / ') + '）' };
         st.lastMsg = '🛑 自動ブレーキ：' + st.brake.why + '。原因を直してから🤖の「▶ 再開」を押してください'; baLog_(st, st.lastMsg); return finish_(st.lastMsg);
       }
     } catch (eB) {}
@@ -9584,6 +9605,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       } else {
         // ★「100件まで」＝手元の明細数が古かっただけ。候補は捨てず、このカタログを満杯扱いにして次へ
         if (/100件|上限/.test(em)) { tgt.models = new Array(100); continue; }
+        if (/枠だけの明細/.test(em)) { baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：⚠ ' + em.slice(0, 120) + '＝このカタログには足さず別のカタログへ（明細の位置は動かさない・人が確かめる）'); tgt.models = new Array(100); continue; }
         /* ★2026-10-20 全体レビュー 中③：販促（まとめ買い割引・値下げ）に入っているカタログには明細を足せない（product.error_cannt_init_tier_in_promotion）。
            見送り印（skip:err）・6時間除外・エラー回数・当日停止のどれにも数えない＝そのカタログを販促から外せば次の回にそのまま入る。原因が分かる文言で残す */
         if (/in_promotion|has promotion/i.test(em)) { baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：🧺 販促（まとめ買い割引・値下げ）に入っているので明細を足せません＝このカタログを販促から外すと次の回で入ります（見送りにはしない）'); res.note = (res.note ? res.note + '／' : '') + '販促中で足せない'; i += batch.length; continue; }
@@ -9596,6 +9618,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
     }
     /* ★このカタログに実際に入った数。`res.added` は実行ぜんぶの累計なので締めの判断に使えない。 */
     var _addedHere = 0;
+    if (r2 && r2.mismatch && r2.mismatch.length) { baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：⚠ 足した後に番号と名前がずれた明細 ' + r2.mismatch.length + '件を在庫0にした（' + r2.mismatch.slice(0, 3).map(function (x) { return x.option + (x.old ? '＝前からの番号' : '＝SKU違い ' + x.sku); }).join(' / ') + '・add_model 送 ' + r2.addSent + '／返 ' + r2.addGot + '・枠だけ ' + (r2.middleGhost || 0) + '）'); try { (st.mismatchLog = st.mismatchLog || []).unshift({ at: new Date().toISOString(), cc: cc, item_id: tgt.item_id, n: r2.mismatch.length, ex: r2.mismatch.slice(0, 5), sent: r2.addSent, got: r2.addGot, ghost: r2.middleGhost || 0 }); if (st.mismatchLog.length > 30) st.mismatchLog.length = 30; } catch (eMl) {} }
     var okNm_ = function (t) { return String(t || '').toLowerCase().replace(/\s+/g, ' ').trim(); }; var okNames = {}; (r2.models || []).forEach(function (m) { okNames[okNm_(m.option)] = m.model_id; });
     /* ★2026-09-25 本人「今後同じ失敗しないように」＝返事に model_id が無いのに「added>0」だけで済みにしていた（TW DS② の6件が入っていないのに済み扱い→3時間後に自動ブレーキ）。
        返事に明細が無い時は【Shopee を読み直して】名前が本当に入っているものだけ済みにする。1カタログ1回の読みで済む（毎回ではなく、この珍しい時だけ） */
