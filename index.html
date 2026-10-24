@@ -1281,13 +1281,14 @@
       <div class="tool-status" id="sync-status"></div>
     </div>
     <div class="tool-card" style="border-color:#cdd9ee;background:#f7faff">
-      <h3>🔁 下の3つを3時間おきに自動実行</h3>
+      <h3>🔁 💵入金予定額と🖼️商品画像を3時間おきに自動実行</h3>
       <div class="tool-row">
-        <label style="font-size:13px" title="この端末で、3時間おきに「注文明細→{国}_row（7か国）」→「入金予定額→F/G列」→「商品画像→AC列」の順に自動実行します。タブを開いている間だけ動きます"><input type="checkbox" id="dep-auto"> 自動実行する（この端末・タブを開いている間）</label>
+        <label style="font-size:13px" title="この端末で、3時間おきに「入金予定額→F/G列」→「商品画像→AC列」の順に自動実行します。注文明細→{国}_row は各国のセラーセンターのタブが自分で入れ替えます。タブを開いている間だけ動きます"><input type="checkbox" id="dep-auto"> 自動実行する（この端末・タブを開いている間）</label>
         <span id="dep-auto-next" class="smd-dim" style="font-size:11.5px;margin-left:auto"></span>
       </div>
       <div class="smd-dim" style="font-size:11.5px;line-height:1.7;margin-top:4px">
-        ONにすると <b>📄注文明細→{国}_row（7か国まとめて）</b> → <b>💵入金予定額→F/G列</b> → <b>🖼️商品画像→AC列</b> の3つを<b>順番に</b>実行します（同時だと通信の枠を取り合って失敗するため）。<br>
+        ONにすると <b>💵入金予定額→F/G列</b> → <b>🖼️商品画像→AC列</b> の2つを<b>順番に</b>実行します（同時だと通信の枠を取り合って失敗するため）。<br>
+        📄注文明細→{国}_row は各国のセラーセンターのタブが3時間おきに自分で入れ替えるので、ここからは回しません（下の📄のボタンで今すぐもできます）。<br>
         ライブでない／鍵が未設定／🎭デモ表示／今月のシートIDが無い ときは<b>実行せず「見送り：理由」を記録</b>して30分後にもう一度みます。<br>
         ⚠️ <b>この端末だけ</b>の設定です。別のPCでもONにすると<b>同じシートに二重に書き込みます</b>。1台だけでONにしてください。（2026-09-19〜：2台ともONでも、実際に走るのは<b>🖥 自動処理の担当のPCだけ</b>です）
       </div>
@@ -51688,14 +51689,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!busy || Date.now() - t0 > 20 * 60 * 1000) { clearInterval(iv); resolve(); }
       }, 3000);
     });
-    // ★まず明細（{国}_row）を7か国まとめて。土台のデータなので先に入れ替える。
-    //   ボタンを押すのではなく直接呼ぶ（ボタン経由だと確認ダイアログで止まってしまうため）。
-    try {
-      const ro = await rowAllGo(false, true);
-      if (ro && ro.skipped) depRunsSave(depRecordRow('明細7か国', null, '見送り: ' + ro.skipped));
-      else if (ro) depRunsSave(depRecordRow('明細7か国', null, '成功 ' + ro.done + 'か国 / 失敗 ' + ro.fail + 'か国'
-        + (ro.failed && ro.failed.length ? '（入らなかった国: ' + ro.failed.join(' ') + '）' : '')));
-    } catch (e) { depRunsSave(depRecordRow('明細7か国', null, '失敗: ' + ((e && e.message) || e))); }
+    // ★明細（{国}_row）は 2026-10-01 から各国のセラーセンターのタブが3時間おきに自分で入れ替える（ここからは呼ばない）。
+    //   2026-10-24 レビュー#9：前は rowAllGo を呼んで毎回「見送り」を記録し、直近の記録の枠を埋めていた
     await clickAndWait('dep-run', 'dep-status');
     // ★自動のときは画像を「直近7日」で回す（2026-09-11 本人指摘「画像を撮れてないところある」）。
     //   既定の「当日(最新日)」だと、あとから同期された前日の注文（例：9/10のBR 4件が 00:52 に同期→04:16 の回は 9/11 しか見ない）が
@@ -51735,13 +51730,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
   let syncRunning = false; toolBusy = null;
   async function syncAll(st, interactive) {
-    if (syncRunning) return;
+    if (syncRunning) { if (interactive) toast('⏳ 同期を実行中です。終わるまでお待ちください'); return; }
     if (toolBusy && toolBusy !== 'sync') { st(toolBusyMsg()); return; }
     if (state.mode !== 'live') { st('❌ ライブモード（ブリッジ入りPC）でのみ同期できます'); return; }
     if (!settings.sbSecret) { st('❌ ⚙️設定でSupabase secretキーを入力してください'); return; }
     syncRunning = true; toolBusy = 'sync';
     const log = [];
     const say = m => { log.push(m); st(log.join('\n')); };
+    st('⏳ 店を確かめています…（最長12秒）');   /* ★2026-10-24 レビュー#8：押した瞬間に反応させる */
     if (!state.accounts) await loadAccounts().catch(() => {});
     // 手動同期は対象アカウントが持つ国だけ（gs_japan_select選択時はVN等を除外）。自動同期は有効な全国（今アクティブな垢を丸ごと最新化）。
     const targets = interactive ? accountTargets() : REGIONS.filter(r => state.enabled.has(r.cc));
@@ -51766,14 +51762,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
 
       // 2) 入金予定額（初回値=暫定を保持し、更新されたら最新値=確定）
       say('💵 入金予定額を取得中...');
-      const exIncome = new Map((await sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at,pending&order=sn'))
+      const exIncome = new Map((await sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at,pending,shop_id&order=sn'))
         .map(i => [i.cc + ':' + i.sn, i]));
       const incomeRows = [];
       const okCc = new Set();   // 今回ちゃんと取れた国だけ「確定済み」判定の対象にする
+      /* ★2026-10-24 レビュー#2：入金の店。今アクティブな店が分かればそれ、分からなくても登録簿でその国に店が1つならそれ。
+         どちらでもない国は null を書かず shop_id の列ごと外す（GAS の入金同期が shop_id=eq. で読むので、null で潰すと行を見失い初回値を書き直す） */
+      const incShopByCc = {};
       for (const region of targets) {
         try {
           const map = await fetchPendingCountry(region);
           okCc.add(region.cc);
+          const incRegs = (state.accounts || []).filter(a => a && a.shop_id && String(a.cc || '').toUpperCase() === region.cc);
+          const incSid = activeShopByCc[region.cc] || (incRegs.length === 1 ? String(incRegs[0].shop_id) : null);
+          incShopByCc[region.cc] = incSid;
           Object.entries(map).forEach(([sn, amount]) => {
             const ex = exIncome.get(region.cc + ':' + sn);
             const now = new Date().toISOString();
@@ -51781,11 +51783,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             const initAt = ex && ex.amount_initial_at ? ex.amount_initial_at : now;   // 暫定=初回記録日時（以後固定）
             let fixAt = ex ? ex.amount_at : null;                                      // 確定=暫定と値が変わった最初のsync
             if (fixAt == null && amount !== initial) fixAt = now;
-            incomeRows.push({ cc: region.cc, sn, amount, amount_initial: initial, amount_at: fixAt, amount_initial_at: initAt, category: 4, synced_at: now, pending: true, shop_id: activeShopByCc[region.cc] || null });
+            const incRow = { cc: region.cc, sn, amount, amount_initial: initial, amount_at: fixAt, amount_initial_at: initAt, category: 4, synced_at: now, pending: true };
+            if (incSid) incRow.shop_id = incSid;
+            incomeRows.push(incRow);
           });
         } catch (e) { say(`　${region.cc} 入金: ⚠ ${e.message}`); }
       }
-      await sbUpsert('income', incomeRows);
+      // ★PostgREST のまとめ送りは全部の行が同じ鍵でないと断られる（PGRST102）→ shop_id 有り／無しで分けて送る（注文の upsertOrdersPreservingShop と同じ形）
+      await sbUpsert('income', incomeRows.filter(r => r.shop_id), 'cc,sn');
+      await sbUpsert('income', incomeRows.filter(r => !r.shop_id), 'cc,sn');
       // 以前Pendingだったが今回のPendingに無い＝入金確定済み → pending=false に更新（利益計算用の金額は残す）。ダッシュボードのPending合計が水増しされないように
       const curKeys = new Set(incomeRows.map(r => r.cc + ':' + r.sn));
       // ★「取れた国」の「まだ暫定(pending=true)」の行だけを確定済みにする（Codex全体レビュー 2026-09-10）。
@@ -51796,6 +51802,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (v.pending !== true) return;
         const p = key.indexOf(':'); const cc = key.slice(0, p);
         if (!okCc.has(cc)) return;
+        /* ★2026-10-24 レビュー#3：ブリッジの Pending は今アクティブな店の分だけ。どの店の Pending か分からない国は倒さない
+           （GAS の入金同期が6時間ごとに pending を書き戻す）。別の店の行は倒さない。店が空の古い行は今までどおり倒す */
+        const incSidCc = incShopByCc[cc];
+        if (!incSidCc) return;
+        if (v.shop_id != null && String(v.shop_id) !== String(incSidCc)) return;
         settledRows.push({ cc: cc, sn: key.slice(p + 1), pending: false });
       });
       if (settledRows.length) await sbUpsert('income', settledRows);
@@ -51963,14 +51974,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
                 const dep = c[6] && typeof c[6].v === 'number' ? c[6].v : null;       // G列=最新
                 const depInit = c[5] && typeof c[5].v === 'number' ? c[5].v : null;   // F列=初期(暫定)
                 const stq = c[16] && c[16].v != null ? String(c[16].v).slice(0, 30) : null;
-                if (cost != null || dep != null) costRows.push({
-                  cc: region.cc, sn: String(sn), cost, deposit: dep, deposit_init: depInit, status: stq, synced_at: new Date().toISOString() });
+                /* ★2026-10-24 レビュー#1：AL が空の行は cost を送らない（null で送ると損益で手入力した仕入額が消える） */
+                if (cost != null || dep != null) { const cr = { cc: region.cc, sn: String(sn), deposit: dep, deposit_init: depInit, status: stq, synced_at: new Date().toISOString() };
+                  if (cost != null) cr.cost = cost;
+                  costRows.push(cr); }
               });
             } catch (e) { if (!/2_p$/.test(tabName)) say(`　${region.cc} シート: ⚠ ${String(e.message).slice(0, 30)}`); }
             }
           }
         }
-        await sbUpsert('costs', costRows);
+        // ★PostgREST のまとめ送りは全部の行が同じ鍵でないと断られる（PGRST102）→ cost 有り／無しで分けて送る
+        await sbUpsert('costs', costRows.filter(r => 'cost' in r), 'cc,sn');
+        await sbUpsert('costs', costRows.filter(r => !('cost' in r)), 'cc,sn');
         say(`📄 仕入額/入金ミラー ${costRows.length}件 保存 ✅（今月＋先月）`);
       } else {
         say(`📄 利益管理表ミラー: スキップ（${jstYm()} 等のシートID未設定。⚙️設定に「${jstYm()}: ID」を追加）`);
@@ -52299,6 +52314,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const CCS = (Array.isArray(ccListIn) && ccListIn.length) ? ccListIn : ROW_COUNTRIES;
     const rows = {};
     CCS.forEach(cc => { rows[cc] = { cc: cc, msg: '待機中…', ok: null }; });
+    /* ★2026-10-24 レビュー#5：今ログイン中の店を見る（detectActiveAndCheck は共通の activeShopByCc を書き換えるので直接 detectShopIds） */
+    st.textContent = '⏳ 各国のセラーセンターがどの店でログイン中か確かめています…（最長12秒）';
+    let rowLive = {};
+    try { rowLive = (await detectShopIds(CCS.map(cc => regionByCc(String(cc).toUpperCase())).filter(Boolean), 12000)) || {}; } catch (_) { rowLive = {}; }
+    if (!state.accounts) await loadAccounts().catch(() => {});
+    const rowSubShops = new Set((state.accounts || []).filter(a => a && a.shop_id && /sub/i.test(String(a.status || ''))).map(a => String(a.shop_id)));
+    const rowBlocked = {};
+    CCS.forEach(cc => { const lv = rowLive[String(cc).toUpperCase()]; if (lv && lv.shop_id && rowSubShops.has(String(lv.shop_id))) rowBlocked[cc] = lv.name || lv.shop_id; });
     const draw = () => {
       listEl.innerHTML = CCS.map(cc => {
         const r = rows[cc];
@@ -52314,6 +52337,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ① 対象の国ぶんのエクスポートをいっぺんに作る
     const rids = {};
     await Promise.all(CCS.map(async cc => {
+      if (rowBlocked[cc]) { rows[cc].ok = false; rows[cc].msg = '第二アカウント（' + rowBlocked[cc] + '）でログイン中なので止めました。本店に切り替えてからもう一度押してください'; draw(); return; }
       rows[cc].msg = 'エクスポートを作成中…'; draw();
       try { rids[cc] = await rowCreateReport(cc, mr); rows[cc].msg = '作成しました（' + rids[cc] + '）。順番待ち…'; }
       catch (e) { rows[cc].ok = false; rows[cc].msg = '作成に失敗: ' + ((e && e.message) || e); }
@@ -52323,6 +52347,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     let done = 0, fail = 0;
     const failed = [];
     for (const cc of CCS) {
+      if (rowBlocked[cc]) {
+        if (!dryRun) { try { depRunsSave(depRecordRow('明細' + cc.toUpperCase(), tg.plan, '止めました: 第二アカウント（' + rowBlocked[cc] + '）でログイン中')); } catch (_) {} }
+        failed.push(cc.toUpperCase()); fail++; continue;
+      }
       if (!rids[cc]) {
         if (!dryRun) { try { depRunsSave(depRecordRow('明細' + cc.toUpperCase(), tg.plan, 'エクスポートを作れませんでした')); } catch (_) {} }
         failed.push(cc.toUpperCase()); fail++; continue;
@@ -52407,6 +52435,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const data = {};
     const lines = {};
     const paint = () => { st.textContent = targets.map(r => `${r.cc}: ${lines[r.cc] || '待機中'}`).join('\n'); };
+    let plan = null;   // ★2026-10-24 レビュー#20：catch から「どのシートか」を記録できるよう try の外に（前は事業計画の plan を指していた）
+    const failedSheets = [];   // ★レビュー#4：書けなかったシート
     try {
       for (const region of targets) {
         lines[region.cc] = 'Pending取得中...'; paint();
@@ -52418,7 +52448,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       if (!Object.keys(data).length) throw new Error('取得できた国がありません');
       // 今月＋先月のシートに書く（6月末注文の入金確定が7月にズレても6月シートが更新される）。GASは1回=1シートなのでシートごとにPOST
-      const plan = activeSheetPlan();
+      plan = activeSheetPlan();
       if (plan.missingCur) throw new Error('今月（' + plan.cur + '）のシートIDが未登録です。⚙️設定の「YYYY-MM: ID」に追加してください。\n※このまま実行すると先月のシートに書いてしまうので止めました。');
       const sids = plan.list.map(x => x.id);
       if (!sids.length) throw new Error('シートID未設定（⚙️設定に「YYYY-MM: ID」を入力）');
@@ -52429,7 +52459,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const resp = await depPostChecked({ token: settings.depToken, mode, data, sheetId: sid }, r => r.result != null && r.mode != null, 'F/G');
         // ★1枚目が成功して2枚目で落ちると、throwで集計表示ごと消えて「どこまで書けたか」が分からなくなっていた。
         //   落ちたシートだけを記録して次のシートへ進む。
-        if (!resp.ok) { st.textContent += `\n❌ シート${sids.indexOf(sid) + 1}/${sids.length} は失敗（${resp.error || 'GAS応答エラー'}）。このシートだけやり直してください`; continue; }
+        if (!resp.ok) { st.textContent += `\n❌ シート${sids.indexOf(sid) + 1}/${sids.length} は失敗（${resp.error || 'GAS応答エラー'}）。このシートだけやり直してください`;
+          { const pe = plan.list[sids.indexOf(sid)]; failedSheets.push((pe && pe.ym) || ('シート' + (sids.indexOf(sid) + 1))); }
+          continue; }
         targets.forEach(r => {
           const res = (resp.result || {})[r.cc.toLowerCase()];
           if (res) { const a = agg[r.cc] = agg[r.cc] || { F: 0, G: 0, bulk: 0, skip: 0, nomatch: 0 }; ['F', 'G', 'bulk', 'skip', 'nomatch'].forEach(k => a[k] += (res[k] || 0)); }
@@ -52443,8 +52475,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const okCc = targets.filter(r => data[r.cc.toLowerCase()]).map(r => r.cc);
       st.textContent += failed.length
         ? `\n⚠ 一部だけ書きました：成功=${okCc.join('/') || 'なし'} ／ 取得できず=${failed.join('/')}\n　→ 取得できなかった国は、ブリッジとShopeeのログインを確かめてもう一度実行してください（書けた国は二重にはなりません）`
-        : `\n✅ 完了（${sheetPlanLabel(plan)}）`;
-      depRunsSave(depRecordRow('入金F/G', plan, failed.length ? ('一部だけ 成功=' + okCc.join('/') + ' 失敗=' + failed.join('/')) : '完了'));
+        : (failedSheets.length ? '' : `\n✅ 完了（${sheetPlanLabel(plan)}）`);
+      const allSheetsNg = failedSheets.length && failedSheets.length === sids.length;
+      if (failedSheets.length) st.textContent += `\n⚠ 書けなかったシート：${failedSheets.join('・')}（上の❌の行）→ そのシートだけもう一度実行してください`;
+      depRunsSave(depRecordRow('入金F/G', plan, (failed.length ? ('一部だけ 成功=' + okCc.join('/') + ' 失敗=' + failed.join('/')) : (allSheetsNg ? '失敗' : failedSheets.length ? '一部だけ' : '完了'))
+        + (failedSheets.length ? ' 書けなかったシート=' + failedSheets.join('/') : '')));
     } catch (e) {
       if (isTimeoutErr(e)) {
         st.textContent += depTimeoutMsg();
@@ -52487,16 +52522,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // ★転記の前に注文をDBから読み直す（2026-09-10）。前は起動時に読んだ一覧のまま使っていたので、
       //   その後に同期された注文（例：10:54同期のBR 9/10分）が「当日」に入らず、画像が入らなかった。
       st.textContent = '注文をDBから読み直し中…';
+      /* ★2026-10-24 レビュー#10・#13：画像用の注文は手元の変数に持つ（注文管理の state.orders は書き換えない）・読む列は cc,sn,items,shop_id だけ */
+      let imgByCc = null;
       try {
-        const byCc = await ordersFromDb();
-        REGIONS.forEach(r => state.orders.perCountry.set(r.cc, { status: 'ok', msg: '', rows: byCc[r.cc] || [] }));
-        try { updateOrdNote(false); } catch (_) {}
-      } catch (e) { st.textContent = '⚠ 注文の読み直しに失敗したので、いま持っている一覧で続けます: ' + (e && e.message); }
+        const imgDbRows = await sbGetAll('orders', 'select=cc,sn,items,shop_id&tab=lt.500&order=sn.asc');
+        imgByCc = {};
+        (imgDbRows || []).forEach(o => { if (o && o.cc && o.sn) (imgByCc[o.cc] = imgByCc[o.cc] || []).push({ cc: o.cc, sn: o.sn, items: o.items || [], shopId: o.shop_id || null }); });
+      } catch (e) { imgByCc = null; st.textContent = '⚠ 注文の読み直しに失敗したので、いま持っている一覧で続けます: ' + (e && e.message); }
       const data = {};
-      let orderCount = 0, imgNoPic = 0, imgSkipOrd = 0;
-      const imgAmbig = [];
+      let orderCount = 0, imgNoPic = 0, imgSkipOrd = 0, imgSub = 0;
+      const imgAmbig = [], imgOneLeft = [];
+      /* ★2026-10-24 レビュー#7：第二アカウントの注文は本店の表（{国}_p）に無い＝未マッチに入る。件数を出して「書けなかった」と区別する */
+      if (!state.accounts) await loadAccounts().catch(() => {});
+      const imgSubShops = new Set((state.accounts || []).filter(a => a && a.shop_id && /sub/i.test(String(a.status || ''))).map(a => String(a.shop_id)));
       REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
-        const oc = state.orders.perCountry.get(region.cc);
+        const oc = imgByCc ? { status: 'ok', rows: imgByCc[region.cc] || [] } : state.orders.perCountry.get(region.cc);
         // status==='error'(ライブ取得失敗=△DB)でもDBの行は保持されているので使う。loading中と空だけ除外
         if (!oc || oc.status === 'loading' || !oc.rows || !oc.rows.length) return;
         // 国ごとに注文日(注文番号先頭6桁)の新しい順で対象日を選ぶ（既存ボタンと同じ挙動）
@@ -52525,11 +52565,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const dupKeys = Object.keys(seen).filter(k => seen[k] > 1);
           if (dupKeys.length) imgAmbig.push(r.cc + ' ' + r.sn + '（同じ明細が' + dupKeys.map(k => seen[k] + '点').join('・') + '）');
           if (!use.length) { imgSkipOrd++; return; }
+          /* ★2026-10-24 レビュー#6：明細が2つ以上あるのに画像のある明細が1つだけ → 送らない（GAS が全部の行に同じ画像を書いてしまう）。件数と注文番号を出す */
+          if (items.length > 1 && use.length === 1) { imgOneLeft.push(r.cc + ' ' + r.sn); return; }
+          if (r.shopId && imgSubShops.has(String(r.shopId))) imgSub++;
           data[cc][r.sn] = use.map(it => ({ name: it.name, variation: it.variation, img: IMG_CDN + it.image }));
           orderCount++;
         });
       });
-      if (!orderCount) throw new Error('対象0件（選んだ日付に注文がありません）');
+      if (!orderCount) throw new Error(imgOneLeft.length ? ('対象0件（まとめ買いで画像のある明細が1つだけの注文 ' + imgOneLeft.length + '件は送っていません: ' + imgOneLeft.slice(0, 8).join(' ') + '）') : '対象0件（選んだ日付に注文がありません）');
       const planImg = activeSheetPlan();
       if (planImg.missingCur) throw new Error('今月（' + planImg.cur + '）のシートIDが未登録です。⚙️設定の「YYYY-MM: ID」に追加してください。\n※このまま実行すると先月のシートに書いてしまうので止めました。');
       const sidsImg = planImg.list.map(x => x.id);
@@ -52550,6 +52593,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // ★入らなかった理由を必ず出す。出さないと「たまに入らない」としか分からない（2026-09-10）。
       if (imgNoPic) st.textContent += `\n⚠ 画像を持っていない明細 ${imgNoPic}件は送っていません（壊れたURLを書かないため）`;
       if (imgSkipOrd) st.textContent += `\n⚠ 明細の画像が1枚も無い注文 ${imgSkipOrd}件は丸ごと送っていません`;
+      if (imgOneLeft.length) st.textContent += `\n⚠ まとめ買いで画像のある明細が1つだけの注文 ${imgOneLeft.length}件は送っていません（送ると画像の無い明細の行にも同じ画像が入るため・手で入れてください）\n　 ${imgOneLeft.slice(0, 8).join('\n　 ')}${imgOneLeft.length > 8 ? '\n　 …ほか' + (imgOneLeft.length - 8) + '件' : ''}`;
+      if (imgSub) st.textContent += `\nℹ 第二アカウントの注文 ${imgSub}件は本店の表（{国}_p）に無いので「未マッチ」に入っています（このボタンは本店の表だけに書きます）`;
       if (imgAmbig.length) st.textContent += `\n⚠ まとめ買いで同じ明細が複数ある注文 ${imgAmbig.length}件は、どの行に入れるか決められません（手で確認してください）\n　 ${imgAmbig.slice(0, 8).join('\n　 ')}${imgAmbig.length > 8 ? '\n　 …ほか' + (imgAmbig.length - 8) + '件' : ''}`;
     } catch (e) {
       st.textContent = `❌ ${e.message}`;
