@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0630';
+var SRC_VER = '20261025-0700';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8512,7 +8512,7 @@ function boshuAutoTick(manual) {
       if (BA_GAME_JAN_REQ && !BA_GAME_JAN_EXEMPT.test(String(hw)) && !baJanReal_(String(c.jan || ''))) {
         var _gj = baGameJanOf_(hw, c);
         if (_gj) c.jan = _gj;
-        else { if ((baPreOf_(pre, c.key, hw) || {}).img) baGameJanTodo_(hw, c); out.skipped++; out.nojan = (out.nojan || 0) + 1; baSkipRec_(st, hw, '', c, 'nojan'); continue; }
+        else { if ((baPreOf_(pre, c.key, hw) || {}).img) { baGameJanTodo_(hw, c); out.nojanPh = (out.nojanPh || 0) + 1; } out.skipped++; out.nojan = (out.nojan || 0) + 1; baSkipRec_(st, hw, '', c, 'nojan'); continue; }
       }
       var en = baEnName_(c, st, enCache, hw); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
       if (!en) { baMark_(ledger, c.key, ccsHw, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
@@ -8624,7 +8624,7 @@ function boshuAutoTick(manual) {
       Utilities.sleep(1200 + Math.floor(Math.random() * 1500));   // 叩きすぎない（ゆらぎ付き）
     }
     out.titles = picks.length;
-    try { var _gjt = baGameJanTodoFlush_(); if (out.nojan) baLog_(st, '🔢 JAN が無いので出さなかった ' + out.nojan + '作品（夜の JAN 調べに ' + _gjt + '件積んだ）'); } catch (eGJ) {}
+    try { var _gjt = baGameJanTodoFlush_(); if (out.nojan) baLog_(st, '🔢 JAN が無いので出さなかった ' + out.nojan + '作品（うち写真あり ' + (out.nojanPh || 0) + '＝夜の JAN 調べに ' + _gjt + '件積んだ・写真の無い作品は写真が集まってから積む）');   /* ★2026-10-25 05：md が「0件積んだ」の理由がログで分からなかった */ } catch (eGJ) {}
     /* ★v190 先回りの写真判定（本人 2026-09-18「まだこのあたり、実物じゃない画像を持ってきてますね」）：この先の候補の写真を、時間の余りで少しずつ判定して控えに入れておく。
        🔜の一覧には判定の結果が出るので、カタログ画像は出す前に一覧から消える。控えは本番と同じ鍵なので、出す時に二重に判定しない（費用は増えず前倒しになるだけ）。1回 最大8枚 */
     try { var pjR = baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, 20, t0, DEADLINE * 0.68); if (pjR.n) baLog_(st, '🔍 先回りの写真判定 ' + pjR.n + '枚（OK ' + pjR.ok + '・NG ' + pjR.ng + '）'); } catch (ePJ) {}
