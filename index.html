@@ -5262,6 +5262,7 @@
     "🗑 消した（Shopeeに無い）": "🗑 removed (not on Shopee)",
     "機種のカタログ群": "console catalog family",
     "🤖の控えの読みを軽く・明細のずれを止める": "Lighter reads for 🤖 caches; stop variation name/content mismatches",
+    "写真の控えを機種ごとの鍵にも保存するようにしました（二重書き）": "Photo cache is now also saved per console key (double write)",
     "ゲームの🤖も、JAN が無い作品は出さないように": "Game auto-listing (🤖) also skips titles without a JAN",
     "JAN が無い（夜の JAN 調べに回した・見つかれば次の回に出る）": "No JAN (sent to the nightly JAN lookup; listed on the next run once found)",
     "仕入れ目安が出ない（相場が取れない）": "No purchase-cost estimate (no market price found)",
@@ -23699,6 +23700,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-24', items: [
+      '🗂 <b>写真の控えを機種ごとの鍵にも保存するようにしました（二重書き）</b>：🤖の写真の控え（約1,740万字）を、巡回のたびに全部読んでいました。機種ごとの鍵（boshu_auto_pre_h_機種）に分けて、巡回はその機種の分だけ読む準備です。今は今までの8分割にも同じ物を書いていて、動きは変わりません。GAS が移す処理を1回走らせた後に、3日並べて動かして毎日ずれを点検し、問題が無ければ台ごとに切り替えます（05 情報システム部の判断）。',
       '✂️ <b>見積もりの文面から「(shipping included)／（送料込み）」を外しました</b>（本人「(shipping included). って必要かな？」）：お客さんが Shopee の会計で別に送料を払うことがあるかは確かめられていないので、言い切らないようにしました（値段の計算は変わりません）。',
       '💱 <b>入金時の為替手数料が 2% に戻っていたのを 0% に戻しました</b>（9/26 に決めた「為替のレートに Payoneer の 2% がもう入っているので 0%」）：このPCの設定が 2% に戻っていて、見積もり・価格計算の粗利が約2%低く出ていました。どの操作で戻ったかは分かりませんでしたが、戻りうる穴を2つふさぎました（直す処理が「全部の設定を移すリンク」より先に走っていた・直した時刻を付けておらず、もう1台と共有の設定に古い 2% が残っていた）。次に開いた時に 0% にし、もう1台にも配ります。',
       '💱 <b>見積もりの値段が古い為替で出ていたのを直しました</b>（本人「計算が合わない」＝BR 仕入 ¥3,250・300g・粗利 ¥3,500 で 350 BRL と出た）：見積もりの小さな窓は、その日の為替を読む前に計算して返しており、コードに書いてある既定のレート（BR 28円）で値段を出していました。今は為替を読み終えてから計算して返します（本物のレート 30.11円で 328 BRL・粗利 ¥3,508）。あわせて、チャットのカードに値段の内訳（円とレート・Shopee の掲載額・想定値引き・手数料・SLS 送料・入金時の為替・Shopee から入る額・PayPal の請求と手数料と手取り）と、仕入れ候補の付属品・状態の一言を渡すようにしました。',
@@ -34816,7 +34818,30 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     return y;
   }
   /* full＝読み直した直後の控え全体（変えた所を足したもの）。changed＝変えた鍵。まだ分割していなければ8つ全部を書く（移行） */
+  /* ★2026-10-25 写真の控えを機種ごとの鍵にも書く（二重書き・05 情報システム部の判断・設計書 05-07_写真の控えを機種ごとに分ける設計）。
+     目印 boshu_auto_pre_h_meta がある間だけ書く（GAS の移す処理が最初に作る）。機種＝鍵の @機種 → 無ければ hw の印 → 無ければ '_'（GAS の baPreHMigrate_ と同じ決まり）。
+     変わった鍵の今の機種と前の機種（削除・機種が変わった時に前の鍵から消す）の分だけ、full から作り直して書く。失敗しても8分割の保存は止めない（毎日の点検で見つける） */
+  const baPreHKey = (h) => 'boshu_auto_pre_h_' + (h && h !== '?' ? h : '_');
+  const baPreHOf = (k, e) => { const t = String(k), i = t.lastIndexOf('@'); if (i > 0) return t.slice(i + 1); return (e && e.hw) ? String(e.hw) : '_'; };
+  let _baPreHMeta = null;
+  async function baPreHSave(full, changed, prev) {
+    if (!_baPreHMeta || Date.now() - _baPreHMeta.at > 60000) { const r = await sbGetAll('app_kv', 'select=v&k=eq.boshu_auto_pre_h_meta'); _baPreHMeta = { at: Date.now(), v: (r && r[0] && r[0].v) || null }; }
+    if (!_baPreHMeta.v) return 0;
+    const want = new Set();
+    if (!(Array.isArray(changed) && changed.length)) Object.keys(full || {}).forEach(k => want.add(baPreHOf(k, full[k])));
+    else changed.forEach(k => { if (full && full[k]) want.add(baPreHOf(k, full[k])); if (prev && prev[k]) want.add(baPreHOf(k, prev[k])); });
+    let n = 0;
+    for (const h of want) {
+      const v = {}; Object.keys(full || {}).forEach(k => { if (baPreHOf(k, full[k]) === h) v[k] = baPreCompact(full[k]); });
+      let ok = false, err = null;
+      for (let t = 0; t < 2 && !ok; t++) { try { await sbUpsert('app_kv', [{ k: baPreHKey(h), v, updated_at: new Date().toISOString() }]); ok = true; } catch (e) { err = e; await new Promise(rs => setTimeout(rs, 3000)); } }
+      if (!ok) throw err;
+      n++;
+    }
+    return n;
+  }
   async function baPreSave(full, changed) {
+    const _prevPre = (_baPreMemo && _baPreMemo.v) || null;   /* 保存の直前に読み直した控え（変える前）＝前の機種の鍵から消す時に使う */
     const sh = {}; baPreShardKeys().forEach(k => { sh[k] = {}; });
     Object.keys(full || {}).forEach(k => { sh[baPreShardOf(k)][k] = baPreCompact(full[k]); });
     let targets = baPreShardKeys();
@@ -34827,6 +34852,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (!ok) throw err;
     }
     if (targets.length === BA_PRE_SHARDS) _baPreSharded = true;
+    try { await baPreHSave(full, changed, _prevPre); } catch (eH) { console.warn('写真の控え（機種ごとの鍵）の二重書きに失敗', eH); }
     _baPreMemo = { at: Date.now(), v: Object.assign({}, full || {}) };
   }
   async function baKvGet(k) {

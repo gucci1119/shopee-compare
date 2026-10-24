@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0400';
+var SRC_VER = '20261025-0500';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -712,14 +712,14 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
-    if (p.action === 'limited_fix' || p.action === 'limited_audit' || p.action === 'tcg_tick' || p.action === 'tcg_cron_install' || p.action === 'tcg_preview' || p.action === 'game_judge_cands' || p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
+    if (p.action === 'pre_h_migrate' || p.action === 'pre_h_check' || p.action === 'limited_fix' || p.action === 'limited_audit' || p.action === 'tcg_tick' || p.action === 'tcg_cron_install' || p.action === 'tcg_preview' || p.action === 'game_judge_cands' || p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
       var bacb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var baout;
       try {
         var bawt = P_().getProperty('WRITE_TOKEN');
         if (!bawt || p.token !== bawt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         /* ★2026-09-25 ポータルから叩く巡回（時間トリガーの1日の実行時間枠＝gmail 90分・Workspace 6時間 を使わない）。manual ではないのでブレーキ・上限・担当の判定は時間トリガーと同じ */
-        baout = p.action === 'limited_fix' ? baLimitedFix_(p) : p.action === 'limited_audit' ? baLimitedAudit_(p) : p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'game_judge_cands' ? gameJudgeCands_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
+        baout = p.action === 'pre_h_migrate' ? baPreHMigrate_(p) : p.action === 'pre_h_check' ? baPreHCheck_(p) : p.action === 'limited_fix' ? baLimitedFix_(p) : p.action === 'limited_audit' ? baLimitedAudit_(p) : p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'game_judge_cands' ? gameJudgeCands_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -7261,6 +7261,90 @@ function baPreMerge_(byKey) {
   var out = {}; sk.forEach(function (k) { var v = byKey[k] || {}; Object.keys(v).forEach(function (x) { out[x] = v[x]; }); });
   return out;
 }
+/* ★2026-10-25 写真の控えを機種ごとの鍵に（05 の判断・設計書 05-07_写真の控えを機種ごとに分ける設計）。
+   鍵：boshu_auto_pre_h_<機種>＋boshu_auto_pre_h__（機種が決まらない物）＋目印 boshu_auto_pre_h_meta（小さい）。
+   目印が { v:1, done:true, on:true, runners:[台] } でこの台が入っている時だけ機種の鍵を読む。それ以外は今の8分割（boshu_auto_pre_s0〜s7）＝戻す時は目印の on を false にするだけ。
+   読む時：最初は '_' だけ。機種の処理に入る時に baPreHEnsure_(機種) でその機種（＋同じ扱いの機種・switch2 なら switch）を読み足す。
+   読み足しは同じ入れ物（BA_PRE_H_OBJ）に重ねる＝先に baKv_('boshu_auto_pre') で受け取った呼び手にもそのまま見える。同じ鍵が2つにあれば at の新しい方 */
+var BA_PRE_H_META = 'boshu_auto_pre_h_meta';
+var BA_PRE_H_MAX = 3000000;   /* 05：1本が300万字を超える機種が出たら書かずに止める */
+var BA_PRE_H_MODE = null, BA_PRE_H_META_V = null, BA_PRE_H_LOADED = {}, BA_PRE_H_OBJ = null;
+function baPreHKey_(h) { h = String(h || ''); return 'boshu_auto_pre_h_' + (h && h !== '?' ? h : '_'); }
+function baPreHwMode_() {
+  if (BA_PRE_H_MODE !== null) return BA_PRE_H_MODE;
+  BA_PRE_H_MODE = false;
+  try {
+    var r = sbSelect_('app_kv', 'select=v&k=eq.' + BA_PRE_H_META); var m = (r && r[0] && r[0].v) || null; BA_PRE_H_META_V = m;
+    if (m && m.v === 1 && m.done === true && m.on === true) { var rs = m.runners, me = baRunnerId_(); BA_PRE_H_MODE = rs === 'all' || (Array.isArray(rs) && rs.indexOf(me) >= 0); }
+  } catch (e) { BA_PRE_H_MODE = false; }   /* 目印が読めない＝今の8分割（安全側） */
+  return BA_PRE_H_MODE;
+}
+function baPreHExpand_(hws) {
+  var all = (BA_PRE_H_META_V && BA_PRE_H_META_V.hws) || [], out = { '_': 1 };
+  (hws || []).forEach(function (h) { h = String(h || ''); if (!h) return; if (h === 'all') { all.forEach(function (x) { out[x] = 1; }); return; } out[h] = 1; if (h === 'switch2') out['switch'] = 1; all.forEach(function (x) { if (baHwSame_(x, h)) out[x] = 1; }); });
+  return Object.keys(out);
+}
+function baPreHLoad_(hws) {
+  if (!BA_PRE_H_OBJ) BA_PRE_H_OBJ = {};
+  var want = baPreHExpand_(hws).filter(function (h) { return !BA_PRE_H_LOADED[h]; }); if (!want.length) return BA_PRE_H_OBJ;
+  try {
+    SB_LAST_LEN = 0; var rows = sbSelect_('app_kv', 'select=k,v&k=in.(' + want.map(function (h) { return encodeURIComponent(baPreHKey_(h)); }).join(',') + ')');
+    BA_KV_SZ['boshu_auto_pre(機種)'] = (BA_KV_SZ['boshu_auto_pre(機種)'] || 0) + SB_LAST_LEN;
+    var pre = BA_PRE_H_OBJ;
+    (rows || []).forEach(function (x) { var v = x.v || {}; Object.keys(v).forEach(function (k) { var e = v[k], cur = pre[k]; if (!cur || !(cur.at && e && e.at && Date.parse(cur.at) > Date.parse(e.at))) pre[k] = e; }); });
+    want.forEach(function (h) { BA_PRE_H_LOADED[h] = 1; });   /* 鍵が無い機種（写真がまだ0件）も読んだことにする */
+    delete BA_KV_FAIL['boshu_auto_pre'];
+  } catch (e) { BA_KV_ERR = true; BA_KV_FAIL['boshu_auto_pre'] = 1; }
+  return BA_PRE_H_OBJ;
+}
+function baPreHObj_() { if (!BA_PRE_H_LOADED['_']) baPreHLoad_([]); return BA_PRE_H_OBJ || {}; }
+function baPreHEnsure_(hws) { if (!baPreHwMode_()) return; baPreHLoad_(Array.isArray(hws) ? hws : [hws]); if (BA_KV_CACHE) BA_KV_CACHE['boshu_auto_pre'] = BA_PRE_H_OBJ; }
+/* 移す（1回だけ・WRITE_TOKEN）：8分割を読み、鍵ごとに機種を決めて23本前後に分けて書く。p.dry=1 は数えるだけ（書かない）。
+   ①機種＝鍵の @機種 → 無ければ baPreHw_（hw の印か出品名の多数決）→ 決まらなければ '_'
+   ②@ の無い鍵で機種が決まった物は、8分割の側にも hw の印を足して書き戻す（ポータルの二重書きが同じ機種の鍵へ書けるように。足すだけで GAS の判定は変わらない＝baPreHw_ は hw があればそれを返す）
+   ③1本でも300万字を超えたら、何も書かずに止める（05 の条件）
+   ④書いた後に機種の鍵を全部読み直し、件数と文字数が8分割と同じか確かめてから目印を書く（目印の on は false のまま＝切り替えは別の手順） */
+function baPreHMigrate_(p) {
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return { ok: false, error: 'いま走っています' };
+  try {
+    var dry = String((p && p.dry) || '') === '1';
+    var sk = baPreShardKeys_();
+    var rows = sbSelect_('app_kv', 'select=k,v&k=in.(' + sk.join(',') + ')'); var byK = {}; (rows || []).forEach(function (x) { byK[x.k] = x.v; });
+    if (sk.some(function (k) { return !byK[k] || typeof byK[k] !== 'object'; })) return { ok: false, error: '8分割がそろっていないので書きません' };
+    var buckets = {}, n = 0, dup = 0, seen = {}, stamped = {};
+    sk.forEach(function (s0) { var v = byK[s0]; Object.keys(v).forEach(function (k) { var e = v[k]; if (seen[k]) dup++; seen[k] = 1; var at = k.lastIndexOf('@'); var h = at > 0 ? k.slice(at + 1) : (baPreHw_(e, k) || '_');
+      if (at <= 0 && h !== '_' && e && typeof e === 'object' && !e.hw) { e.hw = h; stamped[s0] = (stamped[s0] || 0) + 1; }
+      (buckets[h] = buckets[h] || {})[k] = e; n++; }); });
+    var sizes = {}, chars = 0, over = [];
+    Object.keys(buckets).forEach(function (h) { var c = JSON.stringify(buckets[h]).length; sizes[h] = c; chars += c; if (c > BA_PRE_H_MAX) over.push(h + ':' + c); });
+    var res = { ok: true, dry: dry, n: n, dupKeys: dup, hws: Object.keys(buckets).sort(), sizes: sizes, chars: chars, stamped: stamped };
+    if (over.length) { res.ok = false; res.error = '300万字を超える機種があるので書きません：' + over.join(', '); return res; }
+    if (dry) return res;
+    Object.keys(stamped).forEach(function (s0) { sbUpsert_('app_kv', [{ k: s0, v: byK[s0], updated_at: new Date().toISOString() }], 'k'); Utilities.sleep(3000); });
+    Object.keys(buckets).forEach(function (h) { sbUpsert_('app_kv', [{ k: baPreHKey_(h), v: buckets[h], updated_at: new Date().toISOString() }], 'k'); Utilities.sleep(3000); });
+    var keys = Object.keys(buckets).map(baPreHKey_); var back = sbSelect_('app_kv', 'select=k,v&k=in.(' + keys.map(encodeURIComponent).join(',') + ')');
+    var n2 = 0, c2 = 0; (back || []).forEach(function (x) { n2 += Object.keys(x.v || {}).length; c2 += JSON.stringify(x.v || {}).length; });
+    res.readBack = { n: n2, chars: c2, keys: (back || []).length };
+    if (n2 !== n || c2 !== chars || (back || []).length !== keys.length) { res.ok = false; res.error = '書いた後の読み直しが合いません（目印は書きません）'; return res; }
+    var meta = { v: 1, done: true, on: false, runners: [], hws: Object.keys(buckets).filter(function (h) { return h !== '_'; }).sort(), n: n, chars: chars, sizes: sizes, at: new Date().toISOString(), from: 's0-s7', src: SRC_VER };
+    sbUpsert_('app_kv', [{ k: BA_PRE_H_META, v: meta, updated_at: new Date().toISOString() }], 'k');
+    res.meta = meta; return res;
+  } finally { try { lock.releaseLock(); } catch (eL) {} }
+}
+/* 毎日の点検（WRITE_TOKEN）：8分割と機種の鍵の中身を比べる。読むのは両方の全部（約3,500万字・1日1回）。結果は app_kv boshu_auto_pre_h_check（小さい） */
+function baPreHCheck_(p) {
+  var meta = (sbSelect_('app_kv', 'select=v&k=eq.' + BA_PRE_H_META)[0] || {}).v; if (!meta || !meta.done) return { ok: false, error: '目印が無い（まだ移していない）' };
+  var a = {}, b = {}, where = {};
+  (sbSelect_('app_kv', 'select=k,v&k=in.(' + baPreShardKeys_().join(',') + ')') || []).forEach(function (x) { Object.keys(x.v || {}).forEach(function (k) { a[k] = x.v[k]; }); });
+  var hk = (meta.hws || []).concat(['_']).map(baPreHKey_);
+  (sbSelect_('app_kv', 'select=k,v&k=in.(' + hk.map(encodeURIComponent).join(',') + ')') || []).forEach(function (x) { Object.keys(x.v || {}).forEach(function (k) { if (b[k]) where[k] = (where[k] || 1) + 1; b[k] = x.v[k]; }); });
+  var onlyOld = [], onlyNew = [], diff = [];
+  Object.keys(a).forEach(function (k) { if (!b[k]) onlyOld.push(k); else if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) diff.push(k); });
+  Object.keys(b).forEach(function (k) { if (!a[k]) onlyNew.push(k); });
+  var out = { ok: true, at: new Date().toISOString(), nOld: Object.keys(a).length, nNew: Object.keys(b).length, onlyOld: onlyOld.length, onlyNew: onlyNew.length, diff: diff.length, twice: Object.keys(where).length, sample: { onlyOld: onlyOld.slice(0, 5), onlyNew: onlyNew.slice(0, 5), diff: diff.slice(0, 5) } };
+  try { sbUpsert_('app_kv', [{ k: 'boshu_auto_pre_h_check', v: out, updated_at: out.at }], 'k'); } catch (eW) { out.saveErr = String(eW).slice(0, 120); }
+  return out;
+}
 function baKvPrefetch_(keys) {
   try {
     BA_KV_AT = Date.now();
@@ -7270,6 +7354,7 @@ function baKvPrefetch_(keys) {
     var _skipU = 0; if (_bigPf) { try { _skipU = Number(P_().getProperty('BA_PF_SKIP_UNTIL') || 0); } catch (eSk) {} }
     if (_skipU > Date.now()) throw new Error('一括読みは休み中（前回の失敗から3時間・' + new Date(_skipU).toISOString().slice(11, 16) + 'Z まで）');
     var q = keys.slice(); var wantPre = q.indexOf('boshu_auto_pre') >= 0;
+    var _hPre = wantPre && baPreHwMode_(); if (_hPre) { q = q.filter(function (k) { return k !== 'boshu_auto_pre'; }); wantPre = false; }   /* ★2026-10-25 機種の鍵の台は8分割を読まない */
     /* ★2026-10-24 写真の控えは 9/26 から8分割（boshu_auto_pre_s0〜s7）。古い1本 boshu_auto_pre は 9/25 から更新されていないのに毎回一緒に読んでいた（一括読み 約4,580万字の一部）。
        分割を先に読み、8つそろっていなければ古い1本を後から読む（移行途中でも壊れない） */
     if (wantPre) q = q.filter(function (k) { return k !== 'boshu_auto_pre'; }).concat(baPreShardKeys_());
@@ -7278,6 +7363,7 @@ function baKvPrefetch_(keys) {
     BA_KV_CACHE = {}; keys.forEach(function (k) { BA_KV_CACHE[k] = null; });
     var byKey = {}; (r || []).forEach(function (x) { byKey[x.k] = x.v; if (keys.indexOf(x.k) >= 0) BA_KV_CACHE[x.k] = x.v; });
     if (wantPre) BA_KV_CACHE['boshu_auto_pre'] = baPreMerge_(byKey);
+    if (_hPre) BA_KV_CACHE['boshu_auto_pre'] = baPreHObj_();
     BA_KV_ERR = false; BA_KV_PREFETCH_ERR = '';
   } catch (e) {
     /* ★2026-10-20 14:2x 🤖が 13:0x から毎回「cfg_unreadable」で降りていた（一括読み＝大きな控え15本＋写真の控えの分割を1回で読むのが失敗）。
@@ -7292,6 +7378,7 @@ var BA_KV_PREFETCH_ERR = '';
 var BA_KV_AT = 0;   /* ★2026-10-24 全体レビュー（出品管理 #6）：先読みを始めた時刻（0＝分からない）。書く前に「この後に誰かが書いたか」を比べる */
 function baKv_(k) {
   if (BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k)) return BA_KV_CACHE[k];
+  if (k === 'boshu_auto_pre' && baPreHwMode_()) { var _ho = baPreHObj_(); if (BA_KV_CACHE) BA_KV_CACHE[k] = _ho; return BA_KV_FAIL[k] ? null : _ho; }   /* ★2026-10-25 機種の鍵の台 */
   if (k === 'boshu_auto_pre') {
     try { SB_LAST_LEN = 0; var rp = sbSelect_('app_kv', 'select=k,v&k=in.(' + baPreShardKeys_().join(',') + ')'); BA_KV_SZ[k] = SB_LAST_LEN;   /* ★2026-10-24 分割だけ。そろっていない時だけ古い1本を読む */
       { var _hv2 = {}; (rp || []).forEach(function (x) { _hv2[x.k] = 1; }); if (baPreShardKeys_().some(function (kk) { return !_hv2[kk]; })) { SB_LAST_LEN = 0; rp = (rp || []).concat(sbSelect_('app_kv', 'select=k,v&k=eq.boshu_auto_pre') || []); BA_KV_SZ['boshu_auto_pre(古い1本)'] = SB_LAST_LEN; } }
@@ -8688,6 +8775,7 @@ function boshuAutoPrejudge_(hw, maxN) {
     var ctx = baLoadCtx_(cfg, hw, ccs); var st = baKv_(BA_ST) || {}; st.log = st.log || [];
     var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'); if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0 };
     var dailyMax = Number(cfg.dailyMax) || 100; st.aiTextCap = dailyMax * 4;
+    baPreHEnsure_(hw);
     var judged = baKv_(BA_JUDGED) || {}, sameCache = baKv_(BA_SAME) || {}, pre = baKv_('boshu_auto_pre') || {};
     var r = baPrejudgePass_(ctx.cand, pre, judged, sameCache, st, hw, BA_HW_WORD[hw] || hw.toUpperCase(), Number(cfg.maxCostJpy) || 15000, dailyMax * 6, Math.max(1, Math.min(80, Number(maxN) || 40)), t0, 235000);
     { var _frP = baKvFreshMany_([BA_JUDGED, BA_SAME]); baKvSetMerged_(BA_JUDGED, judged, _frP, BA_JUDGED_CAP); baKvSetMerged_(BA_SAME, sameCache, _frP, 12000); }   /* ★2026-09-28 丸ごと上書き→混ぜて書く（ほかの台の判定を消さない） */
@@ -8967,6 +9055,7 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
     BA_CTX_SOLD = soldVar;   /* 読めた時だけ控える（読めなかった時は次の機種でもう一度試す） */
   } catch (e) {}
   if (_tcg) return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: [], pre: {}, modelNames: modelNames, buried: _buriedItems };
+  if (!_tcg) baPreHEnsure_(hw);   /* ★2026-10-25 機種の鍵の台は、この機種の分を読み足す（8分割の台は何もしない） */
   var pre0 = baKv_('boshu_auto_pre') || {};
   var cand = baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, pre0, cfg.autoFamily !== false, _buriedItems, baKv_(BA_EN) || {});
   return { fam: fam, famRows: famRows, listedByCc: listedByCc, allRows: allRows, ledger: ledger, cand: cand, pre: pre0, modelNames: modelNames, buried: _buriedItems };
@@ -8991,6 +9080,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   var n = Math.max(1, Math.min(noYahoo ? 60 : 20, Number(limit) || 20));   // ★v182 noYahoo（写真集めの候補出し）は60件まで
   // ★写真・仕入れ目安・出品予定額まで出す（本人「画像や仕入れ額もいるだろ」「出品予定額はミスがないかチェックしたい」）＝実行時と同じ手順でヤフオクを引く（1件≈2秒）
   var used = baKv_(BA_IMGS) || {}, hwWord = BA_HW_WORD[hw] || hw.toUpperCase();
+  baPreHEnsure_(hw);
   var pre = baKv_('boshu_auto_pre') || {};
   var minHits = Math.max(1, Number(cfg.minHits) || 3), maxCost = Number(cfg.maxCostJpy) || 15000;
   var blocked = false, rows = [], held = [];
@@ -10212,6 +10302,7 @@ function baJanIdxAdd_(q) {
    1台6時間に1回、状態の preHw に { 機種: [件数, 文字数] } を置く（機種の分からない物は '?'）。分け方を変えるかはこの数字を見てから決める */
 function baPreHwCount_(st, pre) {
   try {
+    if (BA_PRE_H_MODE === true) return;   /* 機種の鍵の台は一部だけ読んでいる＝数えない */
     var last = Number(P_().getProperty('BA_PREHW_AT') || 0); if (Date.now() - last < 6 * 3600 * 1000) return;
     if (!pre || typeof pre !== 'object' || !Object.keys(pre).length) return;   /* 読めた写しだけを数える（ここで読みには行かない） */
     var by = {}, tot = 0, n = 0;
@@ -11048,6 +11139,7 @@ function baLimitedFix_(p) {
   var max = Math.max(1, Math.min(40, Number((p && p.max) || 10)));
   try { var cfgF = baKv_(BA_CFG) || {}; var aymF = baAiYenMonth_(); var capF = baAiMonthCap_(cfgF); if (capF > 0 && aymF.yen >= capF) return { ok: false, error: '💴 今月のAI料金が上限 ¥' + capF + '（実績 ¥' + aymF.actual + '＋今日 ¥' + aymF.est + '）＝本人の許可が要る', note: 'AIが使えない（month_cap）' }; } catch (eMF) {}
   var res = baKv_('limited_audit') || {}; res.items = res.items || {};
+  baPreHEnsure_('all');
   var pre = baKv_('boshu_auto_pre') || {}; var used = baKv_(BA_IMGS) || {}; var judged = {}; var sameCache = {};
   var st = { log: [], today: { d: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), judged: 0 } };
   var out = { ok: true, tried: 0, replaced: [], nophoto: [], err: [] }; var t0 = Date.now(); var ledgers = {};
