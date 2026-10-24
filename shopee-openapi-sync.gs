@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261024-1900';
+var SRC_VER = '20261024-2200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6399,8 +6399,10 @@ function sbSelect_(table, query) {
   ufBump_(1, 'Supabase読み(' + table + ')');
   var res; try { res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } }); } catch (e) { ufNoteErr_(e); throw e; }
   if (res.getResponseCode() >= 300) throw new Error('Supabase select ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
-  return JSON.parse(res.getContentText());
+  var _txt = res.getContentText(); SB_LAST_LEN = _txt.length;   /* ★2026-10-24 返事の長さ（文字数）を控える＝どの鍵が太ったかを、読む量を増やさずに数える（BA_KV_SZ） */
+  return JSON.parse(_txt);
 }
+var SB_LAST_LEN = 0, BA_KV_SZ = {};
 // 1000件ずつ全部取る（PostgRESTの既定上限が1000のため、辞書づくりのように全件要るとき用）
 // ★バージョン200（2026-09-20）：sbSelect_ に limit=5000〜50000 と書いていた7か所を全部こちらへ。sbSelect_ は1000行で黙って切れる。
 //   実害：入金の同期で BR の入金 1,076行が1000で切れているのに「全部読めた」(prevFull) と判定→ 残り76行を新規扱いして amount_initial（暫定の入金額）を今の額で上書きしていた。
@@ -7204,7 +7206,7 @@ function baKvPrefetch_(keys) {
   try {
     BA_KV_AT = Date.now();
     var q = keys.slice(); var wantPre = q.indexOf('boshu_auto_pre') >= 0; if (wantPre) q = q.concat(baPreShardKeys_());
-    var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + q.map(encodeURIComponent).join(',') + ')');
+    SB_LAST_LEN = 0; var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + q.map(encodeURIComponent).join(',') + ')'); BA_KV_SZ.__batch = SB_LAST_LEN; BA_KV_SZ.__batchN = q.length;
     BA_KV_CACHE = {}; keys.forEach(function (k) { BA_KV_CACHE[k] = null; });
     var byKey = {}; (r || []).forEach(function (x) { byKey[x.k] = x.v; if (keys.indexOf(x.k) >= 0) BA_KV_CACHE[x.k] = x.v; });
     if (wantPre) BA_KV_CACHE['boshu_auto_pre'] = baPreMerge_(byKey);
@@ -7212,7 +7214,7 @@ function baKvPrefetch_(keys) {
   } catch (e) {
     /* ★2026-10-20 14:2x 🤖が 13:0x から毎回「cfg_unreadable」で降りていた（一括読み＝大きな控え15本＋写真の控えの分割を1回で読むのが失敗）。
        一括が失敗しても設定が1本で読めるなら、控えを1本ずつ読む形（BA_KV_CACHE={}＝読んだ物は控える）に切り替えて続ける。理由は BA_KV_PREFETCH_ERR に残す */
-    BA_KV_PREFETCH_ERR = String((e && e.message) || e).slice(0, 300); BA_KV_AT = 0;
+    BA_KV_PREFETCH_ERR = String((e && e.message) || e).slice(0, 300); BA_KV_AT = 0; BA_KV_SZ.__batchFail = SB_LAST_LEN; BA_KV_SZ.__batchN = keys.length;
     BA_KV_CACHE = null; BA_KV_ERR = true;
     try { var _rc = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(BA_CFG)); BA_KV_CACHE = {}; BA_KV_CACHE[BA_CFG] = (_rc && _rc[0] && _rc[0].v) || null; BA_KV_ERR = false; } catch (e2) {}
   }
@@ -7222,9 +7224,9 @@ var BA_KV_AT = 0;   /* ★2026-10-24 全体レビュー（出品管理 #6）：�
 function baKv_(k) {
   if (BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k)) return BA_KV_CACHE[k];
   if (k === 'boshu_auto_pre') {
-    try { var rp = sbSelect_('app_kv', 'select=k,v&k=in.(' + ['boshu_auto_pre'].concat(baPreShardKeys_()).join(',') + ')'); var bk = {}; (rp || []).forEach(function (x) { bk[x.k] = x.v; }); var vp = baPreMerge_(bk); if (BA_KV_CACHE) BA_KV_CACHE[k] = vp; delete BA_KV_FAIL[k]; return vp; } catch (eP) { BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
+    try { SB_LAST_LEN = 0; var rp = sbSelect_('app_kv', 'select=k,v&k=in.(' + ['boshu_auto_pre'].concat(baPreShardKeys_()).join(',') + ')'); BA_KV_SZ[k] = SB_LAST_LEN; var bk = {}; (rp || []).forEach(function (x) { bk[x.k] = x.v; }); var vp = baPreMerge_(bk); if (BA_KV_CACHE) BA_KV_CACHE[k] = vp; delete BA_KV_FAIL[k]; return vp; } catch (eP) { BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
   }
-  try { var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; delete BA_KV_FAIL[k]; return v; } catch (e) { BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
+  try { SB_LAST_LEN = 0; var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); BA_KV_SZ[k] = SB_LAST_LEN; var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; delete BA_KV_FAIL[k]; return v; } catch (e) { BA_KV_SZ[k] = -SB_LAST_LEN; BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
 }
 /* ★2026-10-20 全体レビュー 高-A：読めなかった鍵（522・時間切れ）は、この実行では書かない。読めない時に `|| {}` で始めた中身（その回の数件だけ）で、
    台帳 boshu_auto_done_<hw>・状態・仕入れ目安の控えなどを丸ごと上書きして、手で付けた見送り印や出品済みの印を消す筋道があった（10/19 高-新2 と同じ型）。
@@ -8497,6 +8499,7 @@ function boshuAutoTick(manual) {
   }
   function finish_(msg) {
     st.src = SRC_VER;   /* ★2026-09-25 どの版で動いたか（ポータルで3台の版ズレを見る） */
+    try { st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eKs) {}   /* ★2026-10-24 鍵ごとの返事の長さ（文字数・負＝読めなかった）。Mac から大物を読まずに数えるため */
     try { if (st.added.length > 400) st.added.length = 400; if (st.skipped.length > 300) st.skipped.length = 300; } catch (e0) {}
     /* ★2026-09-21 どちらのGoogleアカウントで動いたか・その枠をいくつ使ったかを一緒に残す。
      子機は別アカウント＝別の2万回なので、ポータルで**本体とは別の数字**として見せる必要がある。
@@ -10576,8 +10579,11 @@ function tcgTick(manual) {
   var SK = (RUN && rid0 !== String(tc0.runner || '')) ? 'tcg_auto_status_' + rid0 : 'tcg_auto_status';
   baKvPrefetch_([BA_CFG, SK, 'tcg_judged', 'photo_learn', BA_IMGS, 'boshu_auto_judged_manual', 'tcg_pre', 'tcg_names_ai', 'tcg_sets', 'tcg_crop', 'limited_audit', 'boshu_shop_full', 'shop_item_limit', 'boshu_fam_made']);   /* ★2026-10-15 小さい鍵も1回でまとめ読み（4台目が1回に app_kv を約80回読んでいた＝接続枠） */
   var st = baKv_(SK) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || []; st.runner = rid0;
+  /* ★2026-10-24 sgJanFromPage_ の st._sgJan（控えの写し）・st._sgJanN（その実行で駿河屋を読んだ回数）が状態に保存され、次の実行に持ち越していた。
+     実測：tcg_auto_status_child3 に _sgJan={}・_sgJanN=20 ＝次の実行も「上限20に達した」で駿河屋を一度も読まず、空の {} のせいで jan_sg_cache も読み直さない（グッズの JAN が埋まらない）。その実行の中だけで使う */
+  try { delete st._sgJan; delete st._sgJanN; } catch (eSj) {}
   var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {}, runner: rid0 };
-  var finish_ = function (msg) { try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
+  var finish_ = function (msg) { try { delete st._sgJan; delete st._sgJanN; st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eSj2) {} try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
   try {
     var cfg = baKv_(BA_CFG) || {};
     if (BA_KV_ERR) { ufPersist_(); try { lock.releaseLock(); } catch (e0) {} return { ok: false, skipped: 'cfg_unreadable' }; }
