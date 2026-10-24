@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0200';
+var SRC_VER = '20261025-0230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8197,7 +8197,6 @@ function boshuAutoTick(manual) {
   }
   baKvPrefetch_([BA_CFG, BA_ST, 'boshu_auto_pre', 'boshu_auto_prerej', BA_JUDGED, BA_SAME, BA_EN, BA_IMGS, 'boshu_auto_rephoto', 'boshu_auto_judged_manual', 'photo_learn', 'sku_plan_state', BA_JAN_IDX, 'listlog_auto', BA_LOOSE]);   /* B8_OK 2026-10-25：product_ids（約1,229万字）を外して小さい索引 jan_by_item に替えた＝減らす変更 */
   var st = baKv_(BA_ST) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || [];
-  baPreHwCount_(st);
   var out = { ok: true, src: SRC_VER, hw: '', titles: 0, added: 0, skipped: 0, ccs: {} };
   if (BA_KV_PREFETCH_ERR) { try { baLog_(st, '⚠ 控えの一括読みに失敗→1本ずつ読んで続けます：' + BA_KV_PREFETCH_ERR.slice(0, 120)); } catch (ePf) {} }
   try {
@@ -8307,6 +8306,7 @@ function boshuAutoTick(manual) {
     /* ★2026-09-23 優先の機種は【写真の揃った候補がある時だけ】先に回す。実測（2台目 19:49）：Switch を優先で選んだが写真待ちで picks が0件＝その回は何も出ずに終わり、
        2台目の他の10機種の番も1回飛んだ。写真が無い時は普段の順ぐりに落とす（読む控えは後で同じ物を使う＝接続枠は増えない） */
     var _preP = baKv_('boshu_auto_pre') || {}, _rejP = baKv_('boshu_auto_prerej') || {};
+    baPreHwCount_(st, _preP);   /* ★2026-10-25 写真の控えを読んだ後で数える（一括読みが休み中の回は、巡回の頭ではまだ読まれていない） */
     var _readyP = function (c) { var p0 = baPreOf_(_preP, c.key, hw || _h); if (!p0 || !p0.img || /判定できず/.test(String(p0.judge || ''))) return false; var rj = _rejP[c.key]; return !(rj && String(p0.img).replace(/\?.*$/, '') === String(rj.img || '')); };
     if (st.pTick % 2 === 1) {
       var _pc = Number(st.pCursor) || 0;
@@ -10204,10 +10204,10 @@ function baJanIdxAdd_(q) {
 }
 /* ★2026-10-25 写真の控え（約1,816万字・8分割）を機種ごとに分けたら減るかを、推測でなく数える（読む量は増やさない・読んだ写しを数えるだけ）。
    1台6時間に1回、状態の preHw に { 機種: [件数, 文字数] } を置く（機種の分からない物は '?'）。分け方を変えるかはこの数字を見てから決める */
-function baPreHwCount_(st) {
+function baPreHwCount_(st, pre) {
   try {
     var last = Number(P_().getProperty('BA_PREHW_AT') || 0); if (Date.now() - last < 6 * 3600 * 1000) return;
-    var pre = BA_KV_CACHE && BA_KV_CACHE['boshu_auto_pre']; if (!pre || typeof pre !== 'object') return;   /* 先読みに入っていない時は読みに行かない */
+    if (!pre || typeof pre !== 'object' || !Object.keys(pre).length) return;   /* 読めた写しだけを数える（ここで読みには行かない） */
     var by = {}, tot = 0, n = 0;
     Object.keys(pre).forEach(function (k) {
       var e = pre[k]; var at = k.lastIndexOf('@'); var h = at > 0 ? k.slice(at + 1) : (baPreHw_(e, k) || '?');
