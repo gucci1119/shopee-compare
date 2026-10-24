@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261024-0330';
+var SRC_VER = '20261024-1200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1493,6 +1493,25 @@ function doGetInner_(e) {
       catch (err) { oaout = { ok: false, error: String((err && err.message) || err) }; }
       ufPersist_();
       return ContentService.createTextOutput(oacb + '(' + JSON.stringify(oaout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'buyer_orders') {   /* 📦 2026-10-24 本人「ワッツアップでもその人の購入履歴とかを見れたらいいな」：Shopee のユーザー名（＋国）でその人の注文を返す（読むだけ・新しい順50件）。鍵は営業窓口の OUTREACH_TOKEN */
+      var bocb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var boout;
+      try {
+        if (!outreachAuth_(p.token)) throw new Error('token');
+        var bu = String(p.buyer || '').trim().toLowerCase(); if (!/^[a-z0-9._-]{3,40}$/.test(bu)) throw new Error('buyer は Shopee のユーザー名（英数字 . _ -）');
+        var bcc = String(p.cc || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2);
+        var boq = 'select=cc,sn,buyer,order_ts,order_date,total,tab,status,items,tracking,shop_id&buyer=ilike.' + encodeURIComponent(bu) + (bcc ? '&cc=eq.' + bcc : '') + '&order=order_date.desc&limit=50';
+        var borows = (sbSelect_('orders', boq) || []).filter(function (o) { return String(o.buyer || '').toLowerCase() === bu; });
+        var issues = {};
+        if (borows.length) { try { (sbSelect_('order_issues', 'select=cc,sn,stage&sn=in.(' + borows.map(function (o) { return encodeURIComponent(o.sn); }).join(',') + ')') || []).forEach(function (x) { issues[x.cc + ':' + x.sn] = x.stage; }); } catch (eI) {} }
+        var IMGD = { PH: 'cf.shopee.ph', SG: 'cf.shopee.sg', MY: 'cf.shopee.com.my', BR: 'cf.shopee.com.br', VN: 'cf.shopee.vn', TH: 'cf.shopee.co.th', TW: 'cf.shopee.tw' };
+        boout = { ok: true, buyer: bu, cc: bcc, orders: borows.map(function (o) {
+          return { cc: o.cc, sn: o.sn, date: o.order_date || String(o.order_ts || '').slice(0, 10), total: o.total, tab: o.tab, status: o.status || '', issue: issues[o.cc + ':' + o.sn] || '', tracking: o.tracking || '', shop_id: String(o.shop_id || ''),
+            items: (o.items || []).slice(0, 10).map(function (it) { var im = String(it.image || ''); return { name: String(it.name || '').slice(0, 120), variation: String(it.variation || '').slice(0, 80), qty: it.qty || 1, img: im ? (/^https?:/.test(im) ? im : 'https://' + (IMGD[o.cc] || 'cf.shopee.sg') + '/file/' + im + '_tn') : '' }; }) }; }) };
+      } catch (err) { boout = { ok: false, error: String((err && err.message) || err) }; }
+      ufPersist_();
+      return ContentService.createTextOutput(bocb + '(' + JSON.stringify(boout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'ai_usage_report') {   // 🧾 Anthropic の実績（Admin API）・WRITE_TOKEN 必須（誰でも叩けると Anthropic を無駄に呼ばれる）・2026-09-16
       var arcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
