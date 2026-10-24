@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0900';
+var SRC_VER = '20261025-0930';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9607,7 +9607,9 @@ function baBrNewRec_(itemId, name, shopId, hw, sku) {
 function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series) {
   var res = { added: 0, skipped: 0, note: '' };
   var _bn = baBrNewMode_(cfg, cc, hw, series, st);   /* ★2026-10-25 BR の新しい総称カタログ（上の説明）。null＝今までどおり */
-  var capOf = function (x) { if (!_bn || !x || String(x.shop_id) !== _bn.main) return 100; return _bn.ids[String(x.item_id)] ? _bn.cap : 0; };   /* 本店の切り替え前のカタログ＝0（入れない） */
+  /* 本店の切り替え前のカタログ・2店舗目のカタログ＝0（入れない）。05 のレビュー：2店舗目に空きがあると、新しいカタログを作らずに本店向けの明細が2店舗目へ流れて試しが始まらない。
+     新しいカタログを作れない時（1日の上限・重複で5回断られた・複製の失敗）は、2店舗目に落とさず、その回の BR は足さずに次の回へ回す（下の break） */
+  var capOf = function (x) { if (!_bn) return 100; if (!x || String(x.shop_id) !== _bn.main) return 0; return _bn.ids[String(x.item_id)] ? _bn.cap : 0; };
   rows = rows.slice().sort(function (a, b) { return ((a.status === 1 ? 0 : 1) - (b.status === 1 ? 0 : 1)) || (baSeriesNo_(a.name) - baSeriesNo_(b.name)) || (a.item_id - b.item_id); });
   if (!rows.length) { res.note = 'カタログ群なし'; todo.forEach(function (p) { baSet_(ledger, p.key, cc, 'skip:nofam'); baSkipRec_(st, hw, cc, p, 'nofam'); }); return res; }
   var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 909090 : 0;   // ★2026-10-09 Shopee通知：VNの明細は 909,090 VND 以下（超えると出品ごと非公開）
@@ -9663,6 +9665,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (_bn) { if (!st.brNewMade || st.brNewMade.d !== _cdDay) st.brNewMade = { d: _cdDay, n: 0 }; if (st.brNewMade.n >= _bn.perDay) { res.note = 'BR の新しい総称カタログは今日はもう作りません（今日 ' + st.brNewMade.n + '/' + _bn.perDay + '件）'; baLog_(st, cc + '：' + res.note); break; } }   /* ★2026-10-25 他の国の複製の上限とは別に数える */
       else if (st.cloneMade.n >= _cdCap) { res.note = '複製は今日はもう作りません（今日 ' + st.cloneMade.n + '/' + _cdCap + '件）'; baLog_(st, cc + '：' + res.note); break; }
       var _role = series ? 'series' : 'fam';   /* ★Codex指摘：シリーズのカタログの複製を家族に数えると、次の回から無関係の作品がそこへ入る */
+      if (_bn && baShopFull_(cc, base.shop_id)) { res.note = 'BR 本店が満杯の印＝新しい総称カタログを作らず次の回へ'; baLog_(st, cc + '：' + res.note); break; }   /* ★2026-10-25 2店舗目へ作らない */
       if (baShopFull_(cc, base.shop_id)) {
         if (BA_FAM_TICK >= 1) { res.note = '2店舗目のカタログはこの回はもう作りません（1回1件）'; break; }   /* ★2026-09-23 Codex指摘：作成の上限がこの経路に無かった */
         var sub1 = baCloneToSub_(cc, base, newName, st, hw, _role);   /* ★2026-09-26 元の名前（①のまま）でなく、国の中で空いている番号の名前で作る */
