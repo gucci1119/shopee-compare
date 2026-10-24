@@ -9160,7 +9160,8 @@
     // ★「今日」からは何も足せず、タブを切り替えないとToDoを書けなかった（本人指摘 2026-08-13）。
     //   思いついた場所で書けないと結局メモ帳に行くので、ここで足せて、未完了もそのまま見えるようにする。
     let tks = [];
-    try { tks = await sbGetAll('tasks', 'select=*&done=eq.false&order=priority.desc,due.asc.nullslast,sort.desc'); } catch (_) {}
+    let tErr = '';
+    try { tks = await sbGetAll('tasks', 'select=*&done=eq.false&order=priority.desc,due.asc.nullslast,sort.desc'); } catch (e) { tErr = String((e && e.message) || e); }   // ★2026-10-24 レビュー #7：読めなかった時に🎉（片付いた）と出していた
     const btn = (p, label, col) => `<button class="todo-go smd-btn" data-p="${p}" style="font-size:13px;padding:7px 14px;border-color:${col};color:${col};font-weight:700">${label}</button>`;
     host.innerHTML = `<div class="tool-card" style="max-width:760px">
       <div style="font-weight:700;font-size:14px;margin-bottom:4px">📅 今日の実務</div>
@@ -9197,9 +9198,10 @@
           <span class="smd-dim" style="font-size:10.5px;white-space:nowrap">${t.priority === 2 ? '🔴高' : t.priority === 0 ? '🔵低' : ''}${t.due ? '　' + esc(String(t.due)) : ''}</span>
           <button class="tt-del" data-id="${esc(t.id)}" title="削除" style="border:none;background:none;color:#c9c9c9;cursor:pointer;font-size:14px;line-height:1">🗑</button>
         </div>`).join('') + (tks.length > 12 ? `<div class="smd-dim" style="font-size:10.5px;padding:6px 2px">ほか ${tks.length - 12}件　→「✅手動ToDo」タブで全部見られます</div>` : '')
-        : '<div class="smd-dim" style="font-size:12px;padding:6px 2px">未完了のやることはありません🎉</div>'}
+        : (tErr ? `<div style="font-size:12px;padding:6px 2px;color:#d93025;font-weight:700">⚠ ToDo を読めませんでした（未完了が残っているかは未確認） <button class="smd-btn tt-retry" style="font-size:11px;padding:1px 8px">🔄 読み直す</button> <span class="smd-dim" style="font-weight:400;font-size:10.5px">${esc(tErr)}</span></div>` : '<div class="smd-dim" style="font-size:12px;padding:6px 2px">未完了のやることはありません🎉</div>')}
     </div>`;
     host.querySelectorAll('.todo-go').forEach(b => b.addEventListener('click', () => showPage(b.dataset.p)));
+    { const rt = host.querySelector('.tt-retry'); if (rt) rt.addEventListener('click', () => { rt.disabled = true; rt.textContent = '⏳ 読み直し中'; renderTodoToday(); }); }
     { const add = async () => {
         const inp = document.getElementById('tt-new'); const title = (inp.value || '').trim(); if (!title) return;
         const priority = Number((document.getElementById('tt-prio') || {}).value || 1);
@@ -9251,17 +9253,17 @@
       host.querySelectorAll('.tt-del').forEach(b => b.addEventListener('click', async () => {
         const row = b.closest('div'); const nm = (row && row.querySelector('.tt-title') || {}).value || '';
         const id = Number(b.dataset.id);
-        let bak = null;
-        try { const got = await sbGet('tasks', 'select=*&id=eq.' + id + '&limit=1'); bak = (got || [])[0] || null; } catch (_) {}
+        const bak = tks.find(x => Number(x.id) === id) || null;   // ★2026-10-24 レビュー #13：戻す用は読んである行から（通信も1往復減る）
+        if (row) row.style.opacity = '.4'; b.disabled = true;      // 押した瞬間に薄く
         try {
           await sbDelete('tasks', 'id=eq.' + id);
           renderTodoToday();
           toastUndo('🗑 消しました：' + (nm || 'やること'), async () => {
-            if (!bak) return;
+            if (!bak) { alert('戻す用の記録がありません（戻せません）'); return; }
             const row2 = Object.assign({}, bak); delete row2.id;      // idはDB採番に任せる
             try { await sbUpsert('tasks', [row2]); renderTodoToday(); } catch (e) { alert('戻せませんでした: ' + e.message); }
           });
-        } catch (e) { alert(e.message); }
+        } catch (e) { if (row) row.style.opacity = ''; b.disabled = false; alert(e.message); }
       }));
       host.querySelectorAll('.tt-done').forEach(c => c.addEventListener('change', async () => {
         try { await sbUpsert('tasks', [{ id: Number(c.dataset.id), done: true }]); renderTodoToday(); } catch (e) { alert(e.message); }
@@ -9342,6 +9344,7 @@
     pcOv = {}; pcOvShop = { '2': {}, '3': {} }; pcRatioRestore();
     if (!keepDeal) pcQuote.deal = null;
     pcQuote.link = ''; pcQuote.optName = ''; pcQuote.ref = ''; pcQuote.refKey = ''; pcQuote.refFixed = false;
+    { const pl0 = document.getElementById('pc-q-pplink'); if (pl0) pl0.value = ''; } pcQuote.ppFor = null;   /* ★2026-10-24 価格計算レビュー2：前の人の PayPal リンクを次の人の文面に入れない */
     const ta = document.getElementById('pc-q-text'); if (ta) delete ta.dataset.edited;
   }
   function pcRefFix() { const q = pcQuote; if (!q.ref) return; q.refFixed = true; try { localStorage.setItem(q.refKey || ('smdQuoteRef|' + q.ref), JSON.stringify({ ref: q.ref, at: Date.now() })); } catch (_) {} }
@@ -9364,7 +9367,7 @@
     const cc = (document.getElementById('pc-q-cc') || {}).value || 'BR', plan = (plSel || {}).value || '1';
     const r = rows.find(x => x.cc === cc); if (!r) return;
     const buyer = String((document.getElementById('pc-q-buyer') || {}).value || '').trim();
-    const title = String((document.getElementById('pc-q-title') || {}).value || pcQuote.q || '').trim();
+    const title = String((document.getElementById('pc-q-title') || {}).value || (pcLooksLikeSentence(pcQuote.q) ? '' : pcQuote.q) || '').trim();   /* ★2026-10-24 価格計算レビュー4 */
     const unit = r.rg.priceUnit || 1, fmt = (v) => r.rg.cur + (unit < 1 ? (Math.round(v * 100) / 100).toLocaleString(undefined, { maximumFractionDigits: 2 }) : Math.round(v).toLocaleString());
     /* ★2026-10-23 本人「英語でいいよ」（BR もポルトガル語にしない）・②③は本人が前から送っていた「Transaction Guidelines」の形（ブラジル版を国の通貨に置き換え） */
     const ISO = { BR: 'BRL', PH: 'PHP', SG: 'SGD', MY: 'MYR', VN: 'VND', TH: 'THB', TW: 'TWD' }[cc] || r.rg.cur;
@@ -9381,12 +9384,20 @@
       if (!pcQuote.refFixed && (!pcQuote.ref || pcQuote.refKey !== rk)) {   /* 確定（PayPal を作った・Request page に足した）後は商品名を直しても変えない */
         let got = ''; try { const o = JSON.parse(localStorage.getItem(rk) || 'null'); if (o && o.ref && Date.now() - (o.at || 0) < 30 * 86400000) got = o.ref; } catch (_) {}
         if (!got) { const d0 = new Date(); got = 'R' + String(d0.getFullYear()).slice(2) + String(d0.getMonth() + 1).padStart(2, '0') + String(d0.getDate()).padStart(2, '0') + cc + Math.random().toString(36).slice(2, 5).toUpperCase(); }
-        pcQuote.ref = got; pcQuote.refKey = rk; pcQuote.refCc = cc; pcQuote.link = ''; pcQuote.optName = '';   /* ★2026-10-24 レビュー：相手・商品が変わったら前のリンクを使わない */
+        pcQuote.ref = got; pcQuote.refKey = rk; pcQuote.refCc = cc; pcQuote.link = ''; pcQuote.optName = '';
+        { const pl1 = document.getElementById('pc-q-pplink'); if (pl1 && pl1.value) { pl1.value = ''; pcQuote.ppDropped = '相手・商品が変わったので'; } } pcQuote.ppFor = null;   /* ★2026-10-24 価格計算レビュー2 */   /* ★2026-10-24 レビュー：相手・商品が変わったら前のリンクを使わない */
       } }
     const REF = pcQuote.ref;
     /* ★2026-10-23 本人「MYRとVNDは非対応なのでMY/VNの場合はJPYで作成します」：支払いリンクは円＝文面の PayPal の金額も円で書き、現地通貨のめやすを添える */
     const ppNoCur = cc === 'MY' || cc === 'VN';
     const ppTxt = ppNoCur ? Math.ceil(ppJ).toLocaleString('en-US') + ' JPY (≈ ' + num(ppL) + ' ' + ISO + ')' : num(ppL) + ' ' + ISO;
+    /* ★2026-10-24 価格計算レビュー2：PayPal リンクは貼った時の額のもの＝国・払い方・PayPal の額が変わったら外す（別の額のリンクを送らない）。①の時は見ない */
+    { const pe = document.getElementById('pc-q-pplink'), v = String((pe || {}).value || '').trim(), amt = (cc === 'MY' || cc === 'VN') ? Math.ceil(ppJ) : ppL;
+      if (!v) pcQuote.ppFor = null;
+      else if (plan !== '1') {
+        if (!pcQuote.ppFor || pcQuote.ppFor.v !== v) pcQuote.ppFor = { v, cc, plan, amt };
+        else if (pcQuote.ppFor.cc !== cc || pcQuote.ppFor.plan !== plan || pcQuote.ppFor.amt !== amt) { pe.value = ''; pcQuote.ppFor = null; pcQuote.ppDropped = '国・払い方・PayPal の額が変わったので'; } } }
+    if (pcQuote.ppDropped) { const mq = document.getElementById('pc-q-msg'); if (mq) mq.textContent = '⚠ ' + pcQuote.ppDropped + '、前の PayPal リンクを外しました（💳 で作り直して 📥 貼る）'; pcQuote.ppDropped = ''; }
     const ppLink = String((document.getElementById('pc-q-pplink') || {}).value || '').trim() || 'https://www.paypal.com/xxxx';
     const hasImg = !!(pcQuote.deal && pcQuote.deal.img);
     const nm = title || 'the item';
@@ -9458,6 +9469,19 @@
   /* ★2026-10-24 本人「smart reply、ワッツアップからもできるように」：Smart Reply の 💴 で開いた時は、文面を開いた元の webchat の入力欄へ入れる（送らない・送るのは本人）。
      窓のつながり（window.opener）に postMessage → Smart Reply が「いま開いている会話の相手＝見積もりの相手」を確かめてから入れて返事をする。
      相手が違う・返事が無い時は入れずに、文面をコピーして貼ってもらう（別のお客さんの入力欄に入る事故を止める）。WhatsApp はコピーまで */
+  /* ★2026-10-24 価格計算レビュー1・3：チャットから開かれた窓の相手を確かめる。o（開いた元の origin）は決まった8つだけ
+     （Seller Center 7か国・WhatsApp。前の正規表現 seller\.shopee\.[a-z.]+ は seller.shopee.<よそ>.com も通した）。
+     自動で進める入口（&auto=1・&mode=quote）は、src（sr／wa）と o の組が合い、開いた元の窓（window.opener）が残っている時だけ。
+     Shopee Smart Reply・WA Smart Reply はどちらも名前つきの window.open で開く＝opener が残る（チャットで届いたリンクを押した時は残らない） */
+  function pcChatOrigin(o) { o = String(o || ''); return /^https:\/\/(seller\.shopee\.(ph|tw|sg|co\.th|com\.my|com\.br)|banhang\.shopee\.vn|web\.whatsapp\.com)$/.test(o) ? o : ''; }
+  function pcChatOpenerWhy(p) {
+    const o = pcChatOrigin(p.get('o')), src = String(p.get('src') || '');
+    if (!o) return '開いた元（&o=）が Shopee の webchat・WhatsApp ではありません';
+    if (!((src === 'sr' && o !== 'https://web.whatsapp.com') || (src === 'wa' && o === 'https://web.whatsapp.com'))) return '開いた元（&src= と &o=）が合いません';
+    let op = null; try { op = window.opener; } catch (_) {}
+    if (!op || op.closed) return '開いた元の窓（Shopee Smart Reply・WA Smart Reply）が見つかりません（リンクから直接開いた・元の画面を閉じた）';
+    return '';
+  }
   function pcQuoteToChat() {
     const msg = document.getElementById('pc-q-msg'), t = String((document.getElementById('pc-q-text') || {}).value || '').trim();
     if (!t) { msg.textContent = '文面が空です（先に仕入額を入れてください）'; return; }
@@ -9467,11 +9491,12 @@
     let op = null; try { op = window.opener; } catch (_) {}
     if (!op || op.closed) { fallback('開いた元の webchat が見つかりません（ポータルを直接開いた・webchat を閉じた）'); return; }
     const id = 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5); let done = false;
-    const onAck = (e) => { const d = e.data || {}; if (!d || d.smdQuoteAck !== id || !/^https:\/\/(seller\.shopee\.[a-z.]+|banhang\.shopee\.vn|web\.whatsapp\.com)$/.test(e.origin)) return; done = true; window.removeEventListener('message', onAck);
+    const onAck = (e) => { const d = e.data || {}; if (!d || d.smdQuoteAck !== id || !pcChatOrigin(e.origin) || e.origin !== pcChatOrigin(pcQuote.o)) return; done = true; window.removeEventListener('message', onAck);
       if (d.ok) { const app = pcQuote.src === 'wa' ? 'WhatsApp' : 'webchat'; msg.textContent = '💬 ' + (d.buyer || buyer) + ' さんの入力欄に入れました。' + app + ' で中身を見て、写真も付けて自分で送信してください'; try { toast('💬 ' + app + ' の入力欄に入れました（送信はしていません）'); } catch (_) {} }
       else fallback(String(d.err || '入れられませんでした')); };
     window.addEventListener('message', onAck);
-    const to = /^https:\/\/(seller\.shopee\.[a-z.]+|banhang\.shopee\.vn|web\.whatsapp\.com)$/.test(pcQuote.o || '') ? pcQuote.o : '*';
+    const to = pcChatOrigin(pcQuote.o);   /* ★2026-10-24 価格計算レビュー3：決まった相手でなければ渡さない（前は '*'＝誰にでも） */
+    if (!to) { window.removeEventListener('message', onAck); fallback('開いた元が Shopee の webchat・WhatsApp か確かめられないので入れていません'); return; }
     try { op.postMessage({ smdQuoteInsert: t, buyer: buyer, cc: cc, id: id }, to); } catch (e) { window.removeEventListener('message', onAck); fallback('webchat に渡せませんでした'); return; }
     msg.textContent = '⏳ ' + (pcQuote.src === 'wa' ? 'WhatsApp' : 'Smart Reply') + ' の入力欄へ入れています…';
     setTimeout(() => { if (done) return; window.removeEventListener('message', onAck); fallback(pcQuote.src === 'wa' ? 'WhatsApp から返事がありません（WhatsApp のスクリプトが古い版・WhatsApp を読み直した）' : 'Smart Reply から返事がありません（Smart Reply が古い版・webchat を読み直した・別の国の webchat から開いた）'); }, 3000);
@@ -9537,7 +9562,7 @@
     return t.replace(/\s{2,}/g, ' ').trim();
   }
   function pcQuoteApiReply(p) {
-    const tell = (obj) => { try { const op = window.opener; const o = String(p.get('o') || ''); const to = /^https:\/\/(seller\.shopee\.[a-z.]+|banhang\.shopee\.vn|web\.whatsapp\.com)$/.test(o) ? o : '*'; if (op && !op.closed) op.postMessage({ smdQuoteResult: obj }, to); } catch (_) {} };
+    const tell = (obj) => { try { const op = window.opener; const to = pcChatOrigin(p.get('o')); if (to && op && !op.closed) op.postMessage({ smdQuoteResult: obj }, to); } catch (_) {} };   /* ★2026-10-24 価格計算レビュー3：'*' をやめる */
     const t0 = Date.now(), reqId = p.get('rid') || '';
     const tick = () => {
       const L = pcQuote.last, rows = window._pcRows || [], cx = window._pcCtx || {};
@@ -9573,17 +9598,27 @@
         });
         if (plSel) { plSel.value = keep.plan || '1'; if (keep.user) plSel.dataset.user = keep.user; else delete plSel.dataset.user; }
         if (stSel) stSel.value = keep.stage || 'quote'; delete ta.dataset.edited; pcQuoteRender();
+        try { pcRefFix(); } catch (_) {}   /* ★2026-10-24 価格計算レビュー5：カードに出す照合番号を控える（同じ国・相手・商品名なら、↻・💳・🛒 で開いた本体でも同じ番号になる） */
         tell(out);
         setTimeout(() => { try { window.close(); } catch (_) {} }, 1200);
       } catch (e) { tell({ ok: false, rid: reqId, err: '見積もりを作れませんでした：' + String((e && e.message) || e).slice(0, 120) }); }
     };
     setTimeout(tick, 600);
   }
+  /* ★2026-10-24 価格計算レビュー6：探している数秒の間に2回押すと、2本とも「同じ名前は無い」を通って同じ明細が2つ入った＝入口で止める（終わるまで押せない） */
   async function pcQuoteAddReq() {
+    const msg = document.getElementById('pc-q-msg'), btn = document.getElementById('pc-q-addreq');
+    if (pcQuote.addBusy) { if (msg) msg.textContent = '⏳ いま Request page に足しているところです（終わるまで押せません）'; return; }
+    pcQuote.addBusy = true; if (btn) btn.disabled = true;
+    try { return await pcQuoteAddReq0(); } finally { pcQuote.addBusy = false; if (btn) btn.disabled = false; }
+  }
+  async function pcQuoteAddReq0() {
     const L = pcQuote.last, msg = document.getElementById('pc-q-msg'); if (!L) { msg.textContent = '先に仕入額を入れてください'; return; }
     if (!L.buyer) { msg.textContent = '相手のユーザー名を入れてください（明細名に入れます）'; return; }
     if (!/^[A-Za-z0-9._-]{3,40}$/.test(String(L.buyer).trim())) { msg.textContent = '⚠ 相手「' + L.buyer + '」が Shopee のユーザー名の形ではありません（表示名・電話番号は公開の明細名と写真に出てしまう）。Shopee のユーザー名に直してください'; return; }   /* ★2026-10-24 レビュー */
     if (/[\u3040-\u30ff\u4e00-\u9fff]/.test(String(L.title || ''))) { msg.textContent = '⚠ 商品名（英語）が日本語のままです。お客さんに見える明細名・文面に入るので、英語に直してから押してください'; try { document.getElementById('pc-q-title').focus(); } catch (_) {} return; }   /* ★2026-10-24 */
+    { const tl = String(L.title || '').trim(), cq = String(pcQuote.q || '').trim(), cq2 = String((window._pcChatT || {}).q || '').trim();   /* ★2026-10-24 価格計算レビュー4：明細名に「buyer Do you have …?」を入れない（人が打った名前は通す） */
+      if (!tl || (pcLooksLikeSentence(tl) && (tl === cq || tl === cq2))) { msg.textContent = '⚠ 商品名（英語）が空か、お客さんの文のままです（公開の明細名に入ります）。英語の商品名を入れてから押してください'; try { document.getElementById('pc-q-title').focus(); } catch (_) {} return; } }
     if (!settings.writeToken) { msg.textContent = '書き込みの合言葉が未設定です'; return; }
     msg.textContent = 'Request page を探しています…';
     let cats = [];
@@ -9607,7 +9642,7 @@
     const nm = (() => { const f = (L.buyer + ' ' + (L.title || pcQuote.q || '')).replace(/\s+/g, ' ').trim(); if (f.length <= 30) return f; const c = f.slice(0, 31), sp = c.lastIndexOf(' '); return (sp > L.buyer.length ? c.slice(0, sp) : f.slice(0, 30)).replace(/[\s:\-–&,]+$/, '').trim(); })();   /* ★2026-10-24 30字で語の途中を切らない */
     if (pick.ms.some(m => String(m.n || '').trim() === nm)) { msg.textContent = '⚠ 同じ名前の明細がもうあります: ' + nm; return; }
     /* ★2026-10-24 レビュー：DB の明細一覧は反映が遅れる＝成功の直後にもう一度押すと同じ明細が2つ入る。足す直前に Shopee の今の明細で確かめる */
-    if (!madeNew) { try { const gm0 = await gasCall({ action: 'get_models', shop_id: pick.c.shop_id, item_id: pick.c.item_id }, 60000); const live = (((gm0 || {}).data || {}).models || []); if (live.some(m => String(m.name || '').trim() === nm)) { msg.textContent = '⚠ 同じ名前の明細が Shopee にもうあります（足し済み）: ' + nm; return; } if (live.length >= 100) { msg.textContent = '⚠ 入れ先が100明細で満杯になっていました。もう一度押すと別のページを探します'; return; } } catch (_) {} }
+    if (!madeNew) { try { const gm0 = await gasCall({ action: 'get_models', shop_id: pick.c.shop_id, item_id: pick.c.item_id }, 60000); const live = ((gm0 || {}).data || {}).models; if (!Array.isArray(live)) throw new Error(String((gm0 && gm0.error) || '明細の一覧が返りませんでした').slice(0, 80)); if (live.some(m => String(m.name || '').trim() === nm)) { msg.textContent = '⚠ 同じ名前の明細が Shopee にもうあります（足し済み）: ' + nm; return; } if (live.length >= 100) { msg.textContent = '⚠ 入れ先が100明細で満杯になっていました。もう一度押すと別のページを探します'; return; } } catch (eG) { msg.textContent = '⚠ Shopee の今の明細を確かめられなかったので足していません（' + String((eG && eG.message) || eG).slice(0, 80) + '）。少し待ってもう一度押してください'; return; } }   /* ★2026-10-24 価格計算レビュー6：読めない時に重複の確かめを黙って飛ばしていた */
     /* ★2026-10-24 確認ダイアログはやめる（本人の決め：確認は削除だけ・10/3）。押した瞬間に下の文言が変わる */
     const btn = document.getElementById('pc-q-addreq'); btn.disabled = true; msg.textContent = '追加しています…（1分ほど）';
     try {
@@ -10153,7 +10188,7 @@
               }, 300);
             } catch (e) { msg.textContent = '❌ 下書きに入れられませんでした: ' + String((e && e.message) || e).slice(0, 80); }
           });
-          box.querySelectorAll('.pc-src-use').forEach(b => b.onclick = () => { const d = ds[Number(b.dataset.i)]; window._pcKeepDeal = true; pcNewItem(true); pcQuote.deal = d; pcQuote.q = q; const tt = document.getElementById('pc-q-title'); if (tt) tt.value = (window._pcChatT && window._pcChatT.q === q && window._pcChatT.t) ? window._pcChatT.t : q;   /* ★2026-10-24 レビュー：前の商品名を残さない／チャットから英語名（&t）が来ている時はそれを使う（試験で日本語に上書きしていた） */ const ta0 = document.getElementById('pc-q-text'); if (ta0) delete ta0.dataset.edited; const c = document.getElementById('pc-cost'); c.value = String(Math.round(Number(d.eff || d.price))); c.dispatchEvent(new Event('input', { bubbles: true })); msg.textContent = '①仕入額に ¥' + c.value + ' を入れました（' + (d.site || '') + '）'; });
+          box.querySelectorAll('.pc-src-use').forEach(b => b.onclick = () => { const d = ds[Number(b.dataset.i)]; window._pcKeepDeal = true; pcNewItem(true); pcQuote.deal = d; pcQuote.q = q; const tt = document.getElementById('pc-q-title'); if (tt) tt.value = (window._pcChatT && window._pcChatT.q === q && window._pcChatT.t) ? window._pcChatT.t : (pcLooksLikeSentence(q) ? '' : q);   /* ★2026-10-24 レビュー：前の商品名を残さない／チャットから英語名（&t）が来ている時はそれを使う（試験で日本語に上書きしていた） */ const ta0 = document.getElementById('pc-q-text'); if (ta0) delete ta0.dataset.edited; const c = document.getElementById('pc-cost'); c.value = String(Math.round(Number(d.eff || d.price))); c.dispatchEvent(new Event('input', { bubbles: true })); msg.textContent = '①仕入額に ¥' + c.value + ' を入れました（' + (d.site || '') + '）'; });
         } catch (e) { msg.textContent = '❌ 探せませんでした: ' + String((e && e.message) || e).slice(0, 80); }
         finally { go.disabled = false; if (!window._pcSrcDone) window._pcSrcDone = Date.now(); }
       };
@@ -10197,7 +10232,7 @@
       /* チャットから来た時：#pricecalc?q=…&cc=…&buyer=…&src=sr|wa */
       const fromChat = () => { const h = String(location.hash || ''); const i = h.indexOf('?'); if (h.indexOf('pricecalc') < 0 || i < 0) return; const p = new URLSearchParams(h.slice(i + 1)); const q = p.get('q'); if (!q || window._pcLastHash === h) return; window._pcLastHash = h;
         const tIn = String(p.get('t') || '').trim(), tChat = pcLooksLikeSentence(tIn) ? '' : tIn;   /* ★2026-10-24 お客さんの文は英語名にしない（比較12番） */
-        qi.value = q; window._pcChatT = { q: String(q).trim(), t: tChat }; const cc = (p.get('cc') || 'BR').toUpperCase(); const sel = document.getElementById('pc-q-cc'); if (sel) sel.value = cc; const by = document.getElementById('pc-q-buyer'); if (by) by.value = p.get('buyer') || ''; const tt = document.getElementById('pc-q-title'); if (tt) tt.value = tChat || q;
+        qi.value = q; window._pcChatT = { q: String(q).trim(), t: tChat }; const cc = (p.get('cc') || 'BR').toUpperCase(); const sel = document.getElementById('pc-q-cc'); if (sel) sel.value = cc; const by = document.getElementById('pc-q-buyer'); if (by) by.value = p.get('buyer') || ''; const tt = document.getElementById('pc-q-title'); if (tt) tt.value = tChat || (pcLooksLikeSentence(q) ? '' : q);   /* ★2026-10-24 価格計算レビュー4：q がお客さんの文なら入れない（空＝自動の英語名か赤枠） */
         /* ★2026-10-24 本人「なぜこれ自分で決めないといけないの？」「ワッツアップ、スマートリプライの中だけで完結させる」：英語の商品名が空か日本語なら、
            出品作成と同じ英語名づけ（suggestVarName＝辞書＋Chrome 内蔵の翻訳・¥0）で自動で入れる。直したい時だけ人が直す */
         { const t0 = tChat; window._pcEnDone = true; window._pcEnP = Promise.resolve();
@@ -10219,6 +10254,8 @@
             const ce0 = document.getElementById('pc-cost'); if (ce0) { ce0.value = String(Math.round(cost0)); ce0.dispatchEvent(new Event('input', { bubbles: true })); ce0.dispatchEvent(new Event('change', { bubbles: true })); }
             const price0 = Number(String(p.get('price') || '').replace(/[^0-9.]/g, '')) || 0; if (price0 > 0) { pcOv[cc] = price0; try { priceCalcSave(); } catch (_) {} }
             const st0 = document.getElementById('pc-q-stage'); if (st0) { st0.value = 'deal'; st0.dispatchEvent(new Event('change', { bubbles: true })); }
+            /* ★2026-10-24 価格計算レビュー5：&ref=（カードで出した照合番号・R+6桁+国+英数字）が来たらそれを使う＝PayPal の番号と明細 SKU を揃える。形と国が合う時だけ */
+            { const rf = String(p.get('ref') || '').trim().toUpperCase(); if (/^R\d{6}[A-Z]{2}[A-Z0-9]{1,3}$/.test(rf) && rf.slice(7, 9) === cc) { pcQuote.ref = rf; pcQuote.refCc = cc; pcQuote.refKey = 'smdQuoteRef|' + rf; pcQuote.refFixed = true; } }
             try { priceCalcRun(); } catch (_) {}
             /* ★2026-10-24 WhatsApp 役の確認：払い方が前回選んだ②のまま出た（保存の復元が後から上書き）＝描いた後にもう一度入れて change を出す */
             { const plan0 = p.get('plan') || '1'; setTimeout(() => { const pl2 = document.getElementById('pc-q-plan'); if (pl2 && pl2.value !== plan0) { pl2.value = plan0; pl2.dispatchEvent(new Event('change', { bubbles: true })); pl2.dispatchEvent(new Event('input', { bubbles: true })); } }, 400); }
@@ -10230,9 +10267,11 @@
             /* ★2026-10-24 本人「ワッツアップからできないの？」：&auto=1 で開かれたら、ここで止まらずに自動で進める＝
                値段（&price）と英語の商品名がそろっている時だけ → 🛒 Request page に追加 → 案内文をチャットの入力欄へ → 成功したら閉じる。
                結果は開いた元へ { smdReqStatus } で返す（失敗時はこの画面に理由を残して閉じない） */
+            { const why0 = (p.get('mode') === 'quote' || p.get('auto') === '1') ? pcChatOpenerWhy(p) : '';   /* ★2026-10-24 価格計算レビュー1 */
+              if (why0) { const t9 = '⚠ 自動では進めません：' + why0 + '。中身を確かめて、要る時だけ下のボタンを手で押してください'; if (m0) m0.textContent = t9; try { toast(t9, 8000); } catch (_) {} return; } }
             if (p.get('mode') === 'quote') { pcQuoteApiReply(p); return; }   /* ★2026-10-24 チャットで完結 */
             if (p.get('auto') === '1') {
-              const tell = (ok, m) => { try { const op = window.opener; const to = /^https:\/\/(seller\.shopee\.[a-z.]+|banhang\.shopee\.vn|web\.whatsapp\.com)$/.test(pcQuote.o || '') ? pcQuote.o : '*'; if (op && !op.closed) op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 300), buyer: p.get('buyer') || '' }, to); } catch (_) {} };
+              const tell = (ok, m) => { try { const op = window.opener; const to = pcChatOrigin(pcQuote.o); if (to && op && !op.closed) op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 300), buyer: p.get('buyer') || '' }, to); } catch (_) {} };
               const mm = document.getElementById('pc-q-msg') || document.createElement('div');   /* 一瞬（長く回さない） */
               /* ★2026-10-24 本人「目的は、リクエスト商品にかける時間を少なく効率化すること」：値段が来ていない時は止めずに、計算の値段（選んだ払い方の Shopee の額）で進める */
               const priceAuto = !(price0 > 0);
@@ -10255,6 +10294,9 @@
             }
             return;
           } }
+        /* ★2026-10-24 価格計算レビュー7：仕入額のない入口でも前の商品（仕入額・写真・PayPal リンク・照合番号）を消してから探す＝検索が0件・失敗の時に前の商品の値段の文面を出さない */
+        pcNewItem(false); { const ce1 = document.getElementById('pc-cost'); if (ce1 && String(ce1.value || '').trim() !== '') { ce1.value = ''; ce1.dispatchEvent(new Event('input', { bubbles: true })); } }
+        if (p.get('mode') === 'quote') { const why1 = pcChatOpenerWhy(p); if (why1) { const t10 = '⚠ 見積もりの窓として開かれましたが、' + why1 + '。自動では探しません（探す時は「探す」を押してください）'; const sm1 = document.getElementById('pc-src-msg'); if (sm1) sm1.textContent = t10; try { toast(t10, 8000); } catch (_) {} return; } }   /* ★2026-10-24 価格計算レビュー1 */
         window._pcAutoPick = true; run(); if (p.get('mode') === 'quote') pcQuoteApiReply(p); };
       /* ★2026-10-24 Smart Reply の 💴 でポータルを新しく開くと『Cannot access JP_DICT before initialization』で検索が止まった＝ここはスクリプトの途中で走る（JP_DICT はもっと下で作る）。最初の1回は読み込みが終わってから */
       setTimeout(fromChat, 0); window.addEventListener('hashchange', fromChat);
@@ -15731,71 +15773,99 @@
   }
   async function renderCustomersInner(force) {
     const body = document.getElementById('cust-body');
-    let orders, notes;
+    let orders, notes, notesOk = true;
+    /* ★2026-10-24 レビュー#6：読み込みに番号札。読み込み中にアカウント切替・画面の行き来で2本目が走っても、
+       後から終わった古い方で画面とキャッシュを上書きしない（別アカウントの客・金額が出たままになっていた） */
+    const seq = cust._seq = (cust._seq || 0) + 1, acct0 = state.acct;
     const cch = cust._cache; // 絞り込みは再取得せずキャッシュから（TTL120秒／force・書込後は取り直し）
     /* ★2026-09-26 洗い出し：絞り込み（国・リピーターのみ・キャンセル込み）でも2分たつと全注文を読み直していた。絞り込みは手元の分で描く（force＝'filter'） */
-    if ((force === 'filter' && cch) || (!force && cch && Date.now() - cch.at < 120000)) { orders = cch.orders; notes = cch.notes; }
+    if ((force === 'filter' && cch) || (!force && cch && Date.now() - cch.at < 120000)) {
+      orders = cch.orders; notes = cch.notes; notesOk = cch.notesOk !== false;
+      /* ★レビュー#1：メモだけ読めていなかった時は、メモだけ読み直す（全注文は読み直さない） */
+      if (!notesOk) {
+        try { notes = await sbGetAll('customer_notes', 'select=buyer,note'); notesOk = true; if (cust._cache === cch) { cch.notes = notes; cch.notesOk = true; } } catch (_) { /* 読めない＝notesOk=false のまま。下で画面に出してメモ欄を止める */ }
+        if (seq !== cust._seq) return;
+      }
+    }
     else {
       body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
       try {
         orders = await sbGetAll('orders', 'select=cc,buyer,order_date,tab,items,total&order=order_date.desc');
-        notes = await sbGetAll('customer_notes', 'select=buyer,note').catch(() => []);
-      } catch (e) { body.innerHTML = errBox(e); return; }
-      cust._cache = { orders, notes, at: Date.now() };
+      } catch (e) { if (seq === cust._seq) body.innerHTML = errBox(e); return; }
+      /* ★レビュー#1：メモが読めない時（429・5xx・瞬断）に「メモ0件」に化けさせない。
+         化けると📝が全部消え、空のメモ欄に書いた1行で前からのメモ（クレーム歴など）を丸ごと上書きしていた */
+      try { notes = await sbGetAll('customer_notes', 'select=buyer,note'); }
+      catch (e) { notes = []; notesOk = false; try { console.warn('customer_notes', e); } catch (_) {} }
+      if (state.acct !== acct0) return;   // 読み込み中にアカウントが替わった＝別アカウントの分。キャッシュにも画面にも使わない
+      cust._cache = { orders, notes, notesOk, at: Date.now() };
+      if (seq !== cust._seq) return;      // 後から別の描画が始まっている＝そちらに任せる
     }
     const noteMap = {}; (notes || []).forEach(n => { noteMap[n.buyer] = n.note || ''; });
     const scoped = cust.cc ? orders.filter(o => o.cc === cust.cc) : orders;
-    const byB = {};
-    scoped.forEach(o => { const b = o.buyer || '(不明)'; const e = byB[b] = byB[b] || { orders: [], cc: new Set(), cancel: 0 }; e.orders.push(o); if (o.tab === 600) e.cancel++; if (o.cc) e.cc.add(o.cc); });
+    /* ★レビュー#3：未払い（tab 200）はまだ払われていない＝キャンセルと同じく既定では数えない（利益の画面と同じ）。
+       未払い1件で「2回目」になりリピーターに数えられていた。チェック「キャンセル・未払いも含める」の時だけ回数に入れる（金額には入れない） */
+    const custOut = (o) => o.tab === 600 || o.tab === 200;
+    const byB = {}; let noName = 0;
+    /* ★レビュー#5：バイヤー名が空の注文を「(不明)」という1人に束ねない（別人がまとまってリピーター扱い・メモも共有になっていた）。件数だけ上に出す */
+    scoped.forEach(o => { const b = o.buyer || ''; if (!String(b).trim()) { if (cust.inclCancel || !custOut(o)) noName++; return; } const e = byB[b] = byB[b] || { orders: [], cc: new Set(), cancel: 0, unpaid: 0 }; e.orders.push(o); if (o.tab === 600) e.cancel++; if (o.tab === 200) e.unpaid++; if (o.cc) e.cc.add(o.cc); });
     let list = Object.entries(byB).map(([b, e]) => {
-      const cnt = e.orders.filter(o => cust.inclCancel || o.tab !== 600);
+      const cnt = e.orders.filter(o => cust.inclCancel || !custOut(o));
       const dates = cnt.map(o => o.order_date || '').filter(Boolean).sort();
-      const spend = {}; cnt.forEach(o => { if (o.tab !== 600 && o.cc) spend[o.cc] = (spend[o.cc] || 0) + Number(o.total || 0); });
-      return { b, e, n: cnt.length, first: dates[0] || '', last: dates[dates.length - 1] || '', spend };
+      /* ★レビュー#2：円は注文ごとに【注文日のレート】で（他の画面と同じ fxRate。読めない時は今のレート rateJpy）。
+         前は全期間の現地通貨合計×いまのレート1つで、同じ注文の円が他の画面と食い違っていた。
+         ★レビュー#4：金額が空・0 の注文は合計から黙って落とさず noAmt に数えて出す */
+      const spend = {}; let jpy = 0, noAmt = 0;
+      cnt.forEach(o => { if (custOut(o) || !o.cc) return; const v = Number(o.total); if (!(v > 0)) { noAmt++; return; } spend[o.cc] = (spend[o.cc] || 0) + v; const rg = regionByCc(o.cc); jpy += v * (fxRate(o.cc, o.order_date) || (rg ? rg.rateJpy : 0)); });
+      return { b, e, n: cnt.length, first: dates[0] || '', last: dates[dates.length - 1] || '', spend, jpy, noAmt };
     }).filter(x => x.n > 0);
     list.sort((a, b) => b.n - a.n || (b.last > a.last ? 1 : -1));
     if (cust.repeatOnly) list = list.filter(x => x.n >= 2);
     const byBuyer = {}; list.forEach(x => { byBuyer[x.b] = x; });
     const repeat = list.filter(x => x.n >= 2).length;
-    const totalOrders = cust.repeatOnly ? list.reduce((s, x) => s + (x.n || 0), 0) : scoped.filter(o => cust.inclCancel || o.tab !== 600).length; // ★リピーターのみ表示中は"表示中の顧客の注文数"にする（従来は単発客の注文も含む全体で不整合）
+    const totalOrders = cust.repeatOnly ? list.reduce((s, x) => s + (x.n || 0), 0) : scoped.filter(o => String(o.buyer || '').trim() && (cust.inclCancel || !custOut(o))).length; // ★リピーターのみ表示中は"表示中の顧客の注文数"にする（従来は単発客の注文も含む全体で不整合）
     const ccOpts = REGIONS.filter(r => r.enabled !== false).map(r => `<option value="${r.cc}" ${cust.cc === r.cc ? 'selected' : ''}>${r.cc}</option>`).join('');
     // 合計購入額：国ごとの現地通貨に加えて**円換算の合計**も出す（各国通貨を素で並べるだけだと大小が比べられない）
-    const spendJpy = (x) => Object.entries(x.spend).reduce((s, [cc, v]) => { const rg = regionByCc(cc); return s + ((rg && rg.rateJpy) ? v * rg.rateJpy : 0); }, 0);
+    const spendJpy = (x) => x.jpy || 0;   // ★レビュー#2：注文ごとに注文日のレートで足した円（上の list で計算）
     const spendStr = (x) => {
       const ents = Object.entries(x.spend).filter(([, v]) => v > 0);
-      if (!ents.length) return '<span class="smd-dim">—</span>';
+      const na = x.noAmt ? `<div style="font-size:10px;color:#e8770a" title="金額が空の注文（合計購入額に入っていません）">うち金額なし ${x.noAmt}件</div>` : '';
+      if (!ents.length) return '<span class="smd-dim">—</span>' + na;
       const loc = ents.map(([cc, v]) => { const rg = regionByCc(cc); return `<span title="${esc(cc)}の累計購入額">${rg ? fmtLocal(rg, v) : Math.round(v)}</span>`; }).join(' ');
       const j = spendJpy(x);
-      return `<b style="color:#0f9d58">${fmtJpy(j)}</b><div class="smd-dim" style="font-size:10px">${loc}</div>`;
+      return `<b style="color:#0f9d58">${fmtJpy(j)}</b><div class="smd-dim" style="font-size:10px">${loc}</div>` + na;
     };
     const orderRowHtml = (o) => {
       const items = o.items || [], rg = regionByCc(o.cc), qty = custItemQty(o);
-      const amt = o.tab === 600 ? '' : (rg ? fmtLocal(rg, o.total) : (o.total != null ? Math.round(o.total) : ''));
+      const amt = o.tab === 600 ? '' : (!(Number(o.total) > 0) ? '<span style="color:#e8770a;font-weight:400">金額未取得</span>' : (rg ? fmtLocal(rg, o.total) : Math.round(Number(o.total))));   // ★レビュー#4：空・0 を「₱0」と出さない
       const thumbs = items.length ? items.map(it => { const im = it.image || it.image_url || ''; return im ? `<img src="${esc(resolveImgUrl(im))}" referrerpolicy="no-referrer" style="width:40px;height:40px;object-fit:cover;border-radius:6px;flex:none;border:1px solid #eee" onerror="this.style.opacity=.2;this.title='画像読込失敗'">` : '<span style="width:40px;height:40px;border:1px dashed #ccc;border-radius:6px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#6b7280">なし</span>'; }).join('') : '';
       return `<div style="display:flex;gap:9px;padding:6px 0;border-top:1px dashed #e5e5e5;align-items:flex-start">`
         + `<span style="flex:none;width:66px;color:#666;font-size:11px">${esc((o.order_date || snToDate(o.sn) || '').slice(0, 10) || '—')}</span>`
         + `<span style="flex:none">${ccBadge(o.cc)}</span>`
         + `<div style="flex:1;min-width:0"><div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:3px">${thumbs}</div><div style="font-size:11.5px">${custItemsStr(o)}</div></div>`
-        + `<span style="flex:none;text-align:right;min-width:76px">${amt ? `<div style="font-weight:700;font-size:12px;color:#222">${amt}</div>` : ''}<div style="font-size:10px;color:#888">${qty}点</div>${o.tab === 600 ? '<div style="color:#d93025;font-size:10px;font-weight:700">❌ｷｬﾝｾﾙ</div>' : ''}</span>`
+        + `<span style="flex:none;text-align:right;min-width:76px">${amt ? `<div style="font-weight:700;font-size:12px;color:#222">${amt}</div>` : ''}<div style="font-size:10px;color:#888">${qty}点</div>${o.tab === 600 ? '<div style="color:#d93025;font-size:10px;font-weight:700">❌ｷｬﾝｾﾙ</div>' : ''}${o.tab === 200 ? '<div style="color:#e8770a;font-size:10px;font-weight:700">⏳ 未払い</div>' : ''}</span>`
         + `</div>`;
     };
     const detailCellHtml = (x) => {
       const rows = x.e.orders.slice().sort((a, b) => (b.order_date || '') > (a.order_date || '') ? 1 : -1).map(orderRowHtml).join('');
-      return `<td colspan="7" style="background:#fafbff;padding:9px 13px"><div style="font-weight:700;font-size:11.5px;color:#555;margin-bottom:3px">🧾 購入履歴（${x.e.orders.length}件${x.e.cancel ? `・うちキャンセル${x.e.cancel}` : ''}）</div>${rows}<div style="margin-top:9px"><div style="font-weight:700;font-size:11.5px;color:#555;margin-bottom:3px">📝 メモ（特徴・要注意など）</div><textarea class="cust-note" data-b="${esc(x.b)}" rows="2" placeholder="例：梱包厳重希望／良いリピーター／クレーム歴 など" style="width:100%;max-width:540px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px">${esc(noteMap[x.b] || '')}</textarea><div class="cust-note-status smd-dim" data-b="${esc(x.b)}" style="font-size:10px;margin-top:2px"></div></div></td>`;
+      return `<td colspan="7" style="background:#fafbff;padding:9px 13px"><div style="font-weight:700;font-size:11.5px;color:#555;margin-bottom:3px">🧾 購入履歴（${x.e.orders.length}件${x.e.cancel ? `・うちキャンセル${x.e.cancel}` : ''}${x.e.unpaid ? `・うち未払い${x.e.unpaid}` : ''}）</div>${rows}<div style="margin-top:9px"><div style="font-weight:700;font-size:11.5px;color:#555;margin-bottom:3px">📝 メモ（特徴・要注意など）</div>${notesOk ? '' : '<div style="color:#d93025;font-size:11px;font-weight:700;margin-bottom:3px">⚠ メモを読めませんでした（保存しません）</div>'}<textarea class="cust-note" data-b="${esc(x.b)}" ${notesOk ? '' : 'disabled '}rows="2" placeholder="例：梱包厳重希望／良いリピーター／クレーム歴 など" style="width:100%;max-width:540px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px">${esc(noteMap[x.b] || '')}</textarea><div class="cust-note-status smd-dim" data-b="${esc(x.b)}" style="font-size:10px;margin-top:2px"></div></div></td>`;
     };
     const wireNote = (t) => t.addEventListener('change', async () => {
       const b = t.dataset.b, st = body.querySelector('.cust-note-status[data-b="' + (window.CSS && CSS.escape ? CSS.escape(b) : b) + '"]');
+      if (!notesOk) { if (st) { st.textContent = '⚠ メモを読めませんでした（保存しません）'; st.style.color = '#d93025'; } return; }   // ★レビュー#1：読めていない時に上書きしない
       if (st) { st.textContent = '保存中…'; st.style.color = '#888'; }
-      try { await sbUpsert('customer_notes', [{ buyer: b, note: t.value, updated_at: new Date().toISOString() }]); noteMap[b] = t.value; cust._cache = null; if (st) { st.textContent = '✓ 保存しました'; st.style.color = '#1a7f37'; } }
+      try { await sbUpsert('customer_notes', [{ buyer: b, note: t.value, updated_at: new Date().toISOString() }]); noteMap[b] = t.value;
+        { const c0 = cust._cache; if (c0 && Array.isArray(c0.notes)) { const f = c0.notes.find(n => n.buyer === b); if (f) f.note = t.value; else c0.notes.push({ buyer: b, note: t.value }); } }   // キャッシュは捨てずに書き換える
+        if (st) { st.textContent = '✓ 保存しました'; st.style.color = '#1a7f37'; } }
       catch (e) { if (st) { st.textContent = '保存エラー: ' + (e.message || e); st.style.color = '#d93025'; } }
     });
-    body.innerHTML =
+    body.innerHTML = fxStaleBanner()   /* ★レビュー#2：日次レートが読めていない＝古い既定値で換算中、を必ず出す */
+      + (notesOk ? '' : '<div style="background:#fff3f0;border:1px solid #ffc4b3;color:#b5341a;border-radius:8px;padding:8px 12px;margin:0 0 10px;font-size:12.5px">⚠️ <b>メモを読めませんでした。</b>📝の印は出ていません。メモ欄は上書きを防ぐため入力できなくしています（画面を開き直すと読み直します）。</div>') +
       `<div class="tool-card" style="margin:0 0 10px;max-width:none"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <span style="font-weight:700">国:</span>
         <select id="cust-cc" style="padding:5px;font-size:13px"><option value="">すべて</option>${ccOpts}</select>
         <label style="font-size:12px;cursor:pointer"><input type="checkbox" id="cust-rep" ${cust.repeatOnly ? 'checked' : ''}> リピーターのみ</label>
-        <label style="font-size:12px;cursor:pointer" title="キャンセルになった注文を購入回数に含めるか"><input type="checkbox" id="cust-cancel" ${cust.inclCancel ? 'checked' : ''}> キャンセルも含める</label>
-        <span class="smd-dim" style="font-size:12px">${list.length}人（リピーター ${repeat}人）・${totalOrders}注文${cust.inclCancel ? '（キャンセル込み）' : '（キャンセル除く）'}${list.length > 500 ? '　※画面は上位500人まで表示（CSVは全件）' : ''}</span>
+        <label style="font-size:12px;cursor:pointer" title="キャンセル・未払いの注文を購入回数に含めるか（金額には入れません）"><input type="checkbox" id="cust-cancel" ${cust.inclCancel ? 'checked' : ''}> キャンセル・未払いも含める</label>
+        <span class="smd-dim" style="font-size:12px">${list.length}人（リピーター ${repeat}人）・${totalOrders}注文${cust.inclCancel ? '（キャンセル・未払い込み）' : '（キャンセル・未払い除く）'}${list.length > 500 ? '　※画面は上位500人まで表示（CSVは全件）' : ''}</span>${noName ? `<span style="font-size:12px;color:#e8770a" title="名前が空の注文は同じ人とは限らないので、1人にまとめていません">※バイヤー名が空の注文 ${noName}件は一覧に入れていません</span>` : ''}
         <button class="smd-btn" id="cust-csv" style="font-size:11px;margin-left:auto" title="この顧客一覧をCSVで書き出し">⬇ CSV</button></div>
         <div class="smd-dim" style="font-size:11px;margin-top:5px">💡 行をクリックすると<b>購入履歴（商品画像・金額・数量）</b>と<b>メモ</b>がその場で開きます。📝＝メモあり。<b>合計購入額は円換算の合計</b>（下に国ごとの現地通貨）＝国をまたいでも大小を比べられます。</div></div>` +
       `<div class="tool-card" style="margin:0;max-width:860px"><div class="pf-scroll"><table class="pf-table"><tr><th></th><th>バイヤー</th><th>購入回数</th><th>合計購入額</th><th>国</th><th>初回購入</th><th>最終購入</th></tr>` +
@@ -16047,7 +16117,7 @@
   try { Object.assign(TA, JSON.parse(localStorage.getItem('smdTrafficAna') || '{}')); } catch (_) {}
   /* ★2026-10-20 レビュー：選択の控え TA._sel（Set）が保存のたびに {} で書かれ、開き直すと .has が無くて枠空け候補の表が「読み込み中…」のまま止まっていた → 保存しない・読み戻した物は捨てる */
   if (!(TA._sel instanceof Set)) TA._sel = new Set(); delete TA._statAt;
-  const taSave = () => { try { const o = Object.assign({}, TA); delete o._charts; delete o._d; delete o._prod; delete o._sel; delete o._statAt; localStorage.setItem('smdTrafficAna', JSON.stringify(o)); } catch (_) {} };
+  const taSave = () => { try { const o = Object.assign({}, TA); delete o._charts; delete o._d; delete o._prod; delete o._sel; delete o._statAt; delete o._deltaErr; delete o._restatMsg; delete o._prodSeq; delete o._unlistBad; localStorage.setItem('smdTrafficAna', JSON.stringify(o)); } catch (_) {} };
   const TA_METRICS = [
     ['uv', '訪問者', 'sum'], ['pv', 'ページビュー', 'sum'], ['nv', '新規の訪問者', 'sum'], ['ev', '既存の訪問者', 'sum'], ['nf', 'フォロワー増', 'sum'],
     ['ord', '注文数', 'sum'], ['gmv', '売上（円）', 'sum'], ['cvr', '注文率（注文÷訪問者）', 'ratio'], ['ppv', '1訪問あたりのページ数', 'ratio'],
@@ -16081,7 +16151,7 @@
     (ords || []).forEach(o => { if (o.tab === 600 || !o.order_date) return; const y = String(o.order_date).slice(0, 10); const rg = regionByCc(o.cc); const rate = (typeof fxRate === 'function' ? fxRate(o.cc, y) : 0) || (rg ? rg.rateJpy : 0);
       const amt = Number(o.total) > 0 ? Number(o.total) : (paid.get(o.cc + ':' + o.sn) || 0); const c = (O[o.cc] = O[o.cc] || {}); const d = (c[y] = c[y] || { ord: 0, gmv: 0 }); d.ord++; d.gmv += amt * rate;
       if (o.shop_id) { shopCc[String(o.shop_id)] = o.cc; const cs = (O['S:' + o.shop_id] = O['S:' + o.shop_id] || {}); const ds = (cs[y] = cs[y] || { ord: 0, gmv: 0 }); ds.ord++; ds.gmv += amt * rate; } });
-    TA._d = { kv, O, shopCc, ordOk: ords !== null };
+    TA._d = { kv, O, shopCc, ordOk: ords !== null, incOk: inc !== null };   /* ★2026-10-24 全体レビュー #7：入金が読めない時は帯を出す */
   }
   // 国×日の生の値 → 期間・粒度でまとめる。比率の指標は分子・分母を足してから割る
   function taAgg(cc, days, gran) {
@@ -16110,6 +16180,7 @@
   function taTotal(ccs, days, m) { const a = { uv: 0, pv: 0, nv: 0, ev: 0, nf: 0, ord: 0, gmv: 0, st: 0, bo: 0, has: 0 }; ccs.forEach(cc => { taAgg(cc, days, 'month').forEach(x => { Object.keys(a).forEach(k => { a[k] += x[k] || 0; }); }); }); a.has = a.has ? 1 : 0; return taVal(a, m); }
   async function renderTrafficAna(kv) {
     const box = document.getElementById('traffic-ana'); if (!box) return;
+    if (TA._d && kv) TA._d.kv = kv;   /* ★2026-10-24 全体レビュー #5：グラフ・数字の欄は最初に開いた時の traffic_daily のまま＝下の14日の表と食い違っていた → 毎回いまの kv に差し替える */
     const allCc = (typeof REGIONS !== 'undefined' ? REGIONS.map(r => r.cc) : ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW']);
     const ccCol = (cc) => (regionByCc(cc) || {}).color || '#888';
     if (!TA.ccs || !TA.ccs.length) TA.ccs = allCc.slice();
@@ -16135,7 +16206,7 @@
       const dl = (cur != null && pv != null && pv !== 0 && prevOk) ? ((cur - pv) / Math.abs(pv) * 100) : null;
       return `<div style="border:1px solid #e3e8ef;border-radius:8px;padding:6px 10px;min-width:118px"><div class="smd-dim" style="font-size:10.5px">${lb}</div><div style="font-size:17px;font-weight:700">${taFmt(m, cur)}</div><div style="font-size:10.5px;color:${dl == null ? '#9aa4b0' : (dl >= 0 ? '#1a7f37' : '#c0392b')}" title="${av('前の同じ長さの期間（' + prev[0] + '〜' + prev[prev.length - 1] + '）と比べて')}">${dl == null ? (prevOk ? '前の期間 —' : '前の期間のデータなし') : ((dl >= 0 ? '▲' : '▼') + Math.abs(dl).toFixed(1) + '%')}</div></div>`;
     }).join('');
-    box.innerHTML = `${TA._d && TA._d.ordOk === false ? '<div style="background:#fff4e5;border:1px solid #ffd699;color:#b26a00;border-radius:8px;padding:6px 10px;margin:0 0 8px;font-size:12px;font-weight:700">⚠ 注文を読み込めませんでした。下の注文数・売上・注文率は0ではなく「まだ取れていない」状態です（🔄で読み直してください）</div>' : ''}<div class="tool-card" style="max-width:none;margin:0 0 12px">
+    box.innerHTML = `${TA._d && TA._d.ordOk === false ? '<div style="background:#fff4e5;border:1px solid #ffd699;color:#b26a00;border-radius:8px;padding:6px 10px;margin:0 0 8px;font-size:12px;font-weight:700">⚠ 注文を読み込めませんでした。下の注文数・売上・注文率は0ではなく「まだ取れていない」状態です（🔄で読み直してください）</div>' : ''}${TA._d && TA._d.ordOk !== false && TA._d.incOk === false ? '<div style="background:#fff4e5;border:1px solid #ffd699;color:#b26a00;border-radius:8px;padding:6px 10px;margin:0 0 8px;font-size:12px;font-weight:700">⚠ 入金を読み込めませんでした。注文の金額が空の注文は0円で数えています＝売上・客単価は低く出ます（🔄で読み直してください）</div>' : ''}<div class="tool-card" style="max-width:none;margin:0 0 12px">
       <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">
         <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:12px;min-width:44px">期間</b>${TA_PERIODS.map(([d, l]) => chip('period', d, l, TA.period === d)).join('')}
           <span class="smd-dim" style="font-size:11px;margin-left:6px" title="Shopee のアクセスは1日ごとの合計しか取れないので、1時間ごとは出せません">点の区切り：${TA.gran === 'day' ? '1日ごと' : TA.gran === 'week' ? '1週ごと' : '1か月ごと'}（期間で自動）</span></div>
@@ -16249,7 +16320,8 @@
     document.getElementById('ta-cc').innerHTML = `<table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr>${['国'].concat(cols.map(c => c[1])).map(h => `<th style="text-align:right;padding:3px 6px;border-bottom:1px solid #e3e6ea;white-space:nowrap">${h}</th>`).join('')}</tr>${rowsCc.map(r => `<tr><td style="padding:3px 6px;white-space:nowrap"><b style="color:${entCol(r.cc)}">${esc(entLabel(r.cc))}</b></td>${r.v.map((v, i) => `<td style="text-align:right;padding:3px 6px;white-space:nowrap">${taFmt(cols[i][0], v)}</td>`).join('')}</tr>`).join('')}</table>`;
     // 📅 曜日ごとの平均
     const wdN = [0, 0, 0, 0, 0, 0, 0], wdS = [0, 0, 0, 0, 0, 0, 0];
-    days.forEach(y => { const wd = (new Date(y + 'T00:00:00Z').getUTCDay() + 6) % 7; let s = 0, any = false; ents.forEach(cc => { const v = taVal(taAgg(cc, [y], 'day').get(y), m); if (v != null) { s += v; any = true; } }); if (any) { wdS[wd] += (sumLike ? s : s / ents.length); wdN[wd]++; } });
+    /* ★2026-10-24 全体レビュー #9：率・平均（直帰率・注文率・客単価・滞在）を国の数で割っていた＝取り込みが抜けた国も分母・TW と BR が同じ重さ → 上の数字の欄（taTotal）と同じく、国をまたいで足してから割る */
+    days.forEach(y => { const wd = (new Date(y + 'T00:00:00Z').getUTCDay() + 6) % 7; const a = { uv: 0, pv: 0, nv: 0, ev: 0, nf: 0, ord: 0, gmv: 0, st: 0, bo: 0, has: 0 }; ents.forEach(cc => { const x = taAgg(cc, [y], 'day').get(y); if (x) Object.keys(a).forEach(k => { a[k] += x[k] || 0; }); }); a.has = a.has ? 1 : 0; const v = taVal(a, m); if (v != null) { wdS[wd] += v; wdN[wd]++; } });
     TA._charts.push(new Chart(document.getElementById('ta-wd'), { type: 'bar', data: { labels: ['月', '火', '水', '木', '金', '土', '日'], datasets: [{ label: mi[1] + '（平均）', data: wdS.map((s, i) => wdN[i] ? s / wdN[i] : null), backgroundColor: '#7b61ff' }] }, options: Object.assign({}, baseOpt, { plugins: Object.assign({}, baseOpt.plugins, { legend: { display: false } }) }) }));
     // 🆕 新規と既存
     const nvB = buckets.map(b => { let n = 0, e = 0; ents.forEach(cc => { const a = taAgg(cc, days, TA.gran).get(b); if (a && a.has) { n += a.nv; e += a.ev; } }); return [n, e]; });
@@ -16262,23 +16334,29 @@
       host.innerHTML = '<div class="smd-dim">商品ごとの数字を読み込み中…</div>';
       try {
         const key = settings.sbKey || settings.sbSecret;
+        /* ★2026-10-24 全体レビュー #4：読み始めに番号を振り、古い番号の結果は捨てる（期間を続けて押した時に古い期間の数字が後から上書きしていた）。期間はループの前に1回だけ取る */
+        const _seq = TA._prodSeq = (TA._prodSeq || 0) + 1, _per = TA.period; let _dErr = '';
         const [cur, li, statAt, delta] = await Promise.all([
           sbGetAll('app_kv', 'select=v&k=like.listing_stats_*'),
           sbGetAll('listings', 'select=cc,item_id,shop_id,name,image,status,create_time'),   /* ★2026-10-19 枠空け候補の判定に 公開状態と出品日 */
           sbGetAll('app_kv', 'select=k,updated_at&k=like.listing_stats_*').catch(() => []),
-          (async () => { const all = []; for (let off = 0; off < 60000; off += 1000) { const r = await fetch(`${SB_URL}/rest/v1/rpc/listing_stats_delta?limit=1000&offset=${off}&order=item_id.asc`, { method: 'POST', headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify({ days: TA.period }) }); if (!r.ok) break; const part = await r.json(); all.push(...part); if (part.length < 1000) break; } return all; })(),
+          /* ★2026-10-24 全体レビュー #3：途中で失敗すると黙って打ち切り、後ろの品が全部「伸び無し」＝売れた品も👀に入っていた → 出品管理（rxLoadDelta）と同じく書き込み用の鍵で1回だけ読み直し、駄目なら全部捨てて画面に出す */
+          (async () => { const all = []; for (let off = 0; off < 60000; off += 1000) { const hit = k => fetch(`${SB_URL}/rest/v1/rpc/listing_stats_delta?limit=1000&offset=${off}&order=item_id.asc`, { method: 'POST', headers: { apikey: k, Authorization: 'Bearer ' + k, 'Content-Type': 'application/json' }, body: JSON.stringify({ days: _per }) }); let r = await hit(key); if (!r.ok && settings.sbSecret && key !== settings.sbSecret) r = await hit(settings.sbSecret); if (!r.ok) throw new Error('HTTP ' + r.status); const part = await r.json(); all.push(...part); if (part.length < 1000) break; } return all; })().catch(e => { _dErr = '期間の伸び（いいね・販売の＋期間）を読めませんでした（' + String((e && e.message) || e).slice(0, 60) + '）'; return null; }),
         ]);
+        if (_seq !== TA._prodSeq) return;   // もっと新しい読み込みが走っている＝そちらが描く
+        TA._deltaErr = _dErr;
         const st = {}; (cur || []).forEach(r => Object.assign(st, (r.v && r.v.items) || {}));
         const dm = {}; (delta || []).forEach(r => { dm[r.item_id] = r; });
         TA._prod = (li || []).map(l => { const s = st[l.item_id] || {}, d = dm[l.item_id] || {}; return { cc: l.cc, shop: String(l.shop_id || ''), id: String(l.item_id), name: String(l.name || ''), img: l.image || '', hw: (typeof hwOf === 'function' ? hwOf(l.name) : '') || '', views: s.views != null ? +s.views : null, likes: s.likes != null ? +s.likes : null, sale: s.sale != null ? +s.sale : null, dLikes: d.d_likes != null ? +d.d_likes : null, dSale: d.d_sale != null ? +d.d_sale : null, status: String(l.status == null ? '' : l.status), ct: Number(l.create_time) || 0 }; });
         TA._statAt = {}; (statAt || []).forEach(r => { const m = String(r.k || '').match(/^listing_stats_(\d+)$/); if (m) TA._statAt[m[1]] = String(r.updated_at || '').slice(0, 10); });
-        if (!TA._sel) TA._sel = new Set();
+        TA._sel = new Set();   /* ★2026-10-24 全体レビュー #2：統計・期間を読み直したら選び直す（前の統計で選んだ品を、新しい統計で条件から外れても下げていた） */
       } catch (e) { host.innerHTML = '<div style="color:#d93025">⚠ 読めませんでした（' + esc(e.message) + '）</div>'; return; }
     }
+    if (!TA._sel) TA._sel = new Set();
     const hws = [...new Set(TA._prod.map(p => p.hw).filter(Boolean))].sort();
     const q = (TA.pQ || '').toLowerCase();
     let L = TA._prod.filter(p => (!TA.pCc || p.cc === TA.pCc) && (!TA.pShop || p.shop === TA.pShop) && (!TA.pHw || p.hw === TA.pHw) && (!q || p.name.toLowerCase().indexOf(q) >= 0));
-    if (TA.pZero) L = L.filter(p => (p.views || 0) >= 20 && !(p.dSale > 0));
+    if (TA.pZero && !TA._deltaErr) L = L.filter(p => (p.views || 0) >= 20 && !(p.dSale > 0));
     /* ★2026-10-19 本人「出品開始日が古く、いいねも閲覧数もついていなく、1回も売れていないカタログが優先」＝出品枠がいっぱいの国で、非公開にして枠を空ける候補。
        条件＝公開中・生涯売上0・閲覧0・いいね0・出品から30日超（出したばかりの閲覧0は除く）。古い順に並べる。Excel 非公開候補_PH_SG_TH_TW_20261019 と同じ条件 */
     const _freeOk = (p) => String(p.status) === '1' && p.sale === 0 && p.views === 0 && p.likes === 0 && p.ct > 0   /* ★10/20 全体レビュー：統計が無い（null）のを0扱いして候補に入れていた＝売れているカタログを下げるおそれ */ && (Date.now() / 1000 - p.ct) > 30 * 86400;
@@ -16294,6 +16372,8 @@
     const hwJa = (h) => (typeof TITLE_HW_JA !== 'undefined' && TITLE_HW_JA[h]) || h;
     const row = (title, html) => `<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:11.5px;min-width:64px">${title}</b>${html}</div>`;
     const th = (k, label, align) => { const on = TA.pSort === k; return `<th class="ta-sort" data-k="${k}" title="押すと並べ替え（もう一度押すと逆順）" style="cursor:pointer;user-select:none;text-align:${align || 'right'};padding:3px 6px;border-bottom:1px solid #e3e6ea;white-space:nowrap;${on ? 'color:#5b3fd6' : ''}">${label}${on ? (TA.pDir === 'asc' ? ' ▲' : ' ▼') : ' <span style="color:#c5c9d0">⇅</span>'}</th>`; };
+    const _shownP = L.slice(0, TA.pFree ? 600 : 100);   /* ★2026-10-24 全体レビュー #2：表に出ている品。下げる対象・ボタンの件数はここから数える */
+    const _selN = () => _shownP.filter(p => TA._sel.has(String(p.id))).length;
     host.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px">
       ${row('国', pchip('pCc', '', 'すべて', !TA.pCc) + (REGIONS || []).map(r => pchip('pCc', r.cc, r.cc, TA.pCc === r.cc)).join(''))}
       ${row('アカウント', pchip('pShop', '', 'すべて', !TA.pShop) + shopIdsP.map(id => pchip('pShop', id, shopLb(id), TA.pShop === id)).join(''))}
@@ -16306,13 +16386,14 @@
         <b style="font-size:11.5px">🧹 枠空け</b>
         <button class="smd-btn" id="ta-selall" style="font-size:11px;padding:2px 8px">表示中を全部選ぶ</button>
         <button class="smd-btn" id="ta-selnone" style="font-size:11px;padding:2px 8px">選択を外す</button>
-        <button class="smd-btn" id="ta-unlist" style="font-size:11px;padding:2px 10px;background:#d93025;color:#fff;border-color:#d93025">選んだ ${TA._sel ? TA._sel.size : 0} 件を非公開にする（戻せます）</button>
+        <button class="smd-btn" id="ta-unlist" style="font-size:11px;padding:2px 10px;background:#d93025;color:#fff;border-color:#d93025">選んだ ${_selN()} 件を非公開にする（戻せます）</button>
         <button class="smd-btn" id="ta-restats" style="font-size:11px;padding:2px 8px">📊 統計を取り直す（表示中の国・約1分）</button>
         <span class="smd-dim" style="font-size:10.5px">統計の日付：${(() => { const ds = [...new Set(L.map(p => (TA._statAt || {})[p.shop] || '不明'))].sort(); return esc(ds.join('・') || '—'); })()}　※非公開＝消さない。売上・いいねの資産は残り、戻せます</span>
-        ${TA._unlistMsg ? `<div style="width:100%;font-size:11px;color:#1a7f37">${esc(TA._unlistMsg)}</div>` : ''}
+        ${TA._unlistMsg ? `<div style="width:100%;font-size:11px;color:${TA._unlistBad ? '#c0392b' : '#1a7f37'}">${esc(TA._unlistMsg)}</div>` : ''}
+        ${TA._restatMsg ? `<div style="width:100%;font-size:11px;color:${/^⚠/.test(TA._restatMsg) ? '#c0392b' : '#1a7f37'}">${esc(TA._restatMsg)}</div>` : ''}
       </div>` : ''}</div>
-      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr>${TA.pFree ? '<th style="border-bottom:1px solid #e3e6ea">☑</th>' : ''}<th style="border-bottom:1px solid #e3e6ea"></th>${th('cc', '国', 'left')}${th('name', '商品', 'left')}${th('hw', '機種')}${TA.pFree ? th('ct', '出品日') : ''}${th('views', '閲覧')}${th('likes', 'いいね')}${th('dLikes', '＋期間')}${th('sale', '販売')}${th('dSale', '＋期間')}${th('rate', '閲覧→販売')}</tr>
-      ${L.slice(0, TA.pFree ? 600 : 100).map(p => `<tr>${TA.pFree ? `<td style="padding:2px 4px"><input type="checkbox" class="ta-sel" data-id="${esc(p.id)}" ${TA._sel && TA._sel.has(p.id) ? 'checked' : ''}></td>` : ''}<td style="padding:2px 4px">${p.img ? `<img src="${esc(/^https?:/.test(p.img) ? p.img : 'https://down-cvs-sg.img.susercontent.com/' + p.img)}" loading="lazy" style="width:34px;height:34px;object-fit:cover;border-radius:4px">` : ''}</td><td style="padding:2px 6px"><b style="color:${(regionByCc(p.cc) || {}).color || '#888'}">${p.cc}</b></td><td style="padding:2px 6px;max-width:420px">${esc(p.name)}</td><td style="padding:2px 6px;text-align:right;white-space:nowrap">${esc(hwJa(p.hw))}</td>${TA.pFree ? `<td style="text-align:right;padding:2px 6px;white-space:nowrap">${p.ct ? new Date(p.ct * 1000).toISOString().slice(0, 10) : '—'}<span class="smd-dim"> ${p.ct ? Math.floor((Date.now() / 1000 - p.ct) / 86400) + '日' : ''}</span></td>` : ''}<td style="text-align:right;padding:2px 6px">${p.views == null ? '—' : p.views.toLocaleString()}</td><td style="text-align:right;padding:2px 6px">${p.likes == null ? '—' : p.likes.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;color:#1a7f37">${p.dLikes ? '+' + p.dLikes : ''}</td><td style="text-align:right;padding:2px 6px">${p.sale == null ? '—' : p.sale.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;color:#1a7f37">${p.dSale ? '+' + p.dSale : ''}</td><td style="text-align:right;padding:2px 6px">${p.views ? ((p.dSale || 0) / p.views * 100).toFixed(1) + '%' : '—'}</td></tr>`).join('')}</table></div>
+      ${TA._deltaErr ? `<div style="background:#fff4e5;border:1px solid #ffd699;color:#b26a00;border-radius:8px;padding:6px 10px;margin:0 0 6px;font-size:11.5px;font-weight:700">⚠ ${esc(TA._deltaErr)}。「＋期間」「閲覧→販売」は空欄、👀 の絞り込みは止めています（🔄で読み直してください）</div>` : ''}<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr>${TA.pFree ? '<th style="border-bottom:1px solid #e3e6ea">☑</th>' : ''}<th style="border-bottom:1px solid #e3e6ea"></th>${th('cc', '国', 'left')}${th('name', '商品', 'left')}${th('hw', '機種')}${TA.pFree ? th('ct', '出品日') : ''}${th('views', '閲覧')}${th('likes', 'いいね')}${th('dLikes', '＋期間')}${th('sale', '販売')}${th('dSale', '＋期間')}${th('rate', '閲覧→販売')}</tr>
+      ${_shownP.map(p => `<tr>${TA.pFree ? `<td style="padding:2px 4px"><input type="checkbox" class="ta-sel" data-id="${esc(p.id)}" ${TA._sel && TA._sel.has(p.id) ? 'checked' : ''}></td>` : ''}<td style="padding:2px 4px">${p.img ? `<img src="${esc(/^https?:/.test(p.img) ? p.img : 'https://down-cvs-sg.img.susercontent.com/' + p.img)}" loading="lazy" style="width:34px;height:34px;object-fit:cover;border-radius:4px">` : ''}</td><td style="padding:2px 6px"><b style="color:${(regionByCc(p.cc) || {}).color || '#888'}">${p.cc}</b></td><td style="padding:2px 6px;max-width:420px">${esc(p.name)}</td><td style="padding:2px 6px;text-align:right;white-space:nowrap">${esc(hwJa(p.hw))}</td>${TA.pFree ? `<td style="text-align:right;padding:2px 6px;white-space:nowrap">${p.ct ? new Date(p.ct * 1000).toISOString().slice(0, 10) : '—'}<span class="smd-dim"> ${p.ct ? Math.floor((Date.now() / 1000 - p.ct) / 86400) + '日' : ''}</span></td>` : ''}<td style="text-align:right;padding:2px 6px">${p.views == null ? '—' : p.views.toLocaleString()}</td><td style="text-align:right;padding:2px 6px">${p.likes == null ? '—' : p.likes.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;color:#1a7f37">${p.dLikes ? '+' + p.dLikes : ''}</td><td style="text-align:right;padding:2px 6px">${p.sale == null ? '—' : p.sale.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;color:#1a7f37">${p.dSale ? '+' + p.dSale : ''}</td><td style="text-align:right;padding:2px 6px">${p.views && !TA._deltaErr ? ((p.dSale || 0) / p.views * 100).toFixed(1) + '%' : '—'}</td></tr>`).join('')}</table></div>
       <div class="smd-dim" style="font-size:10.5px;margin-top:4px">${TA.pFree ? '古い順に最大600件。' : '上位100件。'}見出しを押すと並べ替え（もう一度押すと逆順）。クリック数（商品の表示→クリック）は Business Insights の商品ページにしか無く、まだ取り込んでいません。</div>`;
     host.querySelectorAll('.ta-pchip').forEach(b => b.addEventListener('click', () => {
       const g = b.dataset.g, v = b.dataset.v;
@@ -16320,27 +16401,34 @@
       taSave(); renderTrafficProd();
     }));
     /* ★2026-10-19 枠空け：選ぶ→非公開（公式API unlist_item・1件ずつ・戻せる）。押した瞬間にボタンの文字が進む。失敗は件数と理由を出す */
-    host.querySelectorAll('.ta-sel').forEach(cb => cb.addEventListener('change', () => { if (!TA._sel) TA._sel = new Set(); const id = cb.dataset.id; if (cb.checked) TA._sel.add(id); else TA._sel.delete(id); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = `選んだ ${TA._sel.size} 件を非公開にする（戻せます）`; }));
-    const _selAll = host.querySelector('#ta-selall'); if (_selAll) _selAll.addEventListener('click', () => { if (!TA._sel) TA._sel = new Set(); host.querySelectorAll('.ta-sel').forEach(cb => { cb.checked = true; TA._sel.add(cb.dataset.id); }); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = `選んだ ${TA._sel.size} 件を非公開にする（戻せます）`; });
+    host.querySelectorAll('.ta-sel').forEach(cb => cb.addEventListener('change', () => { if (!TA._sel) TA._sel = new Set(); const id = cb.dataset.id; if (cb.checked) TA._sel.add(id); else TA._sel.delete(id); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = `選んだ ${_selN()} 件を非公開にする（戻せます）`; }));
+    const _selAll = host.querySelector('#ta-selall'); if (_selAll) _selAll.addEventListener('click', () => { if (!TA._sel) TA._sel = new Set(); host.querySelectorAll('.ta-sel').forEach(cb => { cb.checked = true; TA._sel.add(cb.dataset.id); }); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = `選んだ ${_selN()} 件を非公開にする（戻せます）`; });
     const _selNone = host.querySelector('#ta-selnone'); if (_selNone) _selNone.addEventListener('click', () => { TA._sel = new Set(); host.querySelectorAll('.ta-sel').forEach(cb => { cb.checked = false; }); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = '選んだ 0 件を非公開にする（戻せます）'; });
     const _unl = host.querySelector('#ta-unlist'); if (_unl) _unl.addEventListener('click', async () => {
       if (!TA._sel || !TA._sel.size) { _unl.textContent = '先に候補を選んでください'; return; }
-      if (_unl.dataset.busy) return; _unl.dataset.busy = '1';
-      const rows = TA._prod.filter(p => TA._sel.has(String(p.id))); let ok = 0, ng = 0, dbNg = 0; const errs = [], _sfDone = [];
+      if (_unl.dataset.busy) return;
+      /* ★2026-10-24 全体レビュー #2：選んだ印は国の切り替え・統計の取り直しの後も残る＝見えていない品・条件から外れた品まで下げていた → 押した時点で表示中かつ条件に合うものだけ */
+      const rows = _shownP.filter(p => TA._sel.has(String(p.id)) && _freeOk(p)); const _skip = TA._sel.size - rows.length;
+      if (!rows.length) { TA._sel = new Set(); _unl.textContent = '選んだ品は今の表示に無いか、条件から外れました（選び直してください）'; return; }
+      _unl.dataset.busy = '1'; TA._sel = new Set(rows.map(p => String(p.id)));
+      let ok = 0, ng = 0, dbNg = 0; const errs = [], _sfDone = [];
       for (let i = 0; i < rows.length; i++) { const p = rows[i]; _unl.textContent = `非公開にしています ${i + 1}/${rows.length}（成功${ok}・失敗${ng}）`;
         try { await openapiUnlistItem(p.shop, p.id, true); p.status = '8'; ok++; TA._sel.delete(p.id); _sfDone.push(String(p.id)); try { await sbPatch('listings', 'cc=eq.' + encodeURIComponent(p.cc) + '&item_id=eq.' + encodeURIComponent(p.id), { status: 8 }); } catch (_) { dbNg++; } }
         catch (e) { ng++; errs.push(p.cc + ' ' + p.id + '：' + String((e && e.message) || e).slice(0, 80)); }
         await new Promise(r => setTimeout(r, 400)); }
       /* ★10/20 全体レビュー：枠空けで下げた印を共有の控えに残す＝🤖の巡回が入れ先にして公開し直さない（GAS SRC 1700 の slot_free_unlisted） */
-      if (_sfDone.length) { try { const cur = (await baKvGet('slot_free_unlisted')) || {}; cur.items = cur.items || {}; const nowIso = new Date().toISOString(); _sfDone.forEach(id => { cur.items[id] = nowIso; }); cur.at = nowIso; await sbUpsert('app_kv', [{ k: 'slot_free_unlisted', v: cur, updated_at: nowIso }]); } catch (eSf) { errs.push('枠空けの印を残せませんでした（🤖が公開し直すことがあります）: ' + String((eSf && eSf.message) || eSf).slice(0, 60)); } }
-      TA._unlistMsg = `非公開にしました：成功 ${ok} 件・失敗 ${ng} 件` + (dbNg ? `（控えの更新に失敗 ${dbNg} 件＝次の同期で直ります）` : '') + (errs.length ? '｜' + errs.slice(0, 5).join('／') : '');
+      if (_sfDone.length) { try { const _sfRaw = await baKvGetRaw('slot_free_unlisted'); /* ★2026-10-24 全体レビュー #1：読めない時（undefined）を {} で受けると、今回の分だけで上書きして 10/21 の189件などの印が消えていた（🤖・一括公開が公開し直す）→ 読めない時は書かない。まだ無い（null）だけ空から */ if (_sfRaw === undefined) throw new Error('今の印を読めませんでした（上書きしないで止めました）'); const cur = _sfRaw || {}; cur.items = cur.items || {}; const nowIso = new Date().toISOString(); _sfDone.forEach(id => { cur.items[id] = nowIso; }); cur.at = nowIso; await sbUpsert('app_kv', [{ k: 'slot_free_unlisted', v: cur, updated_at: nowIso }]); } catch (eSf) { errs.unshift('枠空けの印を残せませんでした（🤖が公開し直すことがあります）: ' + String((eSf && eSf.message) || eSf).slice(0, 60)); } }
+      TA._unlistMsg = `非公開にしました：成功 ${ok} 件・失敗 ${ng} 件` + (dbNg ? `（控えの更新に失敗 ${dbNg} 件＝次の同期で直ります）` : '') + (_skip > 0 ? `｜表示外・条件外の ${_skip} 件は下げませんでした` : '') + (errs.length ? '｜' + errs.slice(0, 5).join('／') : '');
+      TA._unlistBad = !!(ng || errs.length);
       try { if (typeof logActivity === 'function') logActivity('🧹 枠空け：' + ok + '件を非公開に（失敗' + ng + '）'); } catch (_) {}
       delete _unl.dataset.busy; renderTrafficProd();
     });
     const _rst = host.querySelector('#ta-restats'); if (_rst) _rst.addEventListener('click', async () => {
       if (_rst.dataset.busy) return; _rst.dataset.busy = '1';
-      const shops = [...new Set(L.map(p => p.shop).filter(Boolean))]; let done = 0;
-      for (const sid of shops) { _rst.textContent = `📊 取り直し中 ${done + 1}/${shops.length}`; try { await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + 'action=run_stats&shop_id=' + encodeURIComponent(sid) + '&token=' + encodeURIComponent(settings.writeToken || ''), 240000, true); } catch (e) { console.warn('[枠空け] 統計の取り直しに失敗', sid, e.message); } done++; }
+      const shops = [...new Set(L.map(p => p.shop).filter(Boolean))]; let done = 0; const _rf = [];
+      for (const sid of shops) { _rst.textContent = `📊 取り直し中 ${done + 1}/${shops.length}`; try { const _rs = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + 'action=run_stats&shop_id=' + encodeURIComponent(sid) + '&token=' + encodeURIComponent(settings.writeToken || ''), 240000, true); if (!_rs || _rs.ok === false) throw new Error((_rs && _rs.error) || '応答がありませんでした'); } catch (e) { _rf.push(shopLb(sid) + '：' + String((e && e.message) || e).slice(0, 60)); console.warn('[枠空け] 統計の取り直しに失敗', sid, e && e.message); } done++; }
+      /* ★2026-10-24 全体レビュー #11：失敗はコンソールだけ（GAS の ok:false も成功扱い）＝取り直せたと思って古い統計のまま下げていた → 失敗した店と理由を枠空けの欄に出す */
+      TA._restatMsg = _rf.length ? ('⚠ 統計を取り直せなかった店 ' + _rf.length + '/' + shops.length + '（この店の数字は古いままです）：' + _rf.join('／')) : ('📊 統計を取り直しました（' + shops.length + '店）');
       delete _rst.dataset.busy; TA._prod = null; renderTrafficProd();
     });
     host.querySelectorAll('.ta-sort').forEach(h => h.addEventListener('click', () => {
@@ -16364,16 +16452,22 @@
     }
     const days = []; const N = 14; const today = new Date(); for (let i = N; i >= 1; i--) { const d = new Date(today.getTime() - i * 86400000); days.push(d.toISOString().slice(0, 10)); }
     const fmt = (v) => (v == null ? '—' : Number(v).toLocaleString());
-    const cell = (o) => { if (!o) return '<td style="text-align:right;padding:3px 6px;color:#c5c9d0">—</td>'; return `<td style="text-align:right;padding:3px 6px;white-space:nowrap" title="${av('訪問者 ' + fmt(o.uv) + '（新規 ' + fmt(o.nv) + '／既存 ' + fmt(o.ev) + '）\nページビュー ' + fmt(o.pv) + '\n新しいフォロワー ' + fmt(o.nf) + '\n平均滞在 ' + fmt(o.stay) + '秒／直帰率 ' + (o.bounce != null ? Math.round(o.bounce * 100) + '%' : '—'))}"><b>${fmt(o.uv)}</b><span class="smd-dim" style="font-size:10px"> /${fmt(o.pv)}</span></td>`; };
+    const cell = (o) => { if (!o) return '<td style="text-align:right;padding:3px 6px;color:#c5c9d0">—</td>'; return `<td style="text-align:right;padding:3px 6px;white-space:nowrap" title="${av('訪問者 ' + fmt(o.uv) + '（新規 ' + fmt(o.nv) + '／既存 ' + fmt(o.ev) + '）\nページビュー ' + fmt(o.pv) + '\n新しいフォロワー ' + fmt(o.nf) + '\n平均滞在 ' + fmt(o.stay) + '秒／直帰率 ' + (o.bounce != null ? Math.round(o.bounce * 100) + '%' : '—') + (o.shops ? '\n' + o.shops + '店の合計' : ''))}"><b>${fmt(o.uv)}</b><span class="smd-dim" style="font-size:10px"> /${fmt(o.pv)}</span></td>`; };
     const upd = kv.upd || {};
     const rows = ccs.map(cc => { const m = kv[cc] || {}; const keys = Object.keys(m).sort(); const last30 = keys.slice(-30); const sum = (f) => last30.reduce((a, k) => a + (Number((m[k] || {})[f]) || 0), 0); const u = upd[cc] ? new Date(upd[cc]) : null; const stale = u ? (Date.now() - u.getTime() > 2 * 86400000) : true;
-      return `<tr><td style="padding:3px 6px;white-space:nowrap"><b style="color:${ccCol(cc)}">${esc(cc)}</b> <span class="smd-dim" style="font-size:10px;${stale ? 'color:#c0392b' : ''}" title="最後に届いた日時">${u ? esc(u.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })) : '未取込'}${stale ? ' ⚠' : ''}</span></td>${days.map(d => cell(m[d])).join('')}<td style="text-align:right;padding:3px 6px;font-weight:700;white-space:nowrap" title="直近30日の合計（訪問者 / ページビュー）">${fmt(sum('uv'))}<span class="smd-dim" style="font-size:10px"> /${fmt(sum('pv'))}</span></td><td style="text-align:right;padding:3px 6px;white-space:nowrap" title="直近30日の新しいフォロワー">${fmt(sum('nf'))}</td></tr>`; }).join('');
+      /* ★2026-10-24 全体レビュー #6：国の数字は店の合計で、最終取込はどれか1店が送れば更新＝2店舗目のタブが閉じても⚠が出なかった（9/25〜10/11 の16日）
+         → 店ごとの最後の到着（byShop[id].at）を見る。2日超〜30日以内に止まった店があれば「⚠n店」。30日より前に止まった店（出品0の店など）は数えず、title にだけ出す */
+      const _jst = (t) => new Date(t).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      const _bs = Object.keys(kv.byShop || {}).map(id => Object.assign({ id }, kv.byShop[id] || {})).filter(x => x.cc === cc && x.at);
+      const _ag = (x) => Date.now() - new Date(x.at).getTime(); const _bsStale = _bs.filter(x => _ag(x) > 2 * 86400000 && _ag(x) <= 30 * 86400000);
+      const _tip = '最後に届いた日時' + _bs.map(x => '\n' + (x.name || ('店 ' + x.id)) + '：' + _jst(x.at) + (_ag(x) > 2 * 86400000 ? ' ⚠' : '')).join('');
+      return `<tr><td style="padding:3px 6px;white-space:nowrap"><b style="color:${ccCol(cc)}">${esc(cc)}</b> <span class="smd-dim" style="font-size:10px;${stale || _bsStale.length ? 'color:#c0392b' : ''}" title="${av(_tip)}">${u ? esc(u.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })) : '未取込'}${stale ? ' ⚠' : (_bsStale.length ? ' ⚠' + _bsStale.length + '店' : '')}</span></td>${days.map(d => cell(m[d])).join('')}<td style="text-align:right;padding:3px 6px;font-weight:700;white-space:nowrap" title="直近30日の合計（訪問者 / ページビュー）">${fmt(sum('uv'))}<span class="smd-dim" style="font-size:10px"> /${fmt(sum('pv'))}</span></td><td style="text-align:right;padding:3px 6px;white-space:nowrap" title="直近30日の新しいフォロワー">${fmt(sum('nf'))}</td></tr>`; }).join('');
     const tot = {}; days.forEach(d => { tot[d] = { uv: 0, pv: 0, n: 0 }; ccs.forEach(cc => { const o = (kv[cc] || {})[d]; if (o) { tot[d].uv += Number(o.uv) || 0; tot[d].pv += Number(o.pv) || 0; tot[d].n++; } }); });
     const foot = `<tr style="border-top:2px solid #d9d0ee;background:#faf7ff"><td style="padding:3px 6px"><b>合計</b></td>${days.map(d => tot[d].n ? `<td style="text-align:right;padding:3px 6px;font-weight:700;white-space:nowrap">${fmt(tot[d].uv)}<span class="smd-dim" style="font-size:10px"> /${fmt(tot[d].pv)}</span></td>` : '<td style="text-align:right;padding:3px 6px;color:#c5c9d0">—</td>').join('')}<td></td><td></td></tr>`;
     host.innerHTML = `<div id="traffic-exp"></div><div id="traffic-ana"></div><div class="tool-card" style="max-width:none;margin:0">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px"><b>訪問者 <span class="smd-dim" style="font-weight:400">/ページビュー</span>（直近14日・国ごと・現地日付）</b><span class="smd-dim" style="font-size:11px">マスにカーソルを当てると 新規/既存・フォロワー・滞在・直帰率</span><button class="smd-btn" id="traffic-reload" style="margin-left:auto;font-size:11px">🔄 読み直す</button></div>
       <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;min-width:900px"><thead><tr style="border-bottom:1px solid #e3e6ea"><th style="text-align:left;padding:3px 6px">国 <span class="smd-dim" style="font-weight:400;font-size:10px">最終取込</span></th>${days.map(d => `<th style="text-align:right;padding:3px 6px;white-space:nowrap">${esc(d.slice(5).replace('-', '/'))}</th>`).join('')}<th style="text-align:right;padding:3px 6px">30日計</th><th style="text-align:right;padding:3px 6px" title="新しいフォロワー（30日）">＋フォロワー</th></tr></thead><tbody>${rows}${foot}</tbody></table></div>
-      <div class="smd-dim" style="font-size:10.5px;margin-top:6px">前日分は Shopee 側で 10:00 に確定し、各国のタブが 11:05（現地）に読み直して送ります。⚠＝2日以上届いていない国（そのタブが閉じているか、ログアウトしています）。</div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:6px">前日分は Shopee 側で 10:00 に確定し、各国のタブが 11:05（現地）に読み直して送ります。⚠＝2日以上届いていない国（そのタブが閉じているか、ログアウトしています）。<span>「⚠1店」＝その国の店のうち2日以上届いていない店がある（国の数字はその店の分が抜けて少なく出ます）。</span></div>
     </div>`;
     const rb = host.querySelector('#traffic-reload'); if (rb) rb.addEventListener('click', () => { TA._d = null; TA._prod = null; renderTraffic(); });
     try { renderTrafficAna(kv); } catch (e) { console.warn('[アクセス分析]', e); }
@@ -19083,6 +19177,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try {
       tasks = await sbGet('tasks', 'select=*&order=done.asc,priority.desc,sort.asc,created_at.asc');
     } catch (e) {
+      /* ★2026-10-24 レビュー #8：表はもうあるのに、通信の失敗でも SQL の実行を案内していた */
+      if (!/HTTP 404\b|does not exist|42P01|PGRST20/i.test(String((e && e.message) || e))) {
+        body.innerHTML = errBox(e) + '<div style="margin-top:8px"><button id="tsk-retry" class="smd-btn">🔄 読み直す</button></div>';
+        const rt0 = document.getElementById('tsk-retry'); if (rt0) rt0.addEventListener('click', () => { rt0.disabled = true; rt0.textContent = '⏳ 読み直し中'; renderTasks(); });
+        return;
+      }
       body.innerHTML = `<div class="tool-card" style="max-width:720px"><h3>⚠️ tasksテーブルが未作成です</h3>
         <div class="smd-dim" style="font-size:12px;margin-bottom:8px">下のSQLを Supabase の SQL Editor に貼って一度だけ実行してください（1回だけ）。作成後にこのページを再読み込みすると使えます。</div>
         <textarea readonly style="width:100%;height:180px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #ccc;border-radius:6px" onclick="this.select()">${esc(TASKS_SQL)}</textarea>
@@ -19143,8 +19243,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         try { await sbPatch('tasks', 'id=eq.' + id, { done: e.target.checked, done_at: e.target.checked ? new Date().toISOString() : null }); renderTasks(); }
         catch (err) { alert(err.message); }
       });
-      r.querySelector('.tsk-del').addEventListener('click', async () => {
-        try { await sbDelete('tasks', 'id=eq.' + id); r.remove(); } catch (err) { alert(err.message); }
+      r.querySelector('.tsk-del').addEventListener('click', async () => {   // ★2026-10-24 レビュー #9：📅今日タブと同じく消してから取り消せる
+        const bak = tasks.find(x => String(x.id) === String(id)) || null;
+        const delBtn = r.querySelector('.tsk-del'); r.style.opacity = '.4'; if (delBtn) delBtn.disabled = true;   // 押した瞬間に薄く
+        try {
+          await sbDelete('tasks', 'id=eq.' + id); r.remove();
+          toastUndo('🗑 消しました：' + ((bak && bak.title) || 'タスク'), async () => {
+            if (!bak) { alert('戻す用の記録がありません（戻せません）'); return; }
+            const row2 = Object.assign({}, bak); delete row2.id;   // id は DB 採番（generated always）に任せる
+            try { await sbUpsert('tasks', [row2]); renderTasks(); } catch (e) { alert('戻せませんでした: ' + ((e && e.message) || e)); }
+          });
+        } catch (err) { r.style.opacity = ''; if (delBtn) delBtn.disabled = false; alert(err.message); }
       });
       r.querySelector('.tsk-prio').addEventListener('click', async e => {
         const next = { '中': 2, '高': 0, '低': 1 }[e.target.textContent] ?? 1; // 中→高→低→中で循環
@@ -19167,14 +19276,35 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ★赤い数字は【急ぎ】だけ（2026-09-19 デザインの見直し）。以前は片付けもの（入庫待ち長期・確証未取得など）まで足した 471 が赤で出ていて、
   //   数が大きすぎて警告として働いていなかった。急ぎ＝発送期日／ELIの提出期限／転記が止まっている国／🤖自動ブレーキ。
   //   急ぎが0の時は、残りの件数を灰色で小さく出す（0件と区別するため）。内訳は吹き出し。
-  function updateAlertBadge(n, urgent, tip) {
+  function updateAlertBadge(n, urgent, tip, unk) {
     const b = document.getElementById('alert-badge');
     if (!b) return;
     const u = urgent == null ? n : urgent;
-    if (u > 0) { b.textContent = u; b.style.display = ''; b.style.background = '#d93025'; b.style.color = '#fff'; }
+    /* ★2026-10-24 全体レビュー（やること #1）：記録（app_kv）を読めなかった時は「?」を付ける。
+       0件と見分けがつかないと、急ぎ（ELI・転記停止・🤖ブレーキ）が赤い数字から黙って消える */
+    if (u > 0) { b.textContent = u + (unk ? '?' : ''); b.style.display = ''; b.style.background = '#d93025'; b.style.color = '#fff'; }
+    else if (unk) { b.textContent = (n > 0 ? n : '') + '?'; b.style.display = ''; b.style.background = '#f9ab00'; b.style.color = '#fff'; }
     else if (n > 0) { b.textContent = n; b.style.display = ''; b.style.background = '#e8eaed'; b.style.color = '#5f6368'; }
     else { b.style.display = 'none'; }
     b.title = tip || '';
+  }
+  /* ★2026-10-24 全体レビュー（やること #2〜#5）：発送期日の判定を1か所に。
+     ・期限は ordShipDeadline に cc を渡す（日曜の繰り上げを現地の曜日で見る＝📦注文管理と同じ。渡さないと日本時間の曜日で見て BR 等で1日遅れていた）
+     ・超過／今日は 📦注文管理の🚨遅延中と同じ「現地の期日の日付 vs 日本時間の今日」（dueBucketOf_）。時刻の24時間では数えない（日単位と時刻基準を混ぜない）
+     ・赤い件数は10分ごとに、もう読んである注文（renderAlerts._cache）だけで今の日付でやり直す。Supabase は読まない・書かない＝担当PCに絞らない */
+  function alertSelfTransit_(o) { return !!(state.orders && state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)); }
+  function alertDeadline_(o) { return o && o.ship_by ? ordShipDeadline({ shipBy: o.ship_by, cc: o.cc }) : 0; }
+  function alertShipLv_(o) { const dl = alertDeadline_(o); if (!dl) return 0; const bk = dueBucketOf_(dl, o.cc); return bk === 'over' ? 2 : (bk === 'd0' ? 1 : 0); }   // 2=超過／1=今日／0=まだ
+  function alertToShip_(orders) { return (orders || []).filter(o => /to ?ship/i.test(o.status || '') && !o.tracking && !alertSelfTransit_(o)); }
+  function alertLate_(orders) { return (orders || []).filter(o => o.tab === 300 && o.tracking && /to ?ship|processed/i.test(o.status || '') && !alertSelfTransit_(o) && ordDueBucket({ tab: 300, shipBy: o.ship_by, cc: o.cc }) === 'over'); }
+  function alertBadgeSet_(k, ship, late) {
+    const total = k.rest + ship + late, urgentN = ship + late + k.eli + k.rowsync + (k.brake ? 1 : 0);
+    updateAlertBadge(total, urgentN, (k.kvErr ? '⚠ 一部の記録を読めず未確認（ELI・転記停止・🤖・在庫0・値付け）・' : '') + '急ぎ ' + urgentN + '件（未手配 ' + ship + '／伝票済みで期限超過 ' + late + '／ELI ' + k.eli + '／転記停止 ' + k.rowsync + (k.brake ? '／🤖自動ブレーキ' : '') + '）・そのほかの片付けもの ' + (total - urgentN) + '件', k.kvErr);
+  }
+  function alertBadgeTick_() {
+    const c = renderAlerts._cache, k = renderAlerts._badge;
+    if (!c || !k || !c.orders) return;   // まだ読んでいない・まとめて更新で消えた時は何もしない（ここから読みに行かない）
+    try { alertBadgeSet_(k, alertToShip_(c.orders).filter(o => alertShipLv_(o) >= 1).length, alertLate_(c.orders).length); } catch (_) {}   // 失敗しても前の数字が残るだけ（0にはしない）
   }
   async function renderAlerts(force) {
     const body = document.getElementById('alert-body');
@@ -19182,16 +19312,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let inv, orders;
     const ach = renderAlerts._cache; // ★タブ切替の度の全件再取得を解消（TTL120秒／更新ボタン・まとめて更新でforce）。invはensureInvが元々キャッシュ済
     let rowsync = null;
-    if (!force && ach && Date.now() - ach.at < 120000) { orders = ach.orders; rowsync = ach.rowsync || null; inv = await ensureInv(); }
+    if (!force && ach && !ach.kvErr && Date.now() - ach.at < 120000) { orders = ach.orders; rowsync = ach.rowsync || null; inv = await ensureInv(); }
     else {
       try {
         let rs = [];
         [inv, orders, rs] = await Promise.all([
           ensureInv(),
           sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
-          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen,stock_restore_state,stock_restore_manual,amz_class,price_adj_digest)').catch(() => []),   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
+          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen,stock_restore_state,stock_restore_manual,amz_class,price_adj_digest)').catch(e => ({ __kvErr: e })),   /* ★2026-10-24 レビュー #1：失敗を空にしない（印を立てて画面とバッジに出す・キャッシュしない） */   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
         ]);
-        renderAlerts._cache = { orders, at: Date.now(), rowsync: ((rs || []).find(x => x.k === 'rowsync_last') || {}).v || null, eli: ((rs || []).find(x => x.k === 'eli_cases') || {}).v || null, ba: ((rs || []).find(x => x.k === 'boshu_auto_status') || {}).v || null, baSeen: ((rs || []).find(x => x.k === 'boshu_auto_seen') || {}).v || null , rs: { st: ((rs || []).find(x => x.k === 'stock_restore_state') || {}).v || null, man: ((rs || []).find(x => x.k === 'stock_restore_manual') || {}).v || {} } };
+        const kvErr0 = rs && rs.__kvErr ? rs.__kvErr : null; if (kvErr0) rs = [];
+        renderAlerts._cache = { orders, at: Date.now(), kvErr: kvErr0 ? String((kvErr0 && kvErr0.message) || kvErr0) : '', rowsync: ((rs || []).find(x => x.k === 'rowsync_last') || {}).v || null, eli: ((rs || []).find(x => x.k === 'eli_cases') || {}).v || null, ba: ((rs || []).find(x => x.k === 'boshu_auto_status') || {}).v || null, baSeen: ((rs || []).find(x => x.k === 'boshu_auto_seen') || {}).v || null , rs: { st: ((rs || []).find(x => x.k === 'stock_restore_state') || {}).v || null, man: ((rs || []).find(x => x.k === 'stock_restore_manual') || {}).v || {} } };
         rowsync = renderAlerts._cache.rowsync;
         renderAlerts._cache.amz = ((rs || []).find(x => x.k === 'amz_class') || {}).v || {};
         renderAlerts._cache.paDigest = ((rs || []).find(x => x.k === 'price_adj_digest') || {}).v || null;   /* 🏷 値付けの提案（毎日19時以降の数え） */
@@ -19204,6 +19335,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { const _amzCls = (renderAlerts._cache && renderAlerts._cache.amz) || {};
       const _notGoods = r => { if (!/amazon/i.test(String(r.supplier || ''))) return false; const c = _amzCls[r.item_id]; if (c && c.k) return c.k === 'supply' || c.k === 'personal'; const sg = amzSuggest(r.name_supplier || r.name); return !!(sg.sure && sg.k === 'supply'); };
       inv = (inv || []).filter(r => !_notGoods(r)); }
+    const kvErr = (renderAlerts._cache && renderAlerts._cache.kvErr) || '';   // 記録を読めなかった（ELI・転記停止・🤖・在庫0・値付けは数えていない）
     const eliCases = (renderAlerts._cache && renderAlerts._cache.eli && renderAlerts._cache.eli.cases) || {};
     /* 🏷 ★2026-10-20 値付けの提案（本人「候補を上げてきてもらって、最終意思決定は私がする。ボタンをポチッと押したら調整がかかる」） */
     const paD = (renderAlerts._cache && renderAlerts._cache.paDigest) || null;
@@ -19216,17 +19348,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const nowSec = Date.now() / 1000;
     // 1) 発送期日：未発送(to ship)で「まだ発送手配していない(追跡番号なし)」ものだけ。
     //    追跡番号あり=発送手配済(Processed)は既に手配済みなので期日アラートから除外する。
-    const toship = orders.filter(o => /to ?ship/i.test(o.status || '') && !o.tracking && !(state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)));
+    const toship = alertToShip_(orders);
     const shipRows = toship.map(o => {
-      const secLeft = o.ship_by ? (ordShipDeadline({ shipBy: o.ship_by }) - nowSec) : null;   // ★ship_byは起点。期限は＋1日
-      const level = secLeft == null ? 0 : (secLeft < 0 ? 2 : (secLeft < 86400 ? 1 : 0));
-      const due = o.ship_by ? new Date(o.ship_by * 1000).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(0, 16) : '—';
-      const label = secLeft == null ? '' : (secLeft < 0 ? '超過' : (secLeft < 86400 ? '24h以内' : ''));
+      const dl = alertDeadline_(o);   // ★ship_byは起点。家から出す期限（cc を渡して現地の曜日で日曜繰り上げ・2026-10-24 レビュー #4）
+      const level = alertShipLv_(o);  // 2=超過／1=今日（📦注文管理の🚨遅延中と同じ日付の数え方・#5）
+      const due = dl ? mdw_(dl, o.cc) : '—';
+      const label = level === 2 ? '超過' : (level === 1 ? '今日' : '');
       const it = (o.items || [])[0] || {};
       const rg = regionByCc(o.cc);
       const imgCell = it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:32px;height:32px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
       return { level, cells: [`<b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b>`, imgCell, esc(o.sn), esc(o.buyer || ''), nm(it.name, '260px'), due, `<b style="color:${level === 2 ? '#d93025' : '#e8710a'}">${label}</b>`], link: rg ? `<a href="https://${rg.host}/portal/sale?sls_print=${encodeURIComponent(o.sn)}" target="_blank" title="伝票印刷" style="text-decoration:none">🖨️</a>` : '' };
     }).filter(r => r.level >= 1).sort((a, b) => b.level - a.level);
+    // 1b) ★2026-10-24 レビュー #3：伝票は出したが家から出す期限を過ぎた注文。赤い件数には足すのに表が無く、開くと🎉になっていた
+    const lateRows = alertLate_(orders);
     // 2) 確証未取得：自動登録(source有)で確証なし・キャンセル以外
     const noProof = inv.filter(r => r.source && !r.proof && r.purchase_status !== 'キャンセル');
     // 3) 発送待ち長期：仕入状況=発送待ちのまま5日超（相手が未発送）
@@ -19311,9 +19445,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         arrivedNotRecv.slice(0, 100).map(r => `<tr style="background:#f6fbf7"><td>${invImg(r)}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#2e7d32">📥 ${esc(deliveredAt(r))}</b></td><td style="font-size:11px;white-space:nowrap">${dtxt(r.purchase_ts || r.purchase_date)}</td></tr>`).join(''),
         '配送業者は「配達完了/お届け済み」なのに在庫が入庫待ちのまま＝在庫・利益に未反映。🛒仕入れ管理→⏳入庫待ち・到着予定 の「✓入荷」／「見込みを一括入荷」で在庫保管中へ。長期に溜まっている分は同ページの「🧹 長期滞留の点検」で滞留日数ごとにまとめて一括受取できます。', 'al-arrived') +
       card('🚚', '発送期日（未発送）', '#d93025', shipRows.length,
-        ['国', '画像', '注文SN', 'バイヤー', '商品', '発送期日', '状態', '伝票'],
+        ['国', '画像', '注文SN', 'バイヤー', '商品', '家から出す期限', '状態', '伝票'],
         shipRows.slice(0, 100).map(r => `<tr${r.level === 2 ? ' style="background:#fff5f5"' : ''}>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
-        'Shopee注文の発送期日が過ぎた／24時間以内のもの。🖨️で伝票印刷へ。', 'al-ship') +
+        '家から出す期限（📦注文管理と同じ数え方＝その国の現地の日付）が過ぎた／今日のもの。🖨️で伝票印刷へ。', 'al-ship') +
+      card('🚨', '伝票済みで家から出す期限を過ぎた注文', '#d93025', lateRows.length,
+        ['国', '注文SN', 'バイヤー', '商品', '家から出す期限', '追跡番号', '確認'],
+        lateRows.slice(0, 100).map(o => { const rg = regionByCc(o.cc); const it = (o.items || [])[0] || {}; const dl = alertDeadline_(o); return `<tr style="background:#fff5f5"><td style="font-size:11px;white-space:nowrap"><b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b></td><td style="font-size:11px;white-space:nowrap">${esc(o.sn)}</td><td style="font-size:11px">${esc(o.buyer || '')}</td><td style="font-size:11px">${nm(it.name, '260px')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#d93025">${dl ? esc(mdw_(dl, o.cc)) : '—'}</b></td><td style="font-size:11px;white-space:nowrap">${esc(o.tracking || '')}</td><td>${rg ? `<a href="https://${rg.host}/portal/sale/order${o.sn ? '#smdsn=' + encodeURIComponent(o.sn) : ''}" target="_blank" rel="noopener" title="Shopeeでこの注文を開く">📄</a>` : ''}</td></tr>`; }).join(''),
+        '伝票は出したが、家から出す期限（その国の現地の日付）を過ぎて、まだ倉庫へ送っていない注文（📦注文管理の「🚨遅延中」と同じ数え方）。 <button class="al-goorders smd-btn b-open" style="font-size:11px;padding:1px 8px">📦 注文管理を開く</button>', 'al-late') +
       card('📦', '相手が未発送（発送待ち5日超）', '#e8710a', stuckShip.length,
         ['画像', '仕入日時', '商品名', '仕入元', 'セラー', '経過'],
         stuckShip.slice(0, 100).map(r => `<tr><td>${invImg(r)}</td><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : ''}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#e8710a">${dtxt(r.purchase_ts)}</b></td></tr>`).join(''),
@@ -19359,14 +19497,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // 伝票は出したが、家から出す期限を過ぎてまだ倉庫へ送っていない注文（📦注文管理の「🚨遅延中」と同じ数え方＝ordDueBucket の 'over'）。
     //   上の「発送期日」は未手配（伝票なし）だけを見ているので、これを足さないと注文管理が「遅延中 4件」なのにバッジは 0 になる（2026-09-19 実測）
     // ※伝票を出した注文の status は 'Processed'（'To Ship' ではない）。最初 'To Ship' だけで数えて 0件になった（実データで確認 2026-09-19）
-    let lateArranged = 0;
-    try { lateArranged = orders.filter(o => o.tab === 300 && o.tracking && /to ?ship|processed/i.test(o.status || '') && !(state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)) && ordDueBucket({ tab: 300, shipBy: o.ship_by, cc: o.cc }) === 'over').length; } catch (_) { lateArranged = 0; }
-    const urgentN = shipRows.length + lateArranged + eliRows.length + rowsyncRows.length + (baBrake ? 1 : 0);
-    updateAlertBadge(total + lateArranged, urgentN, '急ぎ ' + urgentN + '件（未手配 ' + shipRows.length + '／伝票済みで期限超過 ' + lateArranged + '／ELI ' + eliRows.length + '／転記停止 ' + rowsyncRows.length + (baBrake ? '／🤖自動ブレーキ' : '') + '）・そのほかの片付けもの ' + (total + lateArranged - urgentN) + '件');
+    const lateArranged = lateRows.length;   // ★2026-10-24 レビュー #3：上の🚨のカードと同じ行（表・要対応・🎉・チップにも入れる）
+    const totalAll = total + lateArranged;
+    renderAlerts._badge = { rest: totalAll - shipRows.length - lateArranged, eli: eliRows.length, rowsync: rowsyncRows.length, brake: !!baBrake, kvErr: !!kvErr };   // 10分ごとの数え直し（alertBadgeTick_）用
+    alertBadgeSet_(renderAlerts._badge, shipRows.length, lateArranged);
     // 内訳チップバー（443の中身を一目で＋クリックでその項目へジャンプ）
     const cats = [
       ['📥 到着済未反映', arrivedNotRecv.length, '#1a7f37', 'al-arrived'],
       ['🚚 発送期日', shipRows.length, '#d93025', 'al-ship'],
+      ['🚨 伝票済み期限超過', lateRows.length, '#d93025', 'al-late'],
       ['📦 相手未発送', stuckShip.length, '#e8710a', 'al-stuck'],
       ['⏳ 入庫待ち長期', stuckArrive.length, '#e8710a', 'al-arrive'],
       ['📸 確証未取得', noProof.length, '#7b52c4', 'al-proof'],
@@ -19378,10 +19517,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['🧾 データ不整合', dataIssues.length, '#c2185b', 'al-data'],
       ['🏬 滞留在庫', dead.length, '#666', 'al-dead'],
     ];
-    const chipBar = `<div style="margin:0 4px 10px"><div style="font-size:12px;margin-bottom:5px">要対応 <b>${total}</b>件${dead.length ? `（＋滞留在庫 ${dead.length}件・寝ている仕入 ${fmtJpy(deadVal)}）` : ''} <span class="smd-dim" style="font-size:10.5px">— チップをクリックでその項目へ</span></div><div style="display:flex;gap:6px;flex-wrap:wrap">${cats.filter(c => c[1] > 0).map(([lbl, n, col, id]) => `<button class="al-chip" data-go="${id}" style="border:1px solid ${col};background:#fff;color:${col};border-radius:12px;padding:3px 11px;font-size:12px;font-weight:700;cursor:pointer">${lbl} ${n}</button>`).join('') || '<span class="smd-dim">なし🎉</span>'}</div></div>`;
-    body.innerHTML = (total + dead.length + paRecN) === 0
+    const chipBar = `<div style="margin:0 4px 10px"><div style="font-size:12px;margin-bottom:5px">要対応 <b>${totalAll}</b>件${dead.length ? `（＋滞留在庫 ${dead.length}件・寝ている仕入 ${fmtJpy(deadVal)}）` : ''} <span class="smd-dim" style="font-size:10.5px">— チップをクリックでその項目へ</span></div><div style="display:flex;gap:6px;flex-wrap:wrap">${cats.filter(c => c[1] > 0).map(([lbl, n, col, id]) => `<button class="al-chip" data-go="${id}" style="border:1px solid ${col};background:#fff;color:${col};border-radius:12px;padding:3px 11px;font-size:12px;font-weight:700;cursor:pointer">${lbl} ${n}</button>`).join('') || (kvErr ? '<span class="smd-dim">（一部未確認）</span>' : '<span class="smd-dim">なし🎉</span>')}</div></div>`;
+    const kvBanner = kvErr ? `<div style="margin:0 4px 10px;padding:8px 12px;border:1px solid #d93025;background:#fff5f5;border-radius:8px;color:#b71c1c;font-size:12.5px;font-weight:700">⚠ 一部の記録を読めませんでした。🔋ELI・📄転記停止・🤖自動出品・🔔在庫0・🏷値付けは数えていません（0件ではありません） <button class="smd-btn al-retry" style="font-size:11px;padding:1px 8px;margin-left:6px">🔄 読み直す</button><div class="smd-dim" style="font-weight:400;font-size:10.5px;margin-top:3px">${esc(kvErr)}</div></div>` : '';
+    body.innerHTML = kvBanner + ((totalAll + dead.length + paRecN) === 0 && !kvErr
       ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>'
-      : chipBar + html;
+      : chipBar + html);
+    { const rt = body.querySelector('.al-retry'); if (rt) rt.addEventListener('click', () => { rt.disabled = true; rt.textContent = '⏳ 読み直し中'; renderAlerts(true).catch(e => { body.innerHTML = errBox(e); }); }); }
+    { const go = body.querySelector('.al-goorders'); if (go) go.addEventListener('click', () => showPage('orders')); }
     body.querySelectorAll('.al-chip').forEach(b => b.addEventListener('click', () => { const t = document.getElementById(b.dataset.go); if (t) { t.open = true; t.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }));
     { const gr = body.querySelector('.al-gorestock'); if (gr) gr.addEventListener('click', () => { try { lst.tab = 'restock'; localStorage.setItem('smdListTab', 'restock'); } catch (_) {} showPage('list'); }); }
     { const pa1 = body.querySelector('.al-paapply'); if (pa1) pa1.addEventListener('click', () => { paApplyRecommended(pa1).catch(e => alert((e && e.message) || e)); });
@@ -39490,6 +39632,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     let rows;
     try { rows = await sbGetAll('listing_plan', 'select=*'); }
     catch (e) {
+      if (!/HTTP 404\b|does not exist|42P01|PGRST20/i.test(String((e && e.message) || e))) {   /* ★2026-10-24 レビュー #8：通信の失敗を「テーブル未作成」と出さない */
+        host.innerHTML = errBox(e) + '<div style="margin-top:8px"><button id="plan-retry" class="smd-btn">🔄 読み直す</button></div>';
+        const rt0 = document.getElementById('plan-retry'); if (rt0) rt0.addEventListener('click', () => { rt0.disabled = true; rt0.textContent = '⏳ 読み直し中'; renderListingPlan(); });
+        return;
+      }
       host.innerHTML = `<div class="tool-card" style="max-width:880px"><div style="font-weight:700;margin-bottom:6px">🗓️ 出品予定（テーブル未作成）</div><div style="font-size:12.5px;line-height:1.8;color:#444">Supabaseに <code>listing_plan</code> テーブルを1回作成すると使えます。SQL Editorで以下を実行してください：<pre style="background:#f6f6f6;border:1px solid #eee;border-radius:6px;padding:8px;font-size:11px;overflow:auto;white-space:pre-wrap">create table if not exists listing_plan (id text primary key, name text, variations text, source text, source_url text, countries text, due_date date, status text, note text, created_at timestamptz default now(), updated_at timestamptz default now());
 grant all on listing_plan to anon;</pre><span class="smd-dim">作成後、この画面を開き直すと使えます。</span><br><span style="color:#d93025;font-size:11.5px">${esc(e.message)}</span></div></div>`;
       return;
@@ -52859,6 +53006,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.getElementById('ret-refresh').addEventListener('click', () => renderReturns());
     document.getElementById('stock-scan').addEventListener('click', () => stockScanQR());
     if (start !== 'alerts') renderAlerts().catch(() => {}); // 裏でアラートを先読みしバッジを点灯（現在ページは変えない）
+    setInterval(alertBadgeTick_, 10 * 60 * 1000);   // ★2026-10-24 レビュー #2：朝に数えた赤い件数が昼に古いまま残らないように（読んだ注文で期限だけ今の日付でやり直す・読み書きなし）
     applyFxRates().then(() => { try { showPage(state.page); } catch (_) {} }); // 保存済み為替レートをREGIONSへ適用→現在ページを再描画（dash/trend等も新レートで再計算・旧: profitのみ再描画でダッシュが既定レートのままだった）
     const hasBridge = await detectBridge();
     state.mode = hasBridge ? 'live' : (settings.gasUrl ? 'snap' : 'boot');
