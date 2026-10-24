@@ -7311,16 +7311,17 @@ function baPreHMigrate_(p) {
     var sk = baPreShardKeys_();
     var rows = sbSelect_('app_kv', 'select=k,v&k=in.(' + sk.join(',') + ')'); var byK = {}; (rows || []).forEach(function (x) { byK[x.k] = x.v; });
     if (sk.some(function (k) { return !byK[k] || typeof byK[k] !== 'object'; })) return { ok: false, error: '8分割がそろっていないので書きません' };
-    var buckets = {}, n = 0, dup = 0, seen = {}, stamped = {};
+    var buckets = {}, n = 0, dup = 0, seen = {}, stamped = {}, stampOf = {};
     sk.forEach(function (s0) { var v = byK[s0]; Object.keys(v).forEach(function (k) { var e = v[k]; if (seen[k]) dup++; seen[k] = 1; var at = k.lastIndexOf('@'); var h = at > 0 ? k.slice(at + 1) : (baPreHw_(e, k) || '_');
-      if (at <= 0 && h !== '_' && e && typeof e === 'object' && !e.hw) { e.hw = h; stamped[s0] = (stamped[s0] || 0) + 1; }
+      if (at <= 0 && h !== '_' && e && typeof e === 'object' && !e.hw) { e.hw = h; stamped[s0] = (stamped[s0] || 0) + 1; (stampOf[s0] = stampOf[s0] || {})[k] = h; }
       (buckets[h] = buckets[h] || {})[k] = e; n++; }); });
     var sizes = {}, chars = 0, over = [];
     Object.keys(buckets).forEach(function (h) { var c = JSON.stringify(buckets[h]).length; sizes[h] = c; chars += c; if (c > BA_PRE_H_MAX) over.push(h + ':' + c); });
     var res = { ok: true, dry: dry, n: n, dupKeys: dup, hws: Object.keys(buckets).sort(), sizes: sizes, chars: chars, stamped: stamped };
     if (over.length) { res.ok = false; res.error = '300万字を超える機種があるので書きません：' + over.join(', '); return res; }
     if (dry) return res;
-    Object.keys(stamped).forEach(function (s0) { sbUpsert_('app_kv', [{ k: s0, v: byK[s0], updated_at: new Date().toISOString() }], 'k'); Utilities.sleep(3000); });
+    /* 8分割への hw の印は、書く直前にその分割だけ読み直し、まだ在って hw が無い鍵に印だけ足して書く（最初の写しで丸ごと書くと、その間にポータルが保存した写真が消える＝9/25 と同じ穴） */
+    Object.keys(stampOf).forEach(function (s0) { var fr = (sbSelect_('app_kv', 'select=v&k=eq.' + s0)[0] || {}).v; if (!fr || typeof fr !== 'object') return; var m0 = stampOf[s0], c0 = 0; Object.keys(m0).forEach(function (k) { var e = fr[k]; if (e && typeof e === 'object' && !e.hw && k.lastIndexOf('@') <= 0) { e.hw = m0[k]; c0++; } }); if (c0) sbUpsert_('app_kv', [{ k: s0, v: fr, updated_at: new Date().toISOString() }], 'k'); stamped[s0] = c0; Utilities.sleep(3000); });
     Object.keys(buckets).forEach(function (h) { sbUpsert_('app_kv', [{ k: baPreHKey_(h), v: buckets[h], updated_at: new Date().toISOString() }], 'k'); Utilities.sleep(3000); });
     var keys = Object.keys(buckets).map(baPreHKey_); var back = sbSelect_('app_kv', 'select=k,v&k=in.(' + keys.map(encodeURIComponent).join(',') + ')');
     var n2 = 0, c2 = 0; (back || []).forEach(function (x) { n2 += Object.keys(x.v || {}).length; c2 += JSON.stringify(x.v || {}).length; });
