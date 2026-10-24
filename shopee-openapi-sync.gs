@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0230';
+var SRC_VER = '20261025-0300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7827,7 +7827,10 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     else if (String(o.overlay_text || '').replace(/\s/g, '').length >= 2) { ok = false; kind = 'overlay'; }
     /* ★2026-10-12 本人「この辺新品の写真じゃない？」（バトスピ 悠々たるムルナー＝メルカリShopsのスキャン画像が7か国に出た）。AI は scene・edges を甘く付けることがある。
        傾き・影・背景（10%以上）のどれも無い＝平らに切り抜いたスキャン／公式画像として落とす（実物を撮った写真にはどれかが必ず写る） */
-    else if (o.tilt !== true && o.shadow !== true && !(Number(o.bg) >= 10)) { ok = false; kind = 'scan'; }
+    /* ★2026-10-24 01 商品部（本人「新品の画像じゃない？」デジモン BT17-018＝メルカリShops の白い余白付きのまっすぐなスキャンが bg 10 で通った）。
+       白い余白も bg に数えられて bg>=10 だけで通っていた（shadow false・tilt true は指示文の直しで防ぐ）。
+       bg は scene に実物のまわりの物（机・布・手・スリーブ 等）の語がある時だけ数える。shadow は残す（白い机に平らに置いた実物を落とさない・01 の指摘） */
+    else if (o.tilt !== true && o.shadow !== true && !(Number(o.bg) >= 10 && /机|床|布|畳|手|棚|カーペット|シーツ|テーブル|木|スリーブ|ローダー|マット|紙|table|floor|desk|hand|carpet|wood|fabric|sleeve|loader|mat/i.test(String(o.scene || '')))) { ok = false; kind = 'scan'; }
   }
   if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
   if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }
@@ -10412,9 +10415,9 @@ function tcgJudgePrompt_(expect) {
   var ik = tcgItemKind_(expect && expect.hw);
   if (ik !== 'card') {
     var nmJ = TCG_ITEM_JA[ik] || ik;
-    return '中古の' + String((expect && expect.game) || '') + 'の' + nmJ + '（1個）の出品写真です。出品者が自分の手元の実物をカメラで撮った写真だけ product_photo=true。実物の写真には、机・布・手などの背景、影、傾きが写ります。公式の商品画像・通販サイトの画像・切り抜き画像（背景が無い・影が無い）・画面の写真・未開封の箱やパッケージに入ったまま・何個もまとめて写した写真は false。次を JSON だけで返してください：{"product_photo":true/false,"kind":"' + ik + '|box|pack|other"（' + nmJ + 'の実物1個なら ' + ik + '）,"scene":"周りに写っている物（無ければ none）","edges":true/false（実物の縁・厚みが見えるか）,"shadow":true/false,"tilt":true/false,"bg":背景の割合%（0-100）,"card_name_seen":"読める名前（読めなければ空）","title_match":"yes|no|unknown"（期待する「' + String((expect && expect.name) || '') + '」と同じか）,"graded":false,"in_package":true/false（未開封の袋・箱・台紙に入ったままか）,"overlay_text":"写真の上に【後から載せた】文字・値段・値札・帯・枠・スタンプ・吹き出し（例「1枚 390円」「おまとめ割」「翌日発送」。カード自体に印刷された文字ではない）があれば、その文字をそのまま書き写す。無ければ空"}';
+    return '中古の' + String((expect && expect.game) || '') + 'の' + nmJ + '（1個）の出品写真です。出品者が自分の手元の実物をカメラで撮った写真だけ product_photo=true。実物の写真には、机・布・手などの背景、影、傾きが写ります。公式の商品画像・通販サイトの画像・切り抜き画像（背景が無い・影が無い）・画面の写真・未開封の箱やパッケージに入ったまま・何個もまとめて写した写真は false。次を JSON だけで返してください：{"product_photo":true/false,"kind":"' + ik + '|box|pack|other"（' + nmJ + 'の実物1個なら ' + ik + '）,"scene":"周りに写っている物（無ければ none）","edges":true/false（実物の縁・厚みが見えるか）,"shadow":true/false,"tilt":true/false（写っている物の縁が画像の縁と平行でない＝斜めに撮っている時だけ true）,"bg":背景の割合%（0-100。机・布・スリーブ・手など実物のまわりの物だけを数える。白や無地の余白は0）,"card_name_seen":"読める名前（読めなければ空）","title_match":"yes|no|unknown"（期待する「' + String((expect && expect.name) || '') + '」と同じか）,"graded":false,"in_package":true/false（未開封の袋・箱・台紙に入ったままか）,"overlay_text":"写真の上に【後から載せた】文字・値段・値札・帯・枠・スタンプ・吹き出し（例「1枚 390円」「おまとめ割」「翌日発送」。カード自体に印刷された文字ではない）があれば、その文字をそのまま書き写す。無ければ空"}';
   }
-  return '中古トレーディングカード（' + String((expect && expect.game) || 'ポケモンカード') + '）のシングルカードの出品写真です。出品者が自分の手元のカードそのもの（実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・布・スリーブ・ローダー・手などの背景、カードの縁や厚み、光の反射や影、傾き、擦れや白かけが写ります。公式のカード画像・通販サイトの商品画像・スキャン画像（縁がまっすぐで背景が無い・影が無い）・画面の写真・複数枚のまとめ写真・BOXやパックの写真は false。次を JSON だけで返してください：{"product_photo":true/false,"kind":"card|box|pack|other","shown":"front|back|multi|other"（カードの表面1枚だけなら front）,"scene":"周りに写っている物（机・布・スリーブ・手 等。何も無ければ none）","edges":true/false（カードの縁・厚みが見えるか）,"shadow":true/false,"tilt":true/false,"bg":背景の割合%（0-100）,"card_name_seen":"カードに読める名前（読めなければ空）","title_match":"yes|no|unknown"（期待するカード「' + String((expect && expect.name) || '') + '」と同じか）,"graded":true/false（PSA等の鑑定ケース入りか）,"in_package":true/false（カードが雑誌の付録の袋・台紙・未開封の包装・ブリスターに入ったままか。透明な袋越しに見えている時も true。スリーブ・ローダーは false）,"overlay_text":"写真の上に【後から載せた】文字・値段・値札・帯・枠・スタンプ・吹き出し（例「1枚 390円」「おまとめ割」「翌日発送」。カード自体に印刷された文字ではない）があれば、その文字をそのまま書き写す。無ければ空"}';
+  return '中古トレーディングカード（' + String((expect && expect.game) || 'ポケモンカード') + '）のシングルカードの出品写真です。出品者が自分の手元のカードそのもの（実物）をカメラで撮った写真だけ product_photo=true。実物の写真には、机・布・スリーブ・ローダー・手などの背景、カードの縁や厚み、傾き、擦れや白かけが写ります。ホロ・キラの光の反射はスキャン画像にも写るので、反射だけでは実物としないでください。公式のカード画像・通販サイトの商品画像・スキャン画像（縁がまっすぐで背景が無い、または白や無地の余白だけ）・画面の写真・複数枚のまとめ写真・BOXやパックの写真は false。次を JSON だけで返してください：{"product_photo":true/false,"kind":"card|box|pack|other","shown":"front|back|multi|other"（カードの表面1枚だけなら front）,"scene":"周りに写っている物（机・布・スリーブ・手 等。何も無ければ none）","edges":true/false（カードの縁・厚みが見えるか）,"shadow":true/false,"tilt":true/false（写っている物の縁が画像の縁と平行でない＝斜めに撮っている時だけ true）,"bg":背景の割合%（0-100。机・布・スリーブ・手など実物のまわりの物だけを数える。白や無地の余白は0）,"card_name_seen":"カードに読める名前（読めなければ空）","title_match":"yes|no|unknown"（期待するカード「' + String((expect && expect.name) || '') + '」と同じか）,"graded":true/false（PSA等の鑑定ケース入りか）,"in_package":true/false（カードが雑誌の付録の袋・台紙・未開封の包装・ブリスターに入ったままか。透明な袋越しに見えている時も true。スリーブ・ローダーは false）,"overlay_text":"写真の上に【後から載せた】文字・値段・値札・帯・枠・スタンプ・吹き出し（例「1枚 390円」「おまとめ割」「翌日発送」。カード自体に印刷された文字ではない）があれば、その文字をそのまま書き写す。無ければ空"}';
 }
 /* 駿河屋の題名 → {num, rar, name}。例 "129/103[SAR]：(キラ)ミュウex"・"030/103(14/30)：(キラ)ピカチュウ"・"088/076[AR]：(キラ)カクレオン" */
 function tcgParsePokeca_(t) {
