@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0930';
+var SRC_VER = '20261025-1000';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9587,6 +9587,9 @@ var BR_NEWCAT_KEY = 'br_newcat';
 var BA_LIVE_OF = null, BA_BRNEW_MEMO = null, BA_BRNEW_NOTE = false;
 function baBrNewMode_(cfg, cc, hw, series, st) {
   var o = cfg && cfg.brNewCat; if (!o || o.on !== true || cc !== 'BR' || series) return null;
+  /* ★2026-10-25 05：同じ日に新しいカタログを作るのが続けて failMax（既定3）回失敗したら、その日の残りは今までどおり（BR は追加がいちばん多い国＝止まったままにしない）。翌日は自動でもう一度試す */
+  var _fd = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10), _fMax = Math.max(1, Number(o.failMax) || 3);
+  if (st && st.brNewFail && st.brNewFail.d === _fd && st.brNewFail.n >= _fMax) { if (!BA_BRNEW_NOTE) { BA_BRNEW_NOTE = true; baLog_(st, 'BR：新しい総称カタログが作れないので今日は今までどおり（失敗 ' + st.brNewFail.n + ' 回）'); } return null; }
   if ((typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[hw]) || /^goods_|^moncolle$|^(yokai|mezastar|frienda|acnh)$/.test(String(hw || ''))) return null;
   var main = '', capMain = 0; try { ((baKv_('shop_item_limit') || {}).shops || []).forEach(function (x) { if (x && x.cc === 'BR' && x.role === 'main') { main = String(x.shop_id); capMain = Number(x.cap) || 0; } }); } catch (e) {}
   if (!main || !capMain || !BA_LIVE_OF) return null;   /* 本店・上限・公開中の数が分からない時は今までどおり（安全側） */
@@ -9596,6 +9599,12 @@ function baBrNewMode_(cfg, cc, hw, series, st) {
   return { main: main, cap: Math.max(2, Math.min(100, Number(o.cap) || 30)), perDay: Math.max(1, Number(o.perDay) || 8), ids: BA_BRNEW_MEMO, free: free };
 }
 /* 作った BR の総称カタログを小さい鍵 br_newcat に残す（測る準備・入れ先の見分け）。書く直前に読み直して足すだけ。読めなければ書かない（その回は手元の控えだけで続ける） */
+function baBrNewFail_(st, ok) {   /* 作れた＝0に戻す／作れなかった＝続けての回数を1足す（日が変われば0から） */
+  var d = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10);
+  if (!st.brNewFail || st.brNewFail.d !== d) st.brNewFail = { d: d, n: 0 };
+  if (ok) { st.brNewFail.n = 0; return 0; }
+  st.brNewFail.n++; st.brNewFail.at = new Date().toISOString(); return st.brNewFail.n;
+}
 function baBrNewRec_(itemId, name, shopId, hw, sku) {
   var it = { at: new Date().toISOString(), name: String(name || '').slice(0, 120), shop_id: String(shopId || ''), hw: String(hw || ''), sku: String(sku || '') };
   if (BA_BRNEW_MEMO) BA_BRNEW_MEMO[String(itemId)] = it;
@@ -9684,8 +9693,9 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         catch (e) { dupErr = String((e && e.message) || e); if (!/duplicate/i.test(dupErr)) break; baLog_(st, cc + ' 同じ名前のカタログが既にある→番号を送る: ' + newName); }
       }
       if (!tgt) {
-        if (!cl) { res.note = '複製失敗: ' + dupErr.slice(0, 160); baLog_(st, cc + ' ' + res.note); break; }
-        if (!cl.item_id) { res.note = '複製失敗'; break; }
+        if (!cl) { res.note = '複製失敗: ' + dupErr.slice(0, 160); baLog_(st, cc + ' ' + res.note); if (_bn) { var _fn = baBrNewFail_(st, false); baLog_(st, 'BR：新しい総称カタログを作れなかった（今日 続けて ' + _fn + '/' + Math.max(1, Number((cfg.brNewCat || {}).failMax) || 3) + ' 回）'); } break; }
+        if (!cl.item_id) { res.note = '複製失敗'; if (_bn) baBrNewFail_(st, false); break; }
+        if (_bn) baBrNewFail_(st, true);
         baTcgPreorder_(base.shop_id, cl.item_id, hw, st, cc);   /* ★2026-10-11 トレカの新カタログは予約出品（DTS 7日） */
         tgt = { cc: cc, item_id: cl.item_id, name: newName, shop_id: base.shop_id, weight: base.weight, models: [{ n: 'test', price: 0 }], status: 0, isNew: true };
         rows.push(tgt); newItem = true;
