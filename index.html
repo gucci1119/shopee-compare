@@ -9787,6 +9787,7 @@
         const cc = L.cc, r = rows.find(x => x.cc === cc) || L.r;
         const tg0 = window._pcChatTarget || {};
         const out = { ok: true, rid: reqId, cc: cc, iso: L.ISO, buyer: L.buyer, title: L.title, cost: Math.round(Number(cx.cost) || 0), ref: L.ref,
+          warn: (() => { const so = window._pcSrcOut || {}; return (!p.get('cost') && so.hwUnknown) ? '探す語に機種が無いため、候補の機種' + (so.hws && so.hws.length ? '（' + so.hws.join('・') + '）' : '') + 'がお客さんの物と合っているか確かめてください（探す品名に機種を足すと絞れます）' : ''; })(),   /* ★2026-10-24 チャックンポップ（お客さんは SEGA MY CARD・候補は FC） */
           targetProfit: tg0.profit > 0 ? tg0.profit : null, weight: Number((cx.opt || {}).weightG) || null,   /* ★2026-10-24 quote-card-spec 9.3：指定した粗利（無ければ null＝既定の式）・計算に使った重さ（g） */
           deal: pcQuote.deal ? { site: pcQuote.deal.site || '', url: pcQuote.deal.url || '', img: pcQuote.deal.img || '', price: Math.round(Number(pcQuote.deal.eff || pcQuote.deal.price) || 0), name: String(pcQuote.deal.name || '').slice(0, 80) } : null,
           others: (window._pcLastDeals || []).filter(d => !pcQuote.deal || String(d.url || '') !== String(pcQuote.deal.url || '')).slice(0, 5).map(d => ({ site: d.site || '', url: d.url || '', img: d.img || '', price: Math.round(Number(d.eff || d.price) || 0), name: String(d.name || '').slice(0, 80) })),
@@ -10379,14 +10380,19 @@
           if (!kt.ja.length && !/[ぁ-んァ-ヶ一-龠]/.test(q)) kt.key = '';   /* 英語だけの探す語は日本の出品名に入らない＝語の照合はしない（機種・ゲームの語で絞る） */
           const MYCARD = /マイカード|my\s*card|sg-?1000|sc-?3000|セガ\s*マーク\s*(?:iii|3|Ⅲ)|mark\s*iii/i, myCard = MYCARD.test(hint0);
           const GAME_W = /ソフト|カセット|カートリッジ|cartridge|ゲーム|game|\brom\b|ディスク|disc|マイカード|my\s*card|本体|コントローラ|amiibo|セガ|sega|任天堂|nintendo|ナムコ|namco|カプコン|capcom|コナミ|konami|ハドソン|hudson|スクウェア|エニックス|square|enix/i;
-          const whyNg = (d) => { const nm = String(d.name || ''); const s = srcSuspect(d, kt); if (s) return s;
+          /* 語の照合はひらがな・カタカナを同じに見る（出品は「ちゃっくんぽっぷ FC」、探す語は「チャックンポップ」）＝srcSuspect には語を渡さず、ここで照らす */
+          const kana = (t) => srcNrm(t).replace(/[ぁ-ゖ]/g, c => String.fromCharCode(c.charCodeAt(0) + 0x60)).replace(/ー/g, '');
+          const jaK = kt.ja.map(kana).filter(Boolean), keyK = kt.key ? kana(kt.key) : '', kt2 = Object.assign({}, kt, { ja: [], key: '' });
+          const whyNg = (d) => { const nm = String(d.name || ''); const s = srcSuspect(d, kt2); if (s) return s;
+            { const nk = kana(nm); if (jaK.length) { const miss = jaK.find(t => nk.indexOf(t) < 0); if (miss) return '別商品の可能性（「' + miss + '」が無い）'; } else if (keyK && nk.indexOf(keyK) < 0) return '別商品の可能性'; }
             if (myCard && !MYCARD.test(nm) && !/セガ|sega/i.test(nm)) return '別機種（マイカード・セガと書いていない）';
             if (!kt.hw && !myCard && !invHwAuto(nm) && !GAME_W.test(nm)) return 'ゲームと分からない（機種・ソフトの語が無い）';
             return ''; };
           const okN = all0.filter(d => !whyNg(d)), outN = all0.length - okN.length;
           const cut = srcCheapCut(okN);
           const ds = okN.filter(d => !srcIsCheapOutlier(d, cut)).slice(0, 8);
-          try { window._pcSrcOut = { n: outN, ex: all0.filter(d => whyNg(d)).slice(0, 3).map(d => String(d.name || '').slice(0, 30) + '＝' + whyNg(d)) }; } catch (_) {}
+          try { const hws = [...new Set(ds.map(d => invHwAuto(String(d.name || '')) || (MYCARD.test(String(d.name || '')) ? 'マイカード' : '')).filter(Boolean))];
+            window._pcSrcOut = { n: outN, ex: all0.filter(d => whyNg(d)).slice(0, 3).map(d => String(d.name || '').slice(0, 30) + '＝' + whyNg(d)), hwUnknown: !kt.hw && !myCard, hws: hws }; } catch (_) {}   /* 機種が探す語に無い時はチャットへ知らせる（お客さんの写真の機種と合っているかは人が見る） */
           try { window._pcLastDeals = ds; window._pcSrcDone = Date.now(); } catch (_) {}   /* ★2026-10-24 チャットへ返す候補（mode=quote） */
           if (!ds.length) { msg.textContent = '中古の出品が見つかりませんでした（' + Object.values(r.siteStat || {}).map(x => x.label + (x.n < 0 ? '×' : x.n)).join('・') + '）' + (outN ? '。別物の疑いで外した ' + outN + '件（例：' + ((window._pcSrcOut || {}).ex || []).join('／') + '）' : ''); return; }
           msg.textContent = '押すと①仕入額に入ります（送料込みの実質価格）';
@@ -23613,7 +23619,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-24', items: [
-      '🔎 <b>見積もりの仕入れ候補に別物が出ないように</b>（本人「おかしいだろ もはや、全然違うものが出ている」＝チャックンポップの見積もりに楽天のハチワレの雑貨・別のファミコンソフト・コップが並び、その値段で見積もっていた）：価格計算の仕入れ検索は、探す語の日本語の語が全部入っている出品だけを候補にします（仕入れ管理と同じ照らし方）。機種が分からない時は、機種やゲームの語が無い物（おもちゃ・食器など）を外し、マイカード（SG-1000）と分かる時はマイカード・セガと書いた物だけにします。1件も残らない時は「見つかりませんでした」と返し、別物の値段で見積もりを作りません。',
+      '🔎 <b>見積もりの仕入れ候補に別物が出ないように</b>（本人「おかしいだろ もはや、全然違うものが出ている」＝チャックンポップの見積もりに楽天のハチワレの雑貨・別のファミコンソフト・コップが並び、その値段で見積もっていた）：価格計算の仕入れ検索は、探す語の日本語の語が全部入っている出品だけを候補にします（仕入れ管理と同じ照らし方）。機種が分からない時は、機種やゲームの語が無い物（おもちゃ・食器など）を外し、マイカード（SG-1000）と分かる時はマイカード・セガと書いた物だけにします。1件も残らない時は「見つかりませんでした」と返し、別物の値段で見積もりを作りません。名前はひらがなとカタカナを同じに見ます（ちゃっくんぽっぷ＝チャックンポップ）。探す語に機種が無い時は、候補の機種がお客さんの物と合っているか確かめるよう、チャットのカードへ知らせます。',
       '💴 <b>見積もりカードで粗利と重さを指定できるように</b>（本人「ここで粗利を変えられるように」）：Shopee Smart Reply のカードで「目標の粗利」「重さ」を入れて ↻ すると、ポータルがその粗利になる値段（① Shopee の掲載額。②③は①と同じ粗利になるよう PayPal の額を決める）とその重さで計算して返します。見積もりの小さな窓では、この画面で打った目標粗利・重さ・寸法を持ち込まず、窓で使った値もこの画面に残しません。',
       '🔎 <b>ポータル全体レビュー（左メニュー20画面＋共通部分）を直しました</b>（本人「全体的に一度レビューかけて」）：画面ごとの担当が読み、データが消える・金額や件数がずれる・止まる所を中心に直しています。下はその主なものです。',
       '📣 <b>営業の画面が押しても出なかった</b>のを直しました（画面の一覧から漏れていた）。同じ漏れを点検で止めるようにしました。',
