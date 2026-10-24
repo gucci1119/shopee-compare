@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261024-1700';
+var SRC_VER = '20261024-1900';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8321,6 +8321,15 @@ function boshuAutoTick(manual) {
       /* ★v190 仕入の目安が上限を超える作品は出さない（本人 2026-09-18「金額が高すぎるゲームはリスクなので、あんま出したくない」。前は在庫0で出していた）。AIを呼ぶ前に外す＝費用ゼロ。台帳には入れない（上限を変えたらまた候補になる） */
       var costChk = 0; { var pmC = baPreOf_(pre, c.key, hw); if (pmC && pmC.img) costChk = baCostFromPre_(pmC, hw, c.ja, c.en); if (pmC && pmC.img && costChk > maxCost) { out.skipped++; baSkipRec_(st, hw, '', c, 'costhigh', Number(pmC.hits) || 0); continue; }
         if (pmC && pmC.img && costChk >= highCost && (Number(pmC.hits) || 0) < highNeed) { out.skipped++; baSkipRec_(st, hw, '', c, 'highfew', Number(pmC.hits) || 0); continue; } }   /* ヤフオク休み中はメルカリの写真がある作品だけ（英題のAIも呼ばない＝費用ゼロで飛ばす） */
+      /* ★2026-10-24 本人「おすすめで」（ゲームの🤖もトレカ tcgTick と揃える・記憶 listing-must-have-cost-and-jan-or-mpn＝10/16「空欄は絶対なし」）：
+         JAN（ゲームは型番の出所が無い＝JAN だけ）が無い作品は出さない。英語名の AI・写真探しより前に見る＝費用0・通信0で飛ばす。
+         夜の JAN 調べに積み（写真の控えがある作品だけ・1回40件まで）、答えは jan_sg_cache（鍵＝駿河屋の番号、無ければ g:機種:作品の鍵）に入る→次の回ここで拾って出る。
+         GAS からは駿河屋を読まない（今の SG_JAN_PER_RUN の通信を増やさない） */
+      if (BA_GAME_JAN_REQ && !BA_GAME_JAN_EXEMPT.test(String(hw)) && !baJanReal_(String(c.jan || ''))) {
+        var _gj = baGameJanOf_(hw, c);
+        if (_gj) c.jan = _gj;
+        else { if ((baPreOf_(pre, c.key, hw) || {}).img) baGameJanTodo_(hw, c); out.skipped++; out.nojan = (out.nojan || 0) + 1; baSkipRec_(st, hw, '', c, 'nojan'); continue; }
+      }
       var en = baEnName_(c, st, enCache, hw); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
       if (!en) { baMark_(ledger, c.key, ccsHw, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
       /* ★2026-09-20 「出していない作品」の判定は【日本語名の鍵】で見ていたが、Shopee に載っている明細名は【英名】。英名はここで初めて作るので、
@@ -8431,6 +8440,7 @@ function boshuAutoTick(manual) {
       Utilities.sleep(1200 + Math.floor(Math.random() * 1500));   // 叩きすぎない（ゆらぎ付き）
     }
     out.titles = picks.length;
+    try { var _gjt = baGameJanTodoFlush_(); if (out.nojan) baLog_(st, '🔢 JAN が無いので出さなかった ' + out.nojan + '作品（夜の JAN 調べに ' + _gjt + '件積んだ）'); } catch (eGJ) {}
     /* ★v190 先回りの写真判定（本人 2026-09-18「まだこのあたり、実物じゃない画像を持ってきてますね」）：この先の候補の写真を、時間の余りで少しずつ判定して控えに入れておく。
        🔜の一覧には判定の結果が出るので、カタログ画像は出す前に一覧から消える。控えは本番と同じ鍵なので、出す時に二重に判定しない（費用は増えず前倒しになるだけ）。1回 最大8枚 */
     try { var pjR = baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, 20, t0, DEADLINE * 0.68); if (pjR.n) baLog_(st, '🔍 先回りの写真判定 ' + pjR.n + '枚（OK ' + pjR.ok + '・NG ' + pjR.ng + '）'); } catch (ePJ) {}
@@ -9022,9 +9032,9 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
   soldVar = soldVar || {}; pre = pre || {};
   var tv = baKv_('titles_' + hw) || {}, sv = baKv_('sg_' + hw) || {}, jv = baKv_('jan_master_' + hw) || {};
   var byKey = {}, list = [];
-  var add = function (row, key) { if (!key) return; if (byKey[key]) { var o = byKey[key]; if (!o.ja && row.ja) o.ja = row.ja; if (!o.en && row.en) o.en = row.en; if (!o.jan && row.jan) o.jan = row.jan; if (row.sg) o.sg = 1; return; } row.key = key; byKey[key] = row; list.push(row); };
+  var add = function (row, key) { if (!key) return; if (byKey[key]) { var o = byKey[key]; if (!o.ja && row.ja) o.ja = row.ja; if (!o.en && row.en) o.en = row.en; if (!o.jan && row.jan) o.jan = row.jan; if (row.sg) o.sg = 1; if (!o.sgId && row.sgId) o.sgId = row.sgId; return; } row.key = key; byKey[key] = row; list.push(row); };
   (tv.rows || []).forEach(function (r) { var ja = String(r.ja || ''), en = String(r.en || ''); var k = baKey_(ja) || baKey_(en); if (!k) return; add({ ja: ja, en: en, dl: r.dl ? 1 : 0, jan: '', sg: 0 }, k); if (ja && en) { var k2 = baKey_(en); if (k2 && k2 !== k) byKey[k2] = byKey[k]; } });
-  (sv.rows || []).forEach(function (r) { if (!r || !r.t || BA_NG.test(r.t)) return; if (/ハード/.test(String(r.k || ''))) return; /* 駿河屋の「◯◯ハード」区分＝本体・周辺機器 */ var k = baKey_(r.t); if (!k) return; add({ ja: r.t, en: '', dl: 0, jan: baJanReal_(r.j) ? r.j : '', sg: 1 }, k); });
+  (sv.rows || []).forEach(function (r) { if (!r || !r.t || BA_NG.test(r.t)) return; if (/ハード/.test(String(r.k || ''))) return; /* 駿河屋の「◯◯ハード」区分＝本体・周辺機器 */ var k = baKey_(r.t); if (!k) return; add({ ja: r.t, en: '', dl: 0, jan: baJanReal_(r.j) ? r.j : '', sg: 1, sgId: r.id ? String(r.id) : '' }, k); });   /* ★2026-10-24 駿河屋の番号（sgId）も持つ＝夜の JAN 調べの答え（jan_sg_cache・鍵＝駿河屋の番号）を次の回に引ける */
   // ★jan_master_<hw>.items は【{JAN: タイトル} の辞書】（配列ではない・ポータル loadJanMaster と同じ読み方）
   var jmi = jv.items || {};
   (Array.isArray(jmi) ? jmi.map(function (p) { return [p && p[0], p && p[1]]; }) : Object.keys(jmi).map(function (j) { return [j, jmi[j]]; })).forEach(function (p) { var t = p[1], j = p[0]; if (!t || BA_NG.test(String(t))) return; var k = baKey_(t); if (!k) return; add({ ja: String(t), en: '', dl: 0, jan: baJanReal_(j) ? j : '', sg: 0 }, k); });
@@ -9749,6 +9759,28 @@ function sgJanFromPage_(st, sgId) {
   try { var one = {}; one[sgId] = jan || ''; baKvSetMerged_(SG_JAN_CACHE, one, baKvFreshMany_([SG_JAN_CACHE]), 0); } catch (e2) {}
   Utilities.sleep(1200);
   return jan;
+}
+/* ★2026-10-24 ゲームの🤖の JAN の門（boshuAutoTick）。ゲームの候補の鍵は作品名（baKey_）で駿河屋の番号ではないので、夜の JAN 調べの答えを戻す鍵を
+   駿河屋の番号（sg_<hw> の id）／無ければ 'g:' + 機種 + ':' + 作品の鍵 にする（jan_sg_cache の数字・英数字の鍵とは重ならない）。
+   止める時は BA_GAME_JAN_REQ = false（前の動き＝JAN が無くても出す）。読むのは jan_sg_cache（約40KB）を1実行1回だけ・書くのは jan_todo_auto を1実行1回だけ */
+var BA_GAME_JAN_REQ = true, BA_GAME_JAN_EXEMPT = /^goods_|^moncolle$|^(yokai|mezastar|frienda|acnh)$/, BA_GAME_JAN = null, BA_GAME_JAN_TODO = {}, BA_GAME_JAN_TODO_MAX = 40;
+function baGameJanKey_(hw, c) { var s = String((c && c.sgId) || ''); return s ? s : ('g:' + String(hw || '') + ':' + String((c && c.key) || '')).slice(0, 90); }
+function baGameJanOf_(hw, c) {
+  if (BA_GAME_JAN === null) { var v = null; try { v = baKv_(SG_JAN_CACHE); } catch (e) {} BA_GAME_JAN = (v && typeof v === 'object') ? v : {}; }   /* 読めない時は {}＝出さない側に倒れる */
+  var j = String(BA_GAME_JAN[baGameJanKey_(hw, c)] || ''); if (baJanReal_(j)) return j;
+  var j2 = String(BA_GAME_JAN[('g:' + String(hw || '') + ':' + String((c && c.key) || '')).slice(0, 90)] || ''); if (baJanReal_(j2)) return j2;   /* 駿河屋の番号がある作品でも、夜の調べが作品の鍵で書いた答えを拾う */
+  return '';
+}
+function baGameJanTodo_(hw, c) {
+  var k = ('g:' + String(hw || '') + ':' + String((c && c.key) || '')).slice(0, 90);
+  if (BA_GAME_JAN_TODO[k] || Object.keys(BA_GAME_JAN_TODO).length >= BA_GAME_JAN_TODO_MAX) return;
+  BA_GAME_JAN_TODO[k] = { hw: String(hw || ''), ja: String((c && c.ja) || '').slice(0, 80), en: String((c && c.en) || '').slice(0, 60), sg: baGameJanKey_(hw, c), game: 1, at: new Date().toISOString() };
+}
+function baGameJanTodoFlush_() {
+  var ks = Object.keys(BA_GAME_JAN_TODO); if (!ks.length) return 0;
+  var one = BA_GAME_JAN_TODO; BA_GAME_JAN_TODO = {};
+  baKvSetMerged_('jan_todo_auto', one, baKvFreshMany_(['jan_todo_auto']), 0);   /* 読み直して重ねる＝トレカ側の積みを消さない・読めなければ書かない */
+  return ks.length;
 }
 function tcgJanTodoPush_(hw, c) {
   try { var one = {}; var k = String((c && c.key) || hw + ':' + String((c && c.ja) || '')).slice(0, 80); one[k] = { hw: hw, ja: String((c && c.ja) || '').slice(0, 80), en: String((c && c.en) || '').slice(0, 60), sg: (String((c && c.key) || '').split(':')[1] || ''), at: new Date().toISOString() }; baKvSetMerged_('jan_todo_auto', one, baKvFreshMany_(['jan_todo_auto']), 0); } catch (e) {}
