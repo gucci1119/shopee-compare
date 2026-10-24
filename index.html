@@ -9510,7 +9510,10 @@
     const t0 = Date.now(), reqId = p.get('rid') || '';
     const tick = () => {
       const L = pcQuote.last, rows = window._pcRows || [], cx = window._pcCtx || {};
-      const ready = L && rows.length && Number(cx.cost) > 0;
+      /* ★2026-10-24 試験で直した：仕入れ検索の経路では、検索が終わって候補を選び、その仕入額で計算し直すまで待つ（前に入っていた仕入額で先に返していた＝deal:null） */
+      const viaSearch = !p.get('cost'), dl = pcQuote.deal;
+      if (viaSearch && window._pcSrcDone && !(window._pcLastDeals || []).length) { const m = String((document.getElementById('pc-src-msg') || {}).textContent || ''); tell({ ok: false, rid: reqId, err: '仕入れ先が見つかりませんでした：' + m.slice(0, 160) }); setTimeout(() => { try { window.close(); } catch (_) {} }, 1500); return; }
+      const ready = L && rows.length && Number(cx.cost) > 0 && (!viaSearch || (dl && Math.abs(Number(cx.cost) - Math.round(Number(dl.eff || dl.price) || 0)) < 2));
       if (!ready) {
         if (Date.now() - t0 > 45000) { const m = String((document.getElementById('pc-src-msg') || {}).textContent || '') || '仕入れ先が見つからない・計算できない'; tell({ ok: false, rid: reqId, err: '見積もりを作れませんでした：' + m.slice(0, 160) }); setTimeout(() => { try { window.close(); } catch (_) {} }, 1500); return; }
         setTimeout(tick, 800); return;
@@ -10084,7 +10087,7 @@
       const run = async () => {
         const q = String(qi.value || '').trim(), msg = document.getElementById('pc-src-msg'), box = document.getElementById('pc-src-list');
         if (!q) { msg.textContent = '商品名を入れてください'; return; }
-        go.disabled = true; msg.textContent = '探しています…'; box.innerHTML = '';
+        go.disabled = true; msg.textContent = '探しています…'; box.innerHTML = ''; window._pcSrcDone = 0; window._pcLastDeals = [];
         try {
           const r = await srcFetchDeals(encodeURIComponent(q), (k, n) => { msg.textContent = '探しています… ' + k + ' ' + (n < 0 ? '×' : n + '件'); });
           /* ★2026-10-22 レビュー（Obsidian 照合）：10/9 に決めた絞り込みを一覧（renderDeals）と同じく通す＝相場の35%未満は別物の疑いで外す（srcCheapCut）・
@@ -10093,7 +10096,7 @@
           const all0 = (r.deals || []).filter(d => !NG.test(String(d.name || '')));
           const cut = srcCheapCut(all0);
           const ds = all0.filter(d => !srcIsCheapOutlier(d, cut) && !srcSuspect(d, null)).slice(0, 8);
-          try { window._pcLastDeals = ds; } catch (_) {}   /* ★2026-10-24 チャットへ返す候補（mode=quote） */
+          try { window._pcLastDeals = ds; window._pcSrcDone = Date.now(); } catch (_) {}   /* ★2026-10-24 チャットへ返す候補（mode=quote） */
           if (!ds.length) { msg.textContent = '中古の出品が見つかりませんでした（' + Object.values(r.siteStat || {}).map(x => x.label + (x.n < 0 ? '×' : x.n)).join('・') + '）'; return; }
           msg.textContent = '押すと①仕入額に入ります（送料込みの実質価格）';
           if (window._pcAutoPick) { window._pcAutoPick = false; setTimeout(() => { const b0 = box.querySelector('.pc-src-use'); if (b0) b0.click(); }, 50); }
@@ -10120,7 +10123,7 @@
           });
           box.querySelectorAll('.pc-src-use').forEach(b => b.onclick = () => { const d = ds[Number(b.dataset.i)]; window._pcKeepDeal = true; pcNewItem(true); pcQuote.deal = d; pcQuote.q = q; const tt = document.getElementById('pc-q-title'); if (tt) tt.value = q;   /* ★2026-10-24 レビュー：前の商品名を残さない */ const ta0 = document.getElementById('pc-q-text'); if (ta0) delete ta0.dataset.edited; const c = document.getElementById('pc-cost'); c.value = String(Math.round(Number(d.eff || d.price))); c.dispatchEvent(new Event('input', { bubbles: true })); msg.textContent = '①仕入額に ¥' + c.value + ' を入れました（' + (d.site || '') + '）'; });
         } catch (e) { msg.textContent = '❌ 探せませんでした: ' + String((e && e.message) || e).slice(0, 80); }
-        finally { go.disabled = false; }
+        finally { go.disabled = false; if (!window._pcSrcDone) window._pcSrcDone = Date.now(); }
       };
       go.onclick = run; qi.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); run(); } });
       { const pl0 = document.getElementById('pc-q-plan'); if (pl0) pl0.addEventListener('change', () => { pl0.dataset.user = '1'; }); }
@@ -22670,7 +22673,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-24', items: [
-      '💬 <b>チャットの画面で見積もりが完結</b>（本人「スマートリプライ、ワッツアップ、両方の画面で完結させたい」「わざわざポータルに飛びたくない」）：チャットから #pricecalc?…&mode=quote で開かれると、ポータルは裏で仕入れ検索と計算をして、払い方3通り（値段・粗利）×段階2つ（見積もり・買うと決まった）の文面（英語・日本語）と仕入れ先の候補をチャットへ返して閉じます。画面はチャット側のカードに出ます。',
+      '💬 <b>チャットの画面で見積もりが完結</b>（本人「スマートリプライ、ワッツアップ、両方の画面で完結させたい」「わざわざポータルに飛びたくない」）：チャットから #pricecalc?…&mode=quote で開かれると、ポータルは裏で仕入れ検索と計算をして、払い方3通り（値段・粗利）×段階2つ（見積もり・買うと決まった）の文面（英語・日本語）と仕入れ先の候補をチャットへ返して閉じます。画面はチャット側のカードに出ます。仕入れ検索が終わって候補を選び、その仕入額で計算し直すまで待ってから返します（試験で、前の仕入額のまま候補なしで返っていたのを直した）。',
       '🛡 <b>依頼品の自動出品の守り</b>（レビューで見つかった所）：自動で進める時、国が渡されていない・値段が計算の値段と3倍以上ずれている時は止めます（「R$ 1.273,50」を 1.27 と読む等の読み違い対策）。相手が Shopee のユーザー名の形でない時（表示名・電話番号）は足しません。足す直前に Shopee の今の明細を読み直して、同じ明細の二重追加と満杯を防ぎます。',
       '📑 <b>Request page の入れ先を実際の値段で選ぶ・入らなければ新しく作る</b>（本人「価格差4倍制限（ブラジルは4倍、他国は違う）」「明細が100個になったら新しく作らないといけない」）：名前の値段の幅ではなく、明細が100未満・足した後の価格差が上限（BR 4倍・他 5倍）以内のページを選びます（名前の幅に入るページを優先）。どこにも入らない時は、値段の近いページを次の番号（①②…）で複製して作り、明細を足して「Reserved for」の写真を付けます。作ったページは非公開なので「▶ 公開する」で公開してください。',
       '🤖 <b>依頼品の入口に「自動で進める」</b>（本人「ワッツアップからできないの？」）：&auto=1 と値段・英語の商品名を付けて開くと、ポータルが裏で 🛒 Request page に追加 → 案内文をチャットの入力欄へ → 閉じる、まで進めます。足りない物がある時や失敗した時は、この画面に理由を出して残り、開いた元にも結果を返します。',
