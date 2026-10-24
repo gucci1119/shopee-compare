@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-1130';
+var SRC_VER = '20261025-1200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -934,7 +934,8 @@ function doGetInner_(e) {
         var rowHit = 0;
         /* ③ llog_cost_<hw> の jan を埋める：台帳の key→cc:item#model から鍵を作る */
         var lc = baKv_('llog_cost_' + sjHw) || {}; lc.m = lc.m || {}; var lcHit = 0;
-        Object.keys(led).forEach(function (k) { var id = k.split(':')[1] || ''; if (!sjLoose && (cache[id] === undefined || cache[id] === null)) return; var jan = sjLoose ? '' : (cache[id] || ''); var o = led[k] || {}; Object.keys(o).forEach(function (cc) { var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (!m) return; var key = cc + '|' + m[1] + '|' + m[2]; var e = lc.m[key]; if (e && typeof e === 'object') { if (jan && !e.jan) { e.jan = jan; lcHit++; } if (!e.jc) { e.jc = 1; lcHit++; } } }); });
+        var _sjT = {}; rows.forEach(function (r) { if (r && r.id) _sjT[String(r.id)] = String(r.t || '').slice(0, 80); });   /* 駿河屋の題名（控えの ja と照らす） */
+        Object.keys(led).forEach(function (k) { var id = k.split(':')[1] || ''; if (!sjLoose && (cache[id] === undefined || cache[id] === null)) return; var jan = sjLoose ? '' : (cache[id] || ''); var o = led[k] || {}; Object.keys(o).forEach(function (cc) { var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (!m) return; var key = cc + '|' + m[1] + '|' + m[2]; var e = lc.m[key]; if (e && typeof e === 'object') { if (e.ja && _sjT[id]) { var _a1 = vnNorm_(e.ja), _b1 = vnNorm_(_sjT[id]); if (_a1.indexOf(_b1) < 0 && _b1.indexOf(_a1) < 0) return; } /* ★2026-10-25 控えが別の作品（番号が動いた）＝書かない */ if (jan && !e.jan) { e.jan = jan; lcHit++; } if (!e.jc) { e.jc = 1; lcHit++; } } }); });
         if (lcHit) baKvSet_('llog_cost_' + sjHw, lc);
         sjout = { ok: true, hw: sjHw, listed: listedIds.length, todoBefore: todo.length, fetched: fetched, hit: hit, rowsFilled: rowHit, llogFilled: lcHit, cached: Object.keys(cache).length, log: sjSt.log.slice(-5) };
       } catch (esj) { sjout = { ok: false, error: String((esj && esj.message) || esj) }; }
@@ -3481,6 +3482,47 @@ function bulkEdit_(kv, jobKey, from) {
 //     ② あまった末尾の枠を delete_model（末尾なので安全）
 //     ③ option_list を残り件数に詰める（残る側の位置は 0..k-1 のままで動かない）
 //   ⚠ model_id は枠に残るため、**販売数(sold)は枠についたまま1つずれる**。価格・在庫・SKU・画像は正しく移る。
+/* ★2026-10-25 01 商品部の報告（04 の基準で BR の赤字に見えた18件のうち14件）：詰め直し削除は【枠の model_id はそのままで中身だけ上へ】動くのに、
+   仕入れ目安の控え llog_cost_<hw>（鍵 国|item|model）を付け替えていなかった＝控えが1つ下の作品の目安を指していた
+   （例 BR 58219934688：今の 228814616024 は Guilty Gear XX なのに控えは Golden Axe ¥3,011・Guilty Gear の ¥800 は 1つ下の …025 に残っていた）。
+   ポータルの pidRekeyAfterShift（product_ids）と同じ形で付け替える：moves＝[元, 先]（先の枠に元の作品が入った）・gone＝消えた末尾の枠。
+   動いた控えには en（動かす前のその作品の明細名）を付ける＝使う側で「今その番号にある明細名」と照らせる。
+   同じ機種の🤖の台帳（boshu_auto_done_<hw>：作品→国→item#model）も、動いた作品だけ番号を付け替える（消した作品の値は変えない＝「出した」の数え方を変えない）。
+   鍵の探し方：その番号を含む llog_cost_* だけを Supabase で探す（v->m->>"国|item|model"＝鍵の名前だけ返る・大物は読まない） */
+function baLlogRekey_(shopId, itemId, moves, gone, nameOf) {
+  moves = moves || []; gone = gone || []; nameOf = nameOf || {};
+  if (!moves.length && !gone.length) return { n: 0 };
+  var cc = baCcOfShop_(shopId); if (!cc) return { n: 0, error: '店の国が分からない' };
+  var it = String(parseInt(itemId, 10)), K = function (mid) { return cc + '|' + it + '|' + mid; };
+  var ids = {}; moves.forEach(function (mv) { ids[mv[0]] = 1; ids[mv[1]] = 1; }); gone.forEach(function (g) { ids[g] = 1; });
+  var all = Object.keys(ids), keys = {};
+  for (var i = 0; i < all.length; i += 20) {
+    var q = all.slice(i, i + 20).map(function (mid) { return 'v->m->>' + encodeURIComponent('"' + K(mid) + '"') + '.not.is.null'; }).join(',');
+    (sbSelect_('app_kv', 'select=k&k=like.llog_cost_*&or=(' + q + ')') || []).forEach(function (r) { if (r && r.k) keys[r.k] = 1; });
+  }
+  var out = { n: 0, keys: [], ledger: 0 }, today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  Object.keys(keys).forEach(function (kk) {
+    var cur = baKvFresh_(kk); if (BA_KV_FAIL[kk] || !cur || typeof cur !== 'object' || !cur.m) return;   /* 読めなければ書かない */
+    var m = cur.m, snap = {}, ch = 0;
+    moves.forEach(function (mv) { snap[mv[0]] = m[K(mv[0])]; });   /* 先に全部控えてから書く（連鎖で1つずつずれない） */
+    moves.forEach(function (mv) {
+      var e = snap[mv[0]];
+      if (e !== undefined) { var e2 = (e && typeof e === 'object') ? JSON.parse(JSON.stringify(e)) : { c: Number(e) || 0 }; if (!e2.en && nameOf[mv[0]]) e2.en = String(nameOf[mv[0]]).slice(0, 120); e2.rk = today; m[K(mv[1])] = e2; ch++; }
+      else if (m[K(mv[1])] !== undefined) { delete m[K(mv[1])]; ch++; }
+    });
+    gone.forEach(function (g) { if (m[K(g)] !== undefined) { delete m[K(g)]; ch++; } });
+    if (ch) { cur.at = new Date().toISOString(); baKvSet_(kk, cur); out.n += ch; out.keys.push(kk); }
+    /* 同じ機種の🤖の台帳：item#元 → item#先（動いた作品だけ）。消した作品の値はそのまま */
+    try {
+      var hw = kk.replace(/^llog_cost_/, ''), lk = 'boshu_auto_done_' + hw, mvTo = {}; moves.forEach(function (mv) { mvTo[mv[0]] = mv[1]; });
+      var led = baKvFresh_(lk); if (BA_KV_FAIL[lk] || !led || typeof led !== 'object') return;
+      var lc = 0;
+      Object.keys(led).forEach(function (wk) { var o = led[wk]; if (!o || typeof o !== 'object' || o[cc] == null) return; var mm = /^(\d+)#(\d+)$/.exec(String(o[cc])); if (!mm || mm[1] !== it || !mvTo[mm[2]]) return; o[cc] = it + '#' + mvTo[mm[2]]; lc++; });
+      if (lc) { baKvSet_(lk, led); out.ledger += lc; }
+    } catch (eLd) { out.ledgerErr = String(eLd).slice(0, 120); }
+  });
+  return out;
+}
 function removeVariationShift_(shopId, itemId, midCsv, vnames) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   var priceOf = function (m) { var pi = (m.price_info || [])[0] || {}; return pi.original_price != null ? pi.original_price : (pi.current_price != null ? pi.current_price : 0); };
@@ -3557,6 +3599,16 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
   for (var f1 = 0; f1 < fixSku.length; f1 += 50) { try { updateModelSku_(shopId, itemId, fixSku.slice(f1, f1 + 50)); } catch (eS) { fixErr.push('SKU ' + String((eS && eS.message) || eS).slice(0, 80)); } }
   if (fixPr.length) { try { updatePriceList_(shopId, itemId, fixPr); } catch (eP) { fixErr.push('価格 ' + String((eP && eP.message) || eP).slice(0, 80)); } }
   if (fixSt.length) { try { updateStockList_(shopId, itemId, fixSt); } catch (eT) { fixErr.push('在庫 ' + String((eT && eT.message) || eT).slice(0, 80)); } }
+  /* ★2026-10-25 仕入れ目安の控え（llog_cost_<hw>）と🤖の台帳（boshu_auto_done_<hw>）も中身と一緒に引っ越す（下の baLlogRekey_）。
+     ①で Shopee の中身はもう動いているので、②③で止まっても付け替える＝ここで呼ぶ（戻り値の所だけだと、途中で止まった時に付け替わらない） */
+  var _llRk = null;
+  try {
+    var _mvR = [], _gnR = [], _nmR = {};
+    for (var smR = 0; smR < k; smR++) if (keep[smR] !== smR) _mvR.push([String(bySlot[keep[smR]].model_id), String(bySlot[smR].model_id)]);
+    for (var sgR = k; sgR < n; sgR++) _gnR.push(String(bySlot[sgR].model_id));
+    for (var snR = 0; snR < n; snR++) if (bySlot[snR]) _nmR[String(bySlot[snR].model_id)] = String((optList[snR] || {}).option || '');
+    _llRk = baLlogRekey_(shopId, itemId, _mvR, _gnR, _nmR);
+  } catch (eRk0) { _llRk = { error: String((eRk0 && eRk0.message) || eRk0).slice(0, 200) }; }
 
   // ② あまった末尾の枠を消す（末尾なので位置が動かない＝安全）
   for (var s2 = k; s2 < n; s2++) {
@@ -3611,7 +3663,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
     /* ★2026-10-24 全体レビュー（出品管理 #9）：moves＝[移す元の model_id, 移した先の model_id]（先の枠に元の作品が入った）・gone＝消えた末尾の枠・dels＝消した明細 */
     moves: (function () { var mv = []; for (var sm = 0; sm < k; sm++) if (keep[sm] !== sm) mv.push([String(bySlot[keep[sm]].model_id), String(bySlot[sm].model_id)]); return mv; })(),
     gone: (function () { var gn = []; for (var sg = k; sg < n; sg++) gn.push(String(bySlot[sg].model_id)); return gn; })(),
-    dels: mids.map(String),
+    dels: mids.map(String), llog: _llRk,
     remain: r4.opt.length, models_remain: r4.models.length,
     fixed: { sku: fixSku.length, price: fixPr.length, stock: fixSt.length }, fix_errors: fixErr, retried: retried,
     mismatch: bad4.slice(0, 30), error: bad4.length ? '⚠ 消した後、残した明細 ' + bad4.length + ' 件の値段・在庫・SKU が消す前と違います（やり直しても直らない）: ' + bad4.slice(0, 5).map(function (b) { return b.name; }).join(' / ') : undefined,
@@ -10068,14 +10120,36 @@ function baListLogWrite_(st, t0) {
       name: String(a.cat || '').slice(0, 200), model_name: String(a.en || '').slice(0, 120),
       image: String(a.img || ''), price: (a.price != null && a.price !== '') ? Number(a.price) : null, seeded: false });
   });
-  if (!rows.length) return 0;
-  sbUpsert_('listing_log', rows, 'cc,item_id,model_id');
-  /* ★2026-10-11 本人「出品の各カードに仕入れ金額の情報も欲しい」：listing_log に列が無いので app_kv llog_cost_<hw>（{m:{cc|item|model: 仕入れ目安}}）に同じ鍵で控える。機種ごと＝1つの担当が1つの鍵で書くので台をまたいで消し合わない */
+  var hasPend = !!(st.llogPend && typeof st.llogPend === 'object' && Object.keys(st.llogPend).length);
+  if (!rows.length && !hasPend) return 0;
+  /* ★2026-10-25 出品ログ（listing_log）の書き込みに失敗しても、仕入れ目安の控えは書く（失敗は最後に投げ直す＝呼び出し側のログに出る） */
+  var _uErr = null;
+  if (rows.length) { try { sbUpsert_('listing_log', rows, 'cc,item_id,model_id'); } catch (eU) { _uErr = eU; } }
+  /* ★2026-10-11 本人「出品の各カードに仕入れ金額の情報も欲しい」：listing_log に列が無いので app_kv llog_cost_<hw>（{m:{cc|item|model: 仕入れ目安}}）に同じ鍵で控える。機種ごと＝1つの担当が1つの鍵で書くので台をまたいで消し合わない
+     ★2026-10-25 本人の決まり「出品には仕入れ目安と JAN を必ず付ける」（10/16）・事業本部の依頼：
+       ①10/11〜 の🤖の明細 6,293 のうち 325 は出品ログには書けたのに控えだけ落ちていた（読めなかった時に書かない守り・または握りつぶした失敗）
+         → 書けなかった分は st.llogPend（機種ごと最大300件）に貯めて次の回で書き直す。失敗は黙らずにログに出す
+       ②控えには作品名（ja＝日本語・en＝足した時の明細名）と明細SKU（機種_作品名）を必ず持たせる＝使う側は名前か SKU が今の明細と合う時だけ使う（番号だけで結ばない） */
   try {
-    var byHw = {};
-    (st.added || []).forEach(function (a) { if (!a || !a.at || a.at < since || !a.item_id || !a.model_id || !a.cc || !a.hw || !(Number(a.cost) > 0)) return; (byHw[a.hw] = byHw[a.hw] || {})[a.cc + '|' + a.item_id + '|' + a.model_id] = { c: Math.round(Number(a.cost)), src: String(a.src || '').slice(0, 200), from: String(a.from || ''), ja: String(a.ja || '').slice(0, 80), jan: String(a.jan || ''), mpn: String(a.mpn || ''), jc: a.jc ? 1 : 0 };   /* ★2026-10-16 JAN・型番も控える＝ポータルの出品ログが出す。jc=1 は JAN を確かめ済み（無ければ「JAN なし」） */ });   /* ★2026-10-11 本人「どこの仕入れ元リンクから取ってきたかも欲しい」＝目安の元（駿河屋の題名）と写真の元（出品URL）も控える */
-    Object.keys(byHw).forEach(function (h) { var kk = 'llog_cost_' + h; var cur = baKvFresh_(kk); if (!cur || typeof cur !== 'object') cur = {}; cur.m = cur.m || {}; Object.keys(byHw[h]).forEach(function (key) { cur.m[key] = byHw[h][key]; }); cur.at = new Date().toISOString(); cur.src = 'gas'; baKvSet_(kk, cur); });
-  } catch (eC) {}
+    var byHw = hasPend ? st.llogPend : {};
+    st.llogPend = {};
+    (st.added || []).forEach(function (a) {
+      if (!a || !a.at || a.at < since || !a.item_id || !a.model_id || !a.cc || !a.hw || !(Number(a.cost) > 0)) return;
+      var tcg = (typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[a.hw]);
+      var sku = String(a.sku || '') || (tcg ? '' : (function () { try { return baSkuOf_(a.hw, a.en); } catch (eS) { return ''; } })());
+      (byHw[a.hw] = byHw[a.hw] || {})[a.cc + '|' + a.item_id + '|' + a.model_id] = { c: Math.round(Number(a.cost)), src: String(a.src || '').slice(0, 200), from: String(a.from || ''), ja: String(a.ja || '').slice(0, 80), en: String(a.en || '').slice(0, 120), sku: sku.slice(0, 100), jan: String(a.jan || ''), mpn: String(a.mpn || ''), jc: a.jc ? 1 : 0, at: String(a.at).slice(0, 10) };   /* ★2026-10-16 JAN・型番も控える＝ポータルの出品ログが出す。jc=1 は JAN を確かめ済み（無ければ「JAN なし」）・★2026-10-11 目安の元（駿河屋の題名）と写真の元（出品URL）も */
+    });
+    Object.keys(byHw).forEach(function (h) {
+      var kk = 'llog_cost_' + h, n = Object.keys(byHw[h]).length, ok = false, why = '';
+      try {
+        var cur = baKvFresh_(kk);
+        if (BA_KV_FAIL[kk]) why = '読めなかった';
+        else { if (!cur || typeof cur !== 'object') cur = {}; cur.m = cur.m || {}; Object.keys(byHw[h]).forEach(function (key) { cur.m[key] = byHw[h][key]; }); cur.at = new Date().toISOString(); cur.src = 'gas'; baKvSet_(kk, cur); ok = true; }
+      } catch (eW) { why = String((eW && eW.message) || eW).slice(0, 100); }
+      if (!ok) { var keep = Object.keys(byHw[h]).slice(-300); st.llogPend[h] = {}; keep.forEach(function (key) { st.llogPend[h][key] = byHw[h][key]; }); baLog_(st, '仕入れ目安の控え（' + kk + '）に ' + n + '件 書けなかった（' + why + '）→ 次の回で書き直す'); }
+    });
+  } catch (eC) { baLog_(st, '仕入れ目安の控えの書き込みで失敗: ' + String((eC && eC.message) || eC).slice(0, 120)); }
+  if (_uErr) throw _uErr;
   return rows.length;
 }
 function baReuseTestSlot_(shopId, itemId, it, st, cc) {
