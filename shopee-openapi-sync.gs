@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0330';
+var SRC_VER = '20261025-0400';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7728,6 +7728,9 @@ function baImgIdx_(cache) {
   return BA_IMG_IDX;
 }
 function baImgMemoSet_(u, field, v) { if (!BA_IMG_IDX) return; var p = String(u).indexOf('|'), b = p < 0 ? String(u) : String(u).slice(0, p); var o = BA_IMG_IDX[b] || (BA_IMG_IDX[b] = {}); o[field] = v; }
+/* ★2026-10-25 01 商品部：トレカの写真の「実物のまわりの物」の語（Claude 判定 merge.py の REAL と同じ）。過去の判定739枚に当てて、
+   狭い語のままだと dark surface・black cloth・革・magnetic holder・ぼかした背景 などの実物が落ちていた（scan 15枚・catalog 38枚）。ゲームの規則は変えない */
+var BA_TCG_REAL_RE = /机|床|布|畳|手|指|棚|カーペット|シーツ|シート|テーブル|木|台|革|敷物|タオル|ケース|ホルダー|ぼか|ボケ|スリーブ|ローダー|マット|紙|table|floor|desk|hand|finger|carpet|wood|fabric|cloth|towel|sheet|surface|leather|case|holder|blur|bokeh|sleeve|loader|mat/i;
 function baJudge_(imgUrl, st, cache, capN, expect) {
   if (BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
   /* ★2026-10-20 全体レビュー 中②：手動判定（Claude ¥0）や判定の控えが読めなかった回は、判定済みの写真を有料 AI でやり直してしまう＝その回は AI を呼ばない */
@@ -7800,7 +7803,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   /* ★2026-09-23 21:00【取り消し】20:10に「白背景でも影か傾きがあれば実物」と緩めたら、1時間で カタログ画像（LEGO City・A.C.E. R）と
      バッグの宣材（ACTIVE BODY）が通って出品まで行った（本人「こういうのはパッと見新品になるでしょう」「イメージ画像を使ってしまっている」）。
      間違った写真を出すより出さない方がずっとマシ＝元の厳しさに戻す。shadow/tilt は【落とす側にだけ】使う（両方無ければ背景に関係なくカタログ） */
-  if (ok && /白|white|無地|単色|plain|透明|transparent|グラデ|gradient|スタジオ|studio|背景なし|切り抜き/i.test(String(o.scene || '')) && !/机|床|布|畳|手|棚|カーペット|シーツ|テーブル|木|table|floor|desk|hand|carpet|wood|fabric/i.test(String(o.scene || ''))) { ok = false; kind = 'catalog'; }
+  if (ok && /白|white|無地|単色|plain|透明|transparent|グラデ|gradient|スタジオ|studio|背景なし|切り抜き/i.test(String(o.scene || '')) && !((expect && expect.tcg) ? BA_TCG_REAL_RE : /机|床|布|畳|手|棚|カーペット|シーツ|テーブル|木|table|floor|desk|hand|carpet|wood|fabric/i).test(String(o.scene || ''))) { ok = false; kind = 'catalog'; }
   if (ok && o.shadow === false && o.tilt === false) { ok = false; kind = 'catalog'; }
   /* ★2026-09-25 本人「イメージ画像になっている」（SPY×FAMILY おでけけエディション）。限定版の外箱を周りを切り落として正面いっぱいに撮った写真が『実物の箱』で通っていた。
      背景（机・床・布・手）がほぼ写っていない＝見た目は公式のイメージ画像と同じ＝新品と間違われる。5%未満は宣材扱いで落とす（数字を返さない時は今まで通り） */
@@ -7830,7 +7833,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     /* ★2026-10-24 01 商品部（本人「新品の画像じゃない？」デジモン BT17-018＝メルカリShops の白い余白付きのまっすぐなスキャンが bg 10 で通った）。
        白い余白も bg に数えられて bg>=10 だけで通っていた（shadow false・tilt true は指示文の直しで防ぐ）。
        bg は scene に実物のまわりの物（机・布・手・スリーブ 等）の語がある時だけ数える。shadow は残す（白い机に平らに置いた実物を落とさない・01 の指摘） */
-    else if (o.tilt !== true && o.shadow !== true && !(Number(o.bg) >= 10 && /机|床|布|畳|手|棚|カーペット|シーツ|テーブル|木|スリーブ|ローダー|マット|紙|table|floor|desk|hand|carpet|wood|fabric|sleeve|loader|mat/i.test(String(o.scene || '')))) { ok = false; kind = 'scan'; }
+    else if (o.tilt !== true && o.shadow !== true && !(Number(o.bg) >= 10 && BA_TCG_REAL_RE.test(String(o.scene || '')))) { ok = false; kind = 'scan'; }
   }
   if (ok && expect && String(o.title_match || '') === 'no') { ok = false; kind = 'wrongtitle'; }
   if (ok && expect && o.overseas === true) { ok = false; kind = 'overseas'; }
