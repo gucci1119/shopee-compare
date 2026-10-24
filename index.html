@@ -15948,7 +15948,7 @@
       if (sts.some(x => /^(reply:2|task|auto:2(:failed)?)$/.test(x))) st = 'requested';
       /* ★2026-10-24 謝りの1通が送れないと optout:failed／wrongnumber:failed、2行目が書けないと reply:5／reply:8 だけが残る（whatsapp-outreach 202・210）。
          相手が「送らないで」「別人」と言った事実は同じ＝×に（②の赤い停滞で追いかける形に出ていた） */
-      if (sts.some(x => /^(optout|wrongnumber|notfound)(:failed)?$|^reply:[58]$/.test(x))) st = 'x';
+      if (sts.some(x => /^(optout|wrongnumber|notfound)(:failed)?$/.test(x))) st = 'x';   /* ★2026-10-24 断りと読まれた返事（reply:5/8）は × にしない＝読み違え（別の人の返事）がありうるので②の停滞に残す */
       let autoT = p.last;
       const os = (ordBy[String((demoOn() ? dmBuyer(p.acc) : p.acc) || '').toLowerCase()] || []).filter(o => Number(o.order_ts || 0) * 1000 > (p.first || 0) && !/CANCEL|UNPAID/i.test(String(o.status || '')));
       p.orders = os;
@@ -19673,7 +19673,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
      ・赤い件数は10分ごとに、もう読んである注文（renderAlerts._cache）だけで今の日付でやり直す。Supabase は読まない・書かない＝担当PCに絞らない */
   function alertSelfTransit_(o) { return !!(state.orders && state.orders.selfTransit && state.orders.selfTransit.has(o.cc + ':' + o.sn)); }
   function alertDeadline_(o) { return o && o.ship_by ? ordShipDeadline({ shipBy: o.ship_by, cc: o.cc }) : 0; }
-  function alertShipLv_(o) { const dl = alertDeadline_(o); if (!dl) return 0; const bk = dueBucketOf_(dl, o.cc); return bk === 'over' ? 2 : (bk === 'd0' ? 1 : 0); }   // 2=超過／1=今日／0=まだ
+  function alertShipLv_(o) { const dl = alertDeadline_(o); if (!dl) return 0; const bk = dueBucketOf_(dl, o.cc); return bk === 'over' ? 2 : ((bk === 'd0' || bk === 'd1') ? 1 : 0); }   // 2=超過／1=今日・明日（★2026-10-24 前の「24時間以内」と同じく明日の分も早めに出す）／0=まだ
   function alertToShip_(orders) { return (orders || []).filter(o => /to ?ship/i.test(o.status || '') && !o.tracking && !alertSelfTransit_(o)); }
   function alertLate_(orders) { return (orders || []).filter(o => o.tab === 300 && o.tracking && /to ?ship|processed/i.test(o.status || '') && !alertSelfTransit_(o) && ordDueBucket({ tab: 300, shipBy: o.ship_by, cc: o.cc }) === 'over'); }
   function alertBadgeSet_(k, ship, late) {
@@ -19732,7 +19732,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const dl = alertDeadline_(o);   // ★ship_byは起点。家から出す期限（cc を渡して現地の曜日で日曜繰り上げ・2026-10-24 レビュー #4）
       const level = alertShipLv_(o);  // 2=超過／1=今日（📦注文管理の🚨遅延中と同じ日付の数え方・#5）
       const due = dl ? mdw_(dl, o.cc) : '—';
-      const label = level === 2 ? '超過' : (level === 1 ? '今日' : '');
+      const label = level === 2 ? '超過' : (level === 1 ? (dueBucketOf_(dl, o.cc) === 'd1' ? '明日' : '今日') : '');
       const it = (o.items || [])[0] || {};
       const rg = regionByCc(o.cc);
       const imgCell = it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:32px;height:32px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
@@ -19826,7 +19826,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       card('🚚', '発送期日（未発送）', '#d93025', shipRows.length,
         ['国', '画像', '注文SN', 'バイヤー', '商品', '家から出す期限', '状態', '伝票'],
         shipRows.slice(0, 100).map(r => `<tr${r.level === 2 ? ' style="background:#fff5f5"' : ''}>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
-        '家から出す期限（📦注文管理と同じ数え方＝その国の現地の日付）が過ぎた／今日のもの。🖨️で伝票印刷へ。', 'al-ship') +
+        '家から出す期限（📦注文管理と同じ数え方＝その国の現地の日付）が過ぎた／今日・明日のもの。🖨️で伝票印刷へ。', 'al-ship') +
       card('🚨', '伝票済みで家から出す期限を過ぎた注文', '#d93025', lateRows.length,
         ['国', '注文SN', 'バイヤー', '商品', '家から出す期限', '追跡番号', '確認'],
         lateRows.slice(0, 100).map(o => { const rg = regionByCc(o.cc); const it = (o.items || [])[0] || {}; const dl = alertDeadline_(o); return `<tr style="background:#fff5f5"><td style="font-size:11px;white-space:nowrap"><b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b></td><td style="font-size:11px;white-space:nowrap">${esc(o.sn)}</td><td style="font-size:11px">${esc(o.buyer || '')}</td><td style="font-size:11px">${nm(it.name, '260px')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#d93025">${dl ? esc(mdw_(dl, o.cc)) : '—'}</b></td><td style="font-size:11px;white-space:nowrap">${esc(o.tracking || '')}</td><td>${rg ? `<a href="https://${rg.host}/portal/sale/order${o.sn ? '#smdsn=' + encodeURIComponent(o.sn) : ''}" target="_blank" rel="noopener" title="Shopeeでこの注文を開く">📄</a>` : ''}</td></tr>`; }).join(''),
