@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0730';
+var SRC_VER = '20261025-0800';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9983,10 +9983,10 @@ function baJanTodoWrite_(one) {   /* 返り＝{ pushed: 足した数, waiting: �
   var fr = baKvFreshMany_(['jan_todo_auto']); if (!fr) return { pushed: 0, waiting: -1, pruned: 0 };
   var base = (fr['jan_todo_auto'] && typeof fr['jan_todo_auto'] === 'object' && !Array.isArray(fr['jan_todo_auto'])) ? fr['jan_todo_auto'] : {};
   var out = {}, pushed = 0, pruned = 0;
-  Object.keys(base).forEach(function (k) { var e = base[k]; if (/^__/.test(k)) return; if (e && (BA_JAN_TODO_LOOSE.test(String(e.hw || '')) || baJanTodoAnswered_(e))) { pruned++; return; } out[k] = e; });
+  Object.keys(base).forEach(function (k) { var e = base[k]; if (/^__/.test(k)) { out[k] = e; return; }   /* '__' の鍵（時刻や版などの印）はそのまま写す＝外すのは作品の鍵だけ */ if (e && (BA_JAN_TODO_LOOSE.test(String(e.hw || '')) || baJanTodoAnswered_(e))) { pruned++; return; } out[k] = e; });
   Object.keys(one || {}).forEach(function (k) { var e = one[k]; if (!e || BA_JAN_TODO_LOOSE.test(String(e.hw || '')) || baJanTodoAnswered_(e)) return; if (!out[k]) pushed++; out[k] = e; });
   if (pushed || pruned) baKvSet_('jan_todo_auto', out);
-  return { pushed: pushed, waiting: Object.keys(out).length, pruned: pruned };
+  return { pushed: pushed, waiting: Object.keys(out).filter(function (k) { return !/^__/.test(k); }).length, pruned: pruned };
 }
 var BA_JAN_TODO_LAST = null;
 function baGameJanTodoFlush_() {
