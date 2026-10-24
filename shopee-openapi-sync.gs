@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-1030';
+var SRC_VER = '20261025-1100';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3819,7 +3819,8 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey) {
     ((finalRv || {}).model || []).forEach(function (m) {
       var oi = (m.tier_index || [])[0]; var on = fo[oi] ? String(fo[oi].option || '') : ''; if (!on || newNames.indexOf(on.toLowerCase()) < 0) return;
       var sk0 = sentSku[on.toLowerCase()];
-      if (oldIds[String(m.model_id)] || (sk0 && String(m.model_sku || '').trim() && String(m.model_sku || '').trim().toUpperCase() !== sk0.trim().toUpperCase())) {   /* ★2026-10-25 SKU が空＝まだ付いていないだけ（割引から外して足し直した直後に空のことがある・後で 🏷 SKU が付ける）。ずれとは見なさない。名前と前からの番号の確認はそのまま */ mismatch.push({ option: on, model_id: m.model_id, sku: String(m.model_sku || ''), old: !!oldIds[String(m.model_id)] }); return; }
+      var _lsk = String(m.model_sku || '').trim().toUpperCase(), _ssk = sk0 ? String(sk0).trim().toUpperCase() : '';   /* ★2026-10-25 前からの番号でも、Shopee の SKU が送った SKU と同じなら同じ作品（割引で1回目が途中まで入り、足し直しで「同名」と断られた時に、正しい明細を在庫0にしていた＝MY GB ④ 13件・TH GB ⑤ 1件）。前からの番号で SKU が空・違う時は今どおりずれ */
+      if ((oldIds[String(m.model_id)] && !(_ssk && _lsk === _ssk)) || (_ssk && _lsk && _lsk !== _ssk)) {   /* ★2026-10-25 SKU が空＝まだ付いていないだけ（割引から外して足し直した直後に空のことがある・後で 🏷 SKU が付ける）。ずれとは見なさない。名前と前からの番号の確認はそのまま */ mismatch.push({ option: on, model_id: m.model_id, sku: String(m.model_sku || ''), old: !!oldIds[String(m.model_id)] }); return; }
       newList.push({ option: on, model_id: m.model_id });
     });
     if (mismatch.length) { try { updateStockList_(shopId, itemId, mismatch.map(function (x) { return { model_id: x.model_id, stock: 0 }; })); } catch (eMs) { mismatch.forEach(function (x) { x.stockErr = String((eMs && eMs.message) || eMs).slice(0, 80); }); } }
@@ -9837,7 +9838,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       /* ★2026-10-24 01 商品部・05 のレビュー：この道でも③と同じ確認をする（前からある番号・送った SKU と違う物は新しい作品と見なさず在庫0で記録）。
          足した明細が全部ずれと判定された時・④の読み直しに失敗した時もここを通る＝前は、ずれて在庫0にした前からある番号を新しい作品の番号として台帳に「済み」で控えていた */
       try { var _live = getModels_(tgt.shop_id, tgt.item_id) || {}; var _oldI = {}; (r2.oldIds || []).forEach(function (id) { _oldI[String(id)] = 1; }); var _skS = {}, _nmS = {}; items.forEach(function (x) { var nk0 = okNm_(x.option); _nmS[nk0] = 1; if (x.sku) _skS[nk0] = String(x.sku).trim().toUpperCase(); }); var _mmL = [];
-        ((_live.models) || _live || []).forEach(function (m) { if (!(m && m.name && m.model_id)) return; var nk = okNm_(m.name); if (!_nmS[nk]) return; if (_oldI[String(m.model_id)] || (_skS[nk] && String(m.sku || '').trim() && String(m.sku || '').trim().toUpperCase() !== _skS[nk])) {   /* ★2026-10-25 05 の依頼：VN DS ⑪ の2明細・TH PS2 ② の1明細が「SKU違い（空）」で在庫0にされた＝読み直した時に SKU がまだ空だっただけ（今の Shopee では名前・SKU とも合っていた）。空はずれと見なさない */ _mmL.push({ option: m.name, model_id: m.model_id, sku: String(m.sku || ''), old: !!_oldI[String(m.model_id)] }); delete okNames[nk]; return; } okNames[nk] = m.model_id; });
+        ((_live.models) || _live || []).forEach(function (m) { if (!(m && m.name && m.model_id)) return; var nk = okNm_(m.name); if (!_nmS[nk]) return; var _lsk2 = String(m.sku || '').trim().toUpperCase(); if ((_oldI[String(m.model_id)] && !(_skS[nk] && _lsk2 === _skS[nk])) || (_skS[nk] && _lsk2 && _lsk2 !== _skS[nk])) {   /* ★2026-10-25 同上：前からの番号でも SKU が送った SKU と同じなら済み */   /* ★2026-10-25 05 の依頼：VN DS ⑪ の2明細・TH PS2 ② の1明細が「SKU違い（空）」で在庫0にされた＝読み直した時に SKU がまだ空だっただけ（今の Shopee では名前・SKU とも合っていた）。空はずれと見なさない */ _mmL.push({ option: m.name, model_id: m.model_id, sku: String(m.sku || ''), old: !!_oldI[String(m.model_id)] }); delete okNames[nk]; return; } okNames[nk] = m.model_id; });
         if (_mmL.length) { var _mmErr = ''; try { updateStockList_(tgt.shop_id, tgt.item_id, _mmL.map(function (x) { return { model_id: x.model_id, stock: 0 }; })); } catch (eMs2) { _mmErr = String((eMs2 && eMs2.message) || eMs2).slice(0, 80); } baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：⚠ 読み直しで番号と名前がずれた明細 ' + _mmL.length + '件を在庫0にした（' + _mmL.slice(0, 3).map(function (x) { return x.option + (x.old ? '＝前からの番号' : '＝SKU違い ' + x.sku); }).join(' / ') + (_mmErr ? '・在庫0に失敗 ' + _mmErr : '') + '）'); try { (st.mismatchLog = st.mismatchLog || []).unshift({ at: new Date().toISOString(), cc: cc, item_id: tgt.item_id, n: _mmL.length, ex: _mmL.slice(0, 5), via: 'reread', stockErr: _mmErr || undefined }); if (st.mismatchLog.length > 30) st.mismatchLog.length = 30; } catch (eMl2) {} try { baMismatchRec_(cc, tgt, _mmL, items, hw, 'reread'); } catch (eMr2) {} }
         baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：返事に明細が無かったので読み直して確認（' + Object.keys(okNames).length + '件' + (_mmL.length ? '・ずれ ' + _mmL.length + '件は済みにしない' : '') + '）'); }
       catch (eV) { baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：読み直しに失敗＝この回は済みにしない ' + String(eV).slice(0, 160)); }
