@@ -1427,8 +1427,8 @@
     <span class="smd-seg" style="margin:6px 0 8px 20px"><button class="smd-btn b-open" onclick="window.__smdGo && window.__smdGo('profit')" style="font-size:12px">💹 損益・入出金へ</button></span>
     <div class="smd-pagehead">📈 事業計画 <span class="smd-dim" style="font-weight:400;font-size:12px">（目標から逆算した日々のノルマ＋毎月の収支・結果を過去から）</span></div>
     <div class="pagehelp" style="margin:0 20px 10px"><b>この画面：目標（月の営業利益）を決めると、必要な注文数・1日あたりのノルマを自動で逆算します。</b>
-      <div style="margin-top:5px"><span class="step">1</span>上の<b>目標＆逆算</b>に目標営業利益・稼働日数・運営費（固定/変動率）・<b>税率</b>を入力（<b>月別に目標</b>も設定可） <span class="step">2</span><b>必要注文数／日</b>・<b>税引後の手取り目安</b>・<b>今月の進捗</b>を確認 <span class="step">3</span><b>固定費・経費</b>は実額登録（<b>将来月＝予測</b>も可）→月次表に<b>目標/達成/税引後</b>が並ぶ</div>
-      <span style="color:#5a6b8c;font-size:11.5px">※実利益＝入金−仕入−固定費−変動費−その他経費−返金。税引後は「税・保険 見込み率」からのざっくり目安（正確な税額は税理士へ）。正確な月次実額は実績管理表で管理。</span></div>
+      <div style="margin-top:5px"><span class="step">1</span>上の<b>目標＆逆算</b>に目標営業利益・稼働日数・1件の利益・<b>税率</b>を入力（固定費は下の「固定費の内訳」に） <span class="step">2</span><b>必要注文数／日</b>・<b>税引後の手取り目安</b>・<b>今月の進捗</b>を確認 <span class="step">3</span><b>固定費・経費</b>は実額登録（<b>将来月＝予測</b>も可）→月次表に<b>目標/達成/税引後</b>が並ぶ</div>
+      <span style="color:#5a6b8c;font-size:11.5px">※実利益＝入金−仕入−固定費−その他経費−返金。税引後は「税・保険 見込み率」からのざっくり目安（正確な税額は税理士へ）。正確な月次実額は実績管理表で管理。</span></div>
     <div id="plan-body" style="padding:12px 20px"></div>
   </div>
   <!-- 確定申告・帳簿 -->
@@ -16085,15 +16085,74 @@
     fitScroll('customers');
   }
   // ---------------- 📈 事業計画（目標逆算 ＋ 月次収支履歴） ----------------
-  const plan = { cfg: null };
+  const plan = { cfg: null, base: null, cfgOk: false };   // base＝最後に読めた（または作った元の）plan_cfg の控え／cfgOk＝サーバーから読めたか
   const planCfgDefault = () => ({ targetNet: 300000, workDays: 24, avgProfit: 1200, opexFixed: 105000, opexPct: 6, taxPct: 0, vatRefund: '', targetTakeHome: '', costPer: '', cashCycle: 1, monthTargets: {}, fixBreak: [], outPack: 70, outMsg: 40000, outFacPer: 0, outFacShare: 0, outS: 50, outM: 80, outL: 120, outMatS: 25, outMatM: 45, outMatL: 90, outMixS: '', outMixM: '', outMixL: '' });
   function planLoadLocal() { try { return JSON.parse(localStorage.getItem('smdPlanCfg') || 'null'); } catch (_) { return null; } }
+  // ★2026-10-24 全体レビュー（📈 #1〜#3）：plan_cfg は【丸ごと上書き】。以前は
+  //   ①読めなかった時も「行が無い」と同じ扱いで既定値を作り、1字打つとそれで全PCの固定費の内訳・報告の目標を消していた
+  //   ②タブを開いている間は読み直さないので、別のPCで足した内訳の行を古い cfg で消していた
+  //   ③通信・DB の失敗も灰色の「✓ この端末に保存」と出て、保存できたと思わせていた
+  //   → 保存の直前に必ず読み直し、読めなければ書かない。読めたら手元で【いじった分だけ】を重ねて書く（retMeta・tak と同じ）。
+  //   ⚠️ plan.cfg は画面のハンドラ（const cfg = plan.cfg）が握っているので、別のオブジェクトに差し替えず中身を入れ替える。
+  //   ⚠️ 固定費の内訳（fixBreak）は配列なので、2台が同時に内訳をいじると後に保存した方が丸ごと勝つ（片方が触っていなければサーバーが勝つ）。
+  //   ⚠️ throw しない（📈では await せずに呼んでいる所が多い）。成否は true/false で返し、失敗は赤字＋toast で出す。
+  function planCfgReplace_(target, src) { Object.keys(target).forEach(k => { if (!Object.prototype.hasOwnProperty.call(src, k)) delete target[k]; }); Object.assign(target, src); return target; }
   async function planSave() {
+    if (!plan.cfg) return false;
     const st = document.getElementById('plan-save-stat');
-    try { localStorage.setItem('smdPlanCfg', JSON.stringify(plan.cfg)); } catch (_) {}
+    if (!demoOn()) { try { localStorage.setItem('smdPlanCfg', JSON.stringify(plan.cfg)); } catch (_) {} }   // デモ表示中は縮めた額・ダミー名なので控えにも書かない
+    if (!settings.sbSecret) { if (st) { st.textContent = '✓ この端末に保存（同期は設定の秘密キーが必要）'; st.style.color = '#888'; } return false; }
     if (st) { st.textContent = '保存中…'; st.style.color = '#888'; }
-    try { await sbUpsert('app_kv', [{ k: 'plan_cfg', v: plan.cfg, updated_at: new Date().toISOString() }]); if (st) { st.textContent = '✓ 保存（全PC同期）'; st.style.color = '#1a7f37'; } }
-    catch (e) { if (st) { st.textContent = '✓ この端末に保存（同期は設定の秘密キーが必要）'; st.style.color = '#888'; } }
+    const run = () => planSaveNow_();
+    plan._saveQ = (plan._saveQ || Promise.resolve()).then(run, run);   // 保存は1本ずつ（読み直し→重ねる→書く の途中に次の保存が割り込まない）
+    return plan._saveQ;
+  }
+  // ⚠️ plan._saving（保存中）と plan._saveGen（保存できた回数）は renderPlan の取り直しが見る。
+  //   取り直しの読み（重い注文の読みと一緒に Promise.all で待つ）が保存より前の plan_cfg を握ったまま後から返ると、
+  //   保存した直後の画面を古い内容で塗り戻す（データは消えないが、打った値が戻って見える）ので、その時は寄せない。
+  async function planSaveNow_() {
+    const st = () => document.getElementById('plan-save-stat');
+    const fail = (why) => {
+      const el = st(); if (el) { el.textContent = '⚠ 保存できませんでした：' + why; el.style.color = '#d93025'; }
+      try { toast('📈 事業計画の設定を保存できませんでした：' + why, true); } catch (_) {}
+      return false;
+    };
+    plan._saving = (plan._saving || 0) + 1;
+    try { return await planSaveNowBody_(st, fail); }
+    catch (e) { return fail((e && e.message) || String(e)); }   // 受け手の無い Promise の失敗にしない
+    finally { plan._saving = Math.max(0, (plan._saving || 1) - 1); }
+  }
+  async function planSaveNowBody_(st, fail) {
+    let kv;
+    try { kv = await sbGetAll('app_kv', 'select=v&k=eq.plan_cfg'); }
+    catch (e) { return fail('いまの設定を読み直せませんでした（' + ((e && e.message) || e) + '）。他のPCの変更を消してしまうので書いていません。通信を確かめて、もう一度打ち直してください'); }
+    const mine = plan.cfg; if (!mine) return false;
+    const sv = (kv && kv[0] && kv[0].v && typeof kv[0].v === 'object') ? kv[0].v : null;
+    const before = JSON.stringify(mine);
+    // 行がまだ無い＝手元を全部書く。行がある＝土台（最後に読めた内容）と比べて違う項目だけを重ねる（土台が無ければ手元を全部重ねる）
+    const merged = mergeMine_(sv || {}, mine, sv ? plan.base : null);
+    planCfgReplace_(mine, merged);
+    const wrote = snapBase_(mine);
+    try { await sbUpsert('app_kv', [{ k: 'plan_cfg', v: wrote, updated_at: new Date().toISOString() }]); }
+    catch (e) { return fail((e && e.message) || String(e)); }
+    plan.base = wrote; plan.cfgOk = true; plan._saveGen = (plan._saveGen || 0) + 1;
+    if (!demoOn()) { try { localStorage.setItem('smdPlanCfg', JSON.stringify(wrote)); } catch (_) {} }
+    { const el = st(); if (el) { el.textContent = '✓ 保存（全PC同期）'; el.style.color = '#1a7f37'; } }
+    // 他のPCの変更が重なって中身が変わった時は描き直す（変わっていなければ描き直さない）
+    if (JSON.stringify(mine) !== before && state.page === 'plan') { try { planRerenderKeep_(); } catch (_) {} }
+    return true;
+  }
+  // ★2026-10-24 全体レビュー（📈 #14）：打鍵の後に描き直すと入力欄が差し替わってフォーカスが外れ、続けて打った文字が消えていた。
+  //   描き直しの前に打っていた欄（id が plan- で始まる）とカーソルの位置（末尾からの距離）を控え、描いた後に戻す。
+  //   描いている間に別の所を押していたら（フォーカスが body 以外にある）戻さない。
+  async function planRerenderKeep_() {
+    const a = document.activeElement, id = (a && a.id && /^plan-/.test(a.id)) ? a.id : '';
+    let fromEnd = null; try { if (id && a.selectionEnd != null) fromEnd = String(a.value || '').length - a.selectionEnd; } catch (_) {}
+    await renderPlan();
+    if (!id) return;
+    const cur = document.activeElement; if (cur && cur !== document.body) return;
+    const b = document.getElementById(id); if (!b) return;
+    try { b.focus(); if (fromEnd != null) { const q = Math.max(0, String(b.value || '').length - fromEnd); b.setSelectionRange(q, q); } } catch (_) {}
   }
   // 出品台帳の重量から「小・中・大」の構成比を出す。小さい物が多いなら単価も小さくてよい＝一律単価にしない。
   //  小＝〜500g（ゲームソフト等・封筒〜小箱）／中＝〜1kg／大＝1kg超（本体・箱物）
@@ -16245,9 +16304,11 @@
       tline('粗利', gross, t.gross, fmtM),
       tline('注文数', m.n, t.orders, fmtN),
       ...((pl && pl.fix >= 0 && dim > 0 && dayNow > 0)
-        ? ['実利益：' + ((Number(pl.targetNet) || 0) > 0 ? '目標 ' + man(Number(pl.targetNet)) + ' ／ ' : '') + '結果 ' + man(pl.now)
-          + ' ／ 着地予測 ' + man(gross / (dayNow / dim) - pl.fix - (pl.other || 0) / (dayNow / dim) - (pl.refund || 0) / (dayNow / dim))
-          + '（固定費 ' + man(pl.fix) + ' は月額のまま計上）'] : []),
+        ? [pl.known === false
+          ? '実利益：集計中（判明 ' + (Number(pl.reliPct) || 0) + '%）'   /* ★2026-10-24 #5 まだ言えない月に「0.0万円」と貼らない */
+          : '実利益：' + ((Number(pl.targetNet) || 0) > 0 ? '目標 ' + man(Number(pl.targetNet)) + ' ／ ' : '') + '結果 ' + man(pl.now)
+          + ' ／ 着地予測 ' + man(gross / (dayNow / dim) - pl.fix - (pl.other || 0) - (pl.refund || 0) / (dayNow / dim))   /* ★2026-10-24 #7 その他経費は伸ばさない */
+          + '（固定費 ' + man(pl.fix) + '・その他経費 ' + man(pl.other || 0) + ' は登録済みの額のまま計上）'] : []),
       '',
       '国別：' + (ccs.map(cc => cc + ' ' + M2[ym][cc].n + '件/' + man(M2[ym][cc].dep - M2[ym][cc].cost)).join('　') || '-'),
       '粗利/件：' + (m.gn ? yen(gross / m.gn) : '-'),
@@ -16263,16 +16324,25 @@
       <table class="pf-table" style="width:100%;font-size:12px;margin-bottom:8px"><tr>
         <th style="width:120px"></th><th style="width:110px;text-align:right">目標（月）</th>
         <th style="width:120px;text-align:right">結果（今日まで）</th><th style="width:120px;text-align:right">着地予測</th><th style="width:150px;text-align:right">判定</th></tr>
-        ${line('売上（入金）', m.dep, t.sales, man)}
+        ${line('売上（入金）', (m.depAll != null ? m.depAll : m.dep), t.sales, man)}
         ${line('粗利', gross, t.gross, man)}
         ${line('注文数', m.n, t.orders, v => Math.round(v).toLocaleString() + '件')}
         ${(() => {
           // ★実利益の着地は**単純な日割りにしてはいけない**。固定費（家賃・人件費等）は月額でもう全額決まっており、
-          //   月末に向けて増えないため。伸ばすのは 入金・仕入・その他経費・返金（＝件数に比例するもの）だけ。
+          //   月末に向けて増えないため。伸ばすのは 入金・仕入・返金（＝件数に比例するもの）だけ。
+          // ★2026-10-24 全体レビュー（📈 #7）：その他経費も伸ばさない。この画面の「＋登録」も固定費の自動登録も月の1日付けで入れるので、
+          //   月初ほど何倍にも引いていた（3日目に資材 ¥30,000 → 約¥31万を引いた着地）。登録済みの額をそのまま引く。
+          // ★2026-10-24 全体レビュー（📈 #5）：判明率40%未満（まだ言えない）の月に「結果 0.0万円」と出していた → 集計中
           if (!pl || !(pl.fix >= 0)) return '';
           const frac = dim > 0 ? dayNow / dim : 0; if (frac <= 0) return '';
-          const landOp = gross / frac - pl.fix - (pl.other || 0) / frac - (pl.refund || 0) / frac;
-          const tgt = Number(pl.targetNet) || 0, has = tgt > 0, ok = has && landOp >= tgt;
+          const tgt = Number(pl.targetNet) || 0, has = tgt > 0;
+          if (pl.known === false) return `<tr style="background:#f2f8ff">
+            <td style="font-weight:700">実利益 <span class="smd-dim" style="font-weight:400;font-size:10px">（固定費を引いた後）</span></td>
+            <td style="text-align:right">${has ? man(tgt) : '<span class="smd-dim">未設定</span>'}</td>
+            <td style="text-align:right" colspan="3"><span class="smd-dim" title="入金と仕入の両方が分かった注文が少ないので、まだ実利益を出せません">集計中（判明 ${Number(pl.reliPct) || 0}%）</span></td>
+          </tr>`;
+          const landOp = gross / frac - pl.fix - (pl.other || 0) - (pl.refund || 0) / frac;
+          const ok = has && landOp >= tgt;
           return `<tr style="background:#f2f8ff">
             <td style="font-weight:700">実利益 <span class="smd-dim" style="font-weight:400;font-size:10px">（固定費を引いた後）</span></td>
             <td style="text-align:right">${has ? man(tgt) : '<span class="smd-dim">未設定</span>'}</td>
@@ -16765,16 +16835,24 @@
       } catch (e) { btn.disabled = false; msg.textContent = '記録できませんでした: ' + String((e && e.message) || e).slice(0, 120); }
     });
   }
+  // ★2026-10-24 全体レビュー（📈 #15）：await の後で投げると「読み込み中…」のまま止まり、赤い描画エラーも出なかった
+  //   （9/12〜9/24 に🎯が描けなかった件が12日見えなかった形）。打鍵の後など showPage を通らない呼び出しも、ここで拾って出す。
   async function renderPlan(force) {
+    try { return await renderPlanBody_(force); }
+    catch (e) { console.error('[描画] plan', e); const b = document.getElementById('plan-body'); if (b) b.innerHTML = errBox(e); }
+  }
+  async function renderPlanBody_(force) {
     const body = document.getElementById('plan-body');
-    let orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv;
+    let orders, income, costs, inv, expenses, kv, tasks, issues, shKv;
+    let kvFresh = false;
+    const gen0 = plan._saveGen || 0;   // 読み始めた時の「保存できた回数」（読んでいる間に保存が終わったら、古い読みで塗り戻さない）
     const planFails = [];
     const pc = plan._cache; // 目標などの数値変更では再取得しない（TTL120秒／force・タブ再訪で取り直し）＝8テーブル毎回取得を解消
-    if (!force && pc && Date.now() - pc.at < 120000) { ({ orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv } = pc.data); }
+    if (!force && pc && Date.now() - pc.at < 120000) { ({ orders, income, costs, inv, expenses, kv, tasks, issues, shKv } = pc.data); }
     else {
       body.innerHTML = '<span class="smd-dim">読み込み中...（注文・入金・在庫・経費・返金を集計）</span>';
       try {
-        [orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv] = await Promise.all([
+        [orders, income, costs, inv, expenses, kv, tasks, issues, shKv] = await Promise.all([
           // ★order_ts を取らないと、下の JST 判定が必ず else（各国ローカル日）に落ちる。
           //   月境界と、注文日レートの基準日がずれる（2026-09-06に発覚）。
           sbGetAll('orders', 'select=cc,sn,total,order_date,order_ts,tab&order=order_date.desc'),
@@ -16783,18 +16861,33 @@
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
           sbGetAll('inventory', 'select=shopee_sn,price&shopee_sn=not.is.null'),
           sbGetAll('expenses', 'select=ymd,amount,category,memo'),
-          sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(() => []),
+          sbGetAll('app_kv', 'select=k,v&k=eq.plan_cfg').catch(e => { console.warn('[plan] plan_cfg を読めませんでした', e); return null; }),   // ★2026-10-24 読めなかった＝null（行が無い＝[] と分ける）
           sbGetAll('tasks', 'select=done').catch(() => []),
           loadSoft(sbGetAll('order_issues', 'select=cc,sn,refund_jpy,refund_date,created_at'), '手で記録した返金', planFails),   // ★cc/snが無いと retLossForYm の二重計上の除外が一切効かない（2026-09-10 是正）
-          loadSoft(sbGetAll('returns', 'select=cc,order_sn,return_sn,refund_amount,currency,create_time,status'), '正式な返品リクエスト', planFails),
-          loadSoft(sbGetAll('app_kv', 'select=v&k=eq.return_meta'), '補償金の記録', planFails),   // 正式な返品リクエストの返金
+          /* ★2026-10-24 全体レビュー（📈 #13）：returns（全件）と return_meta は 9/24 に正式返品を引くのをやめてから使っていない＝読まない（落ちた時に出ていた誤った警告も消える） */
           loadSoft(sbGetAll('app_kv', 'select=v&k=eq.profit_sheet'), '利益管理表の取り込み値', planFails),  // 📗利益計算表：PayPal差分（主にBR・買主から別途徴収した分）
         ]);
       } catch (e) { body.innerHTML = errBox(e); return; }
-      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues, rets, rmeta, shKv }, at: Date.now(), fails: planFails.slice() };
+      plan._cache = { data: { orders, income, costs, inv, expenses, kv, tasks, issues, shKv }, at: Date.now(), fails: planFails.slice() };
+      kvFresh = true;
     }
     plan._fails = (plan._cache && plan._cache.fails) || planFails;
-    if (!plan.cfg) plan.cfg = (kv && kv[0] && kv[0].v) || planLoadLocal() || planCfgDefault();
+    // ★2026-10-24 全体レビュー（📈 #1・#2）：plan_cfg は読めた時だけサーバーを正にする。
+    //   読めた＝開いている間も取り直しのたびに、手元でまだ保存していない分だけを上に残してサーバーの内容に寄せる（別のPCの変更を取り込む）。
+    //   読めなかった＝この端末の控え（無ければ既定値）で表示だけする。保存は planSave が直前に読み直し、読めなければ書かない。
+    if (kvFresh && kv) {
+      const sv = (kv[0] && kv[0].v && typeof kv[0].v === 'object') ? kv[0].v : null;
+      const quiet = (plan._saveGen || 0) === gen0 && !plan._saving;   // 読んでいる間に保存が走っていない＝この読みが最新
+      if (!plan.cfg) { plan.cfg = sv ? snapBase_(sv) : (planLoadLocal() || planCfgDefault()); plan.base = sv ? snapBase_(sv) : null; }
+      else if (quiet) {
+        if (sv) planCfgReplace_(plan.cfg, plan.base ? mergeMine_(sv, plan.cfg, plan.base) : snapBase_(sv));   // 土台が無い（💴から作った等）＝サーバーが勝つ
+        plan.base = sv ? snapBase_(sv) : null;
+      }   // 保存と重なった時は手元・土台とも触らない（保存した側が新しい）
+      plan.cfgOk = true;
+    } else if (!plan.cfg) {
+      plan.cfg = planLoadLocal() || planCfgDefault();
+      plan.base = snapBase_(plan.cfg); plan.cfgOk = false;   // 作った元を土台にする＝保存の時は「この後いじった分」だけがサーバーに乗る
+    }
     if (plan.cfg.opexFixed == null) plan.cfg.opexFixed = 105000;
     if (plan.cfg.opexPct == null) plan.cfg.opexPct = 6;
     if (plan.cfg.taxPct == null) plan.cfg.taxPct = 0;
@@ -16852,7 +16945,10 @@
     //   （スプシでは備品費の下にぶら下がっていたため、そのまま入れると固定費から漏れていた）。
     const FIX_CATS = ['人件費', '家賃', '地代家賃', '倉庫代', '倉庫', '倉庫代・家賃', '倉庫費', '保管料',
       'ツール', 'ツール代', 'サブスク', '固定費', '通信費', '通信', '外注費', '外注', 'オフィス'];
-    const isFixCat = c => FIX_CATS.indexOf(String(c || '').trim()) >= 0;
+    // ★2026-10-24 全体レビュー（📈 #6）：完全一致だけだと、💴の細目（人件費（梱包・発送）・ツール代（その他）など）と
+    //   固定費の自動登録（plEcatOf）が入れる分類がその他経費に落ち、固定費は見込みで引く＋実額をその他経費で引く＝二重に引いていた。
+    //   頭が「人件費」「ツール」の分類も固定費に入れる（実データでの件数は未確認）。
+    const isFixCat = c => { const t = String(c || '').trim(); return FIX_CATS.indexOf(t) >= 0 || /^人件費|^ツール/.test(t); };
     const EF = {}, EO = {}; // EF=固定費実額(ym) / EO=その他経費(ym)
     const EI = {};   // 初期投資（別枠）：固定費にもその他経費にも入れない
     expenses.forEach(x => { const ym = (x.ymd || '').slice(0, 7); if (!ym) return; const amt = Number(x.amount) || 0; if (plIsInvest(x.category)) { EI[ym] = (EI[ym] || 0) + amt; return; } if (isFixCat(x.category)) EF[ym] = (EF[ym] || 0) + amt; else EO[ym] = (EO[ym] || 0) + amt; });
@@ -16879,7 +16975,7 @@
     // ★固定費を二重管理しない：実額（💴入出金・経費に登録した人件費/家賃/ツール等）を唯一の真実にする。
     //   直近の実績月（当月を除く・実額がある月）の平均を「実額の固定費」として持ち、
     //   計画側に内訳の手入力が無ければ**そのまま既定値として使う**（手入力があれば上書きとして尊重）。
-    const fixActualMonths = yms.filter(ym => ym !== curYm && (EF[ym] || 0) > 0).slice(0, 3);
+    const fixActualMonths = yms.filter(ym => ym < curYm && (EF[ym] || 0) > 0).slice(0, 3);   // ★2026-10-24 過去の月だけ（将来の月の予測経費を実額の平均に混ぜない）
     const fixActual = fixActualMonths.length
       ? Math.round(fixActualMonths.reduce((sum, ym) => sum + (EF[ym] || 0), 0) / fixActualMonths.length) : 0;
     const opexManual = fixBreak.length ? fixBreakSum : ((cfg.opexFixed === '' || cfg.opexFixed == null) ? null : (Number(cfg.opexFixed) || 0));
@@ -16907,7 +17003,10 @@
     const needGmv = needOrders * avgPrice;
     // 消費税還付（輸出免税）：国内仕入で払った消費税(税込の10/110)が戻る見込み。目標の仕入は注文数×1件仕入で推定。手入力で上書き可。
     const costRow = rows.find(r => r.cost > 0 && r.gn > 0);
-    const costPerOrder = costRow ? costRow.cost / costRow.gn : 0; // 仕入は突合済(gn)の合計→gnで割る（nで割ると過小）
+    // ★2026-10-24 全体レビュー（📈 #11）：一番新しい月（月初なら当月の2〜3件）で決めていたので、運転資金・目標の仕入・還付の推定がぶれていた。
+    //   粗利/件と同じ直近3か月（当月除く・判明率40%以上）の合計で割る。無い時だけ従来どおり一番新しい月。
+    const tCost = done.reduce((s, r) => s + r.cost, 0);
+    const costPerOrder = (tGn > 0 && tCost > 0) ? tCost / tGn : (costRow ? costRow.cost / costRow.gn : 0); // 仕入は突合済(gn)の合計→gnで割る（nで割ると過小）
     const targetCost = Math.round(needOrders * costPerOrder);
     /* ★2026-10-22 還付の元はお店からの仕入だけ＝目標の仕入にその割合を掛ける。割合は在庫台帳（読めていれば直近90日）、読めていなければ 7〜9月の実測 15%（1,970件中 Amazon・Shops・楽天等） */
     const vatBizShare = (() => { try { const inv = (typeof stock !== 'undefined' && Array.isArray(stock.rows)) ? stock.rows : null; if (!inv) return 0.15; const since = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10); let b = 0, a = 0; inv.forEach(r => { const d = invPurDate(r); if (!d || d < since) return; const pr = Number(r.price) || 0; if (!(pr > 0)) return; a += pr; if (plVatKind(r.supplier) === 'biz') b += pr; }); return a > 0 ? b / a : 0.15; } catch (_) { return 0.15; } })();
@@ -16945,8 +17044,10 @@
     const maxAbs = Math.max(1, ...chart.map(r => Math.abs(chVal(r))));
     const chartHtml = chart.map(r => {
       const v = chVal(r), h = Math.round(Math.abs(v) / maxAbs * 66), pos = v >= 0;
-      return `<div title="${r.ym}：営業利益 ${r.gn > 0 ? fmtJpy(v) : 'データなし'}（注文${r.n}件）" style="flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:2px">
-        <div style="height:72px;display:flex;align-items:flex-end;width:100%;justify-content:center"><div style="width:70%;height:${Math.max(2, h)}px;background:${pos ? '#1a7f37' : '#d93025'};border-radius:4px 3px 0 0"></div></div>
+      // ★2026-10-24 全体レビュー（📈 #9）：判明率40%未満の月は表では「—」なのに、ここだけ0円の緑の棒になっていた → 灰色の点線＋「まだ出せない」
+      const unk = opProfitOf(r) == null, kp = r.n ? Math.round((r.gn || 0) / r.n * 100) : 0;
+      return `<div title="${unk ? `${r.ym}：まだ出せない（判明 ${kp}%）（注文${r.n}件）` : `${r.ym}：営業利益 ${fmtJpy(v)}（注文${r.n}件）`}" style="flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:2px">
+        <div style="height:72px;display:flex;align-items:flex-end;width:100%;justify-content:center">${unk ? '<div style="width:70%;height:10px;border:1px dashed #b0b7c3;border-bottom:none;border-radius:4px 3px 0 0;box-sizing:border-box"></div>' : `<div style="width:70%;height:${Math.max(2, h)}px;background:${pos ? '#1a7f37' : '#d93025'};border-radius:4px 3px 0 0"></div>`}</div>
         <div style="font-size:9px;color:#888;transform:rotate(-40deg);white-space:nowrap;transform-origin:center">${r.ym.slice(2)}</div></div>`;
     }).join('');
     // ★合計は【同じ母集団】で足す。列ごとに条件が違うと、行では「—」の月の粗利が合計には入り、
@@ -16983,8 +17084,9 @@
         <table style="border-collapse:collapse;font-size:12.5px"><tr class="smd-dim" style="font-size:11px;background:#f4f6fa"><th style="text-align:left;padding:4px 8px">案件</th><th style="text-align:right;padding:4px 8px">投資額</th><th style="text-align:right;padding:4px 8px">その後の営業利益 累計</th><th style="text-align:left;padding:4px 8px">回収</th><th style="text-align:left;padding:4px 8px">見込み</th></tr>${trs}</table>
         <div class="smd-dim" style="font-size:11px;margin-top:6px">案件の分け方＝💴で登録する時にメモの先頭に【事務所】のように付ける（無ければ月ごと）。当月は途中の数字です。</div></div>`;
     })();
-    const repHtml = planReportHtml(M, M2, cfg, { fix: effFixedOf(curRow), other: curRow.other || 0, refund: curRow.refund || 0, now: curOp, targetNet: targetNet });
-    body.innerHTML = loadFailBanner(plan._fails, '返金・補償を含む数字') + fxStaleBanner() + repHtml +
+    const repHtml = planReportHtml(M, M2, cfg, { fix: effFixedOf(curRow), other: curRow.other || 0, refund: curRow.refund || 0, now: curOp, known: curOpKnown, reliPct: curReliPct, targetNet: targetNet });
+    const cfgWarn = plan.cfgOk ? '' : '<div style="margin:0 0 10px;padding:8px 12px;border:1px solid #f3c2bb;background:#fff7f6;border-radius:8px;font-size:12px;color:#c0392b"><b>⚠ 目標・固定費の設定（plan_cfg）を読めませんでした。</b>いまの表示はこの端末の控え（無ければ既定値）です。保存する時にもう一度読み直し、読めなければ保存しません。</div>';
+    body.innerHTML = loadFailBanner(plan._fails, '返金・補償を含む数字') + cfgWarn + fxStaleBanner() + repHtml +
       `<div style="display:flex;gap:9px;flex-wrap:wrap;margin:0 0 12px">`
       + secBtn('sim', '🎯 これからの計画（シミュレーション）', '目標を決めて、必要な注文数・固定費・達成ペースを逆算する')
       + secBtn('hist', '📊 これまでの実績（履歴）', '月ごとの売上・入金・仕入・経費・実利益を振り返る')
@@ -17098,7 +17200,7 @@
             <div style="font-size:11px;margin-top:4px">${paceTxt}</div>
           </div>
           <div style="flex:1;min-width:220px">
-            <div style="font-size:12px;display:flex;justify-content:space-between"><span>実利益${fixEstimated(curRow) ? '（固定費は見込み）' : ''}</span><span>${curOpKnown ? money(curOp, curOp < 0 ? '#d93025' : '#1a7f37') : `<span class="smd-dim" title="入金と仕入の両方が分かった注文が少ないので、まだ実利益を出せません">集計中（判明 ${curReliPct}%）</span>`} / ${fmtJpy(targetNet)}${taxPct > 0 ? ` <span class="smd-dim" style="font-size:10px">(税引後 ${fmtJpy(afterTax(curOp))})</span>` : ''}</span></div>
+            <div style="font-size:12px;display:flex;justify-content:space-between"><span>実利益${fixEstimated(curRow) ? '（固定費は見込み）' : ''}</span><span>${curOpKnown ? money(curOp, curOp < 0 ? '#d93025' : '#1a7f37') : `<span class="smd-dim" title="入金と仕入の両方が分かった注文が少ないので、まだ実利益を出せません">集計中（判明 ${curReliPct}%）</span>`} / ${fmtJpy(targetNet)}${taxPct > 0 && curOpKnown ? ` <span class="smd-dim" style="font-size:10px">(税引後 ${fmtJpy(afterTax(curOp))})</span>` : ''}</span></div>
             ${bar(curOp, targetNet, '#1a7f37')}
             <div class="smd-dim" style="font-size:10px;margin-top:4px">入金 ${fmtJpy(curRow.dep)} − 仕入 ${fmtJpy(curRow.cost)} − 固定費 ${fmtJpy(effFixedOf(curRow))}${fixEstimated(curRow) ? '(見込)' : ''} − その他経費 ${fmtJpy(curRow.other)}</div>
           </div>
@@ -17126,7 +17228,7 @@
                   : `<b style="color:${col(dp)}">${dp}%</b><span class="smd-dim" style="font-size:9px"> ${r.gn || 0}/${r.n}</span>`)
                 + '</td>';
             })()}<td style="white-space:nowrap;color:#1a73e8">${tgt ? fmtJpy(tgt) : dash}</td><td style="white-space:nowrap;font-weight:700;color:${achv == null ? '#888' : (achv >= 100 ? '#1a7f37' : '#e8710a')}">${achv == null ? dash : achv + '%'}</td><td style="white-space:nowrap;color:#7b52c4">${has && taxPct > 0 ? money(afterTax(op)) : dash}</td><td style="white-space:nowrap">${has ? fmtJpy(Math.round(r.gross / r.gn)) : dash}</td></tr>`; }).join('')}
-          <tr style="border-top:2px solid #ccc;font-weight:700" title="${av('件数とGMVは全' + tot.monthsAll + 'か月ぶん。\nお金の列（入金・仕入・粗利・固定費・経費・実利益）は、入金と仕入がそろって計算できた ' + tot.months + 'か月ぶんだけを足しています。\n（列ごとに母集団が違うと、粗利−固定費−経費 と 実利益 が合いません）')}"><td>合計</td><td>${tot.nAll}</td><td>${fmtJpy(tot.gmvAll)}</td><td>${fmtJpy(tot.dep)}</td><td style="color:#a15">${fmtJpy(tot.cost)}</td><td>${money(tot.gross)}</td><td class="smd-dim">—</td><td style="color:#c47">${fmtJpy(tot.fix)}</td><td style="color:#d93025">${fmtJpy(tot.other)}</td><td style="color:#d93025">${fmtJpy(tot.refund)}</td><td>${money(tot.op, tot.op < 0 ? '#d93025' : '#1a7f37')}</td><td>—</td><td>—</td><td style="color:#7b52c4">${taxPct > 0 ? money(afterTax(tot.op)) : '—'}</td><td>—</td></tr>
+          <tr style="border-top:2px solid #ccc;font-weight:700" title="${av('件数とGMVは全' + tot.monthsAll + 'か月ぶん。\nお金の列（入金・仕入・粗利・固定費・経費・実利益）は、入金と仕入がそろって計算できた ' + tot.months + 'か月ぶんだけを足しています。\n（列ごとに母集団が違うと、粗利−固定費−経費 と 実利益 が合いません）')}"><td>合計</td><td>${tot.nAll}</td><td>${fmtJpy(tot.gmvAll)}</td><td>${fmtJpy(tot.dep)}</td><td style="color:#a15">${fmtJpy(tot.cost)}</td><td>${money(tot.gross)}</td><td style="color:#c47">${fmtJpy(tot.fix)}</td><td style="color:#d93025">${fmtJpy(tot.other)}</td><td style="color:#d93025">${fmtJpy(tot.refund)}</td><td>${money(tot.op, tot.op < 0 ? '#d93025' : '#1a7f37')}</td><td>—</td><td>—</td><td>—</td><td style="color:#7b52c4">${taxPct > 0 ? money(afterTax(tot.op)) : '—'}</td><td>—</td></tr>
         </table></div>
         <div class="smd-dim" style="font-size:11px;margin-top:8px">💡 <b>入金</b>=Shopeeの預かり金（escrow）を円換算（Shopee手数料は差引済）／<b>仕入</b>=在庫の仕入額を注文に突合／<b>粗利</b>=入金−仕入／<b>固定費</b>=登録した人件費・家賃・ツール等の実額（<span style="color:#e8710a">*</span>＝未登録で見込み額を使用）／<b>その他経費</b>=梱包資材など登録分／<b>返金</b>=返品ページの返金（当月分）／<b>実利益</b>=粗利−固定費−その他経費−返金（送料・手数料は固定費/入金側）。<b>この表が月次損益の「正」</b>です（注文別の内訳は💹損益・入出金＞利益明細へ）。入金・仕入データ未取得の古い月は「—」（GMVは全月）。</div>
       </div><div id="plan-conv"><div class="smd-dim" style="font-size:12px;margin:0 0 12px"><span class="smd-spin"></span> 📐 出品→注文の転換率を読み込み中…</div></div>${investHtml}`);
@@ -17155,7 +17257,7 @@
     // ★打鍵ごとに renderPlan() を呼ぶと画面を描き直して入力欄が差し替わり、途中の入力が飛ぶ。
     //   打鍵では値を控えるだけにして、手が止まってから保存と再描画をする（税の欄と同じ手当て）。
     let planT = null;
-    const planLater = () => { clearTimeout(planT); planT = setTimeout(() => { planSave(); renderPlan(); }, 700); };
+    const planLater = () => { clearTimeout(planT); planT = setTimeout(() => { planSave(); planRerenderKeep_(); }, 700); };   // ★2026-10-24 描き直してもカーソルを戻す（#14）
     const wire = (id, key) => { const el = document.getElementById(id); if (el) { el.addEventListener('input', () => { cfg[key] = ((id === 'plan-avg' || id === 'plan-vat') && el.value.trim() === '') ? '' : numParse(el.value); plan.cfg = cfg; planLater(); }); el.addEventListener('change', () => { clearTimeout(planT); planSave(); renderPlan(); }); } };
     wire('plan-target', 'targetNet'); wire('plan-days', 'workDays'); wire('plan-avg', 'avgProfit'); wire('plan-opexf', 'opexFixed'); wire('plan-tax', 'taxPct'); wire('plan-vat', 'vatRefund');
     // 手取り目標・仕入/件・回収サイクル（空欄OK）
@@ -17172,13 +17274,16 @@
        ['plan-out-mixS', 'outMixS'], ['plan-out-mixM', 'outMixM'], ['plan-out-mixL', 'outMixL']].forEach(([id, key]) => {
         const el = document.getElementById(id); if (!el) return;
         el.addEventListener('input', () => {
-          plan.cfg[key] = Number(String(el.value).replace(/[^\d.]/g, '')) || 0;
-          clearTimeout(ot); ot = setTimeout(() => { planSave(); renderPlan(); }, 500);
+          // ★2026-10-24 全体レビュー（📈 #12）：構成比は空欄＝出品台帳の重量から自動。消したのに 0 で入れると 0% に固まり、3つとも消すと費用0になっていた
+          plan.cfg[key] = (/^outMix/.test(key) && String(el.value).trim() === '') ? '' : (Number(String(el.value).replace(/[^\d.]/g, '')) || 0);
+          clearTimeout(ot); ot = setTimeout(() => { planSave(); planRerenderKeep_(); }, 500);
         });
       });
       const tf = document.getElementById('plan-out-tofix');
       if (tf) tf.addEventListener('click', () => {
         const c = plan.cfg, packCost = Number(planOutsourceHtml._lastPack) || 0, n = Number(planOutsourceHtml._lastN) || 0;
+        // ★2026-10-24 全体レビュー（📈 #12）：費用0のまま押すと、既にある「外注（梱包発送）」の行を消して何も足さなかった → 何も変えずに理由を出す
+        if (!(packCost > 0)) { try { toast('梱包発送の費用が0円なので登録しませんでした（必要注文数・サイズ別の単価・構成比を確かめてください）', true); } catch (_) {} return; }
         if (!Array.isArray(c.fixBreak)) c.fixBreak = [];
         c.fixBreak = c.fixBreak.filter(x => !/^外注（/.test(x.name || ''));   // 二重登録を防ぐ
         if (packCost > 0) c.fixBreak.push({ name: '外注（梱包発送）', amount: Math.round(packCost), freq: 'monthly', cat: '人件費', memo: n + '件/月・サイズ別単価＋資材費' });
@@ -26501,19 +26606,47 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   };
   const rulesState = { data: null, q: '', cc: 'ALL', loading: false };
   const RULE_CCS = ['ALL', 'PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW'];
+  // ★id で引ける形に（mergeMine_ は {キー: 中身} しか扱えないので、配列の items を一度辞書にする）。同じ id の2つ目は入れない
+  function rulesById_(arr) { const o = {}; (arr || []).forEach(x => { if (x && x.id != null && !Object.prototype.hasOwnProperty.call(o, String(x.id))) o[String(x.id)] = x; }); return o; }
   async function rulesLoad(force) {
-    if (rulesState.data && !force) return;
+    if (rulesState.data && !rulesState.err && !force) return;   // ★読めなかった時は次に開いた時に読み直す（以前は空の控えのまま二度と読まなかった・2026-10-24）
     rulesState.loading = true; drawRules();
     try {
       const kv = await sbGetAll('app_kv', 'select=v&k=eq.rules');
       rulesState.data = (kv && kv[0] && kv[0].v) || { items: [], hub: {} }; rulesState.err = false;
-    } catch (_) { rulesState.data = { items: [], hub: {} }; rulesState.err = true; }
+      rulesState.base = snapBase_(rulesById_(rulesState.data.items));   // 前回ちゃんと読めた内容＝保存の時に「手元で触った分」を見分ける土台
+    } catch (_) { if (!rulesState.data) rulesState.data = { items: [], hub: {} }; rulesState.err = true; }   // ★読めた控えは空にしない。読めなかっただけ
     finally { rulesState.loading = false; }
   }
-  async function rulesSave() {
+  // ⚠️ 保存は app_kv の rules の【まるごとの上書き】。📚を開いたままの古い控えで書くと、
+  //   **その間に他のPC・外注さんが足した／直したルールが消える**（2026-10-24 レビュー）。
+  //   → 保存の直前に読み直し、手元で触った1件（rec）だけを重ねる（返品の控え retMeta・棚卸 tak と同じ mergeMine_ の形）。
+  //   控え（rulesState.data）は保存が通ってから書き換える（失敗した分が次の保存に混ざらないように）。
+  async function rulesSave(rec) {
     if (!settings.sbSecret) { alert('このPCは書き込みキーが未設定です（⚙️設定で登録してください）'); return false; }
     if (rulesState.err) { alert('店の決まりを読み込めていないので保存しません（画面を更新してからもう一度）'); return false; }
-    await sbUpsert('app_kv', [{ k: 'rules', v: rulesState.data, updated_at: new Date().toISOString() }]);
+    let kv;
+    try { kv = await sbGetAll('app_kv', 'select=v&k=eq.rules'); }
+    catch (e) { alert('いまの店の決まりを読み直せなかったので保存しません（他の人が足した分を消さないため）。\n通信を確かめて、もう一度お試しください。\n' + ((e && e.message) || e)); return false; }
+    const got = kv && kv[0] && kv[0].v;
+    // 読み直したら空だった＝消えたのか読めなかったのか分からない。手元にルールがあるなら書かない（[[catch-empty-is-not-absence]]）
+    if (!got && rulesState.base && Object.keys(rulesState.base).length) { alert('読み直したら店の決まりが空でした。消えた可能性があるので保存しません（画面を更新して確かめてください）'); return false; }
+    const srv = got || { items: [], hub: {} };
+    const mine = rulesById_((rulesState.data && rulesState.data.items) || []);
+    mine[String(rec.id)] = rec;
+    const merged = mergeMine_(rulesById_(srv.items), mine, rulesState.base);
+    // 並びはサーバの順を保つ。id の無い行・同じ id の2つ目はそのまま残す（消さない）。新しく足した分は末尾へ
+    const items = [], seen = {};
+    (srv.items || []).forEach(x => {
+      const k = (x && x.id != null) ? String(x.id) : null;
+      if (k == null || seen[k]) { items.push(x); return; }
+      seen[k] = 1; if (Object.prototype.hasOwnProperty.call(merged, k)) items.push(merged[k]);
+    });
+    Object.keys(merged).forEach(k => { if (!seen[k]) items.push(merged[k]); });
+    const v = Object.assign({}, srv, { items: items });   // hub などルール以外はサーバのまま
+    await sbUpsert('app_kv', [{ k: 'rules', v: v, updated_at: new Date().toISOString() }]);   // 失敗は例外のまま editOne へ（画面に出す）
+    rulesState.data = v;
+    rulesState.base = snapBase_(rulesById_(items));   // 保存できた＝ここが新しい土台
     return true;
   }
   // スペース区切りは「すべて含む」／-語で除外（出品一覧の検索と同じ書き方に揃える）
@@ -26554,6 +26687,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${Object.keys(d.hub || {}).map(c => `<a href="${hrefOk(d.hub[c])}" target="_blank" rel="noopener" style="font-size:11px;padding:2px 10px;border:1px solid #dfe3e8;background:#fff;border-radius:10px;text-decoration:none;color:#1565c0">${esc(c)} ↗</a>`).join('')}
       </div>
       ${topTags.length ? `<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">${topTags.map(t => `<button class="rl-tag" data-t="${av(t)}" style="font-size:10.5px;padding:2px 9px;border:1px solid #dfe3e8;background:#fafbfc;border-radius:10px;cursor:pointer">${esc(t)}</button>`).join('')}</div>` : ''}
+      ${rulesState.err ? `<div class="smd-empty" style="color:#b71c1c;border-color:#f3c2bb;background:#fff7f6">❌ 店の決まりを読み込めませんでした（「ルールが無い」のではありません）。通信と⚙️設定のキーを確かめて <button id="rl-retry" class="smd-btn" style="font-size:11.5px;padding:3px 10px">🔄 読み直す</button></div>` : ''}
       ${list.length ? list.map(r => `<div class="tool-card" style="margin:0 0 9px;max-width:none;padding:10px 14px">
         <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
           <b style="font-size:13.5px">${esc(r.title)}</b>
@@ -26566,23 +26700,33 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           ${(r.tags || []).map(t => `<span class="smd-dim" style="font-size:10px;background:#f4f6fa;border-radius:8px;padding:1px 8px">${esc(t)}</span>`).join('')}
           <span class="smd-dim" style="font-size:10.5px;margin-left:auto">📎 元ソース：${/^https?:/.test(r.source || '') ? `<a href="${hrefOk(r.source)}" target="_blank" rel="noopener" style="color:#1565c0">${esc(String(r.source).slice(0, 60))}</a>` : esc(r.source || '（未記載）')}</span>
         </div>
-      </div>`).join('') : '<div class="smd-empty">該当するルールがありません。別のキーワードで探すか、「＋ ルールを追加」で書き足してください。</div>'}`;
+      </div>`).join('') : (rulesState.err ? '' : '<div class="smd-empty">該当するルールがありません。別のキーワードで探すか、「＋ ルールを追加」で書き足してください。</div>')}`;
     { const q = host.querySelector('#rl-q');
-      if (q) { let t; q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { rulesState.q = q.value; drawRules(); const q2 = document.getElementById('rl-q'); if (q2) { q2.focus(); q2.setSelectionRange(q2.value.length, q2.value.length); } }, 300); }); } }
+      if (q) { let t, ime = false;
+        // ★日本語の変換中は描き直さない（drawRules は入力欄ごと作り直すので、変換中の文字が確定・消える）。確定したら1回描く（2026-10-24）
+        const go = () => { clearTimeout(t); t = setTimeout(() => { if (ime) return; rulesState.q = q.value; drawRules(); const q2 = document.getElementById('rl-q'); if (q2) { q2.focus(); q2.setSelectionRange(q2.value.length, q2.value.length); } }, 300); };
+        q.addEventListener('compositionstart', () => { ime = true; clearTimeout(t); });
+        q.addEventListener('compositionend', () => { ime = false; go(); });
+        q.addEventListener('input', (e) => { if (ime || (e && e.isComposing)) return; go(); }); } }
+    { const b = host.querySelector('#rl-retry'); if (b) b.addEventListener('click', async () => { b.disabled = true; b.textContent = '⏳ 読み直し中…'; await rulesLoad(true); drawRules(); }); }
     host.querySelectorAll('.rl-cc').forEach(b => b.addEventListener('click', () => { rulesState.cc = b.dataset.c; drawRules(); }));
     host.querySelectorAll('.rl-tag').forEach(b => b.addEventListener('click', () => { rulesState.q = b.dataset.t; drawRules(); }));
     const editOne = async (r0) => {
       const title = prompt('ルールの見出し', r0 ? r0.title : ''); if (title == null) return;
-      const body = prompt('内容（改行OK）', r0 ? r0.body : ''); if (body == null) return;
+      const body = prompt('内容（この欄では改行できません。本文を直さなければ、元の改行はそのまま残ります）', r0 ? r0.body : ''); if (body == null) return;
       const tags = prompt('タグ（カンマ区切り。例: 文字数,タイトル）', r0 ? (r0.tags || []).join(',') : ''); if (tags == null) return;
       const cc = prompt('対象の国（カンマ区切り。全部なら ALL）', r0 ? (r0.cc || ['ALL']).join(',') : 'ALL'); if (cc == null) return;
       const source = prompt('元ソース（URL または 出典のメモ）', r0 ? (r0.source || '') : ''); if (source == null) return;
-      const rec = { id: r0 ? r0.id : ('r' + Date.now().toString(36)), title: title.trim(), body: body.trim(),
+      // ★prompt は1行の入力欄なので、複数行の本文は改行が詰まって返ってくる（推測・2026-10-24 レビュー）。
+      //   空白・改行の違いしか無い＝本文を直していないなら、元の本文をそのまま使う（改行を消さない）
+      let bodyV = body.trim();
+      if (r0 && String(r0.body || '').replace(/\s+/g, '') === bodyV.replace(/\s+/g, '')) bodyV = r0.body || '';
+      const rec = { id: r0 ? r0.id : ('r' + Date.now().toString(36)), title: title.trim(), body: bodyV,
         tags: tags.split(',').map(x => x.trim()).filter(Boolean), cc: cc.split(',').map(x => x.trim().toUpperCase()).filter(Boolean), source: source.trim() };
-      rulesState.data.items = rulesState.data.items || [];
-      const i = rulesState.data.items.findIndex(x => x.id === rec.id);
-      if (i >= 0) rulesState.data.items[i] = rec; else rulesState.data.items.push(rec);
-      if (await rulesSave()) { toast('✓ 保存しました'); drawRules(); }
+      // ★控え（rulesState.data）はここでは書き換えない＝rulesSave が保存できた後に入れる。失敗は必ず画面に出す
+      toast('⏳ 保存中…');
+      try { if (await rulesSave(rec)) { toast('✓ 保存しました'); drawRules(); } }
+      catch (e) { toast('❌ ルールを保存できませんでした（何も変わっていません）: ' + ((e && e.message) || e), true); }
     };
     { const b = host.querySelector('#rl-add'); if (b) b.addEventListener('click', () => editOne(null)); }
     host.querySelectorAll('.rl-edit').forEach(b => b.addEventListener('click', () => {
@@ -26592,14 +26736,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function renderRules() { await rulesLoad(false); drawRules(); }
   function manualTabs() {
     const panes = { use: 'manual-body', rules: 'rules-body', pack: 'pack-body', msg: 'man-msg-body' };   // ★id重複の修正：メッセージ画面の #msg-body と同名で、受信箱が隠れたマニュアル側に描かれていた（2026-09-12）
-    document.querySelectorAll('.man-tab').forEach(b => b.addEventListener('click', async () => {
+    // ★受け口は1回だけ（renderManual が開くたびに manualTabs を呼ぶので、印が無いと押した時に N 本走り app_kv rules を N 回読んでいた・2026-10-24）
+    document.querySelectorAll('.man-tab').forEach(b => { if (b.dataset.wired) return; b.dataset.wired = '1'; b.addEventListener('click', async () => {
       document.querySelectorAll('.man-tab').forEach(x => x.classList.toggle('on', x === b));
       const m = b.dataset.m || 'use';
       Object.keys(panes).forEach(k => { const el = document.getElementById(panes[k]); if (el) el.style.display = (k === m) ? '' : 'none'; });
       if (m === 'rules') await renderRules();
       if (m === 'pack') renderPackManual();
       if (m === 'msg') renderMsgManual();
-    }));
+    }); });
   }
   // ===== 📦 梱包・発送のしかた（就労支援施設むけ／物販がはじめての人むけ） =====
   // ★書き方の方針：1ステップ＝1つの動作。専門用語はその場で言い換える。
@@ -26620,11 +26765,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   //   外注さん（タイミー等・毎回別の人）に紙で渡す前提。**文章を増やさない**のが肝。
   //   手順は4つだけ、判断は「保留トレーに入れる」で回避、チェックは「伝票の枚数＝荷物の数」だけ。
   //   ★17時の集荷が仕事の核なので、そこだけ枠を大きくして別格に見せている。
-  let workSheetN = null;   // 本日の発送件数（発送しめきりバーが出したもの）
+  let workSheetN = null;   // 本日の発送件数（発送しめきりバーが出したもの）※国の絞り込み後の数なので、紙には使わない（下の workSheetCount_）
+  // ★「きょう出す数」は【全部の国】の今日出す分（2026-10-24 レビュー）。workSheetN は注文管理の国の絞り込み（ccFilter）を
+  //   掛けた後の数なので、PH だけに絞った後に印刷すると PH の数が紙に出ていた。
+  //   数え方は帯の「📦 本日の発送」と同じ（未発送のうち 遅延中＋本日発送）で、絞り込みだけ外す。
+  //   読み込み中・読めなかった国がある時は n=null＝空欄（0 と書かない・紙に手で書ける）。miss にその国を返す。
+  function workSheetCount_() {
+    try {
+      const ccs = REGIONS.filter(x => state.enabled.has(x.cc)).map(x => x.cc);
+      const miss = []; let rows = [];
+      ccs.forEach(cc => {
+        const oc = state.orders.perCountry.get(cc);
+        if (!oc || oc.status !== 'ok' || !oc.rows) { miss.push(cc); return; }
+        rows = rows.concat(oc.rows);
+      });
+      if (!ccs.length || miss.length) return { n: null, miss: ccs.length ? miss : ['（国の設定なし）'] };
+      return { n: rows.filter(r => r.tab === 300 && !ordDone(r) && ['over', 'd0'].indexOf(ordDueBucket(r)) >= 0).length, miss: [] };
+    } catch (e) { return { n: null, miss: ['（数えられませんでした: ' + ((e && e.message) || e) + '）'] }; }
+  }
   function workSheetHtml() {
     const d = new Date(Date.now() + 9 * 3600000);
     const ymd = d.getUTCFullYear() + '年' + (d.getUTCMonth() + 1) + '月' + d.getUTCDate() + '日（' + '日月火水木金土'[d.getUTCDay()] + '）';
-    const n = (workSheetN != null && workSheetN > 0) ? String(workSheetN) : '';
+    const wc = workSheetCount_(); const n = wc.n != null ? String(wc.n) : '';   // 0件と分かった時は 0 と書く（空欄＝分からない、と分ける）
     const cfg = Object.assign({ boxIn: '青いカゴ', boxOut: '赤いカゴ', tel: '', pickup: '17:00' }, settings.workSheet || {});
     const fill = (v, w) => '<span class="f" style="min-width:' + (w || 90) + 'px">' + esc(v || '') + '</span>';
     return '<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>きょうの作業</title><style>'
@@ -26680,12 +26842,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       + '</p></div></div></body></html>';
   }
   function printWorkSheet() {
+    // ★空欄になる時は、押した瞬間（新しい窓に焦点が移る前）に知らせる
+    const wc = workSheetCount_();
+    if (wc.n == null) toast('「きょう出す数」は空欄で印刷します（まだ読めていない国：' + wc.miss.join('・') + '）。📦注文管理を開いて読み込みが終わってから印刷すると入ります', true);
     const w = window.open('', '_blank');
     if (!w) { alert('ポップアップがブロックされました。ブラウザの設定でこのサイトの新しいウィンドウを許可してください。'); return; }
     w.document.write(workSheetHtml());
     w.document.close();
     setTimeout(() => { try { w.focus(); w.print(); } catch (_) {} }, 400);
-    logAct('マニュアル', 'きょうの作業指示を印刷', workSheetN != null ? workSheetN + '件' : '', '');
+    logAct('マニュアル', 'きょうの作業指示を印刷', wc.n != null ? wc.n + '件（全部の国）' : '', '');
   }
   function renderPackManual() {
     const host = document.getElementById('pack-body'); if (!host || host.dataset.done) return;
@@ -26741,7 +26906,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       // 🖨 その日に来た人へ渡す1枚。この本を全部読ませるのは無理なので、当日分だけを紙にする。
       + '<div style="background:#fff8e6;border:1px solid #ffe0a3;border-radius:10px;padding:11px 14px;margin-bottom:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">'
       + '<div style="font-size:13px;line-height:1.7;color:#7a5200;flex:1;min-width:260px"><b>🖨 きょうの作業指示（A4 1枚）</b><br>'
-      + 'その日に来た人に<b>これだけ渡せば始められる</b>紙です。日付と「きょう出す数」は自動で入ります。'
+      + 'その日に来た人に<b>これだけ渡せば始められる</b>紙です。日付と「きょう出す数」（全部の国の今日出す分）は自動で入ります。注文の読み込みが終わっていない時は空欄になります（手で書けます）。'
       + '<span class="smd-dim" style="font-size:11.5px">（カゴの色・集荷時刻・連絡先は⚙️設定で変えられます）</span></div>'
       + '<button class="smd-btn" id="pm-print" style="background:#e65100;border-color:#e65100;color:#fff;font-weight:700;white-space:nowrap" title="A4 1枚の作業指示を印刷します（今日の日付と件数入り）">🖨 きょうの作業指示を印刷</button></div>'
 
@@ -26801,7 +26966,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             + '<text x="' + x[0] + '" y="100" text-anchor="middle" font-size="12.5" fill="#333">' + x[2] + '</text></g>'; }).join('')
         + '<text x="350" y="124" text-anchor="middle" font-size="11.5" fill="#8a8f98">スキャン期限が8/11なら、出すのは8/10まで</text></svg>'
         + '<div style="font-size:12.5px;color:#7a5200;background:#fff8e6;border:1px solid #ffe0a3;border-radius:6px;padding:7px 10px;margin-top:7px">'
-        + '<b>九州・沖縄・北海道</b>から送る場合は、もう1日よけいにかかります。画面の見込みも自動で1日ずらしています。</div></div>'
+        + '<b>九州・沖縄・北海道</b>から送る場合は、もう1日よけいにかかります。<b>画面の「📦 家から出す」の日は地域で変わりません</b>。遠方から出す時は、<b>画面の日より1日早く</b>出してください。<span style="font-size:11.5px;color:#8a8f98">（自動で1日ずらしているのは、🛒仕入れ管理の⏳入庫待ちの「到着見込み」だけです）</span></div></div>'
         + A('件数が多くて終わりそうにないときは、<b>お昼までに</b>「今日は○件までできそうです」と伝えてください。あとで言われるより助かります。'))
 
       + B('#ee4d2d', '📦', '1件ずつ、この順番で', ''
@@ -26918,7 +27083,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       + '<div style="background:linear-gradient(180deg,#fff,#f7fbff);border:1px solid #d6e4f5;border-radius:12px;padding:15px 18px;margin-bottom:14px">'
       + '<div style="font-size:19px;font-weight:800;margin-bottom:5px">💬 お客様メッセージのしかた</div>'
       + '<div style="font-size:13.5px;line-height:1.9;color:#444">お客様は海外の方です。やりとりは<b>英語（ブラジルはポルトガル語）</b>で、'
-      + 'ポータルの <b>💬メッセージ</b> から返します。'
+      + '各国の Seller Center の<b>チャット（webchat）</b>で、返信を手伝う <b>Smart Reply</b>（ブラウザ拡張）を使って返します。<span style="font-size:12px;color:#8a8f98">（ポータルの💬メッセージ画面は使いません。左のメニューにもありません）</span>'
       + '<br><b>ぜんぶ自分で考えなくて大丈夫です。</b>下に「型（テンプレート）」があります。あてはまればコピーして送るだけです。</div></div>'
 
       + B('#1a73e8', '🧭', 'まず、この考え方だけ覚えてください', decideSvg
@@ -27062,23 +27227,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${card('#1a73e8', '📈', '事業計画', '目標(または手取り)から<b>必要な注文数を逆算</b>。固定費内訳・税額・消費税還付・<b>運転資金/キャッシュ推移</b>も。1件¥1,200＋固定費で計算。')}
         ${card('#00897b', '✅', 'タスク管理', 'やることリスト（優先度/期日/完了・複数PC同期）。')}
         ${card('#e91e63', '👤 / 🏪', '顧客 / 仕入先', 'バイヤー別・仕入元別の集計。')}
-        ${card('#25d366', '💬', 'メッセージ（ここで返信まで完結）', 'お客さんの問い合わせを一元表示し、<b>この画面から返信</b>します。<b>未返信（7日以内）</b>と<b>◯時間待ち</b>で優先度が一目、送信すると<b>次の未返信へ自動で進む</b>（⌘Enterで送信）。<b>📋定型文</b>／<b>🧭対応ガイド</b>（分岐で返信文を作る）／<b>🏷タグ・📝メモ・📌ピン</b>／<b>🧾この相手の注文</b>（発送状況・追跡番号）／<b>過去の全メッセージ検索</b>。<br><span class="smd-dim">※Shopeeが公式のチャットAPIをこの垢に開放していないため、<b>裏でShopeeチャットのタブを開いておく</b>必要があります（送受信の配管。あなたが触る必要はありません）。止まると画面上部に警告が出ます。</span>')}
+        ${card('#25d366', '💬', 'お客様メッセージ（ポータルでは返しません）', '返信は各国の Seller Center の<b>チャット（webchat）</b>で、返信を手伝う <b>Smart Reply</b>（ブラウザ拡張）を使います。ポータルの💬メッセージ画面は不安定なので使いません（左のメニューにもありません）。返し方の型は <b>📖マニュアル → 💬 お客様メッセージのしかた</b> タブにあります。')}
         ${card('#7b52c4', '📊 / 💱', '価格調整 / 為替', '相場リサーチ／円換算レート設定。')}
         ${card('#607d8b', '⚠️ / 🧾', 'アラート / 操作ログ', '要対応の自動抽出／編集履歴。')}
         ${card('#455a64', '💰 / 📖', '転記 / マニュアル', 'スプシ転記／このヘルプ。')}
       </div>
 
-      ${h('🆕 出品管理（4つのタブ）')}
-      ${card('#1565c0', '📋', '① 出品状況', `全出品カタログの一覧。${chip('🔄Shopeeから更新')} で全7か国を取得（初回・時々）。検索・状態フィルタ・明細展開。各行から ${chip('✎編集')}（ポータル内で編集）/ ✏️（Shopee編集画面）/ 🛍️（お客さんが見る販売ページ）。`)}
-      ${card('#1a7f37', '🌍', '② 各国そろえる（未出品チェック・重要）', `<span class="smd-dim">旧「横断カバレッジ／国のヌケ」。</span>シリーズ→📦カタログ→明細 の3階層で<b>「どの国に有る／無いか」</b>が一目で分かる（<b style="color:#d93025">✗（赤）＝その国は未出品＝出せば伸びしろ</b>）。<br>
+      ${h('🆕 出品管理（上に大分類が5つ・その中にタブ）')}
+      ${card('#1565c0', '🗂', 'タブの並び（いまの画面の名前）', `<b>📋 出品一覧</b>＝📋 出品一覧<br><b>✍️ 出品する</b>＝📚 母数（ハード別の網羅）／🤖 自動出品／✍️ 出品を作る<br><b>💴 値段・利益</b>＝💰 利益台帳／🏷 値付けの見直し<br><b>📊 分析</b>＝📊 施策・分析／🌍 各国そろえる／🆕 この国に無い商品／📅 出品ログ（日別）／🧹 カタログの質／👀 反応（閲覧・いいね）／🌱 切り出し候補<br><b>📦 在庫</b>＝🔁 在庫の自動復活／♾️ 無在庫（取り寄せ）・在庫監視<br><span class="smd-dim">上の大分類を押すと、その中のタブが出ます（中が1つだけの時はタブは出ません）。下の説明は主なタブだけです。</span>`)}
+      ${card('#1565c0', '📋', '出品一覧（📋 出品一覧）', `全出品カタログの一覧。${chip('🔄Shopeeから更新')} で全7か国を取得（初回・時々）。検索・状態フィルタ・明細展開。各行から ${chip('✎編集')}（ポータル内で編集）/ ✏️（Shopee編集画面）/ 🛍️（お客さんが見る販売ページ）。`)}
+      ${card('#1a7f37', '🌍', '各国そろえる（📊 分析 › 🌍 各国そろえる・未出品チェック・重要）', `<span class="smd-dim">旧「横断カバレッジ／国のヌケ」。</span>シリーズ→📦カタログ→明細 の3階層で<b>「どの国に有る／無いか」</b>が一目で分かる（<b style="color:#d93025">✗（赤）＝その国は未出品＝出せば伸びしろ</b>）。<br>
         ・上部の ${chip('🔎検索')} で名前/SKU/明細名を絞り込み（日本語OK）。<br>
         ・<b>SKU欄はその場で書き換え</b>→ ${chip('書込')} でその商品の全国のSKUをShopeeに反映（🔗＝連結済／推＝推奨SKUを自動入力）。<br>
         ・各国の<b>数字（緑のチップ）をクリック</b>→メニュー（✎編集/✏️Shopee/🛍️販売/🏷この国だけSKU）。<br>
         ・カタログ行の ${chip('🌍各国まとめ編集')} <span class="smd-dim">（旧・統括編集）</span>＝<b>同じカタログのPH/BR等を1画面でまとめて編集</b>：統括タイトル（全国一括）／<b>💰価格×係数（全国一括）</b>／<b>🔢在庫を全国一括で〇個に</b>／明細比較グリッドで<b>各国の価格・在庫をセル編集→各国「価格書込」「在庫書込」</b>。書込は公式API（ライブPC/各国ログイン不要・確認式）。<br>
         ・📦行の左の<b>チェック</b>→上に ${chip('一括編集')} バー（複数カタログをまとめて。対象国を選んで ${chip('🏷SKU→推奨に統一')} ${chip('⚖️重量')} ${chip('💰価格×係数')} ${chip('📝タイトル置換')} ${chip('🔤明細名置換')}）。<br>
         ・カタログ行の ${chip('＋明細')} ＝メルカリ取込（後述）。`)}
-      ${card('#e8710a', '📊', '③ 分析・棚卸し', `先頭に <b>🎯施策提案</b>（下記）。ほかに 🔥横展開すべき商品／📋統合候補／国別ステータス／売れ筋／未公開棚卸し。`)}
-      ${card('#7b52c4', '✍️', '④ コンポーザー（新規出品を各国ぶん一気に作る）', `
+      ${card('#e8710a', '📊', '施策・分析（📊 分析 › 📊 施策・分析）', `先頭に <b>🎯施策提案</b>（下記）。ほかに 🔥横展開すべき商品／📋統合候補／国別ステータス／売れ筋／未公開棚卸し。`)}
+      ${card('#7b52c4', '✍️', '出品を作る（✍️ 出品する › ✍️ 出品を作る・新規出品を各国ぶん一気に作る）', `
         <b>1.商品情報</b>：商品名/ハード/シリーズ → <b>タイトル自動生成</b>（バリエ有りは「Variation」自動挿入・手で修正可・${chip('★呼出/＋登録')}でお気に入り）。カテゴリ/親SKUは候補＆${chip('💡提案')}。右上の ${chip('小/標準/大/特大')} で文字サイズ変更。<br>
         <b>画像</b>：サムネを ${chip('✕削除')}／<b>ドラッグで並べ替え</b>／${chip('🔗リンク/URL')} ${chip('📁ファイル')} ${chip('＋タイル')} や枠にドロップで追加（カタログ最大9枚）。メルカリ商品URLは自動で画像化（ブリッジ不要）。<br>
         <b>2.価格</b>：目標ROI・重量・寸法・仕入から<b>各国の出品価格を重量ベースで自動計算</b>。${chip('⚙️手数料・SLS・バッファ')} を年1回改定時に更新（合計%も表示）。<br>
@@ -27202,7 +27368,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           <tr><td style="border:1px solid #eee;padding:5px 8px"><code>sales-dashboard</code></td><td style="border:1px solid #eee;padding:5px 8px">全7か国の<b>売れ行きランキング</b>を画像付きで</td><td style="border:1px solid #eee;padding:5px 8px">Seller Center</td><td style="border:1px solid #eee;padding:5px 8px"><code>mydata</code>（売上/表示）</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><code>purchase-info</code></td><td style="border:1px solid #eee;padding:5px 8px">メルカリ/Yahoo!フリマ購入一覧の<b>配送情報（方法/追跡番号/配達状況）</b>を取得</td><td style="border:1px solid #eee;padding:5px 8px">各フリマ購入一覧</td><td style="border:1px solid #eee;padding:5px 8px">（Shopee外）→<b>Supabase inventory へ直書き</b>（メルカリv2.2/Yahoo!フリマv3.9）。追跡番号を入れると配送追跡GASがヤマト/郵便を照会し<b>配達中/現在地</b>を自動表示。Yahoo!フリマは🚚ボタンで番号取得＋🔑ポータル連携チップでキー検証</td></tr>
           <tr><td style="border:1px solid #eee;padding:5px 8px"><code>waybill</code></td><td style="border:1px solid #eee;padding:5px 8px">SLS<b>伝票印刷</b></td><td style="border:1px solid #eee;padding:5px 8px">SLS印刷ページ</td><td style="border:1px solid #eee;padding:5px 8px">SLS waybill</td></tr>
-          <tr><td style="border:1px solid #eee;padding:5px 8px"><code>chat-ingest</code></td><td style="border:1px solid #eee;padding:5px 8px"><b>問い合わせ（webchat）を💬受信箱へ取込＋返信送信</b>。公式Chat APIがこの垢で未開放のための代替</td><td style="border:1px solid #eee;padding:5px 8px">各国 Seller Center（開いている間・常駐）</td><td style="border:1px solid #eee;padding:5px 8px">webchatの会話を横取り。<b>Supabaseキー設定時は取り込み(chat_messages)・返信(chat_outbox)ともSupabase直</b>（v1.15.0〜）＝<b>GASの日次枠を一切消費せず</b>、取り込み5秒/返信8秒でリアルタイム。キー未設定時のみ従来のGAS経由（取り込み15秒/返信60秒）。userscriptメニュー「★返信を有効化：Supabaseキーを設定」で1回だけキー登録（ソースには埋めない）。※直書き時は生JSONの退避(chat_raw・ほぼbotノイズ)は省略＝受信箱の中身はDOM抽出の主経路で不変</td></tr>
+          <tr><td style="border:1px solid #eee;padding:5px 8px"><code>chat-ingest</code></td><td style="border:1px solid #eee;padding:5px 8px"><b>問い合わせ（webchat）を取り込む</b>（※返信は webchat の Smart Reply で。ポータルの💬メッセージ画面は今は使いません）。公式Chat APIがこの垢で未開放のための代替</td><td style="border:1px solid #eee;padding:5px 8px">各国 Seller Center（開いている間・常駐）</td><td style="border:1px solid #eee;padding:5px 8px">webchatの会話を横取り。<b>Supabaseキー設定時は取り込み(chat_messages)・返信(chat_outbox)ともSupabase直</b>（v1.15.0〜）＝<b>GASの日次枠を一切消費せず</b>、取り込み5秒/返信8秒でリアルタイム。キー未設定時のみ従来のGAS経由（取り込み15秒/返信60秒）。userscriptメニュー「★返信を有効化：Supabaseキーを設定」で1回だけキー登録（ソースには埋めない）。※直書き時は生JSONの退避(chat_raw・ほぼbotノイズ)は省略＝受信箱の中身はDOM抽出の主経路で不変</td></tr>
         </tbody>
       </table></div>
 
