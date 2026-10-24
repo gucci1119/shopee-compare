@@ -235,4 +235,8 @@ if [ -n "$B7" ]; then echo "NG  自動の読み直しが作業中（appBusy）�
 #     大物＝product_ids（約4.5MB）・boshu_auto_pre*（約6MB）・titles_*・sg_*・listings・cond_photo_index。直前のコミットと比べて増えた行だけ見る
 B8=$(git diff -U0 HEAD -- shopee-openapi-sync.gs index.html 2>/dev/null | grep '^+' | grep -v '^+++' | grep -v 'B8_OK' | grep -E "baKvSet_\(['\"](product_ids|boshu_auto_pre|titles_|sg_|cond_photo_index)|baWriteJan_\(|baKvPrefetch_\(\[[^]]*(product_ids|boshu_auto_pre)|sbUpsert\(['\"]app_kv['\"][^)]*(product_ids|boshu_auto_pre|titles_)" | head -5)
 if [ -n "$B8" ]; then echo "NG  大物（product_ids・写真の控え・駿河屋/母数の控え等）の書き込み／先読みが増えています。何MBを何分ごと・何台かを書き出して、本当に要るか決めてから（スキル supabase-read-guard）"; echo "$B8"; NG=1; else echo "OK  大物の書き込み・先読みは増えていない"; fi
+# 7-9 ★2026-10-24 📣営業の画面が PAGE_KEYS に無く、押しても真っ白だった。page-◯◯ の画面は全部 PAGE_KEYS に入れる
+PK=$(grep -m1 "const PAGE_KEYS = \[" index.html | sed "s/.*\[\(.*\)\].*/\1/" | tr -d "' ")
+B9=""; for k in $(grep -o 'id="page-[a-z0-9]*"' index.html | sed 's/id="page-//;s/"//' | sort -u); do case ",$PK," in *",$k,"*) ;; *) B9="$B9 $k";; esac; done
+if [ -n "$B9" ]; then echo "NG  PAGE_KEYS に無い画面がある（押しても出ない）:$B9"; NG=1; else echo "OK  画面は全部 PAGE_KEYS にある"; fi
 exit $NG

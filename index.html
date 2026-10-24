@@ -1454,7 +1454,7 @@
   <!-- 操作ログ -->
   <div id="page-log" style="display:none">
     <div class="smd-pagehead">🧾 操作ログ <span class="smd-dim" style="font-weight:400;font-size:12px">（ポータルでの編集履歴・直近500件）</span></div>
-    <div class="pagehelp" style="margin:8px 20px 0"><b>この画面：ポータル上で「いつ・誰が・何を変更したか」の記録です（参照用）。</b><span style="color:#5a6b8c;font-size:11.5px">※価格や在庫の書込・出品・SKU統一などの履歴。トラブル時の確認に。</span></div>
+    <div class="pagehelp" style="margin:8px 20px 0"><b>この画面：ポータル上で「いつ・どの画面で・何を変更したか」の記録です（参照用・どのPCからかは残りません）。</b><span style="color:#5a6b8c;font-size:11.5px">※価格や在庫の書込・出品・SKU統一などの履歴。トラブル時の確認に。</span></div>
     <div id="log-body" style="padding:12px 20px"></div>
   </div>
   <!-- 改修履歴 -->
@@ -1989,6 +1989,7 @@
       if (att === 0) await new Promise(r2 => setTimeout(r2, 400));
     }
     // CORS不可・本文が読めない相手は従来のスクリプト注入で（想定外の応答形式でも動くように）
+    if (corsFail && once) throw new Error('__DISCONNECTED__結果を確認できませんでした（通信が切れました）。Shopee で処理が済んでいる可能性があります。出品一覧で確かめてから、もう一度押してください');   /* ★2026-10-24 全体レビュー：書き込みを script 方式で送り直すと同じ出品が2つできる */
     if (corsFail || (lastErr && /JSONを返しませんでした/.test(lastErr.message))) {
       try { return await jsonpScript(url, tmo); } catch (e2) { throw lastErr || e2; }
     }
@@ -2786,8 +2787,9 @@
               }
             }
             ufQuotaDraw(); } catch (_) {} }
-          if (!/timeout|busy|internal|502|503/i.test(lastErr)) throw new Error(lastErr); }
+          if (!/timeout|busy|internal|502|503/i.test(lastErr)) { const eF = new Error(lastErr); eF.__final = 1; throw eF; } }
       } catch (e) {
+        if (e && e.__final) throw e;   /* ★2026-10-24 全体レビュー：GAS が断った（ok:false）のを自分の catch が握って3回投げ直していた */
         const msg = String((e && e.message) || '');
         // ★GASは302で script.googleusercontent.com に飛ばすことがあり、その先でCORSに弾かれると
         //   Failed to fetch になる。この時は <script> 経由（CORSの影響を受けない）で取り直す。
@@ -2810,6 +2812,7 @@
   // ---------------- 公式API 書き込み（在庫/価格）: GAS JSONP経由・ブリッジ不要 ----------------
   // params: { shop_id, item_id, model_id?/model_name?, stock?(在庫) or price?(価格) }
   async function openapiUpdate(action, params) {
+    shopeeWriteGuard(String(action || '書き込み'), params);   /* ★2026-10-24 全体レビュー：デモ表示のまま本番に書かない */
     if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
     const q = Object.assign({ action, token: settings.writeToken }, params);
@@ -2841,6 +2844,7 @@
   // params: { shop_id, name, desc, price, stock, weight(kg), images(改行\n区切りURL), category, condition, publish(0/1) }
   // 画像アップロード＋category/logistic解決をGAS内で行うためタイムアウト長め(120s)。既定は非公開(UNLIST)。
   async function openapiAddItem(params) {
+    shopeeWriteGuard('出品の作成', params);   /* ★2026-10-24 全体レビュー：デモ表示のまま本番に出品しない */
     if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
     const q = Object.assign({ action: 'add_item', token: settings.writeToken }, params);
@@ -3972,7 +3976,7 @@
   };
   const fmtJpy = n => '¥' + Math.round(Number(n) || 0).toLocaleString();
   const fmtLocal = (region, n) => region.cur + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-  const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const esc = s => String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));   /* ★2026-10-24 全体レビュー：' も変える（url('…') や '…' で囲んだ属性に外の文字が入ると抜けられた） */
   /* ★2026-09-23 全体レビュー（脆弱性）：href に入れる外部由来のURL（仕入元・確証・出典）は http(s) だけ通す。
      esc() は javascript: を止めない＝在庫の仕入元URL欄に javascript:… を書かれると🔗を押した人の設定（鍵）が抜ける。
      GAS の URL（<script src> に載せる）は script.google.com の /exec だけ通す（#s= のリンクで別サーバーに差し替えられると鍵が流れる） */
@@ -4717,7 +4721,8 @@
     let el = document.getElementById('smd-toast');
     if (!el) { el = document.createElement('div'); el.id = 'smd-toast'; document.body.appendChild(el); }
     el.textContent = msg; el.className = 'show' + (isErr ? ' err' : '');
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.className = ''; }, 1800);
+    const dur = typeof isErr === 'number' ? isErr : 1800;   /* ★2026-10-24 全体レビュー：toast(msg, 8000) の長い失敗の説明が1.8秒で消えていた */
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.className = ''; }, dur);
   }
   // ★消す前に確認ダイアログを出すより、**消してから取り消せる**方が邪魔にならない。
   //   6秒だけ「↩ 取消」を出す。押さなければそのまま消える（本人指摘 2026-08-15）。
@@ -8490,6 +8495,7 @@
       if (!p || p.nodeName === 'SCRIPT' || p.nodeName === 'STYLE') continue;
       if (p.closest && p.closest('[data-noi18n]')) continue;   // 言語トグル等、訳してはいけない場所
       const v = i18nText(n.nodeValue);
+      if (v != null && p.nodeName === 'OPTION' && !p.hasAttribute('value')) { try { p.setAttribute('value', p.text); } catch (_) {} }   /* ★2026-10-24 全体レビュー：英語モードで選ぶと「After leaving Japan」が保存されていた */
       if (v != null) jobs.push([n, v]);
       n.__i18n = 1;
     }
@@ -8681,7 +8687,7 @@
     /* ★2026-10-12 新しい版を出すと、全PCの空いている全タブが3分以内に一斉に読み直していた（＝起動時の重い読みが押し寄せる）。裏のタブは表に戻った時に、表のタブは0〜3分ばらつかせて */
     if (!appBusy()) {
       if (document.hidden) { if (!window.__appUpVis) { window.__appUpVis = true; document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(() => { if (!appBusy()) appReloadFresh(); }, 1500); }); } return; }
-      if (!window.__appUpJit) { window.__appUpJit = true; setTimeout(() => { if (!appBusy()) appReloadFresh(); else appUpdateApply(); }, Math.random() * 180000); }
+      if (!window.__appUpJit) { window.__appUpJit = true; setTimeout(() => { if (!appBusy()) appReloadFresh(); else { window.__appUpJit = false; appUpdateApply(); } }, Math.random() * 180000); }
       return;
     }
     // 作業中は待つ（勝手に消すと入力が飛ぶ）。理由も出しておく
@@ -8818,9 +8824,11 @@
       ['同じ商品を各国まとめて編集する', 'Edit one product across countries', '出品管理 › 出品一覧 › 各行の🌍', { p: 'list', k: 'status' }, '各国 まとめ 一括 編集 🌍'],
       ['まだ出していない国を探す（各国そろえる）', 'Find countries not yet listed', '出品管理 › 分析・やること › 各国そろえる', { p: 'list', k: 'analysis', fn: () => { try { lst.anaSub = 'coverage'; renderListPage(); } catch (_) {} } }, '各国 そろえる 未出品 国 coverage'],
       ['無在庫（取り寄せ）で出す・在庫切れを見張る', 'Dropship listings & stock watch', '出品管理 › 無在庫', { p: 'list', k: 'dropship' }, '無在庫 取り寄せ 監視 dropship'],
+      ['ほかの国では出しているのに、この国に無い商品', 'Items listed elsewhere but missing in this country', '出品管理 › 🆕 この国に無い商品', { p: 'list', k: 'newacct' }, 'この国に無い 未出品 国 新しい店 第二アカウント コピー newacct'],
     ]],
     ['🏷 値付け', 'Pricing', [
-      ['赤字・利益が薄い明細を値上げする', 'Raise prices of loss / thin-margin items', '出品管理 › 値付けの見直し › 🔴🟠', { p: 'list', k: 'rank', fn: () => { PA.cat = 'loss'; paSave(); } }, '値上げ 赤字 薄利 利益 マージン'],
+      ['赤字の明細を値上げする', 'Raise prices of loss-making items', '出品管理 › 値付けの見直し › 🔴', { p: 'list', k: 'rank', fn: () => { PA.cat = 'loss'; paSave(); } }, '値上げ 赤字 持ち出し 利益 マージン'],
+      ['利益が薄い明細を値上げする', 'Raise prices of thin-margin items', '出品管理 › 値付けの見直し › 🟠', { p: 'list', k: 'rank', fn: () => { PA.cat = 'thin'; paSave(); } }, '値上げ 薄利 利益が薄い 利益 マージン'],
       ['上げすぎて売れなくなった明細を少し下げる', 'Lower prices raised too far', '出品管理 › 値付けの見直し › 🟡', { p: 'list', k: 'rank', fn: () => { PA.cat = 'over'; paSave(); } }, '値下げ 上げすぎ 売れない'],
       ['よく売れる明細を少し値上げする', 'Raise prices of strong sellers', '出品管理 › 値付けの見直し › 🔵', { p: 'list', k: 'rank', fn: () => { PA.cat = 'room'; paSave(); } }, '値上げ 余地 売れる'],
       ['見られてるのに売れない出品を見直す', 'Viewed but not selling', '出品管理 › 値付けの見直し（下の👀）', { p: 'list', k: 'rank' }, '見られてる 売れない 閲覧 値下げ いいね'],
@@ -8836,6 +8844,7 @@
       ['棚卸しをする', 'Stocktake', '在庫管理 › 棚卸し', { p: 'stock', st: 'tana' }, '棚卸し 棚卸 数える'],
       ['在庫で持っておくべき商品（繰り返し売れる）', 'Items worth stocking (repeat sellers)', '在庫管理 › 有在庫化候補', { p: 'stock', st: 'repeat' }, '有在庫 繰り返し 定番 仕入れ推奨'],
       ['在庫番号の二重を直す', 'Fix duplicate stock numbers', '在庫管理 › 二重採番', { p: 'stock', st: 'dupid' }, '二重 採番 在庫番号'],
+      ['売れて在庫0になった明細を戻す（在庫の自動復活）', 'Restore stock of items that sold out (auto-restock)', '出品管理 › 🔁 在庫の自動復活', { p: 'list', k: 'restock' }, '在庫0 在庫切れ 復活 戻す 自動 様子見 restock'],
     ]],
     ['💹 お金', 'Money', [
       ['注文ごとの利益を見る', 'Profit per order', '損益・入出金 › 利益明細', { p: 'profit' }, '利益 明細 粗利 注文'],
@@ -8851,6 +8860,9 @@
       ['売れ筋・施策の提案・SKUの整理', 'Best sellers, suggestions, SKU cleanup', '出品管理 › 分析・やること', { p: 'list', k: 'analysis' }, '分析 売れ筋 施策 sku 整理'],
       ['売れ行きランキング（旧）', 'Sales ranking (old)', '出品管理 › 値付けの見直し › 📊売れ行きランキング', { p: 'list', k: 'rank', fn: () => { PA.sub = 'old'; paSave(); } }, 'ランキング 売れ行き'],
       ['リピーター・お客さん', 'Repeat customers', '顧客管理', { p: 'customers' }, '顧客 リピーター バイヤー'],
+      ['WhatsApp・Zalo・Viber で営業したバイヤーの段階・停滞を見る', 'Sales outreach: buyer stages on WhatsApp / Zalo / Viber', '営業', { p: 'outreach' }, '営業 whatsapp zalo viber 段階 停滞 案内 バイヤー outreach'],
+      ['出しているカタログに反応（閲覧・いいね・販売）があるか', 'Do listings get reactions (views, likes, sales)?', '出品管理 › 👀 反応（閲覧・いいね）', { p: 'list', k: 'react' }, '反応 閲覧 いいね 販売 効果 作ってからの日数 react'],
+      ['総称のバリエで売れた作品を切り出す候補', 'Spin-off candidates from generic variations', '出品管理 › 🌱 切り出し候補', { p: 'list', k: 'spinoff' }, '切り出し 総称 バリエ 専用カタログ シリーズ spinoff'],
       ['業界ニュース', 'Industry news', '業界ニュース', { p: 'news' }, 'ニュース トレンド'],
     ]],
     ['⚙️ 設定・記録', 'Settings & records', [
@@ -8866,7 +8878,7 @@
     if (!go) return;
     const done = () => { try { if (go.fn) go.fn(); } catch (_) {} };
     if (go.p === 'list' && go.k) {
-      if (go.k === 'rank') { done(); showPage('rank'); return; }
+      if (go.k === 'rank') { try { PA.sub = 'adj'; paSave(); } catch (_) {} done(); showPage('rank'); return; }   // ★2026-10-24 前に開いた旧ランキング（PA.sub='old'）が残って見直しの表が出なかった
       try { lst.tab = go.k; localStorage.setItem('smdListTab', go.k); } catch (_) {}
       showPage('list');
       setTimeout(() => { const b = document.querySelector('#list-tab button[data-k="' + go.k + '"]'); if (b && !b.classList.contains('on')) b.click(); setTimeout(done, 300); }, 60);
@@ -8886,11 +8898,12 @@
     if (document.getElementById('smd-guide')) return;
     const ov = document.createElement('div'); ov.id = 'smd-guide';
     ov.style.cssText = 'position:fixed;inset:0;z-index:2147481000;background:rgba(0,0,0,.4);display:flex;align-items:flex-start;justify-content:center;padding:6vh 12px;overflow:auto';
-    const card = (label, where, go, gi, ii) => `<button class="gd-it" data-g="${gi}" data-i="${ii}" style="text-align:left;background:#fff;border:1px solid #e3e6ea;border-radius:8px;padding:8px 10px;cursor:${go ? 'pointer' : 'default'};display:block;width:100%"><div style="font-size:13px;font-weight:700;color:#1f2937">${esc(label)}</div><div style="font-size:11px;color:#6b7280;margin-top:2px">→ ${esc(where)}</div></button>`;
+    const card = (label, where, go, gi, ii) => `<button class="gd-it" data-g="${gi}" data-i="${ii}" style="text-align:left;background:#fff;border:1px solid #e3e6ea;border-radius:8px;padding:8px 10px;cursor:${go ? 'pointer' : 'default'};display:block;width:100%"><div style="font-size:13px;font-weight:700;color:#333">${esc(label)}</div><div style="font-size:11px;color:#6b7280;margin-top:2px">→ ${esc(where)}</div></button>`;
     const body = () => {
       const q = paNormGuide(ov.querySelector('#gd-q') ? ov.querySelector('#gd-q').value : '');
       return FEAT.map(([g, , items], gi) => {
-        const hit = items.map((it, ii) => ({ it, ii })).filter(({ it }) => !q || paNormGuide(it[0] + ' ' + it[2] + ' ' + (it[4] || '') + ' ' + g).includes(q));
+        const qs = q ? q.split(' ') : [];   // ★2026-10-24 言葉を2つ並べても当たるように（全部の語を含む）
+        const hit = items.map((it, ii) => ({ it, ii })).filter(({ it }) => { if (!qs.length) return true; const h = paNormGuide(it[0] + ' ' + it[2] + ' ' + (it[4] || '') + ' ' + g); return qs.every(w => h.includes(w)); });
         if (!hit.length) return '';
         return `<div style="margin-bottom:12px"><div style="font-size:12px;font-weight:800;color:#5b3fd6;margin:0 0 6px">${esc(g)}</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:6px">${hit.map(({ it, ii }) => card(it[0], it[2], it[3], gi, ii)).join('')}</div></div>`;
       }).join('') || '<div class="smd-dim" style="padding:12px">見つかりません。言い方を変えてみてください（例：値下げ／在庫／伝票）</div>';
@@ -8913,8 +8926,9 @@
   const paNormGuide = s => String(s || '').normalize('NFKC').toLowerCase().replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60)).replace(/\s+/g, ' ').trim();
   function openPalette() {
     if (document.getElementById('smd-palette')) return;
-    const ALIAS = { dash: 'ダッシュボード ホーム 概要 トップ dashboard', todo: 'やること 今日 アラート 警告 要対応 タスク todo 出品予定 予定 バックログ', orders: '注文 発送 未発送 オーダー order', stock: '在庫 棚卸 インベントリ stock', buy: '仕入れ 仕入 検索 入庫待ち sourcing', profit: '利益 損益 入出金 純利益 粗利 経費 明細 注文別 ROI profit', finance: '利益 損益 入出金 純利益 粗利 経費 サマリー profit', customers: '顧客 バイヤー 購入者 customer', pricecalc: '価格計算 計算 計算機 電卓 見積 いくらで出す 出品価格 リクエスト paypal ペイパル 差額 値付け calculator', plan: '事業計画 目標 逆算 スケジュール ノルマ 月次 収支 結果 履歴 plan goal', suppliers: '仕入先 セラー supplier', list: '出品 出品管理 カバレッジ コンポーザー 商品 listing 無在庫 在庫監視 監視 取り下げ 多国 同時出品 dropship 見張り', rank: '価格 値付け 価格調整 売れ行き 値上げ 値下げ 一括改定 price 計算 計算機 電卓 見積 いくらで出す 出品価格 リクエスト paypal ペイパル 差額', fx: '為替 レート fx', news: 'ニュース 業界 トレンド ゲーム アニメ news trend', messages: 'メッセージ チャット 問い合わせ ワッツアップ whatsapp chat message', tasks: 'タスク やること todo', returns: '返品 キャンセル 返金 return', log: '操作ログ 履歴 log', changelog: '改修履歴 更新履歴', manual: 'マニュアル 使い方 ヘルプ help', tools: '転記 スプシ スプレッドシート 書き出し エクスポート 手動同期 上級者', account: 'アカウント ショップ 垢 account', expenses: '経費 入出金 月次 サマリー 損益 純利益 CSV 古物台帳', tax: '確定申告 帳簿 棚卸 期首 期末 棚卸高 売上原価 勘定科目 所得 損益計算書 為替差損益 税理士 青色申告 tax' };
-    const pages = [...document.querySelectorAll('#smd-nav button[data-p]')].map(b => ({ label: (b.textContent || '').trim(), el: b, kw: ((b.dataset.p && ALIAS[b.dataset.p]) || '').toLowerCase() }));
+    const ALIAS = { dash: 'ダッシュボード ホーム 概要 トップ dashboard', todo: 'やること 今日 アラート 警告 要対応 タスク todo 出品予定 予定 バックログ', orders: '注文 発送 未発送 オーダー order', stock: '在庫 棚卸 インベントリ stock', buy: '仕入れ 仕入 検索 入庫待ち sourcing', profit: '利益 損益 入出金 純利益 粗利 経費 明細 注文別 ROI profit', finance: '利益 損益 入出金 純利益 粗利 経費 サマリー profit', customers: '顧客 バイヤー 購入者 customer', pricecalc: '価格計算 計算 計算機 電卓 見積 いくらで出す 出品価格 リクエスト paypal ペイパル 差額 値付け calculator', plan: '事業計画 目標 逆算 スケジュール ノルマ 月次 収支 結果 履歴 plan goal', suppliers: '仕入先 セラー supplier', list: '出品 出品管理 カバレッジ コンポーザー 商品 listing 無在庫 在庫監視 監視 取り下げ 多国 同時出品 dropship 見張り', rank: '価格 値付け 価格調整 売れ行き 値上げ 値下げ 一括改定 price 計算 計算機 電卓 見積 いくらで出す 出品価格 リクエスト paypal ペイパル 差額', fx: '為替 レート fx', news: 'ニュース 業界 トレンド ゲーム アニメ news trend', tasks: 'タスク やること todo', returns: '返品 キャンセル 返金 return', log: '操作ログ 履歴 log', changelog: '改修履歴 更新履歴', manual: 'マニュアル 使い方 ヘルプ help', tools: '転記 スプシ スプレッドシート 書き出し エクスポート 手動同期 上級者', account: 'アカウント ショップ 垢 account', expenses: '経費 入出金 月次 サマリー 損益 純利益 CSV 古物台帳', tax: '確定申告 帳簿 棚卸 期首 期末 棚卸高 売上原価 勘定科目 所得 損益計算書 為替差損益 税理士 青色申告 tax' };
+    // ★2026-10-24 隠してある💬メッセージ（display:none）を⌘Kに出さない（CLAUDE.md 却下5）。offsetParent は畳んだグループでも null になるので使わない
+    const pages = [...document.querySelectorAll('#smd-nav button[data-p]')].filter(b => b.style.display !== 'none' && b.dataset.p !== 'messages').map(b => ({ label: (b.textContent || '').trim(), el: b, kw: ((b.dataset.p && ALIAS[b.dataset.p]) || '').toLowerCase() }));
     // 左メニューに無いサブタブ（損益グループの中のページ）は、ここで直接ジャンプ先として足す。
     // 無いと⌘Kで「確定申告」と打っても辿り着けない。
     [['💹 損益・入出金 ＞ 利益明細', 'profit', ALIAS.profit],
@@ -8948,7 +8962,8 @@
     let dataTimer = null;
     inp.addEventListener('input', () => {
       const q = inp.value.trim().toLowerCase();
-      pageHits = q ? pages.filter(it => it.label.toLowerCase().includes(q) || it.kw.includes(q)) : pages.filter(it => !it.feat);   // やりたいことは打った時だけ出す（空欄で50行並べない）
+      const qn = paNormGuide(q), qs = qn ? qn.split(' ') : [];   // ★2026-10-24 ガイドと同じそろえ方・全部の語を含む
+      pageHits = qs.length ? pages.filter(it => { const h = it._n || (it._n = paNormGuide(it.label + ' ' + it.kw)); return qs.every(w => h.includes(w)); }) : pages.filter(it => !it.feat);   // やりたいことは打った時だけ出す（空欄で50行並べない）
       sel = 0;
       if (dataTimer) { clearTimeout(dataTimer); dataTimer = null; }
       if (q.length >= 2) { dataTimer = setTimeout(() => { dataTimer = null; if (document.getElementById('smd-palette')) runData(q); }, 130); }
@@ -9908,7 +9923,8 @@
     };
     const fn = RENDER[p];
     if (fn) {
-      try { fn(); }
+      const showErr = (e) => { console.error('[描画]', p, e); const pg = document.getElementById('page-' + p); if (pg) pg.insertAdjacentHTML('afterbegin', `<div style="margin:10px 20px;padding:8px 12px;background:#fff0f0;border:1px solid #f5c2c2;border-radius:6px;color:#b00;font-size:12px">描画エラー(${p}): ${esc((e && e.message) || e)}（コンソールに詳細）</div>`); };
+      try { const r = fn(); if (r && typeof r.catch === 'function') r.catch(showErr); }   /* ★2026-10-24 全体レビュー：async の失敗は try に入らず、空のまま止まっていた */
       catch (e) {
         console.error('[描画]', p, e);
         const pg = document.getElementById('page-' + p);
@@ -9919,7 +9935,7 @@
     setTimeout(() => { try { applyHelpState(); } catch (_) {} }, 60);   // 非同期に描かれるページ用
     SHOW_PAGE_HOOKS.forEach(h => { try { h(); } catch (_) {} });
   }
-  const PAGE_KEYS = ['dash','todo','orders','stock','buy','profit','expenses','returns','account','customers','plan','traffic','pricecalc','tax','suppliers','list','rank','fx','news','messages','log','changelog','tools','manual'];
+  const PAGE_KEYS = ['dash','todo','orders','stock','buy','profit','expenses','returns','account','customers','outreach','plan','traffic','pricecalc','tax','suppliers','list','rank','fx','news','messages','log','changelog','tools','manual'];
   function saveNavCollapsed() { try { localStorage.setItem('smdNavCollapsed', JSON.stringify([...document.querySelectorAll('#smd-nav .navgroup.collapsed')].map(g => g.dataset.g))); } catch (_) {} }
   { try { JSON.parse(localStorage.getItem('smdNavCollapsed') || '[]').forEach(g => { const el = document.querySelector('#smd-nav .navgroup[data-g="' + g + '"]'); if (el) el.classList.add('collapsed'); }); } catch (_) {} }
   document.getElementById('smd-nav').addEventListener('click', e => {
@@ -22688,6 +22704,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🧾 操作ログ ----------------
   async function renderLog() {
+    if (state.page !== 'log') return;   /* ★2026-10-24 開いていない時に他の画面から呼ばれて activity_log を500行読んでいた（出品ログの仕入れ目安の読み終わり） */
     const body = document.getElementById('log-body');
     body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let logs; try { logs = await sbGetAll('activity_log', 'select=*&order=ts.desc&limit=500'); } catch (e) { body.innerHTML = errBox(e); return; }
@@ -23503,7 +23520,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '\u{1F6A8} <b>【重要・実害あり】発送期日が1日甘く出ていました</b>（本人指摘）。Shopeeの <code>ship_by</code> は<b>その国の現地時間</b>の期日なのに、<b>日本時間で日付に丸めていた</b>ため、現地では前日だった期日が1日後ろにズレていました。<b>未発送77件のうち34件（BR 51件中27件）が該当</b>し、ズレは<b>常に「まだ間に合う」と見える側</b>＝<b>遅延（LSR）を見落とす向き</b>でした。期日は<b>現地の日付</b>、「今日」は<b>日本時間</b>（荷物を出すのは日本から）で数えるように直しました。検算＝本人の運用ルール（月→金スキャン/木に手離れ・火→土/金・水→土/金・木→水/火・金土日→木/水）と実データ1,999件で一致を確認。例：9/5(土)注文のMY注文は <code>ship_by</code> 現地9/8(火)→スキャン期限9/10(木)→手を離れる9/9(水)で、<b>「今日中」ではなく「遅延」</b>が正しい表示です。',
       '\u2328 <b>打ち込んだ数字が、その場で反映されるようにしました</b>。<b>事業計画の「🎯目標＆逆算」7欄</b>と<b>確定申告の「期首/期末の棚卸高・平均USD/JPY」</b>は、<b>入力欄から離れるまで計算が古いまま</b>でした（同じページの「👥外注の単価」は元から打鍵連動で、作りが割れていました）。棚卸高は売上原価＝期首＋当期仕入−期末に直接効くので、打ち替えても数字が動かないのは危ない状態でした。',
       '\u{1F504} <b>在庫の「シリーズ別 回転速度」が、件数が多いほど閉じていた</b>のを直しました（13件以上で畳まれる分岐が逆向き）。表は40行＋スクロール枠に収まっているので、常に開いた状態にします。',
-      '\u{1F6A8} <b>【事故になる経路を塞ぎました】🎭デモ表示のまま「💵入金予定額→F/G列」「🖼️商品画像→AC列」を実行すると、<b>ダミーの商品名が本番の利益管理表に焼き付いていました</b>。デモの番人はSupabaseへの保存にしか入っておらず、<b>転記GASへの送信は素通り</b>だったためです。両方の入口で止めるようにしました。',
+      '\u{1F6A8} <b>【事故になる経路を塞ぎました】</b>🎭デモ表示のまま「💵入金予定額→F/G列」「🖼️商品画像→AC列」を実行すると、<b>ダミーの商品名が本番の利益管理表に焼き付いていました</b>。デモの番人はSupabaseへの保存にしか入っておらず、<b>転記GASへの送信は素通り</b>だったためです。両方の入口で止めるようにしました。',
       '\u{1F527} <b>F/G転記の「不安定」を、まず見えるようにしました</b>（本人「各国のセラーセンターを回るのが面倒でポータルからできるようにしたが不安定」）。①<b>取得できなかった国があっても「✅完了」で締めていた</b>ので、成功した国と失敗した国を名指しするようにしました（書けた国を再実行しても二重にはなりません）。②<b>2枚目のシートで落ちると1枚目の結果ごと画面から消えていた</b>ので、落ちたシートだけを記録して次へ進むようにしました。',
       '\u{1F310} <b>英語表示のダイアログを、変数が混ざる行も訳せるように</b>しました（96本のパターンを追加）。「注文 ◯◯ を 3梱包に分割します」のように<b>総称パターンが先に当たって半分英語になっていた行</b>も直しています。',
     ] },
@@ -23728,7 +23745,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '📐 <b>識別1の列だけ1段ずれていたのを直しました</b>（本人「なんでこれ段ずれてるの？」）。🔒ロックのボタンが<b>識別1の列にだけ</b>あり、項目名の<b>上に積んで1行ぶんの高さを取っていた</b>ため、その列の項目名と入力欄が他の3列より1段下がっていました。🔒をアイコンだけにして<b>項目名と同じ行</b>に並べ、4列の高さを揃えました。',
       '🔑 <b>出品一覧を「アカウント」で絞れるようにしました</b>（本人「アカウントでもフィルターかけれるように」）。🔎絞り込むの左に <b>🔑</b> を置き、<b>系統でまとめて</b>（<code>gcsonlinestore</code> / <code>gs_japan_select</code>）も、<b>国ごとの店</b>（<code>gcsonlinestore.ph</code> 等）も選べます。<b>選ぶ前から件数が見えます</b>（例 <code>gcsonlinestore（系統ぜんぶ 6,443件）</code>／<code>gs_japan_select.ph（6件）</code>／<code>アカウント未判別（27件）</code>）。<br>ヘッダの「対象アカウント」とは別物で、こちらは<b>この画面だけの絞り込み</b>です（帯の ✕ で外せます・設定は保存されます）。系統の求め方は既にある <code>famOfLabel</code> を使い、判定を二重に持ちません。店が1つしか無い時はセレクト自体を出しません。',
       '🐛 <b>絞り込みの帯が「バリエーションだけ」を「単品だけ」と表示していたのを直しました</b>。分岐が <code>varType === \'has\'</code> を見ていましたが、実際に入る値は <code>\'multi\'</code> だったので<b>常に else 側（単品だけ）に落ちて</b>いました。<b>ボタンの光り方は正しく、帯のラベルだけが嘘</b>をついていた状態です（実データが単品288件ではなくバリエーション288件だった）。「決め打ち分岐の else に別の状態が混ざる」といういつもの型でした。',
-      '🎨 <b>ボタンの色に意味を持たせて、全ページで揃えました</b>（本人「色とか揃えてくれ」「赤に紫は醜いだろ」「視認性も意識して」）。<br><b>まず約束</b>：<b>色が付いていたら、それが効いている</b>。絞り込み・並べ替えは<b>切ってある間はグレー</b>で、押している物だけ色が付きます。保存・削除・開くは「押すと何が起きるか」を色で見せるので常に色が付きます（<b>書き込む＝みどり／消す＝あか／開く・見る＝あお／絞り込む＝オレンジ／並べる＝むらさき</b>）。<br><b>直した中身</b>：これまで<b>「保存・書込」だけで赤・青・緑・紫の4色</b >に散らばっていたので、ラベルの意味で<b>47個</b>を塗り直しました（書込27・削除10・開く10）。今後は色を直接書かず <code>.b-write</code> 等のクラスだけを使います。<br><b>紫地に赤い📊が乗っていた件</b>：並べ替えのセグメントで<b>背景だけ紫にして文字色を変えていなかった</b>ため、オレンジ文字が残っていました。さらに<b>絵文字は文字色に染まらない</b>ので、べた塗りの上に置くと必ず汚くなります。<b>選択中はべた塗りをやめ</b>、淡い塗り＋濃い文字＋太い枠にして、塗りに乗る絵文字（📊📈🧩👁🆕🔃📚🌏）は外しました。文字と背景のコントラストも取り直しています（オレンジの塗り＋白文字は3.7:1で基準割れだった）。<br><b>出品一覧のツールバー</b>は役割で3つに分けました——<b>データ</b>（グレー）／<b>🔎絞り込む（件数が変わる）</b>／<b>⇅並べる・見せ方（件数は変わらない）</b>。左に色の帯を付けて、どちらのかたまりか一目で分かるようにしています。「明細あり/単品」が並べ替えの隣に、「統計期間」が赤枠の隣にある、といった混在を解消しました。',
+      '🎨 <b>ボタンの色に意味を持たせて、全ページで揃えました</b>（本人「色とか揃えてくれ」「赤に紫は醜いだろ」「視認性も意識して」）。<br><b>まず約束</b>：<b>色が付いていたら、それが効いている</b>。絞り込み・並べ替えは<b>切ってある間はグレー</b>で、押している物だけ色が付きます。保存・削除・開くは「押すと何が起きるか」を色で見せるので常に色が付きます（<b>書き込む＝みどり／消す＝あか／開く・見る＝あお／絞り込む＝オレンジ／並べる＝むらさき</b>）。<br><b>直した中身</b>：これまで<b>「保存・書込」だけで赤・青・緑・紫の4色</b>に散らばっていたので、ラベルの意味で<b>47個</b>を塗り直しました（書込27・削除10・開く10）。今後は色を直接書かず <code>.b-write</code> 等のクラスだけを使います。<br><b>紫地に赤い📊が乗っていた件</b>：並べ替えのセグメントで<b>背景だけ紫にして文字色を変えていなかった</b>ため、オレンジ文字が残っていました。さらに<b>絵文字は文字色に染まらない</b>ので、べた塗りの上に置くと必ず汚くなります。<b>選択中はべた塗りをやめ</b>、淡い塗り＋濃い文字＋太い枠にして、塗りに乗る絵文字（📊📈🧩👁🆕🔃📚🌏）は外しました。文字と背景のコントラストも取り直しています（オレンジの塗り＋白文字は3.7:1で基準割れだった）。<br><b>出品一覧のツールバー</b>は役割で3つに分けました——<b>データ</b>（グレー）／<b>🔎絞り込む（件数が変わる）</b>／<b>⇅並べる・見せ方（件数は変わらない）</b>。左に色の帯を付けて、どちらのかたまりか一目で分かるようにしています。「明細あり/単品」が並べ替えの隣に、「統計期間」が赤枠の隣にある、といった混在を解消しました。',
       '🔎 <b>0件のときに「どの条件でゼロになったか」を出すようにしました</b>（本人「おかしくない？再読み込みしたけど」）。PHで <code>switch</code> が0件に見えた件は<b>数字が正しく</b>、<b>⚠同名が複数</b> が効いていたためでした——PHで<b>同じタイトルが2件以上あるのは国全体で4件（2組）だけ</b>で、<code>Resident Evil 6（PS4）</code>と<code>HOMELAND（GameCube）</code>。<b>どちらもSwitchではない</b>ので掛け合わせると0になります（PHは <code>switch</code> 単体なら63件）。他国もMY18・TW14・TH6・VN4・BR2・SG0で画面と一致します。<br>ただ<b>「3つ条件が効いています」と帯に出ていても、どれを外せば見えるのかが分からない</b>のが本当の問題でした。0件のときに<b>「該当0件：「⚠同名が複数」でゼロになりました／その手前までは63件ありました」</b>と出し、<b>その場で外して63件を見るボタン</b>を置きました（条件の効き方はマウスを乗せると経過が出ます）。<br>件数は<b>絞り込みの通り道で数えているだけ</b>なので、判定を二重に持ちません。ついでに <b>✕ぜんぶ外す が「同名のこの1タイトルだけ」を消し忘れていた</b>のも直しました（外す処理を1か所に集約）。',
       '👥 <b>単品なのに「👥 1/2枚・空き200」と出ていたのを直しました</b>（本人「ここの「2分の1枚」もおかしいし、これバリエーションじゃないし、意味がわからんし。」）。<b>①②に分けたカタログの仲間</b>を示すバッジですが、束ねる鍵が<b>「末尾の番号を落とした商品名」</b>だったため、<b>同じタイトルを2回出しているだけ</b>の行まで仲間にされていました。<br>実データを数えたところ、束ねられていた <b>212組（454件）のうち174組・357件が①②ではなく、ただの重複出品</b>でした（例：MYの <code>New Minecraft - Switch</code> が2件・どちらも単品）。空き枠も <code>100×2枚＝200</code> と計算されて「空き200」になっていました。<br><b>シリーズと呼ぶ条件を決めました</b>——<b>番号（①②や(2)）が付いた行が2枚以上あり、かつ中身がバリエーションのもの</b>だけ（手で <code>grp</code> を指定したものは従来どおり優先）。これで<b>本物は38組・97件</b>に絞られ、単品からバッジが消えます。<br>代わりに、重複の行には<b>「⚠ 同名2件・出品中2」</b>と<b>正しい名前で</b>出すようにしました。<b>押すとその名前の出品だけが並び</b>（<b>国＋タイトル完全一致</b>。検索欄に入れる方式だと部分一致で他国や長いタイトルが混ざるため）、どちらを止めるか決められます（赤＝2件とも出品中で自分同士が競っている／灰＝片方は停止済み）。<br>あわせて<b>束ね方そのもの</b>も直しました——末尾の数字を落とす時に<b>区切りを見ていなかった</b>ため、<code>…fp5028</code> のような<b>型番の末尾3桁まで落として</b> <code>fp5</code> で束ね、<b>別商品を同じシリーズに入れて</b>いました（SGのFILA×PEANUTS 3組）。数字の前に<b>スペースか括弧がある時だけ</b>連番とみなします。<br>同じ取り違えは<b>5か所</b>にあったので全部直しました——行の「同シリーズ①②」リンク・<b>📚シリーズのみ</b>の絞り込み・「満杯だが同シリーズに空きがある」・シリーズ順の<b>色帯</b>・<b>シリーズ順の並べ替え</b>（重複を「大きいシリーズ」として上に持ち上げていた）。<br>※<b>①が2枚ある</b>ような二重登録もシリーズではないので、<b>違う番号が2つ以上</b>あることを条件にしました（いまのデータでは該当なし・将来の取り違え防止）。',
       '🔎 <b>「いま何で絞り込んでいるか」を画面の上に出しました</b>（本人「switchでフィリピンのヒットがゼロって明らかにおかしい」）。<b>バグではなく、⚠同名が複数 がONのままでした</b>。この絞り込みは<b>設定が保存される</b>ので、前に押したまま次に開いてもONで残ります。<br>これまで「効いているかどうか」を<b>ボタンの枠の色だけ</b>で表しており、赤枠のボタンが並ぶ中で<b>どれが実際に効いているのか見分けられません</b>でした。<br>効いている条件を<b>1本の帯にまとめて上に出す</b>ようにしました（例：<code>⚠同名が複数 / 検索「switch」</code>）。<b>条件ごとの ✕ で1つだけ外せ</b>、<b>「✕ぜんぶ外す」</b>で全部戻せます。<br>※実データ確認：switch を含む出品は <b>MY467 / BR77 / PH63 / TH52 / VN47 / TW44 / SG41件</b> あり、同名が複数の組に限ると44件でした。数字は正しく、見せ方の問題でした。',
@@ -23814,7 +23831,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       '🔤 <b>「同じ商品だけど別の写真」も重複として検知できるようにしました</b>（本人要望）。これまでの画像照合は<b>dHash</b>で、<b>同じ写真しか当たりません</b>（別の出品者が撮った写真は背景・角度・光が違うため。2026-08-06に確認済み）。ゲームソフトは<b>パッケージにタイトルが大きく印刷されている</b>ので、<b>写真の中の文字を読んで（OCR）突き合わせる</b>ようにしました。<b>🔤N%</b> がその一致度です（70%以上＝同じ商品の可能性が高い／50〜69%＝似ている）。<br>写真が88%以上一致した組は既に確定なので<b>文字は読みません</b>（無駄に時間を使わない）。読むのは<b>名前で候補に挙がった分だけ</b>——既存の明細画像は数万枚あり、全件の照合は現実的でないためです。文字読み取りは<b>ブラウザ側</b>で動かしています（GASに新しい権限を足すと再認証が必要になるため）。1枚1〜3秒、初回だけ辞書のダウンロードで少し待ちます。まとめて追加の前の確認にも<b>🔤70%以上</b>を含めました。',
       '🛒 <b>メルカリShopsのURLが「商品ページでない」として捨てられていた</b>のを修正（本人指摘）。メルカリShopsには<b>2つの形</b>があり、<code>mercari-shops.com/products/…</code> は通していたのに、メルカリ本体から開いた時の <code>jp.mercari.com/shops/product/…</code> が抜けていました（実測：貼った38件のうち33件が除外）。両方を通します。',
       '🔍 <b>重複の判定から「仕入元URLが既出」を外し、画像の照合を自動にしました</b>（本人指示）。仕入元URLの突合は<b>2026-08-06に「効かない手」として捨てた判定</b>です（同じ商品でも出品者が違えばURLは毎回別物）。それなのに<b>⚠既出という赤字＋入力欄の赤枠</b>で強い警告として出続けていたので、画面から外しました（台帳への記録は残すので後から追えます）。あわせて<b>「🔍画像でも確かめる」を押さなくても自動で走る</b>ようにしました——名前が似ているだけでは別物のことも多く、押さないと確度が上がらないのは<b>「押さないと出ない」形</b>だったためです。全件の画像照合は既存の明細画像が数万枚あって現実的でないので、<b>名前で候補に挙がった分だけ</b>照合します（🖼一致度88%以上＝同じ写真＝重複濃厚／75〜87%＝似ている）。',
-      '🖼 <b>まとめて追加が画像アップの通信エラーで止まっていた</b>のを修正（本人の画面で発生）。原因は3つでした。<b>①並列取得(<code>fetchAll</code>)にリトライが無く、12件まとめて投げたうちの1本が落ちるだけで12件ぶんが巻き添え</b>で消えていた → 数回やり直し、それでもダメなら<b>1本ずつに落として、落ちた画像だけ諦めて残りは通す</b>ようにしました。<b>②リトライが3回・合計5秒しかなかった</b> → <b>5回・合計15秒</b>（1→2→4→8秒）まで粘ります。<b>③署名を画像のダウンロード前に作っていた</b> → 取得に手間取ると署名が古くなって弾かれるので、<b>画像を取った後に作る</b >ようにしました。明細画像の一括差し替え・ZIP出力など、画像を並列で扱う4か所すべてに同じ手当てをしています。',
+      '🖼 <b>まとめて追加が画像アップの通信エラーで止まっていた</b>のを修正（本人の画面で発生）。原因は3つでした。<b>①並列取得(<code>fetchAll</code>)にリトライが無く、12件まとめて投げたうちの1本が落ちるだけで12件ぶんが巻き添え</b>で消えていた → 数回やり直し、それでもダメなら<b>1本ずつに落として、落ちた画像だけ諦めて残りは通す</b>ようにしました。<b>②リトライが3回・合計5秒しかなかった</b> → <b>5回・合計15秒</b>（1→2→4→8秒）まで粘ります。<b>③署名を画像のダウンロード前に作っていた</b> → 取得に手間取ると署名が古くなって弾かれるので、<b>画像を取った後に作る</b>ようにしました。明細画像の一括差し替え・ZIP出力など、画像を並列で扱う4か所すべてに同じ手当てをしています。',
       '🛑 <b>明細を100件より多く追加しようとしても止めていなかった</b>のを修正（本人指摘）。<b>Shopeeの上限は1カタログ100明細</b>で変わっていません。まとめて追加の経路だけ<b>上限チェックが抜けており</b>、超える数をそのまま送ってShopee側で丸ごと弾かれていました（名前・価格・重複・価格差5倍のチェックはあったのに、件数だけ無かった）。<b>送る前に「あと何件しか足せないか」「何件多いか」を出して止める</b>ようにし、残り3件以下になる時も確認を挟みます。同じシリーズの別カタログ（🈳付き）へ回す案内も出します。',
       '💹 <b>「仕入額ごとの採算」を利益ページに追加</b>。全期間を実測したところ、<b>仕入が高いほど赤字率が跳ね上がる</b>と分かりました：<b>¥0〜2,000 4%／〜4,000 7%／〜6,000 17%／〜10,000 26%／〜20,000 <span style="color:#b3261e">50%</span>／¥20,000〜 67%</b>。しかも1件あたりの粗利は<b>¥10,000までどの帯もほぼ¥1,400で一定</b>なのに、そこを超えると<b>ほぼ0</b>になります。＝<b>高額品は「当たれば大きい」ではなく、いまの値付けだと割に合っていない</b>。<br>あわせて<b>赤字の原因わけ</b>も実測しました（2026-04以降・粗利が判明した890件）：<b>返金起因 21件 ¥77,548</b>／<b>値付け 81件 ¥85,262</b>。<b style="color:#b3261e">以前「赤字は値付けでなく返品が主因」と報告しましたが、件数でも金額でも値付けの方が多く、誤りでした</b>。訂正します。',
       '📌 <b>バリエーションの▶を押すと画面が一番上に戻っていた</b>のを修正（本人指摘）。一覧を作り直す作りなので、押した行がどこにあったか分からなくなっていました。<b>押した行の画面上の位置を覚えておいて、開いたあと同じ高さに戻す</b>ようにしたので、<b>その場で開いて見えます</b>。',
@@ -24389,17 +24406,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       </div>`;
     body.innerHTML = matrix +
       `<div class="tool-card" style="margin:0;max-width:1150px;font-size:13px;line-height:1.8">` +
-      CHANGELOG.map(g => `<div style="margin-bottom:14px"><b style="color:#ee4d2d">${esc(g.date)}</b><button class="cl-copy" data-d="${av(g.date)}" title="この日ぶんをDiscordに貼れる形でコピーします（自動投稿はしません）" style="margin-left:8px;border:1px solid #5865F2;background:#f5f6ff;color:#5865F2;border-radius:10px;padding:1px 9px;font-size:10.5px;font-weight:700;cursor:pointer">📋 この日をコピー</button><ul style="margin:4px 0 0 18px;padding:0">` +
+      CHANGELOG.map(g => `<div style="margin-bottom:14px"><b style="color:#ee4d2d">${esc(g.date)}</b><button class="cl-copy" data-d="${av(g.date)}" title="この日ぶんをDiscordに貼れる形でコピーします（自動投稿はしません）" style="margin-left:8px;border:1px solid #5865F2;background:#f5f6ff;color:#5865F2;border-radius:10px;padding:1px 9px;font-size:10.5px;font-weight:700;cursor:pointer">📋 この日をコピー</button><ul data-noi18n style="margin:4px 0 0 18px;padding:0">` +
         g.items.map(i => `<li style="margin:2px 0">${i}</li>`).join('') + `</ul></div>`).join('') +
       `</div>`;
     // 📋 その日ぶんをDiscord用テキストにしてコピー（貼るのは手動。自動投稿はしない）
     document.querySelectorAll('.cl-copy').forEach(b => b.addEventListener('click', async () => {
       const g = CHANGELOG.find(x => x.date === b.dataset.d); if (!g) return;
       const plain = (h) => String(h || '')
-        .replace(/<b>/g, '**').replace(/<\/b>/g, '**')
+        .replace(/<b\b[^>]*>/g, '**').replace(/<\/b\s*>/g, '**')
         .replace(/<br\s*\/?>/gi, ' ')
         .replace(/<[^>]+>/g, '')
-        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
         .replace(/\s+/g, ' ').trim();
       const txt = '## 🛠 Shopee OS 開発ログ　' + g.date + '\n\n' + g.items.map(i => '- ' + plain(i)).join('\n');
       try { await navigator.clipboard.writeText(txt); b.textContent = '✓ コピーしました'; setTimeout(() => { b.textContent = '📋 この日をコピー'; }, 1600); }
@@ -38011,7 +38028,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     if (force) logState.costMap = null;
     if (logState._costMapBusy || logState.costMap) return;
     logState._costMapBusyAt = Date.now();
-    logState._costMapBusy = true; sbGet('app_kv', 'select=k,v&k=like.llog_cost_*').then(ks => { const cm = {}; (ks || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(key => { const v = m[key]; cm[key] = (v && typeof v === 'object') ? { c: Number(v.c) || 0, src: String(v.src || ''), from: String(v.from || ''), ja: String(v.ja || ''), jan: String(v.jan || ''), mpn: String(v.mpn || ''), jc: v.jc ? 1 : 0 } : { c: Number(v) || 0, src: '', from: '', ja: '', jan: '', mpn: '', jc: 0 };   /* ★2026-10-17 jc（駿河屋まで確かめた印）も写す。写していなかったので「JAN なし」が「未取得」のまま出ていた */   /* ★2026-10-16 JAN・型番も控えから出す（🤖/🃏が足した時に分かっていた値） */ }); }); logState.costMap = cm; logState._costMapAt = Date.now(); try { renderLog(); } catch (_) {} }).catch(() => { logState.costMap = {}; logState._costMapAt = Date.now(); }).finally(() => { logState._costMapBusy = false; }); 
+    logState._costMapBusy = true; sbGet('app_kv', 'select=k,v&k=like.llog_cost_*').then(ks => { const cm = {}; (ks || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(key => { const v = m[key]; cm[key] = (v && typeof v === 'object') ? { c: Number(v.c) || 0, src: String(v.src || ''), from: String(v.from || ''), ja: String(v.ja || ''), jan: String(v.jan || ''), mpn: String(v.mpn || ''), jc: v.jc ? 1 : 0 } : { c: Number(v) || 0, src: '', from: '', ja: '', jan: '', mpn: '', jc: 0 };   /* ★2026-10-17 jc（駿河屋まで確かめた印）も写す。写していなかったので「JAN なし」が「未取得」のまま出ていた */   /* ★2026-10-16 JAN・型番も控えから出す（🤖/🃏が足した時に分かっていた値） */ }); }); logState.costMap = cm; logState._costMapAt = Date.now(); try { renderListingLog(); } catch (_) {} /* ★2026-10-24 操作ログの renderLog を呼んでいた（10/19 レビュー高-新3）＝出品ログが「読み込み中」のまま・操作ログを裏で500行読んでいた */ }).catch(() => { logState.costMap = {}; logState._costMapAt = Date.now(); }).finally(() => { logState._costMapBusy = false; }); 
   }
   async function loadListingLog() {
     /* ★2026-09-21 本人「なんかずっと読み込み中だけど、重くなってますかね？」→ 実測でその通りだった。
@@ -52793,7 +52810,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         setsyncQuietSave(); setsyncSnap = null; setsyncStamp();
         try { applyIndependentMode(); } catch (_) {}
         try { if (typeof applyVacationUI === 'function') applyVacationUI(); } catch (_) {}
-        try { showPage(state.page); } catch (_) {}
+        try { if (!appBusy()) showPage(state.page); } catch (_) {}   /* ★2026-10-24 全体レビュー：入力中に描き直して未保存の入力を消していた */
         try { toast('🔄 もう1台で変えた設定を取り込みました（' + took.length + '項目）'); } catch (_) {}
       }
       if (give && settings.sbSecret) { out.at = new Date().toISOString(); out.by = PC.id; out.label = PC.label; await pcKvPut('portal_settings_shared', out); }   // 失敗しても _keyAt が残る＝次の巡回でもう一度
