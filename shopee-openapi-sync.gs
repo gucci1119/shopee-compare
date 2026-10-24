@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261024-2330';
+var SRC_VER = '20261025-0000';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -312,8 +312,32 @@ function ufPersist_() {
 /* ★実測で止める（推定値に頼らない）。Google に実際に断られたら、その事実を残して**その日の背景処理を全部やめる**。
    数え方の間違いが何個あっても、これは必ず効く。翌日（太平洋時間の日替わり）に自動で解ける。 */
 function ufIsBlocked_() {
-  try { var s = P_().getProperty('ufBlocked'); if (!s) return false; var o = JSON.parse(s); return !!(o && o.d === ufToday_()); } catch (e) { return false; }
+  try { var s = P_().getProperty('ufBlocked'); if (!s) return false; var o = JSON.parse(s); if (!(o && o.d === ufToday_())) return false; if (ufProbeMaybe_(o)) return false; return true; } catch (e) { return false; }
 }
+/* ★2026-10-24 断られた印の試し直し（05 情報システム部の判断・記憶 quota-guard-must-be-fact-based＝断られた事実で止め、通った事実で戻す）。
+   4台目は 10/24 19:23 に断られた後も 19:28 に Supabase へ書けた・20:23 に同じアカウントの別の GAS が外へ届いた＝印が日付の変わるまで背景を止めていた。
+   印を立てて1時間たったら、いちばん軽い1回（app_kv の鍵1つ・中身は読まない）だけ試す。通れば印を外す。断られたら印はそのまま・次は1時間後。
+   ほかの安全弁（UF_STOP の背景停止・子機の停止線）は変えない。結果は ufProbe（uf_status の probe）と、この実行の st.log（UF_PROBE_NOTE）に残す */
+var UF_PROBE_NOTE = '';
+function ufProbeMaybe_(o) {
+  var now = Date.now(), last = Number(o.probeAt || 0) || Date.parse(o.at || '') || now;
+  if (now - last < 3600000) return false;
+  o.probeAt = now; try { P_().setProperty('ufBlocked', JSON.stringify(o)); } catch (eP) { return false; }   /* 先に試した印＝同じ時刻に何本も試さない */
+  try {
+    ufBump_(1, '接続枠の試し直し');
+    var key = cfg_('SB_SERVICE_KEY');
+    var r = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/app_kv?select=k&k=eq.boshu_auto_cfg', { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
+    try { P_().deleteProperty('ufBlocked'); } catch (eD) {}
+    UF_PROBE_NOTE = '✅ 接続枠の試し直し：通ったので「断られた」の印を外しました（' + String(o.at || '') + ' に断られた・試しの返事 ' + r.getResponseCode() + '）';
+    ufProbeLog_({ at: new Date().toISOString(), ok: true, code: r.getResponseCode(), blockedAt: o.at || '' }); Logger.log(UF_PROBE_NOTE); return true;
+  } catch (e) {
+    var m = String((e && e.message) || e).slice(0, 140);
+    UF_PROBE_NOTE = '⛔ 接続枠の試し直し：まだ断られました＝印はそのまま・次は1時間後（' + m + '）';
+    ufProbeLog_({ at: new Date().toISOString(), ok: false, msg: m, blockedAt: o.at || '' }); Logger.log(UF_PROBE_NOTE); return false;
+  }
+}
+function ufProbeLog_(x) { try { P_().setProperty('ufProbe', JSON.stringify(x)); } catch (e) {} }
+function ufProbeInfo_() { try { return JSON.parse(P_().getProperty('ufProbe') || 'null'); } catch (e) { return null; } }
 function ufBlockedInfo_() { try { var s = P_().getProperty('ufBlocked'); var o = s ? JSON.parse(s) : null; return (o && o.d === ufToday_()) ? o : null; } catch (e) { return null; } }
 function ufNoteErr_(e) {
   var m = String((e && e.message) || e || '');
@@ -1631,7 +1655,7 @@ function doGetInner_(e) {
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, src: SRC_VER, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, aiSpend: aiSpendLoad_() };
+        ufo = { ok: true, src: SRC_VER, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -3781,7 +3805,7 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey) {
     if (mismatch.length) { try { updateStockList_(shopId, itemId, mismatch.map(function (x) { return { model_id: x.model_id, stock: 0 }; })); } catch (eMs) { mismatch.forEach(function (x) { x.stockErr = String((eMs && eMs.message) || eMs).slice(0, 80); }); } }
   } catch (e5) {}
   var sentN = newModels.length, gotN = (addResp && Array.isArray(addResp.model)) ? addResp.model.length : -1;   /* add_model の返事の明細数（一部だけ通ったかの手がかり・-1＝返事に無い） */
-  return { ok: true, models: newList, mismatch: mismatch.slice(0, 20), addSent: sentN, addGot: gotN, middleGhost: (finalOpt !== finalModel) ? (finalOpt - finalModel) : 0, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40), noImgSkipped: noImgSkipped.slice(0, 40),
+  return { ok: true, models: newList, mismatch: mismatch.slice(0, 20), oldIds: models.map(function (m) { return String(m.model_id); }), addSent: sentN, addGot: gotN, middleGhost: (finalOpt !== finalModel) ? (finalOpt - finalModel) : 0, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40), noImgSkipped: noImgSkipped.slice(0, 40),
            healed: healed, opt_count: finalOpt, model_count: finalModel };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
@@ -8526,7 +8550,8 @@ function boshuAutoTick(manual) {
   }
   function finish_(msg) {
     st.src = SRC_VER;   /* ★2026-09-25 どの版で動いたか（ポータルで3台の版ズレを見る） */
-    try { st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eKs) {}   /* ★2026-10-24 鍵ごとの返事の長さ（文字数・負＝読めなかった）。Mac から大物を読まずに数えるため */
+    try { st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eKs) {}
+    try { if (UF_PROBE_NOTE) { baLog_(st, UF_PROBE_NOTE); UF_PROBE_NOTE = ''; } } catch (ePn) {}   /* ★2026-10-24 鍵ごとの返事の長さ（文字数・負＝読めなかった）。Mac から大物を読まずに数えるため */
     try { if (st.added.length > 400) st.added.length = 400; if (st.skipped.length > 300) st.skipped.length = 300; } catch (e0) {}
     /* ★2026-09-21 どちらのGoogleアカウントで動いたか・その枠をいくつ使ったかを一緒に残す。
      子機は別アカウント＝別の2万回なので、ポータルで**本体とは別の数字**として見せる必要がある。
@@ -9624,7 +9649,12 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
     /* ★2026-09-25 本人「今後同じ失敗しないように」＝返事に model_id が無いのに「added>0」だけで済みにしていた（TW DS② の6件が入っていないのに済み扱い→3時間後に自動ブレーキ）。
        返事に明細が無い時は【Shopee を読み直して】名前が本当に入っているものだけ済みにする。1カタログ1回の読みで済む（毎回ではなく、この珍しい時だけ） */
     if (!(r2.models || []).length && (r2.added || 0) > 0) {
-      try { var _live = getModels_(tgt.shop_id, tgt.item_id) || {}; ((_live.models) || _live || []).forEach(function (m) { if (m && m.name && m.model_id) okNames[okNm_(m.name)] = m.model_id; }); baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：返事に明細が無かったので読み直して確認（' + Object.keys(okNames).length + '件）'); }
+      /* ★2026-10-24 01 商品部・05 のレビュー：この道でも③と同じ確認をする（前からある番号・送った SKU と違う物は新しい作品と見なさず在庫0で記録）。
+         足した明細が全部ずれと判定された時・④の読み直しに失敗した時もここを通る＝前は、ずれて在庫0にした前からある番号を新しい作品の番号として台帳に「済み」で控えていた */
+      try { var _live = getModels_(tgt.shop_id, tgt.item_id) || {}; var _oldI = {}; (r2.oldIds || []).forEach(function (id) { _oldI[String(id)] = 1; }); var _skS = {}, _nmS = {}; items.forEach(function (x) { var nk0 = okNm_(x.option); _nmS[nk0] = 1; if (x.sku) _skS[nk0] = String(x.sku).trim().toUpperCase(); }); var _mmL = [];
+        ((_live.models) || _live || []).forEach(function (m) { if (!(m && m.name && m.model_id)) return; var nk = okNm_(m.name); if (!_nmS[nk]) return; if (_oldI[String(m.model_id)] || (_skS[nk] && String(m.sku || '').trim().toUpperCase() !== _skS[nk])) { _mmL.push({ option: m.name, model_id: m.model_id, sku: String(m.sku || ''), old: !!_oldI[String(m.model_id)] }); delete okNames[nk]; return; } okNames[nk] = m.model_id; });
+        if (_mmL.length) { var _mmErr = ''; try { updateStockList_(tgt.shop_id, tgt.item_id, _mmL.map(function (x) { return { model_id: x.model_id, stock: 0 }; })); } catch (eMs2) { _mmErr = String((eMs2 && eMs2.message) || eMs2).slice(0, 80); } baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：⚠ 読み直しで番号と名前がずれた明細 ' + _mmL.length + '件を在庫0にした（' + _mmL.slice(0, 3).map(function (x) { return x.option + (x.old ? '＝前からの番号' : '＝SKU違い ' + x.sku); }).join(' / ') + (_mmErr ? '・在庫0に失敗 ' + _mmErr : '') + '）'); try { (st.mismatchLog = st.mismatchLog || []).unshift({ at: new Date().toISOString(), cc: cc, item_id: tgt.item_id, n: _mmL.length, ex: _mmL.slice(0, 5), via: 'reread', stockErr: _mmErr || undefined }); if (st.mismatchLog.length > 30) st.mismatchLog.length = 30; } catch (eMl2) {} }
+        baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：返事に明細が無かったので読み直して確認（' + Object.keys(okNames).length + '件' + (_mmL.length ? '・ずれ ' + _mmL.length + '件は済みにしない' : '') + '）'); }
       catch (eV) { baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：読み直しに失敗＝この回は済みにしない ' + String(eV).slice(0, 160)); }
     }
     items.forEach(function (x) {
@@ -10612,7 +10642,7 @@ function tcgTick(manual) {
      実測：tcg_auto_status_child3 に _sgJan={}・_sgJanN=20 ＝次の実行も「上限20に達した」で駿河屋を一度も読まず、空の {} のせいで jan_sg_cache も読み直さない（グッズの JAN が埋まらない）。その実行の中だけで使う */
   try { delete st._sgJan; delete st._sgJanN; } catch (eSj) {}
   var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {}, runner: rid0 };
-  var finish_ = function (msg) { try { delete st._sgJan; delete st._sgJanN; st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eSj2) {} try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
+  var finish_ = function (msg) { try { if (UF_PROBE_NOTE) { baLog_(st, UF_PROBE_NOTE); UF_PROBE_NOTE = ''; } } catch (ePn2) {} try { delete st._sgJan; delete st._sgJanN; st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eSj2) {} try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
   try {
     var cfg = baKv_(BA_CFG) || {};
     if (BA_KV_ERR) { ufPersist_(); try { lock.releaseLock(); } catch (e0) {} return { ok: false, skipped: 'cfg_unreadable' }; }
