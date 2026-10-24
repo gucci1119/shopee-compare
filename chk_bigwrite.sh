@@ -4,7 +4,7 @@
 cd "$(dirname "$0")"
 RANGE="${1:-@{u}}"
 PAT="baKvSet_\\(['\"](product_ids|boshu_auto_pre|titles_|sg_|cond_photo_index)|baWriteJan_\\(|baKvPrefetch_\\(\\[[^]]*(product_ids|boshu_auto_pre)|sbUpsert\\(['\"]app_kv['\"][^)]*(product_ids|boshu_auto_pre|titles_)"
-B=$(git diff -U0 "$RANGE" -- shopee-openapi-sync.gs index.html 2>/dev/null | grep '^+' | grep -v '^+++' | grep -E "$PAT" | head -5)
+B=$(git diff -U0 "$RANGE" -- shopee-openapi-sync.gs index.html 2>/dev/null | grep '^+' | grep -v '^+++' | grep -v 'B8_OK' | grep -E "$PAT" | head -5)   # ★2026-10-24 chk.sh と同じく、同じ行に B8_OK と根拠（何MB×何回）を書いた行は通す
 if [ -n "$B" ]; then
   echo "NG  大物（product_ids・写真の控え・駿河屋/母数の控え等）の書き込み／先読みが増えています。何MBを何分ごと・何台かを書き出して、本当に要るか本人と決めてから（スキル supabase-read-guard）。どうしても通すなら ALLOW_BIGWRITE=1 git push"
   echo "$B"; exit 1
