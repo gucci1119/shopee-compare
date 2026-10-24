@@ -1236,7 +1236,7 @@
         <button data-k="arranged" title="② 伝票発行済：Arrange Shipment押済でSLS伝票は発行済だが、まだ倉庫へ物理発送していない。伝票を印刷・梱包して倉庫へ送ります">②📄伝票発行済</button>
         <button data-k="transit" title="③ 倉庫スキャン待ち：自社倉庫→Shopee Japan倉庫へ物理発送済で、まだ倉庫でスキャンされていない＝輸送中">③🚚倉庫スキャン待ち</button>
         <button data-k="400" title="④ 発送済：Shopee倉庫でスキャン済＝Shopeeの物流に乗って配送中〜完了。手元での作業は不要">④✈️発送済</button>
-        <button data-k="late" title="発送期限が近い/超過している未対応の注文">🚨遅延/リスク</button>
+        <button data-k="late" title="倉庫へまだ送っていない注文のうち、📦家から出す日が今日・過ぎたもの（伝票発行済も含む）">🚨遅延/リスク</button>
         <button data-k="pre" title="Pre-order（予約商品）の注文">🕒Pre-order</button>
       </span>
       <button class="smd-btn b-fil" id="ord-autoonly" title="🤖自動出品で入れた明細を含む注文だけを表示します（上の段階・国・検索と組み合わせて使えます）。&#10;見分け方は各明細の紫の「🤖自動出品」の印と同じ（🤖の台帳の明細＝英題と、Shopee上の実際の明細名）。&#10;もう一度押すと解除。">🤖 自動出品だけ表示</button>
@@ -3213,9 +3213,9 @@
     catch (e) {
       const em = String(e.message || e);
       // 「not eligible for rescheduling」＝もうShopee上で発送手配済み（パッケージ発行済）。ポータルが未発送と誤表示していただけ→手配済みに直して静かに片付ける
-      if (/not eligible for rescheduling|already|processed|has been (arranged|shipped)/i.test(em)) {
+      if (/not eligible for rescheduling|already (been )?(arranged|shipped|processed)|has been (arranged|shipped|processed)/i.test(em) && !/cancel/i.test(em)) {   /* ★2026-10-24 全体レビュー #11：前は「already」「processed」を含むだけで手配済み扱い＝取消の文でも発送へ回す筋道があった */
         try { const oc = state.orders.perCountry.get(cc); if (oc && oc.rows) { const o = oc.rows.find(x => x.sn === sn); if (o) { o.status = 'Processed'; o.needsDropoff = false; } } } catch (_) {}
-        try { logAct('注文', '発送手配済を検知(表示是正)', sn, cc); } catch (_) {}
+        try { logAct('注文', '発送手配済を検知(表示是正)', sn, cc + ' ' + em.slice(0, 120)); } catch (_) {}
         renderOrders();
         alert(`この注文（${sn}）は既にShopee上で発送手配済みでした（追跡番号が未取込のため未発送に見えていました）。\n\n「発送手配済」に表示を直しました。🖨️で伝票を印刷して倉庫へ発送してください。`);
         return;
@@ -3279,7 +3279,7 @@
       /* ★2026-09-26 本人「なぜ失敗するのか？」「なんかすでに処理されてるっぽい」：10:58 に11件とも手配済み→Chrome が落ちて読み直した後、
          ポータルに手配済みがまだ入っておらず、同じ11件にもう一度押して全部「失敗」と出た。1件ずつの 📦発送手配（apiShipFlow）と同じく、
          「not eligible for rescheduling」＝もう Shopee 上で手配済み として数え、表示も手配済みに直す（失敗にしない） */
-      if (/not eligible for rescheduling|already|has been (arranged|shipped)/i.test(em)) {
+      if (/not eligible for rescheduling|already (been )?(arranged|shipped|processed)|has been (arranged|shipped|processed)/i.test(em) && !/cancel/i.test(em)) {   /* ★#11 apiShipFlow と同じ判定 */
         try { const oc = state.orders.perCountry.get(cc); if (oc && oc.rows) { const o = oc.rows.find(x => x.sn === sn); if (o) { o.status = 'Processed'; o.needsDropoff = false; } } } catch (_) {}
         return { ok: false, already: true };
       }
@@ -3902,6 +3902,7 @@
   const TAB_MAX_PAGES = { 300: 10, 400: 1 }; // 発送中(400)は直近1ページ(50)に削減＝BR等の重い国がタイムアウトしないように
   async function fetchOrdersCountry(region, onProgress) {
     const rows = [];
+    let drops = 0;   /* ★2026-10-24 全体レビュー #4：取れなかったページ・束を数える。1つでもあれば ok にしない（一部の行で DB の全件を置き換えて、出し忘れの元になっていた） */
     for (const tab of ORDER_TABS) {
       let list = [];
       const maxPage = TAB_MAX_PAGES[tab] || 4;
@@ -3915,8 +3916,8 @@
           j = await bridgePostJson(`https://${region.host}/api/v3/order/search_order_list_index?SPC_CDS_VER=2`, {
             order_list_tab: tab, entity_type: 1, pagination: pg,
           });
-        } catch (e) { console.warn('[注文一覧]', region.cc, 'tab' + tab, 'p' + p, e.message); break; }
-        if (!j || j.code !== 0) { console.warn('[注文一覧] code', region.cc, 'tab' + tab, 'p' + p, j && j.code); break; }
+        } catch (e) { console.warn('[注文一覧]', region.cc, 'tab' + tab, 'p' + p, e.message); drops++; break; }
+        if (!j || j.code !== 0) { console.warn('[注文一覧] code', region.cc, 'tab' + tab, 'p' + p, j && j.code); drops++; break; }
         const idx = (j.data && j.data.index_list) || [];
         list = list.concat(idx);
         const total = ((j.data || {}).pagination || {}).total || 0;
@@ -3935,15 +3936,16 @@
           j = await bridgePostJson(`https://${region.host}/api/v3/order/get_order_list_card_list?SPC_CDS_VER=2`, {
             order_list_tab: tab, need_count_down_desc: false, order_param_list: slice,
           });
-        } catch (e) { console.warn('[明細]', region.cc, 'tab' + tab, e.message); doneC += slice.length; onProgress(tab, doneC, list.length); return; } // 1バッチ失敗は飛ばして継続
+        } catch (e) { console.warn('[明細]', region.cc, 'tab' + tab, e.message); drops += slice.length; doneC += slice.length; onProgress(tab, doneC, list.length); return; } // 1バッチ失敗は飛ばして継続（最後に ⚠ にする）
         doneC += slice.length; onProgress(tab, doneC, list.length);
-        if (!j || j.code !== 0) return;
+        if (!j || j.code !== 0) { drops += slice.length; return; }
         ((j.data || {}).card_list || []).forEach(c => {
           const oc = c && c.order_card;
           if (oc) rows.push(parseOrderCard(region, oc, tab));
         });
       }));
     }
+    if (drops) { console.warn('[注文一覧] 取れなかった分', region.cc, drops); throw new Error('ライブ取得の一部が取れませんでした（DBの行のまま表示しています）'); }
     return rows;
   }
 
@@ -10740,7 +10742,7 @@
         if (o.synced_at && o.synced_at > maxSync) maxSync = o.synced_at;
         if (o.shop_id) { (shopTally[o.cc] = shopTally[o.cc] || {})[o.shop_id] = (shopTally[o.cc][o.shop_id] || 0) + 1; }
         (byCc[o.cc] = byCc[o.cc] || []).push({ cc: o.cc, sn: o.sn, orderId: o.order_id, buyer: o.buyer || '', status: o.status || '',
-          tab: o.tab, shipBy: o.ship_by || 0, tracking: o.tracking || '', items: o.items || [], preOrder: !!o.pre_order, shopId: o.shop_id || null, orderTs: o.order_ts || null, orderDate: o.order_date || '', payTs: o.pay_ts || null, payMethod: o.pay_method || '', region: regionByCc(o.cc) });
+          tab: o.tab, shipBy: o.ship_by || 0, tracking: o.tracking || '', total: (o.total != null ? o.total : null), items: o.items || [], preOrder: !!o.pre_order, shopId: o.shop_id || null, orderTs: o.order_ts || null, orderDate: o.order_date || '', payTs: o.pay_ts || null, payMethod: o.pay_method || '', region: regionByCc(o.cc) });
       });
       state.orders.presumedShop = {};
       Object.keys(shopTally).forEach(cc => { state.orders.presumedShop[cc] = Object.keys(shopTally[cc]).sort((a, b) => shopTally[cc][b] - shopTally[cc][a])[0]; });
@@ -10846,7 +10848,9 @@
         REGIONS.forEach(r => state.orders.perCountry.set(r.cc, { status: 'ok', msg: '', rows: byCc[r.cc] || [] }));
         updateOrdNote(false); renderOrders();
       }).catch(e => {
-        document.getElementById('ord-list').innerHTML = `<div class="smd-empty">${esc(e.message)}</div>`;
+        /* ★2026-10-24 全体レビュー #2：一覧に直接書くと、後から終わる倉庫の印・登録簿の描き直しで「未処理の注文はありません🎉」に戻っていた。国ごとに「読めなかった」を残す */
+        REGIONS.forEach(r => { const oc = state.orders.perCountry.get(r.cc); state.orders.perCountry.set(r.cc, { status: 'error', msg: '注文DBを読めませんでした: ' + ((e && e.message) || e), rows: (oc && oc.rows) || [] }); });
+        renderOrders();
       });
       return;
     }
@@ -10867,10 +10871,25 @@
           const oc = state.orders.perCountry.get(region.cc);
           if (oc) { oc.msg = `読み込み中 ${done}/${total}`; renderOrdersSummary(); }
         }), timeout]).then(rows => {
-          // ライブ行にはshop_idが無いので、今アクティブな店 or DB推定の店で補完（アカウント表示用）
+          /* ★2026-10-24 全体レビュー #10・#3：ライブの行で国ごと置き換えると、💳未払い・古い④発送済・もう一方の店の注文が DB にあっても一覧から消えていた。
+             ライブの行を DB の行に注文番号で重ねる（ライブに無い行は DB のまま残す＝GAS の毎時同期までの最大1時間は古い状態のことがある・ブリッジの無いPCと同じ）。
+             ライブのカードに無い項目（追跡番号・金額・注文日・店・model_id 入りの明細）は DB の行から引き継ぐ＝🔄更新で DB へ書いても消さない */
+          const seed = ((state.orders.perCountry.get(region.cc) || {}).rows) || [];
+          const bySn = new Map(seed.map(d => [d.sn, d]));
+          const isEmpty = v => v === undefined || v === null || v === '' || v === 0;
+          rows.forEach(x => {
+            x._live = true;
+            const d = bySn.get(x.sn); if (!d || d._live) return;
+            ['orderId', 'buyer', 'shipBy', 'tracking', 'total', 'shopId', 'orderTs', 'orderDate', 'payTs', 'payMethod'].forEach(k => { if (isEmpty(x[k]) && !isEmpty(d[k])) x[k] = d[k]; });
+            if ((d.items || []).length) x.items = d.items;   // GAS の明細（model_id 入り）を正にする
+          });
+          // ライブ行にはshop_idが無いので、DBの行の店（上）→ 今アクティブな店 or DB推定の店で補完（アカウント表示用）
           const presumed = activeShopByCc[region.cc] || (state.orders.presumedShop && state.orders.presumedShop[region.cc]) || null;
           rows.forEach(x => { if (!x.shopId) x.shopId = presumed; });
-          state.orders.perCountry.set(region.cc, { status: 'ok', msg: '', rows });
+          /* 同期（syncAll）の最中は今までどおりライブの行だけ＝syncAll はこの国の行を全部 orders へ書くので、重ねた DB の行（古いことがある）を書き戻させない */
+          const liveSn = new Set(rows.map(x => x.sn));
+          const merged = (state.orders.dbSeedOk && !syncRunning) ? rows.concat(seed.filter(d => !d._live && !liveSn.has(d.sn))) : rows;
+          state.orders.perCountry.set(region.cc, { status: 'ok', msg: '', rows: merged });
           state.orders.liveAt = new Date().toISOString(); updateOrdNote(false);
           renderOrders();
         }).catch(e => {
@@ -10880,7 +10899,9 @@
         }).finally(onSettle);
       });
     };
+    state.orders.dbSeedOk = false;   /* ★2026-10-24 #3・#4：ライブの行を重ねる元（DBの行）を読めたか。読めていない時は🔄更新でDBへ書かない */
     ordersFromDb().then(byCc => {
+      state.orders.dbSeedOk = true;
       REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
         const seed = byCc[region.cc] || [];
         state.orders.perCountry.set(region.cc, { status: 'loading', msg: seed.length ? `DB${seed.length}件→更新中` : '読み込み中...', rows: seed });
@@ -10958,6 +10979,15 @@
   };
   const ordStatusJa = s => { const t = String(s || '').trim(); if (!t) return ''; const j = ORD_STATUS_JA[t.toUpperCase()]; return j ? esc(j) : esc(t); };
 
+  /* ★2026-10-24 全体レビュー #2：有効な国のうち、まだ読めていない（pending）・読めずに行も無い（failed）国を数える。「0件」と言ってよいかの判定 */
+  function ordLoadState_() {
+    const en = REGIONS.filter(r => state.enabled.has(r.cc));
+    const pcs = en.map(r => state.orders.perCountry.get(r.cc));
+    const failedCc = en.filter((r, i) => pcs[i] && pcs[i].status === 'error' && !(pcs[i].rows || []).length).map(r => r.cc);
+    /* 項目が1つも無い＝開いた直後・🔄更新の取り直し中。読んだ後に別の画面で国を足した時は、その国だけ項目が無いまま＝ずっと「読み込み中」にしない（今までどおり） */
+    const none = state.orders.perCountry.size === 0;
+    return { n: en.length, none, pending: pcs.filter(oc => (!oc && none) || (oc && oc.status === 'loading')).length, failed: failedCc.length, failedCc };
+  }
   function renderOrdersSummary() {
     const el = document.getElementById('ord-summary');
     const parts = [];
@@ -10967,7 +10997,7 @@
     const isSelfT = r => !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn));
     REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
       const oc = state.orders.perCountry.get(region.cc);
-      if (!oc) return;
+      if (!oc) { if (state.orders.perCountry.size === 0) parts.push(`<span class="cc" style="color:${region.color}">${region.cc}</span><span class="smd-dim">読み込み中…</span>`); return; }   /* ★#2 開いた直後・取り直し中は国を消さない */
       const n = (oc.rows && oc.rows.length) || 0;
       // ★見出しは「未発送＋発送済」。未払い(tab=200)まで足すと、下の4段階の合計と合わない
       //   （差がどこへ行ったのか画面に出ない・2026-09-06）。
@@ -11005,7 +11035,9 @@
     const stageLine = '';
     const ccClear = state.orders.ccFilter ? `<span class="ord-ccall" style="cursor:pointer;color:#1565c0;font-weight:700" title="国の絞り込みを解除して全国表示に戻す">🌏全国に戻す</span>` : '';
     // ★区切りの「｜」は中身がある物どうしの間にだけ入れる（空だと ｜ だけが浮いて残っていた）
-    const head = [`取扱中の注文 <b>${total}</b>件（未発送＋発送済）${unpaidAll ? `<span class="smd-dim" style="font-size:11px" title="買い手がまだ払っていない注文。発送の4段階には入りません"> ＋未払い ${unpaidAll}件</span>` : ''}`, riskTag, ccClear, parts.join(' ｜ ')]
+    const _ls = ordLoadState_();
+    const totalTxt = (_ls.pending && !total) ? '<b>…</b>件（読み込み中）' : (_ls.n && _ls.failed === _ls.n) ? '<b>?</b>件（読めませんでした・0件ではありません）' : `<b>${total}</b>件`;   /* ★#2 */
+    const head = [`取扱中の注文 ${totalTxt}（未発送＋発送済）${unpaidAll ? `<span class="smd-dim" style="font-size:11px" title="買い手がまだ払っていない注文。発送の4段階には入りません"> ＋未払い ${unpaidAll}件</span>` : ''}`, riskTag, ccClear, parts.join(' ｜ ')]
       .map(x => String(x || '').trim()).filter(Boolean).join(' ｜ ');
     el.innerHTML = head + stageLine;
     const setFilter = (k) => { state.orders.filter = k; state.orders.page = 1; state.orders.calOfs = 0; document.querySelectorAll('#ord-filter button').forEach(x => x.classList.toggle('on', x.dataset.k === k)); renderOrders(); };
@@ -11024,13 +11056,13 @@
   // 発送側が対応済みか（Shopee手配済 or 倉庫へ輸送中フラグ）。未対応の未発送だけが遅延の対象
   const ordHandled = (r) => ordArranged(r) || !!(state.orders.selfTransit && state.orders.selfTransit.has(r.cc + ':' + r.sn));
   // 0=なし 1=遅延リスク(期日24h以内 or Shopee警告) 2=遅延(期日超過)。未対応の未発送(tab300)のみ
+  /* ★2026-10-24 全体レビュー #6：上の帯の「🚨 遅延中」（日単位・📦家から出す日・伝票発行済も数える）と、タブ・印の🚨（時刻の LSR・伝票発行済を数えない）が食い違っていた。
+     伝票を出しただけの荷物は家にある＝まだ遅れうる。帯と同じ「📦家から出す日」の日単位で数え、対象外は倉庫へ発送済と④発送済だけ（ordDone と同じ） */
   const ordRisk = (r) => {
-    if (r.tab !== 300 || ordHandled(r)) return 0;
-    // ★遅延の線は ship_by そのものではなく ③LSR（ship_by + 2暦日）。ship_byで見ると2日早く赤くなる
-    const lsr = ordLsrScan(r);
-    const s = lsr ? (lsr - nowSec()) : null;
-    if (s != null && s < 0) return 2;
-    if ((s != null && s < 86400) || /Risk of late/i.test(r.warn || '')) return 1;
+    if (r.tab !== 300 || ordDone(r)) return 0;
+    const b = ordDueBucket(r);
+    if (b === 'over') return 2;
+    if (b === 'd0' || /Risk of late/i.test(r.warn || '')) return 1;
     return 0;
   };
   // ---- 📅 発送しめきり ----
@@ -11314,6 +11346,8 @@
       const k = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
       days.push({ k, w: d.getUTCDay(), md: (d.getUTCMonth() + 1) + '/' + d.getUTCDate(), n: cnt[k] || 0, sc: scanCnt[k] || 0, nf: nfrCnt[k] || 0, lt: lastCnt[k] || 0, lg: lateCnt[k] || 0, pre: preCnt[k] || 0, src: srcLabel(ordOf, k), srcSc: srcLabel(ordScanOf, k) });
     }
+    /* ★2026-10-24 全体レビュー #8：💡要対応の「翌日分」「前倒し」は days[1] を明日として使う。◀▶・日を押して表示をずらすと別の日の件数になっていた＝今日からの14日を別に渡す */
+    const days0 = ofs ? Array.from({ length: 14 }, (_, i) => { const d = new Date(Date.now() + 9 * 3600 * 1000 + i * 86400000); const k = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0'); return { k, n: cnt[k] || 0 }; }) : days;
     const cell = (d) => {
       const isToday = d.k === jstDate(Date.now());
       const isSel = String(state.orders.filter || '') === ('send:' + d.k) || String(state.orders.filter || '') === ('last:' + d.k);
@@ -11397,7 +11431,7 @@
           })()}</div>`)}
         </div>`;
       })()}
-      ${calAdviceHtml(days, cnt, key)}
+      ${calAdviceHtml(days0, cnt, key)}
       ${dowStatsHtml()}
     </div>`;
   }
@@ -11424,12 +11458,18 @@
     const todayDone = todayAll.length - todayTotal;
     workSheetN = todayTotal;   // 🖨きょうの作業指示（印刷）に「きょう出す数」を入れるため控える
     const notArranged = (list) => list.filter(r => !ordArranged(r)).length;
-    if (!rows.length) { el.innerHTML = ''; return; }
+    if (!rows.length) {
+      const _ls = ordLoadState_();   /* ★2026-10-24 #2：読めていない時に帯を消すと「出す物が無い」と読める */
+      if (_ls.pending || _ls.failed) { workSheetN = null; el.innerHTML = `<div class="smd-dim" style="margin:6px 0 2px;font-size:11.5px">📦 本日の発送：${_ls.pending ? '注文を読み込み中…' : '⚠ 注文を読めませんでした（0件ではありません）'}</div>`; return; }
+      el.innerHTML = ''; return;
+    }
+    const _lsF = ordLoadState_().failedCc;
+    if (_lsF.length) workSheetN = null;   /* ★#2 読めなかった国がある時に、🖨きょうの作業指示へ少ない数を刷らない（空欄になる） */
     const chip = (k, label, list, col) => `<span class="ord-duechip" data-k="due${k}" title="【発送期限】この日までに発送してください（クリックで該当分を表示）" style="cursor:pointer;display:inline-flex;align-items:center;gap:5px;background:${col}14;color:${col};border:1px solid ${col}55;font-size:11px;font-weight:700;border-radius:12px;padding:2px 9px">${label} <b style="font-size:12.5px">${list.length}</b>${notArranged(list) ? `<span style="font-weight:400;opacity:.75">（未手配${notArranged(list)}）</span>` : ''}</span>`;
     const ok = todayTotal === 0;
     el.innerHTML = `<div style="margin:6px 0 2px;padding:7px 12px;border-radius:8px;border:1px solid ${ok ? '#bfe6c8' : '#f3c2bb'};background:${ok ? '#f2fbf4' : '#fff7f6'}">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <b style="font-size:12.5px;white-space:nowrap;color:${ok ? '#1a7f37' : '#c0392b'}">${ok ? '✅ 本日の発送は完了しました' : '📦 本日の発送 ' + todayTotal + '件'}</b>${todayDone ? `<span class="smd-dim" style="font-size:10.5px;white-space:nowrap" title="本日ぶんは全部で${todayAll.length}件。「倉庫へ発送済」にした${todayDone}件を引いた残りが上の件数です">（本日ぶん${todayAll.length}件中 <b style="color:#1a7f37">${todayDone}件は発送済</b>）</span>` : ''}
+        <b style="font-size:12.5px;white-space:nowrap;color:${ok ? '#1a7f37' : '#c0392b'}">${ok ? '✅ 本日の発送は完了しました' : '📦 本日の発送 ' + todayTotal + '件'}</b>${_lsF.length ? `<span class="smd-err" style="font-size:10.5px;white-space:nowrap">⚠ ${esc(_lsF.join('・'))} は読めていません（数に入っていません）</span>` : ''}${todayDone ? `<span class="smd-dim" style="font-size:10.5px;white-space:nowrap" title="本日ぶんは全部で${todayAll.length}件。「倉庫へ発送済」にした${todayDone}件を引いた残りが上の件数です">（本日ぶん${todayAll.length}件中 <b style="color:#1a7f37">${todayDone}件は発送済</b>）</span>` : ''}
         ${over.length ? chip('over', '🚨 遅延中', over, '#b71c1c') : ''}
         ${chip('d0', '本日発送', d0, '#d93025')}
         ${chip('d1', '翌日発送', d1, '#e8710a')}
@@ -11490,34 +11530,56 @@
     { id: 's3', text: 'ディスク・カートリッジは緩衝材で包み、箱物は角をつぶさない', src: { reason: 'DAMAGED', note: '返品理由「破損」4件' } },
     { id: 's4', text: '伝票は読み取れる向きで全面を貼る（折れ・はがれ無し）。別の注文の伝票と入れ違えていない', src: { reason: 'WRONG_ADDRESS', note: '返品理由「住所違い」2件' } }
   ];
+  /* ★2026-10-24 全体レビュー #1・#5：読めなかった時に空（[]）にしていた＝その後の「＋1行足す」「✅チェック項目に」「外す」で丸ごと上書きして、種の4行・足した行・控えが全部消える筋道。
+     読めなかった時は前の一覧のまま（無ければ null＝「読めませんでした」を出す）。保存は毎回その場で読み直し、1か所だけ変えて書く
+     （もう1台のPCが足した行を古い一覧で消さない）。読み直せなければ書かない */
+  async function shipCheckFetch_() {
+    const r = await sbGet('app_kv', 'select=v&k=eq.ship_check'); const v = (r && r[0] && r[0].v) || null;
+    return (v && Array.isArray(v.items)) ? v.items : SHIP_CHECK_SEED.map(x => Object.assign({ on: true, at: '2026-10-11', seed: 1 }, x));
+  }
   async function shipCheckLoad(force) {
     if (shipCheck.items && !force) return shipCheck.items;
-    try { const r = await sbGet('app_kv', 'select=v&k=eq.ship_check'); const v = (r && r[0] && r[0].v) || null; shipCheck.items = (v && Array.isArray(v.items)) ? v.items : SHIP_CHECK_SEED.map(x => Object.assign({ on: true, at: '2026-10-11', seed: 1 }, x)); }
-    catch (_) { shipCheck.items = shipCheck.items || []; }
+    try { shipCheck.items = await shipCheckFetch_(); shipCheck.err = ''; }
+    catch (e) { shipCheck.err = String((e && e.message) || e); shipCheck.errAt = Date.now(); }
     return shipCheck.items;
   }
-  async function shipCheckSave() {
+  async function shipCheckSave(apply) {
     if (!settings.sbSecret) { toast('書込みキーが無いので保存できません'); return false; }
-    try { await sbUpsert('app_kv', [{ k: 'ship_check', v: { items: shipCheck.items, at: new Date().toISOString() }, updated_at: new Date().toISOString() }], 'k'); return true; }
-    catch (e) { toast('保存できませんでした: ' + ((e && e.message) || e)); return false; }
+    let fresh;
+    try { fresh = await shipCheckFetch_(); }
+    catch (e) { toast('出荷前チェックを読み直せなかったので保存を止めました（今ある項目を消さないため）: ' + ((e && e.message) || e), true); return false; }
+    if (apply(fresh) === false) { shipCheck.items = fresh; shipCheck.err = ''; return false; }
+    try { await sbUpsert('app_kv', [{ k: 'ship_check', v: { items: fresh, at: new Date().toISOString() }, updated_at: new Date().toISOString() }], 'k'); shipCheck.items = fresh; shipCheck.err = ''; return true; }
+    catch (e) { toast('保存できませんでした: ' + ((e && e.message) || e), true); return false; }
   }
   async function shipCheckAdd(text, src) {
-    await shipCheckLoad(); text = String(text || '').trim(); if (!text) return;
-    if (shipCheck.items.some(x => x.text === text)) { toast('同じ項目がもうあります'); return; }
-    shipCheck.items.push({ id: 'c' + Date.now().toString(36), text, src: src || {}, on: true, at: jstToday() });
-    if (await shipCheckSave()) { toast('出荷前チェックに1行足しました'); shipCheckRender(); try { logAct('注文管理', '出荷前チェック追加', text.slice(0, 60), JSON.stringify(src || {}).slice(0, 80)); } catch (_) {} }
+    text = String(text || '').trim(); if (!text) return;
+    let dup = false;
+    const saved = await shipCheckSave(items => { if (items.some(x => x.text === text)) { dup = true; return false; } items.push({ id: 'c' + Date.now().toString(36), text, src: src || {}, on: true, at: jstToday() }); });
+    if (dup) { toast('同じ項目がもうあります'); shipCheckRender(); return; }
+    if (saved) { toast('出荷前チェックに1行足しました'); shipCheckRender(); try { logAct('注文管理', '出荷前チェック追加', text.slice(0, 60), JSON.stringify(src || {}).slice(0, 80)); } catch (_) {} }
   }
   function shipCheckRender() {
     const host = document.getElementById('ship-check'); if (!host) return;
     const items = shipCheck.items;
-    if (!items) { host.innerHTML = '<span class="smd-dim" style="font-size:11px">✅ 出荷前チェック 読み込み中…</span>'; shipCheckLoad().then(shipCheckRender); return; }
+    if (!items) {
+      /* ★#1 読めなかった＝0件ではない。描き直しのたびに読みに行かない（失敗から1分は読み直さない・押せば今すぐ読む） */
+      if (shipCheck.err && Date.now() - (shipCheck.errAt || 0) < 60000) {
+        host.innerHTML = '<span class="smd-err" style="font-size:11px">⚠ 出荷前チェックを読めませんでした（0件ではありません）</span> <button class="smd-btn" id="sc-retry" style="font-size:10.5px;padding:1px 8px">再読込</button>';
+        const rb = host.querySelector('#sc-retry'); if (rb) rb.addEventListener('click', () => { rb.disabled = true; rb.textContent = '⏳読み込み中…'; shipCheckLoad(true).then(shipCheckRender); });
+        return;
+      }
+      host.innerHTML = '<span class="smd-dim" style="font-size:11px">✅ 出荷前チェック 読み込み中…</span>';
+      if (!shipCheck.busy) { shipCheck.busy = true; shipCheckLoad().then(() => { shipCheck.busy = false; shipCheckRender(); }); }
+      return;
+    }
     const on = items.filter(x => x.on !== false);
     host.innerHTML = `<div class="tool-card" style="margin:0;max-width:none;padding:8px 12px;border:1px dashed #9ccc9c;background:#f6fbf6">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><b style="font-size:13px">✅ 出荷前チェック（${on.length}）</b><span class="smd-dim" style="font-size:11px">うちで実際に起きたミスだけを潰すリスト。ミスが出たら1行足す（返品ページの各行「✅チェック項目に」からも）。🖨きょうの作業指示にも印刷されます</span><button class="smd-btn b-write" id="sc-add" style="margin-left:auto;font-size:11px;padding:2px 9px">＋ 1行足す</button></div>
       <ol style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:1.6">${on.map(x => `<li>${esc(x.text)} <span class="smd-dim" style="font-size:10px">${x.src && x.src.note ? '（' + esc(x.src.note) + '）' : (x.src && x.src.sn ? '（' + esc(x.src.cc || '') + ' ' + esc(x.src.sn) + '・' + esc(x.at || '') + '）' : (x.at ? '（' + esc(x.at) + '）' : ''))}</span> <button class="smd-btn sc-off" data-id="${av(x.id)}" style="font-size:9.5px;padding:0 5px" title="外す（消さずに控えに残す）">外す</button></li>`).join('')}</ol>
       ${items.length > on.length ? `<div class="smd-dim" style="font-size:10.5px;margin-top:4px">外した項目 ${items.length - on.length}件（控えに残っています）</div>` : ''}</div>`;
     const add = host.querySelector('#sc-add'); if (add) add.addEventListener('click', async () => { const t = prompt('出荷前チェックに足す1行（起きたミスを「二度と起きないための確認」の形で）'); if (t) await shipCheckAdd(t, { by: 'manual' }); });
-    host.querySelectorAll('.sc-off').forEach(b => b.addEventListener('click', async () => { const it = shipCheck.items.find(x => x.id === b.dataset.id); if (!it) return; it.on = false; it.offAt = jstToday(); if (await shipCheckSave()) shipCheckRender(); }));
+    host.querySelectorAll('.sc-off').forEach(b => b.addEventListener('click', async () => { const id = b.dataset.id; b.disabled = true; b.textContent = '⏳'; await shipCheckSave(items => { const it = items.find(x => x.id === id); if (!it) return false; it.on = false; it.offAt = jstToday(); }); shipCheckRender(); }));
   }
   function renderOrders() {
     ordSearchClrSync();
@@ -11594,7 +11656,8 @@
     rows.sort((a, b) => String(b.sn || '').localeCompare(String(a.sn || '')));
     state.orders.shown = rows; // 一括印刷などで「表示中の行」を参照するため保持
     list.innerHTML = '';
-    const loading = [...state.orders.perCountry.values()].some(oc => oc.status === 'loading');
+    const _ls = ordLoadState_();   /* ★2026-10-24 #2：まだ読めていない国がある＝0件ではない（開いた直後・🔄更新の取り直し中） */
+    const loading = [...state.orders.perCountry.values()].some(oc => oc.status === 'loading') || _ls.pending > 0;
     const allErr0 = !loading && [...state.orders.perCountry.values()].length > 0 && [...state.orders.perCountry.values()].every(oc => oc.status === 'error'); // ★全国エラー＝取得失敗を「注文なし🎉」と誤表示しない
     // ★ただし**DBの注文が手元にある**なら、それは「取得失敗で空」ではなく「その絞り込みに該当が無い」だけ。
     //   ライブ更新が落ちただけで「注文の取得に失敗しました」と全面表示するのは誤解を招く（実際に混乱を招いた）。
@@ -11602,7 +11665,7 @@
     const allErr = allErr0 && !haveAny;
     const liveWarn = allErr0 && haveAny ? '<div class="smd-dim" style="font-size:11px;margin-top:6px">⚠️ Shopeeからのライブ更新に失敗しています（表示は保存済みのデータ）。上部の「🔄 更新」で再取得できます。</div>' : '';
     if (!rows.length) {
-      const emptyMsg = loading ? '読み込み中...' : allErr ? '⚠️ 注文の取得に失敗しました（すべての国でエラー）。上部の「🔄 更新」で再取得してください。<br><span class="smd-dim" style="font-size:11px">※「注文なし」ではありません。ネットワーク／キー／同期の問題の可能性。</span>' : (state.orders.filter === 'late' ? '未対応（未手配）で発送期限が近い/超過した注文はありません🎉<br><span class="smd-dim" style="font-size:11px">※発送手配済(伝票発行済)はShopee期限を満たしているので対象外です</span>' : (state.orders.ccFilter ? state.orders.ccFilter + ' に該当する注文はありません（他の国は上の国チップで）' : '未処理の注文はありません🎉')) + liveWarn;
+      const emptyMsg = loading ? '読み込み中...' : allErr ? '⚠️ 注文の取得に失敗しました（すべての国でエラー）。上部の「🔄 更新」で再取得してください。<br><span class="smd-dim" style="font-size:11px">※「注文なし」ではありません。ネットワーク／キー／同期の問題の可能性。</span>' : (state.orders.filter === 'late' ? '倉庫へまだ送っていない注文で、📦家から出す日が今日・過ぎたものはありません🎉<br><span class="smd-dim" style="font-size:11px">※伝票を出しただけの荷物（家にある分）も数えています。「🚚倉庫へ発送済」にした分と④発送済は対象外です</span>' : (state.orders.ccFilter ? state.orders.ccFilter + ' に該当する注文はありません（他の国は上の国チップで）' : '未処理の注文はありません🎉')) + liveWarn + ((!loading && !allErr && _ls.failedCc.length) ? '<br><span class="smd-err" style="font-size:11px">⚠ ' + esc(_ls.failedCc.join('・')) + ' の注文を読めませんでした（0件ではありません）</span>' : '');
       list.innerHTML = `<div class="smd-empty">${(!loading && !allErr && state.orders.autoOnly) ? '🤖自動出品の明細を含む注文は、この条件ではまだありません。<br><span class="smd-dim" style="font-size:11px">上の「🤖 自動出品」をもう一度押すと解除します。</span>' : emptyMsg}</div>`;
       return;
     }
@@ -11629,15 +11692,15 @@
       const badge = (bg, t, tip) => `<span title="${tip}" style="background:${bg};color:#fff;font-size:9px;font-weight:700;border-radius:4px;padding:1px 5px;margin-right:4px;white-space:nowrap">${t}</span>`;
       let warnBadge = '';
       if (/Cancelled in/i.test(r.warn || '')) warnBadge = badge('#b00020', '⚠自動キャンセル間近', 'Shopee: ' + esc(r.warn));
-      else if (risk === 2) warnBadge = badge('#d93025', '🚨遅延', '未対応の未発送が発送期日を超過');
-      else if (risk === 1) warnBadge = badge('#e8710a', '⚠遅延リスク', '未対応の未発送・発送期日が近い(24h以内)/Shopee警告。仕入れが間に合わなければ別の早い仕入先へ');
+      else if (risk === 2) warnBadge = badge('#d93025', '🚨遅延', '倉庫へまだ送っていない注文で、📦家から出す日を過ぎた（伝票発行済も含む）');
+      else if (risk === 1) warnBadge = badge('#e8710a', '⚠遅延リスク', '倉庫へまだ送っていない注文で、📦家から出す日が今日／Shopee警告。仕入れが間に合わなければ別の早い仕入先へ');
       const flags = warnBadge + (r.preOrder ? badge('#8a4b00', '予約', 'Pre-Order：予約商品') : '');
       // ★状態を2列に分離：①Shopee上（Shopeeの発送状態＋arrange shipmentボタン）②自宅→倉庫（物理発送・手動フラグ）
       // 自宅→倉庫は inTransit(手動)のみで判定。Shopeeで arrange shipment を押しても荷物は家にある＝物理は未発送。
       const warehouseLabel = inTransit
         ? '<span style="color:#7b52c4;white-space:nowrap;display:inline-block;line-height:1.25" title="手元→Shopee Japan倉庫へ送りました。倉庫でスキャンされるのを待っています">🚚倉庫へ送った<br><span style="font-size:10px">（スキャン待ち）</span></span>'   /* ★2026-10-11 幅94pxの列で「（ス／チ）」と途中が欠けて見えた（本人「表示バグってる」）→2行に分けて収める */
         : '<span style="color:#d93025;white-space:nowrap" title="手元→Shopee Japan倉庫へまだ物理発送していない。Shopeeで発送手配済でも、伝票を貼って倉庫へ送るまでは未発送">倉庫へ未発送</span>';
-      const transitToggle = (r.tab === 300) ? `<div class="ord-selftransit" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-on="${inTransit ? 1 : 0}" title="自宅→Shopee Japan倉庫へ発送済（未スキャン）を記録／解除" style="cursor:pointer;font-size:9px;margin-top:3px;color:#7b52c4;${inTransit ? '' : 'border:1px dashed #b3a4e0;border-radius:4px;padding:1px 4px;display:inline-block'}">${inTransit ? '↩︎ 解除' : '🚚倉庫へ発送済にする'}</div>` : '';
+      const transitToggle = (r.tab === 300) ? `<div class="ord-selftransit" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-on="${inTransit ? 1 : 0}" title="自宅→Shopee Japan倉庫へ発送済（未スキャン）を記録／解除" style="cursor:pointer;font-size:9px;margin-top:3px;color:#7b52c4;${inTransit ? '' : 'border:1px dashed #b3a4e0;border-radius:4px;padding:1px 4px;display:inline-block'}">${(state.orders.stBusy && state.orders.stBusy.has(stKey)) ? '⏳記録中…' : inTransit ? '↩︎ 解除' : '🚚倉庫へ発送済にする'}</div>` : '';
       // Shopeeへ発送手配(arrange shipment)＝ship_order。まだ手配していない(未発送/arranged=false)注文だけに出す。押すとSLS伝票が発行される。
       const canArrange = (r.tab === 300 && !arranged && r.shopId && settings.openapiUrl && settings.writeToken);
       const arrangeBtn = canArrange
@@ -11695,22 +11758,25 @@
       e.stopPropagation();
       if (!settings.sbSecret) { alert('このPCは書き込みキー未設定です（⚙️設定）'); return; }
       const cc = el.dataset.cc, sn = el.dataset.sn, key = cc + ':' + sn, turnOn = el.dataset.on !== '1';
+      /* ★2026-10-24 全体レビュー #9：通信が終わるまで何も変わらず、もう一度押すと描き直し後の新しい要素（data-on=1）を押して印が解除されていた */
+      const busy = state.orders.stBusy || (state.orders.stBusy = new Set());
+      if (busy.has(key)) return;
+      busy.add(key); el.style.opacity = '.5'; el.style.pointerEvents = 'none'; el.textContent = '⏳記録中…';
       const val = turnOn ? new Date().toISOString() : null;
       try {
         await sbUpsert('costs', [{ cc, sn, self_transit_at: val }]);
         if (!state.orders.selfTransit) state.orders.selfTransit = new Map();
         if (turnOn) state.orders.selfTransit.set(key, val); else state.orders.selfTransit.delete(key);
         logAct('注文管理', turnOn ? '倉庫へ発送(未スキャン)' : '倉庫輸送を解除', sn, cc);
-        renderOrders();
       } catch (err) { alert('保存失敗: ' + err.message); }
+      finally { busy.delete(key); renderOrders(); }
     }));
   }
 
   // 更新ボタン＝ライブ取得＋DBへ保存（DB最終同期も進む）。ライブ不可/書込キー無しなら表示のみ
   async function refreshOrders() {
     const btn = document.getElementById('ord-reload');
-    state.orders.perCountry.clear();
-    if (state.mode !== 'live' || !settings.sbSecret) { loadOrders(true); return; }
+    if (state.mode !== 'live' || !settings.sbSecret) { state.orders.perCountry.clear(); loadOrders(true); return; }
     if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '⏳ 更新中'; }
     try {
       // 先にアクティブ店を判定＝各行に正しいshop_idを刻む＋対象アカウントと一致確認（別垢のまま更新する事故を防ぐ）
@@ -11718,16 +11784,21 @@
       const targets = accountTargets(); // 対象アカウントが持つ国だけ
       const { check } = await detectActiveAndCheck(targets);
       if (!check.ok) { if (btn) { btn.disabled = false; if (btn.dataset.orig) btn.innerHTML = btn.dataset.orig; } alert('【注文更新を中止】\n' + check.msg); return; }
+      state.orders.perCountry.clear();   /* ★2026-10-24 #2：消すのは取り直す直前（上で中止した時に空の表を残さない） */
       loadOrders(true);
       await waitOrdersLoaded({ textContent: '' });
+      /* ★2026-10-24 全体レビュー #3：ライブのカードには model_id・追跡番号（無い時）・金額（無い時）が無く、注文日は注文番号の頭6桁。そのまま書くと GAS が入れた値を消していた。
+         ライブの行は重ねる時に DB の行から引き継いである（loadOrders）。書くのはライブで取れた行だけ（重ねて残した DB の行は書き戻さない）・注文日は DB の値。
+         DB の注文を読めていない時は引き継げないので書かない */
+      if (!state.orders.dbSeedOk) { toast('DBの注文を読めなかったので、ライブの行はDBへ保存しませんでした（追跡番号などを空で上書きしないため）', true); return; }
       const orderRows = [];
-      targets.forEach(region => { const oc = state.orders.perCountry.get(region.cc); if (oc && oc.status === 'ok') oc.rows.forEach(o => orderRows.push(orderRowToDb(o))); });
+      targets.forEach(region => { const oc = state.orders.perCountry.get(region.cc); if (oc && oc.status === 'ok') oc.rows.forEach(o => { if (!o._live) return; const row = orderRowToDb(o); if (o.orderDate) row.order_date = o.orderDate; orderRows.push(row); }); });
       if (orderRows.length) {
         await upsertOrdersPreservingShop(orderRows, targets); // 判定できた国だけshop_idを刻む（他国は既存保持）
         state.orders.dbSyncedAt = new Date().toISOString();
         updateOrdNote(false);
       }
-    } catch (e) { /* ライブ表示は生きているので保存失敗は握りつぶす（DB最終同期が進まないだけ） */ }
+    } catch (e) { toast('注文のDB保存に失敗しました（表示はライブのまま）: ' + ((e && e.message) || e), true); }   /* ★2026-10-24 #20：握りつぶすと「DB最終同期」が進まない理由が分からない */
     finally { if (btn) { btn.disabled = false; if (btn.dataset.orig) btn.innerHTML = btn.dataset.orig; } }
   }
   document.getElementById('ord-reload').addEventListener('click', () => { refreshOrders(); });
@@ -11741,6 +11812,7 @@
       state.orders.perCountry.clear();
       loadOrders(false);                 // GASがDBへ取り込んだ最新注文を再読込
       await waitOrdersLoaded({ textContent: '' });
+      if (ordLoadState_().failed) throw new Error('GASの取り込みは終わりましたが、注文DBを読めませんでした（一覧は読めていません）');   /* ★2026-10-24 #2・#20 */
       updateOrdNote(false);
       sb.innerHTML = '✓ 取得完了';
       setTimeout(() => { sb.innerHTML = orig; sb.disabled = false; }, 2500);
@@ -11815,11 +11887,14 @@
     const body = rows.map(r => {
       const qty = r.items.reduce((s, it) => s + it.qty, 0);
       const names = r.items.map(it => `${it.name || ''}${it.variation ? ' [' + it.variation + ']' : ''}${it.qty > 1 ? ' ×' + it.qty : ''}`).join(' / ');
-      const due = r.tab === 300 && r.shipBy ? jstDateTime(new Date(r.shipBy * 1000).toISOString()) : '';
+      /* ★2026-10-24 全体レビュー #7：前は ship_by（DTS）そのものを日本時間で出していた＝画面の「📦家から出す日」より早く、BR はさらにずれた。画面と同じ数え方・現地日付で出す */
+      const locYmd = (sec) => { const d = new Date((sec + ccTz_(r.cc) * 3600) * 1000); return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0') + '(' + WDJ[d.getUTCDay()] + ')'; };
+      const due = r.tab === 300 && r.shipBy ? locYmd(ordShipDeadline(r)) : '';
+      const lastDay = r.tab === 300 && r.shipBy ? locYmd(ordNfrScan(r) - 86400) : '';
       // 状態はtab決め打ちでなく実ステータス（発送手配済を「未発送」と誤記しない）。手配列でShopee上の手配有無を明示
-      return [r.cc, acctLabel(r.shopId) || '', r.sn, r.buyer || '', names, qty, r.tracking || '', ordStatusJa(r.status), ordArranged(r) ? '伝票発行済' : (r.tab === 300 ? '未手配' : ''), due, r.preOrder ? '予約' : ''];
+      return [r.cc, acctLabel(r.shopId) || '', r.sn, r.buyer || '', names, qty, r.tracking || '', ordStatusJa(r.status), ordArranged(r) ? '伝票発行済' : (r.tab === 300 ? '未手配' : ''), due, r.preOrder ? '予約' : '', lastDay];
     });
-    downloadCsv('注文_' + new Date().toISOString().slice(0, 10) + '.csv', [['国', '店', '注文SN', 'バイヤー', '商品', '点数', '追跡番号', '状態', '手配', '発送期日', '区分']].concat(body));
+    downloadCsv('注文_' + new Date().toISOString().slice(0, 10) + '.csv', [['国', '店', '注文SN', 'バイヤー', '商品', '点数', '追跡番号', '状態', '手配', '家から出す日', '区分', '自動キャンセル前の最終発送日']].concat(body));
     toast('⬇ 注文CSV書出: ' + rows.length + '件');
   });
   // 📋 追跡番号を一括コピー（表示中で追跡ありのみ・重複排除）
