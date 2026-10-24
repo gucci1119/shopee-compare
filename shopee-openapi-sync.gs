@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0015';
+var SRC_VER = '20261025-0100';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -212,10 +212,20 @@ function ufState_() { var o = null; try { var s = P_().getProperty('ufCount'); o
    ＝「残り75%」と出しながら発送手配も止まる状態。もう一方の分（app_kv.uf_ext_*）を足して数える。
    読みは15分キャッシュ（1日あたり最大96回）。読めない時は【前の値を持ち越す】＝0にしない（0は「まだ余っている」という一番危ない側の嘘）。 */
 var _ufExt = null;
+/* ★2026-10-24 子機でも【同じ Google アカウント】で動く別の GAS の分は足す（05 情報システム部の判断＝安全弁が慎重になる向き）。
+   4台目（child3・gutiken）は「取込GAS 窓口（Smart Reply用）」と同じアカウントなのに、その分（uf_acct4_ingest）を一度も足していなかった
+   ＝自前の数え 2,705 のまま 19:23 に Google に断られた。スクリプト プロパティ UF_SAME_ACCT_KEYS（カンマ区切り）があればそれ、無ければ下の表 */
+var UF_SAME_ACCT_BY_RUNNER = { child3: 'uf_acct4_ingest' };
+function ufSameAcctKeys_() {
+  var k = ''; try { k = String(P_().getProperty('UF_SAME_ACCT_KEYS') || '').trim(); } catch (e) {}
+  if (!k) { try { k = UF_SAME_ACCT_BY_RUNNER[baRunnerId_()] || ''; } catch (e2) {} }
+  return String(k || '').split(',').map(function (x) { return x.trim(); }).filter(function (x) { return /^[a-z0-9_]+$/.test(x); });
+}
 function ufExt_() {
   /* ★子機（別Googleアカウント）は【別の枠】。本体側の消費（メルカリ取込など）を足してはいけない。
-     足すと、自分はまだ使っていないのに他人の消費でブレーキを踏んで🤖が止まる。 */
-  if (isChild_()) return 0;
+     足すと、自分はまだ使っていないのに他人の消費でブレーキを踏んで🤖が止まる。（同じアカウントの鍵だけは足す＝ufSameAcctKeys_） */
+  var _sameK = [];
+  if (isChild_()) { _sameK = ufSameAcctKeys_(); if (!_sameK.length) return 0; }
   if (_ufExt !== null) return _ufExt;
   _ufExt = 0;   /* 再入よけ：この読みの最中に ufTotal_ が呼ばれても 0 で答える（無限ループにしない） */
   var d = ufToday_(), cached = null;
@@ -226,7 +236,7 @@ function ufExt_() {
      こちらが少なければ読まずに5,000と答えてしまい、停止線を越えて背景処理を続ける）。
      **今日まさにその形で使い切った**ので、96回/日の節約と引き換えにしてよいものではない。30分キャッシュだけ残す。 */
   try {
-    var rows = sbSelect_('app_kv', 'select=k,v&k=like.uf_ext_*');
+    var rows = sbSelect_('app_kv', _sameK.length ? ('select=k,v&k=in.(' + _sameK.map(encodeURIComponent).join(',') + ')') : 'select=k,v&k=like.uf_ext_*');
     var n = 0, stale = [];
     (rows || []).forEach(function (r) {
       var v = r && r.v; if (!v) return;
