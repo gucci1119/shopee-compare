@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-0000';
+var SRC_VER = '20261025-0015';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -328,8 +328,9 @@ function ufProbeMaybe_(o) {
     var key = cfg_('SB_SERVICE_KEY');
     var r = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/app_kv?select=k&k=eq.boshu_auto_cfg', { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } });
     try { P_().deleteProperty('ufBlocked'); } catch (eD) {}
-    UF_PROBE_NOTE = '✅ 接続枠の試し直し：通ったので「断られた」の印を外しました（' + String(o.at || '') + ' に断られた・試しの返事 ' + r.getResponseCode() + '）';
-    ufProbeLog_({ at: new Date().toISOString(), ok: true, code: r.getResponseCode(), blockedAt: o.at || '' }); Logger.log(UF_PROBE_NOTE); return true;
+    var _cap = 0; try { _cap = ufTotal_() + 1500; P_().setProperty('ufProbeCap', JSON.stringify({ d: ufToday_(), cap: _cap, at: new Date().toISOString() })); UF_PROBE_CAP_MEMO = _cap; } catch (eC) {}
+    UF_PROBE_NOTE = '✅ 接続枠の試し直し：通ったので「断られた」の印を外しました（' + String(o.at || '') + ' に断られた・試しの返事 ' + r.getResponseCode() + '）。試し直しの後なので、今日の背景は ' + _cap + ' 回まで（業務の呼び出しはそのまま）';
+    ufProbeLog_({ at: new Date().toISOString(), ok: true, code: r.getResponseCode(), blockedAt: o.at || '', bgCap: _cap }); Logger.log(UF_PROBE_NOTE); return true;
   } catch (e) {
     var m = String((e && e.message) || e).slice(0, 140);
     UF_PROBE_NOTE = '⛔ 接続枠の試し直し：まだ断られました＝印はそのまま・次は1時間後（' + m + '）';
@@ -365,7 +366,16 @@ function coreAllowed_() {
    ★出し方を変えたら数え直す（画像の枚数やAIの呼び方を変えると動く）。 */
 var UF_PER_LISTING = 3.7;
 var UF_STOP_CHILD = 17000;
-function ufStopLine_() { return isChild_() ? UF_STOP_CHILD : UF_STOP; }
+function ufStopLine_() { var b = isChild_() ? UF_STOP_CHILD : UF_STOP; var pc = ufProbeCap_(); return (pc > 0 && pc < b) ? pc : b; }
+/* ★2026-10-24 05 情報システム部（01 商品部の気づき）：印が立つのは自前の数えより実際の使用が多い時＝試し直しで印を外した後も元の停止線で背景を走らせると、
+   同じ日にまた断られ、本体なら発送手配・4台目なら同じアカウントの取込の窓口が巻き添えになる。→ 外した日は背景の停止線を「外した時点の自前の数え＋1,500」に下げる
+   （ufProbeCap・日付つき。日付が変わると元に戻る）。業務の道（coreAllowed_＝UF_STOP_CORE）はそのまま */
+var UF_PROBE_CAP_MEMO = null;
+function ufProbeCap_() {
+  if (UF_PROBE_CAP_MEMO !== null) return UF_PROBE_CAP_MEMO;
+  var c = 0; try { var o = JSON.parse(P_().getProperty('ufProbeCap') || 'null'); if (o && o.d === ufToday_()) c = Number(o.cap) || 0; } catch (e) {}
+  UF_PROBE_CAP_MEMO = c; return c;
+}
 function bgAllowed_() {
   if (ufIsBlocked_()) return false;   // ★実際に断られた日は、数がいくつに見えていても背景処理をしない
   return ufTotal_() < ufStopLine_();
@@ -1655,7 +1665,7 @@ function doGetInner_(e) {
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, src: SRC_VER, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, aiSpend: aiSpendLoad_() };
+        ufo = { ok: true, src: SRC_VER, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
