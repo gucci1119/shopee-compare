@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261024-2200';
+var SRC_VER = '20261024-2210';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7205,6 +7205,10 @@ function baPreMerge_(byKey) {
 function baKvPrefetch_(keys) {
   try {
     BA_KV_AT = Date.now();
+    /* ★2026-10-24 一括読みが約45MB で毎回「Unterminated string in JSON」になり、その後に同じ鍵を1本ずつ読み直していた＝同じ量を2回読む（MICRO 1GB が落ちる恐れ・10/10 前例）。
+       失敗したらこの台では3時間、一括を試さず最初から1本ずつ読む（読む量が半分になる）。どの鍵が太ったかは kvSz で数える */
+    var _skipU = 0; try { _skipU = Number(P_().getProperty('BA_PF_SKIP_UNTIL') || 0); } catch (eSk) {}
+    if (_skipU > Date.now()) throw new Error('一括読みは休み中（前回の失敗から3時間・' + new Date(_skipU).toISOString().slice(11, 16) + 'Z まで）');
     var q = keys.slice(); var wantPre = q.indexOf('boshu_auto_pre') >= 0; if (wantPre) q = q.concat(baPreShardKeys_());
     SB_LAST_LEN = 0; var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + q.map(encodeURIComponent).join(',') + ')'); BA_KV_SZ.__batch = SB_LAST_LEN; BA_KV_SZ.__batchN = q.length;
     BA_KV_CACHE = {}; keys.forEach(function (k) { BA_KV_CACHE[k] = null; });
@@ -7215,6 +7219,7 @@ function baKvPrefetch_(keys) {
     /* ★2026-10-20 14:2x 🤖が 13:0x から毎回「cfg_unreadable」で降りていた（一括読み＝大きな控え15本＋写真の控えの分割を1回で読むのが失敗）。
        一括が失敗しても設定が1本で読めるなら、控えを1本ずつ読む形（BA_KV_CACHE={}＝読んだ物は控える）に切り替えて続ける。理由は BA_KV_PREFETCH_ERR に残す */
     BA_KV_PREFETCH_ERR = String((e && e.message) || e).slice(0, 300); BA_KV_AT = 0; BA_KV_SZ.__batchFail = SB_LAST_LEN; BA_KV_SZ.__batchN = keys.length;
+    if (!/一括読みは休み中/.test(BA_KV_PREFETCH_ERR)) { try { P_().setProperty('BA_PF_SKIP_UNTIL', String(Date.now() + 3 * 3600 * 1000)); } catch (eSp) {} }
     BA_KV_CACHE = null; BA_KV_ERR = true;
     try { var _rc = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(BA_CFG)); BA_KV_CACHE = {}; BA_KV_CACHE[BA_CFG] = (_rc && _rc[0] && _rc[0].v) || null; BA_KV_ERR = false; } catch (e2) {}
   }
