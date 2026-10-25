@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261026-0110';
+var SRC_VER = '20261026-0220';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2618,6 +2618,10 @@ function remapEntry_(m, newIdx) {
   return e;
 }
 function updateTierVariation_(shopId, itemId, tierVariation, model) {
+  /* ★2026-10-26 01 商品部（TW 2店舗目 FC ③）：この店は差し替えた写真が Shopee に出るまで数分〜十数分かかる。その間に同じカタログへ別の書き換え（続けての写真差し替え・明細の追加・並べ替え等）が
+     get_model_list の古い一覧で option_list を作ると、差し替える前の写真で書き戻してしまう（Zanac・Tennis は時間をおいて直り、Space Invaders は戻ったまま）。
+     → 差し替えた写真を2時間だけ控え（app_kv tv_img_pending・小さい）、送る一覧の写真が【差し替える前の写真のまま】の明細だけ控えの写真に置き換える。ほかの写真に変えている時は触らない */
+  try { var _pd = tvPendGet_(itemId); if (_pd && tierVariation && tierVariation[0] && Array.isArray(tierVariation[0].option_list)) { tierVariation[0].option_list.forEach(function (o) { var pe = o && _pd[o.option]; if (!pe) return; var cur = String((o.image && (o.image.image_id || (o.image.image_id_list || [])[0])) || ''); if (cur !== pe.id && cur === String(pe.old || '')) o.image = { image_id: pe.id }; }); } } catch (ePd) {}
   var body = { item_id: parseInt(itemId, 10), tier_variation: tierVariation };
   // ★modelは【新しいtier_indexの昇順】に並べてから送る。
   //   get_model_list が返す並びは tier_index 順とは限らず、その順のまま送ると
@@ -2634,6 +2638,9 @@ function updateTierVariation_(shopId, itemId, tierVariation, model) {
   return (j && j.response) || j;
 }
 var BA_TIER_WARN = '';
+var BA_TV_PEND_KEY = 'tv_img_pending', BA_TV_PEND_TTL = 2 * 3600 * 1000;
+function tvPendGet_(itemId) { try { var m = baKv_(BA_TV_PEND_KEY) || {}; var e = m[String(itemId)]; if (!e) return null; var out = {}, now = Date.now(); Object.keys(e).forEach(function (o) { var x = e[o]; if (x && x.id && now - Number(x.at || 0) < BA_TV_PEND_TTL) out[o] = x; }); return Object.keys(out).length ? out : null; } catch (e2) { return null; } }
+function tvPendPut_(itemId, option, imageId, oldId) { try { var m = baKvFresh_(BA_TV_PEND_KEY) || {}; var now = Date.now(); Object.keys(m).forEach(function (k) { var e = m[k] || {}; Object.keys(e).forEach(function (o) { if (!e[o] || now - Number(e[o].at || 0) >= BA_TV_PEND_TTL) delete e[o]; }); if (!Object.keys(e).length) delete m[k]; }); var k2 = String(itemId); m[k2] = m[k2] || {}; m[k2][option] = { id: imageId, old: String(oldId || ''), at: now }; baKvSet_(BA_TV_PEND_KEY, m); if (BA_KV_CACHE) BA_KV_CACHE[BA_TV_PEND_KEY] = m; } catch (e) {} }
 // ★既存出品にモデル(明細)を追加。model_list=[{tier_index:[i],original_price,model_sku,seller_stock:[{stock}],image?:{image_id_list}}]
 function addModel_(shopId, itemId, modelList) {
   var j = callShop_(shopId, '/api/v2/product/add_model', null, 'post', { item_id: parseInt(itemId, 10), model_list: modelList });
@@ -4080,6 +4087,7 @@ function setVariationImage_(shopId, itemId, optionName, imageUrl) {
   if (!found) throw new Error('バリエが見つかりません: ' + optionName);
   var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
   BA_TIER_WARN = '';
+  if (oldImg && oldImg !== imageId) tvPendPut_(itemId, optionName, imageId, oldImg);   /* 送る前に控える（この後の書き換えが古い一覧で戻さないように） */
   var up = updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap);
   /* ★2026-10-26 01 商品部：TW 2店舗目（1863984079）の FC ③ で ok と image_id を返したのに、読み直すと写真が前のままだった（3明細・30秒後も同じ）。
      返事の中の写真が【前の写真のまま】なら成功と言わない（呼び元が失敗として扱う）。返事に写真が無い時は今までどおり（読み直しの呼び出しは増やさない） */
