@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-2230';
+var SRC_VER = '20261025-2330';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -918,7 +918,7 @@ function doGetInner_(e) {
       var sjout;
       try {
         var sjwt = P_().getProperty('WRITE_TOKEN'); if (!sjwt || p.token !== sjwt) throw new Error('WRITE_TOKEN不正');
-        var sjHw = String(p.hw || ''); if (!/^goods_[a-z0-9_]+$|^yokai$|^moncolle$|^mezastar$|^frienda$|^acnh$/.test(sjHw)) throw new Error('hw はグッズ（goods_*・小物4区分）だけ');
+        var sjHw = String(p.hw || ''); if (!(/^goods_[a-z0-9_]+$|^yokai$|^moncolle$|^acnh$/.test(sjHw) || baArc_(sjHw))) throw new Error('hw はグッズ（goods_*・小物4区分）だけ');
         var sjN = Math.max(1, Math.min(40, Number(p.n) || 20));
         var sjSt = { log: [] };
         var sgv = baKv_('sg_' + sjHw) || {}; var rows = sgv.rows || [];
@@ -9192,7 +9192,7 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
   /* ★2026-10-12 Supabase が繰り返し落ちた。トレカの巡回が30分ごとに出品全件（7,371カタログ・明細の中身つき）を読んでいた＝カードのカタログ（195件・約3%）だけで足りる */
   /* ★2026-10-13 本人「妖怪ウォッチメダルもモンコレもカードじゃないしな」「メダルとフィギュアだもん」：card/tcg だけで絞ると妖怪メダル（YOKAI_WATCH_MEDAL_SERIES）・モンコレ（POKEMON_MONCOLLE_SERIES）・メザスタの入れ先が見えず、
      作った回の1件目だけ入って以後は増えなかった（4か国の新カタログが全部 明細1）。親SKUの medal/moncolle/mezastar でも読む */
-  if (!BA_CTX_ROWS[_rowsKey]) BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,parent_sku.ilike.*mezastar*,parent_sku.ilike.*frienda*,parent_sku.ilike.*amiibo*)' : ''));
+  if (!BA_CTX_ROWS[_rowsKey]) BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*)' : ''));
   var rows = BA_CTX_ROWS[_rowsKey];   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
   var itemCc = {}, modelNames = {};
   /* ★2026-09-23 本人「1アカウント目のところにリミット余ってれば出してもいいけど」「2アカウント目の方に出しちゃえばいい」。
@@ -9770,7 +9770,7 @@ function baBrNewMode_(cfg, cc, hw, series, st) {
   /* ★2026-10-25 05：同じ日に新しいカタログを作るのが続けて failMax（既定3）回失敗したら、その日の残りは今までどおり（BR は追加がいちばん多い国＝止まったままにしない）。翌日は自動でもう一度試す */
   var _fd = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10), _fMax = Math.max(1, Number(o.failMax) || 3);
   if (st && st.brNewFail && st.brNewFail.d === _fd && st.brNewFail.n >= _fMax) { if (!BA_BRNEW_NOTE) { BA_BRNEW_NOTE = true; baLog_(st, 'BR：新しい総称カタログが作れないので今日は今までどおり（失敗 ' + st.brNewFail.n + ' 回）'); } return null; }
-  if ((typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[hw]) || /^goods_|^moncolle$|^(yokai|mezastar|frienda|acnh)$/.test(String(hw || ''))) return null;
+  if ((typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[hw]) || /^goods_|^moncolle$|^(yokai|acnh)$/.test(String(hw || '')) || baArc_(hw)) return null;
   var main = '', capMain = 0; try { ((baKv_('shop_item_limit') || {}).shops || []).forEach(function (x) { if (x && x.cc === 'BR' && x.role === 'main') { main = String(x.shop_id); capMain = Number(x.cap) || 0; } }); } catch (e) {}
   if (!main || !capMain || !BA_LIVE_OF) return null;   /* 本店・上限・公開中の数が分からない時は今までどおり（安全側） */
   var minFree = Math.max(0, Number(o.minFree) || 500), free = capMain - (Number(BA_LIVE_OF[main]) || 0);
@@ -10764,6 +10764,7 @@ function tcgParseCard_(hw, t, k) {
   if (!m) return null;
   var num = m[1], rar = String(m[2] || '').trim(), rest = m[3].trim(), vars = [];
   rest = rest.replace(/^(?:\(([^()]{1,24})\)\s*)+/, function (all) { all.replace(/\(([^()]{1,24})\)/g, function (_, v) { vars.push(v.trim()); return ''; }); return ''; });
+  rest = rest.replace(/\s*(?:\(\s*[A-Z]\s*ランク\s*\)|\(\s*ランク\s*[A-Z]\s*\)|【\s*[A-Z]?\s*ランク\s*[A-Z]?\s*】)\s*$/, '').trim();   /* 🕹 2026-10-25 駿河屋の状態ランク（ガオーレ・バトリオ・トレッタで実測）＝名前ではない */
   var tail = rest.match(/\(([^()]{1,30})\)\s*$/); if (tail && /SECRET|シークレット|パラレル|ホロ|箔押し|サイン|\bSP\b|版|foil|キラ|プロモ|ゴールデン|スーパータグ|ダブルタグ|スペシャルタグ|タグ$/i.test(tail[1]))   /* 🪙 メザスタ「ピカチュウ(ゴールデンタグ)」は変種（2026-10-11） */ { vars.push(tail[1].trim()); rest = rest.slice(0, tail.index).trim(); }
   rest = rest.replace(/＜[^＞]*＞|<[^>]*>/g, '').replace(/\/\[[^\]]*\]\s*$/, '').replace(/\[[^\]]*\]\s*$/, '').replace(/\s+/g, ' ').trim();
   if (!rest) return null;
@@ -10780,11 +10781,11 @@ var TCG_LOC_EN = { goods_amiibo: 'Nintendo amiibo Figure', pokeca: 'Pokemon Card
 var TCG_LOC_ZH = { goods_amiibo: '任天堂 amiibo 公仔', pokeca: '寶可夢卡牌 PTCG 單卡', onepiece: '航海王卡牌 OPCG 單卡', yugioh: '遊戲王 OCG 單卡', yugioh_rush: '遊戲王 Rush Duel 單卡', duema: '決鬥大師 單卡', dbh: '七龍珠英雄 卡片', battlespirits: '戰鬥之魂 單卡', vanguard: '卡片戰鬥先導者 單卡', digimon: '數碼寶貝卡牌 單卡', shadowverse: '闇影詩章 EVOLVE 單卡', weiss: '黑白雙翼 單卡', wixoss: 'WIXOSS 單卡', zx: 'Z/X 單卡', mtg: '魔法風雲會 MTG 單卡', unionarena: 'UNION ARENA 單卡', dbs: '七龍珠超 卡牌 單卡', gundam: '鋼彈卡牌 單卡', fftcg: '最終幻想 FFTCG 單卡', fecipher: '聖火降魔錄 Cipher 單卡', smt: '真・女神轉生 TCG 單卡', gamba: '假面騎士 Ganbarizing 卡片', gambale: '假面騎士 Ganba Legends 卡片', acnh: '動物森友會 amiibo卡', yokai: '妖怪手錶 妖怪徽章', moncolle: '寶可夢 Moncolle 公仔', mezastar: '寶可夢 Mezastar 卡匣', frienda: '寶可夢 Frienda 卡匣' };
 function tcgLocalFamName_(hw, cc) {
   var en = TCG_LOC_EN[hw]; if (!en) return '';
-  var kind = hw === 'yokai' ? 'medal' : ((hw === 'moncolle' || hw === 'goods_amiibo') ? 'figure' : ((hw === 'mezastar' || hw === 'frienda') ? 'tag' : 'card'));   /* メザスタのタグ・フレンダのピックはカードと呼ばない */
+  var kind = tcgItemKind_(hw);   /* メザスタのタグ・フレンダのピックはカードと呼ばない（TCG_ITEM_KIND と同じ表＝🕹 アーケードの種類もここに入る） */
   if (cc === 'TW') { var w = en.replace(/ Single Card/, '').split(' '), nm = '【二手】' + (TCG_LOC_ZH[hw] || '') + ' ' + en + ' 日版'; while (nm.length > 57 && w.length > 1) { nm = '【二手】' + (TCG_LOC_ZH[hw] || '') + ' ' + w.join(' ') + ' 日版'; if (nm.length > 57) w.splice(w.length - 2, 1); } return nm; }   /* 台湾は60字まで（番号の分を空ける）。Card/TCG は末尾なので残る */
-  var L = { TH: ['[มือสอง]', { card: 'การ์ด', medal: 'เหรียญ', figure: 'ฟิกเกอร์', tag: 'แท็ก' }, '| สินค้าญี่ปุ่น'], VN: ['[Đã qua sử dụng]', { card: 'Thẻ bài', medal: 'Huy hiệu', figure: 'Mô hình', tag: 'Thẻ' }, '| Hàng Nhật'], BR: ['[Usado]', { card: 'Carta', medal: 'Medalha', figure: 'Figura', tag: 'Tag' }, '| Japonês'] }[cc];
+  var L = { TH: ['[มือสอง]', { card: 'การ์ด', medal: 'เหรียญ', figure: 'ฟิกเกอร์', tag: 'แท็ก', disk: 'แผ่น', chip: 'ชิป', piece: 'ตัวหมาก' }, '| สินค้าญี่ปุ่น'], VN: ['[Đã qua sử dụng]', { card: 'Thẻ bài', medal: 'Huy hiệu', figure: 'Mô hình', tag: 'Thẻ', disk: 'Đĩa', chip: 'Chip', piece: 'Quân' }, '| Hàng Nhật'], BR: ['[Usado]', { card: 'Carta', medal: 'Medalha', figure: 'Figura', tag: 'Tag', disk: 'Disco', chip: 'Chip', piece: 'Peça' }, '| Japonês'] }[cc];
   if (!L) return '';
-  return L[0] + ' ' + L[1][kind] + ' ' + en + ' ' + L[2];
+  return L[0] + ' ' + (L[1][kind] || L[1].tag) + ' ' + en + ' ' + L[2];   /* 語の無い品物の種類は tag の語（undefined を出さない） */
 }
 /* ★2026-10-15 本人「シリーズごとのカタログに仕分け」「大シリーズで。細かくするかは反応を見て」：弾記号の頭（SV9→SV・M6A→M・S12a→S・SM12→SM）を大シリーズとし、
    cfg.tcg.seriesSplit（例 ['pokeca']）に入っている区分だけ、入れ先を「<英名> <SER> Series Single Card」のカタログに分ける。既存カタログは触らない（いいね・sold） */
@@ -10801,7 +10802,39 @@ var TCG_NG_TITLE = /box|ボックス|パック(?!マン)|未開封|付録|とじ
 /* ★2026-10-12 本人「モンコレってフィギュアでしょ？」「妖怪メダルとメザスタタグ これはトレカじゃないね」：小物はカード1枚の判定にかけると kind≠card で全部落ちていた（妖怪 5枚試して0明細＝AI料金だけ）。
    シリーズごとに「正しい形」を決め、その形の実物写真なら通す（カード以外の問い） */
 var TCG_ITEM_KIND = { goods_amiibo: 'figure', moncolle: 'figure', yokai: 'medal', mezastar: 'tag', frienda: 'tag' };   /* 🪙 2026-10-13 フレンダのピックはタグと同じ扱い */
-var TCG_ITEM_JA = { figure: 'フィギュア（小さな人形）', medal: 'メダル', tag: 'タグ（ゲーム機で読み込むプラスチックのカード状のタグ）' };
+var TCG_ITEM_JA = { figure: 'フィギュア（小さな人形）', medal: 'メダル', tag: 'タグ（ゲーム機で読み込むプラスチックのカード状のタグ）', disk: 'ディスク（ゲーム機で読み込むプラスチックの円盤）', chip: 'チップ（ゲーム機で読み込む小さなプラスチックの駒）', piece: 'コマ（ゲーム機で読み込む円いプラスチックの駒）' };
+/* 🕹 2026-10-25 アーケードの種類（本人「種類の数は多く打っておきたい」「種類ってのは、がおーれ、フレンダ、メザスタ、とかの粒度の種類」・01 商品部の依頼）。
+   ここに1行足せば GAS の全部（SKU の頭・英名・現地語名・検索語・品物の種類・ばら売りの JAN 免除・巡回の絞り込み・名前の辞書）に効く。
+   ポータル index.html の ARCADE_KINDS と同じ中身（chk.sh が突き合わせる）。表紙 img/cover_<hw>.png・cfg.family/cfg.tcg.hws・写真判定は 01 が用意する。
+   順番：GAS 配備 → ポータル公開 → 表紙が 200 → 駿河屋の控え sg_<hw> → 最後に cfg（先に cfg を入れると表紙 404 でカタログが作れない＝10/25 フレンダ） */
+var ARCADE_KINDS = /*ARC_KINDS_BEGIN*/[
+  { hw: 'mezastar', ja: 'ポケモンメザスタ', kindJa: 'タグ', label: 'メザスタ タグ', en: 'Pokemon Mezastar Tag', zh: '寶可夢 Mezastar 卡匣', sku: 'MEZASTAR', kind: 'tag', names: 'pokeca', q: 'メザスタ タグ', mq: 'メザスタ', cat: '', sq: 'ポケモンメザスタ', cap: 70, re: 'mezastar|メザスタ' },
+  { hw: 'frienda', ja: 'ポケモンフレンダ', kindJa: 'ピック', label: 'フレンダ ピック', en: 'Pokemon Frienda Pick', zh: '寶可夢 Frienda 卡匣', sku: 'FRIENDA', kind: 'tag', names: 'pokeca', q: 'ポケモンフレンダ', mq: '', cat: '501080174', sq: '', cap: 50, re: 'frienda|フレンダ' },
+  { hw: 'gaole', ja: 'ポケモンガオーレ', kindJa: 'ディスク', label: 'ガオーレ ディスク', en: 'Pokemon Gaole Disk', zh: '寶可夢 加傲樂 Gaole 卡匣', sku: 'GAOLE', kind: 'disk', names: 'pokeca', q: 'ポケモンガオーレ ディスク', mq: 'ガオーレ', cat: '501080146', sq: '', cap: 50, re: 'gaole|ga-?ol[eé]|ガオーレ' },
+  { hw: 'tretta', ja: 'ポケモントレッタ', kindJa: 'チップ', label: 'トレッタ チップ', en: 'Pokemon Tretta Chip', zh: '寶可夢 Tretta 卡匣', sku: 'TRETTA', kind: 'chip', names: 'pokeca', q: 'ポケモントレッタ', mq: 'トレッタ', cat: '501080124', sq: '', cap: 45, re: 'tretta|トレッタ' },
+  { hw: 'battrio', ja: 'ポケモンバトリオ', kindJa: 'コマ', label: 'バトリオ コマ', en: 'Pokemon Battrio Piece', zh: '寶可夢 Battrio 卡匣', sku: 'BATTRIO', kind: 'piece', names: 'pokeca', q: 'ポケモンバトリオ', mq: 'バトリオ', cat: '501080114', sq: '', cap: 45, re: 'battrio|バトリオ' }
+]/*ARC_KINDS_END*/;
+var BA_ARC = {}, BA_ARC_SKU_OR = '';
+(function () {
+  var alt = [], sk = [];
+  ARCADE_KINDS.forEach(function (a) {
+    BA_ARC[a.hw] = a; alt.push(a.hw); sk.push('parent_sku.ilike.*' + String(a.sku).toLowerCase() + '*');
+    if (!BA_HW_LABEL[a.hw]) BA_HW_LABEL[a.hw] = a.sku;
+    if (!TCG_EN[a.hw]) TCG_EN[a.hw] = a.en;
+    if (!TCG_HW_JA[a.hw]) TCG_HW_JA[a.hw] = a.ja;
+    if (!TCG_SEARCH_WORD[a.hw]) TCG_SEARCH_WORD[a.hw] = a.q;
+    if (!TCG_LOC_EN[a.hw]) TCG_LOC_EN[a.hw] = a.en;
+    if (!TCG_LOC_ZH[a.hw]) TCG_LOC_ZH[a.hw] = a.zh;
+    if (!TCG_ITEM_KIND[a.hw]) TCG_ITEM_KIND[a.hw] = a.kind;
+  });
+  BA_ARC_SKU_OR = sk.join(',');
+  var j = alt.join('|');
+  BA_LOOSE_HW = new RegExp('^(yokai|acnh|' + j + ')$');
+  BA_JAN_TODO_LOOSE = new RegExp('^(yokai|acnh|' + j + ')$');
+  BA_GAME_JAN_EXEMPT = new RegExp('^goods_|^moncolle$|^(yokai|acnh|' + j + ')$');
+})();
+function baArc_(hw) { return !!BA_ARC[String(hw || '')]; }
+function tcgNamesKey_(hw) { hw = String(hw || ''); if (hw === 'moncolle') return 'pokeca'; var a = BA_ARC[hw]; return (a && a.names) || hw; }   /* 名前の辞書（モンコレ・ポケモンのアーケードはポケカの辞書） */
 function tcgItemKind_(hw) { return TCG_ITEM_KIND[String(hw || '')] || 'card'; }
 function tcgJudgePrompt_(expect) {
   var ik = tcgItemKind_(expect && expect.hw);
@@ -10905,7 +10938,7 @@ function tcgEnName_(hw, pr, names, ai) {
   var en = '';
   /* 🧸 2026-10-14 amiibo の名前は『amiibo:名前』の鍵だけを見る（ヒカリ・ホムラ・ソラ・リンク等の短い名前がヴァイス等のカード名と取り違わないため）。無ければ空＝出さない（AI には聞かない） */
   if (hw === 'goods_amiibo') { var ca = ai && ai.cache && ai.cache['amiibo:' + String(pr.name || '').trim()]; return ca ? String(ca.en || '').trim() : ''; }
-  if (hw === 'pokeca' || hw === 'pokeca_old' || hw === 'moncolle' || hw === 'mezastar' || hw === 'frienda') en = tcgEnPokeca_(pr.name, names);
+  if (hw === 'pokeca' || hw === 'pokeca_old' || tcgNamesKey_(hw) === 'pokeca') en = tcgEnPokeca_(pr.name, names);
   if (en) return en;
   /* ★2026-10-10 辞書に無い名前（トレーナーズ・サポート・グッズ・特殊な形態＝ポケカで106件）は文章AIに公式英名を聞く。控え app_kv tcg_names_ai（{和名: {en, kind}}）＝同じ名前は2度聞かない。1回の実行で ai.budget 件まで */
   if (!ai || !ai.cache) return '';
@@ -11189,7 +11222,7 @@ function tcgTick(manual) {
     if (!hw) return finish_('🩹 受け持ちの全シリーズが「AIを使っても出ない」ので今日は休み（' + hws.map(function (h) { var y = st.yieldD.h[h] || {}; return h + ' 判定' + (y.j || 0) + '/追加' + (y.a || 0); }).join('・') + '）');
     st._yHw = hw; st._yJ0 = Number(st.today.judged) || 0;
     out.hw = hw; var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
-    var names = (baKv_('tcg_names_' + ((hw === 'moncolle' || hw === 'mezastar' || hw === 'frienda') ? 'pokeca' : hw)) || {}).map || {};   /* 🪙 モンコレ・メザスタはポケモン名＝ポケカの辞書を使う */
+    var names = (baKv_('tcg_names_' + tcgNamesKey_(hw)) || {}).map || {};   /* 🪙 モンコレ・メザスタはポケモン名＝ポケカの辞書を使う */
     var ai = { cache: baKv_('tcg_names_ai') || {}, budget: Math.max(0, (hw === 'pokeca' || hw === 'pokeca_old') ? (Number(tc.aiNames) || 10) : (Number(tc.aiNamesOther) || 40)), st: st, dirty: 0, sets: baKv_('tcg_sets') || {}, setBudget: 5, offBudget: 6, setsDirty: 0 };   /* ★2026-10-11 ポケカ以外は辞書が無い＝AIに聞く数を 40/回 に（Haiku の小さな呼び出し） */   /* offBudget＝1回の実行で公式カード検索を試す区分名の数（1件あたり最大7回の urlfetch） */   /* 辞書に無い名前は1回10件・弾の記号は1回5件までAIに聞く */
     var ctx = baLoadCtx_(cfg, hw, ccs, { tcg: 1 });
     var CLAUDE_ONLY = tc.claudeOnly === true; if (CLAUDE_ONLY) { ai.budget = 0; ai.setBudget = 0; }   /* ★2026-10-14 Claude だけモード＝英語名・弾記号の AI も呼ばない（tcg_names_ai と辞書にある名前だけ使う） */
@@ -11264,7 +11297,7 @@ function tcgTick(manual) {
         if (!_janG && !_mpnG) {
           /* グッズ（amiibo・妖怪メダル等）は型番が無く、駿河屋の商品ページは Cloudflare に止められることがある（10/16 実測「Just a moment...」）。
              既定＝出した上で夜の JAN 調べ（ポータルの「駿河屋のJANを埋める」＝ブラウザ経由）に回す。cfg.tcg.requireIdGoods=true なら出さない（本人の判断で切替） */
-          var _strict = !/^goods_|^yokai$|^moncolle$|^mezastar$|^frienda$|^acnh$/.test(String(hw)) || !!(tc && tc.requireIdGoods);
+          var _strict = !(/^goods_|^yokai$|^moncolle$|^acnh$/.test(String(hw)) || baArc_(hw)) || !!(tc && tc.requireIdGoods);
           tcgJanTodoPush_(hw, c);
           if (_strict) { baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN も型番も無いので出さない（夜の JAN 調べに回す）'); baSkipRec_(st, hw, '', c, 'nojan'); continue; }
           baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN が未取得のまま出す（夜の JAN 調べに積んだ）');

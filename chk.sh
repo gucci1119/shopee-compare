@@ -239,4 +239,8 @@ if [ -n "$B8" ]; then echo "NG  大物（product_ids・写真の控え・駿河�
 PK=$(grep -m1 "const PAGE_KEYS = \[" index.html | sed "s/.*\[\(.*\)\].*/\1/" | tr -d "' ")
 B9=""; for k in $(grep -o 'id="page-[a-z0-9]*"' index.html | sed 's/id="page-//;s/"//' | sort -u); do case ",$PK," in *",$k,"*) ;; *) B9="$B9 $k";; esac; done
 if [ -n "$B9" ]; then echo "NG  PAGE_KEYS に無い画面がある（押しても出ない）:$B9"; NG=1; else echo "OK  画面は全部 PAGE_KEYS にある"; fi
+# 7-10 ★2026-10-25 🕹 アーケードの種類の表は GAS とポータルの2か所にある。中身がずれると、片方だけ新しい種類を知っている＝カタログを作るのに画面に出ない等になる
+A1=$(awk '/\/\*ARC_KINDS_BEGIN\*\//,/\/\*ARC_KINDS_END\*\//' shopee-openapi-sync.gs | sed 's/^ *//; s/.*ARC_KINDS_BEGIN/BEGIN/; s/ARC_KINDS_END.*/END/')
+A2=$(awk '/\/\*ARC_KINDS_BEGIN\*\//,/\/\*ARC_KINDS_END\*\//' index.html | sed 's/^ *//; s/.*ARC_KINDS_BEGIN/BEGIN/; s/ARC_KINDS_END.*/END/')
+if [ -z "$A1" ] || [ "$A1" != "$A2" ]; then echo "NG  アーケードの種類の表（ARCADE_KINDS）が GAS とポータルで違う／見つからない"; NG=1; else echo "OK  アーケードの種類の表は GAS とポータルで同じ（$(printf '%s\n' "$A1" | grep -c "hw: '") 種類）"; fi
 exit $NG
