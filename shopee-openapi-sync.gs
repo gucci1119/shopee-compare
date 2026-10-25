@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261026-0220';
+var SRC_VER = '20261026-0250';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -951,6 +951,37 @@ function doGetInner_(e) {
         erout = { ok: true, income: (erj.response || {}).order_income || null, err: erj.error || '' };
       } catch (ee) { erout = { ok: false, error: String((ee && ee.message) || ee) }; }
       return ContentService.createTextOutput(ercb + '(' + JSON.stringify(erout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    /* ★2026-10-26 01 商品部の依頼（本人「モンスターボールPlus（TW 本店）に NT$50 のクーポンを付けて。値段はそのまま」）：
+       商品クーポン（voucher）を作る口・品物の販促の一覧を読む口・クーポンを読む口。作る口は WRITE_TOKEN 必須・そのまま公式APIへ渡して返事を全部返す。
+       add_voucher は通信の失敗で送り直さない（二重に作らない・callShop_ の一覧に入れた） */
+    if (p.action === 'voucher_add' || p.action === 'item_promotion' || p.action === 'voucher_get') {
+      var vcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var vout;
+      try {
+        var vshop = parseInt(p.shop_id, 10); if (!getToken_(vshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var nums = function (x) { return String(x || '').split(',').map(function (y) { return parseInt(y, 10); }).filter(function (y) { return y > 0; }); };
+        if (p.action === 'voucher_add') {
+          var vwt = P_().getProperty('WRITE_TOKEN'); if (!vwt || p.token !== vwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+          var vb = { voucher_name: String(p.voucher_name || ''), voucher_code: String(p.voucher_code || ''), start_time: parseInt(p.start_time, 10), end_time: parseInt(p.end_time, 10),
+            voucher_type: parseInt(p.voucher_type, 10) || 2, reward_type: parseInt(p.reward_type, 10) || 1, usage_quantity: parseInt(p.usage_quantity, 10), min_basket_price: parseFloat(p.min_basket_price) };
+          if (p.discount_amount != null && p.discount_amount !== '') vb.discount_amount = parseFloat(p.discount_amount);
+          if (p.percentage != null && p.percentage !== '') vb.percentage = parseInt(p.percentage, 10);
+          if (p.max_price != null && p.max_price !== '') vb.max_price = parseFloat(p.max_price);
+          if (p.display_start_time) vb.display_start_time = parseInt(p.display_start_time, 10);
+          if (p.display_channel_list) vb.display_channel_list = nums(p.display_channel_list);
+          if (p.item_id_list) vb.item_id_list = nums(p.item_id_list);
+          if (!vb.voucher_name || !vb.voucher_code || !(vb.start_time > 0) || !(vb.end_time > vb.start_time) || !(vb.usage_quantity > 0)) throw new Error('voucher_name・voucher_code・start_time・end_time・usage_quantity が要ります');
+          if (vb.voucher_type === 2 && !(vb.item_id_list && vb.item_id_list.length)) throw new Error('商品クーポン（voucher_type=2）は item_id_list が要ります');
+          var vj = callShop_(vshop, '/api/v2/voucher/add_voucher', null, 'post', vb);
+          vout = { ok: true, sent: vb, res: vj };
+        } else if (p.action === 'item_promotion') {
+          vout = { ok: true, res: callShop_(vshop, '/api/v2/product/get_item_promotion', { item_id_list: nums(p.item_id_list || p.item_id).join(',') }, 'get') };
+        } else {
+          vout = { ok: true, res: callShop_(vshop, '/api/v2/voucher/get_voucher', { voucher_id: parseInt(p.voucher_id, 10) }, 'get') };
+        }
+      } catch (err) { vout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(vcb + '(' + JSON.stringify(vout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'get_models') {
       var gcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -2420,7 +2451,7 @@ function callShop_(shopId, path, query, method, body) {
   var txt = null, lastErr = null;
   for (var a = 0; a < 3; a++) {
     try { ufBump_(1, path); txt = UrlFetchApp.fetch(url, opt).getContentText(); break; }
-    catch (e) { lastErr = e; ufNoteErr_(e); if (/too many times|回数が多すぎます|quota|rate/i.test(String(e))) break; if (String(method || '').toLowerCase() === 'post' && /add_item|add_model|init_tier_variation|update_tier_variation|delete_|unlist_item|boost_item|ship_order|copy|register_brand/.test(String(path))) break; Utilities.sleep(700 * (a + 1)); }   /* ★2026-09-28 Codex：作る・消す・並べ替える POST は、通信例外（Shopee側で済んでいて返事だけ落ちた可能性）で送り直さない＝二重作成・二重削除を防ぐ */ // クォータ枯渇は即諦める＋【断られた事実】を残す（2026-09-21）
+    catch (e) { lastErr = e; ufNoteErr_(e); if (/too many times|回数が多すぎます|quota|rate/i.test(String(e))) break; if (String(method || '').toLowerCase() === 'post' && /add_item|add_model|init_tier_variation|update_tier_variation|delete_|unlist_item|boost_item|ship_order|copy|register_brand|add_voucher/.test(String(path))) break; Utilities.sleep(700 * (a + 1)); }   /* ★2026-09-28 Codex：作る・消す・並べ替える POST は、通信例外（Shopee側で済んでいて返事だけ落ちた可能性）で送り直さない＝二重作成・二重削除を防ぐ */ // クォータ枯渇は即諦める＋【断られた事実】を残す（2026-09-21）
   }
   if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + ((lastErr && lastErr.message) || lastErr));
   var j = JSON.parse(txt);
