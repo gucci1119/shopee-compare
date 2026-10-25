@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-1700';
+var SRC_VER = '20261025-2230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1953,6 +1953,48 @@ function productPerfIngest_(body) {
     return { ok: true, cc: cc, shop: shop, run: run, n: n, got: got, done: !!body.last };
   } finally { try { lock.releaseLock(); } catch (e) {} }
 }
+/* ★2026-10-25 05-13 アクセス（各国）・本人「カートに入れられた数もポータルに保存しておきたいよね」（05 情報システム部の設計 第2版：表を作らない）。
+   各国の datacenter のタブの userscript（shopee-insights v1.5.0）が、前日1日ぶん（現地の日付）の「カートに入った品・売れた品」だけを送ってくる。
+   鍵なし（product_perf_ingest と同じ型）。登録している店だけ受け付ける。書けるのは app_kv `perf_d_<店>_<YYYYMMDD>`（その日の中身・丸ごと置き換え）と
+   `perf_d_sum`（店×日の合計 [カート個数, カートに入れた人, 売れた個数, 注文, 品数]・グラフ用・店ごとに400日まで）と `perf_d_meta`（店ごとの最後の日）だけ。
+   接続（urlfetch）は1回4回（合計を読む1・日の鍵を書く1・合計を書く1・目印 perf_d_meta を書く1）。同じ日を2回送っても丸ごと置き換えなので害はない */
+function perfDailyIngest_(body) {
+  var cc = String(body.cc || '').toUpperCase(); if (!/^(PH|SG|MY|BR|VN|TH|TW)$/.test(cc)) throw new Error('cc 不正');
+  var shop = String(body.shop_id || '').replace(/\D/g, '').slice(0, 15); if (!shop) throw new Error('shop_id がありません');
+  if (!listTokens_().some(function (t) { return String(t && t.shop_id) === shop; })) throw new Error('登録していない店です');
+  var d = String(body.d || ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new Error('d 不正');
+  var dt = Date.parse(d + 'T00:00:00Z'); if (!(dt > Date.now() - 40 * 86400000 && dt < Date.now() + 86400000)) throw new Error('d が範囲外');
+  var items = body.items || []; if (Object.prototype.toString.call(items) !== '[object Array]') throw new Error('items 不正');
+  if (items.length > 300) throw new Error('1回300品まで');
+  var num = function (v) { var x = Number(v); return isFinite(x) && x > 0 ? Math.round(x) : 0; };
+  var out = {}, tot = [0, 0, 0, 0, 0];
+  items.forEach(function (it) {
+    var id = String((it && it.id) || '').replace(/\D/g, ''); if (!id) return;
+    var o = { uv: num(it.uv), pv: num(it.pv), ck: num(it.ck), au: num(it.au), ab: num(it.ab), cu: num(it.cu), co: num(it.co) };
+    if (!o.au && !o.cu && !o.co) return;   /* カートか売れた物だけ */
+    var ms = {}, m = it.m || {};
+    Object.keys(m).slice(0, 100).forEach(function (mid) { var a = m[mid] || [], id2 = String(mid).replace(/\D/g, ''); if (!id2) return; var x = [num(a[0]), num(a[1]), num(a[2])]; if (x[0] || x[1] || x[2]) ms[id2] = x; });
+    if (Object.keys(ms).length) o.m = ms;
+    out[id] = o; tot[0] += o.au; tot[1] += o.ab; tot[2] += o.cu; tot[3] += o.co; tot[4]++;
+  });
+  var k = 'perf_d_' + shop + '_' + d.replace(/-/g, '');
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(25000)) return { ok: false, error: 'busy', retry: true };
+  try {
+    var cur = baKvFreshMany_(['perf_d_sum']); if (!cur) throw new Error('perf_d_sum を読めませんでした（上書きしないで止めます）');
+    baKvSet_(k, { v: 1, cc: cc, shop: shop, name: String(body.shop_name || '').slice(0, 60), d: d, st: Number(body.st) || 0, et: Number(body.et) || 0, at: new Date().toISOString(), n: tot[4], items: out });
+    var sum = cur.perf_d_sum || {}; sum.v = 1; sum.shops = sum.shops || {};
+    var S = sum.shops[shop] = sum.shops[shop] || { cc: cc, days: {} }; S.cc = cc; if (body.shop_name) S.name = String(body.shop_name).slice(0, 60); S.days = S.days || {};
+    S.days[d] = tot;
+    var dk = Object.keys(S.days).sort(); while (dk.length > 400) { delete S.days[dk.shift()]; }
+    sum.at = new Date().toISOString();
+    baKvSet_('perf_d_sum', sum);
+    /* 小さい目印（店ごとの最後の日）＝ポータルの見張り（やること ⚠自動検知・10分ごと）は合計の1本（1年で約190KB）を読まずにこれだけ読む。合計から作るので読まずに書く（+1回） */
+    var meta = { v: 1, at: sum.at, shops: {} };
+    Object.keys(sum.shops).forEach(function (id) { var x = sum.shops[id] || {}, ks = Object.keys(x.days || {}).sort(); meta.shops[id] = { cc: x.cc, last: ks.length ? ks[ks.length - 1] : '', n: ks.length }; });
+    baKvSet_('perf_d_meta', meta);
+    return { ok: true, d: d, shop: shop, cc: cc, n: tot[4] };
+  } finally { try { lock.releaseLock(); } catch (e) {} }
+}
 function doPost(e) {
   try { return doPostInner_(e); } finally { try { ufPersist_(); } catch (_uf) {} }
 }
@@ -1969,6 +2011,7 @@ function doPostInner_(e) {
     if (body.action === 'traffic_ingest') { out = trafficIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     if (body.action === 'ai_actual_ingest') { out = aiActualIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }   /* ★2026-10-11 Claude Console のコスト（本当の請求）を userscript が横取りして送る＝鍵なし。書けるのは app_kv ai_actual だけ */
     if (body.action === 'product_perf_ingest') { out = productPerfIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
+    if (body.action === 'perf_daily_ingest') { out = perfDailyIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }   /* ★2026-10-25 05-13 前日1日ぶんのカート（鍵なし・perf_d_* だけ） */
     if (body.action === 'yamato_ship') { var yc = P_().getProperty('YAMATO_CSTMR'); if (yc && String(body.cstmr || '') !== yc) throw new Error('お客様コード不一致'); out = yamatoShip_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     var wt = P_().getProperty('WRITE_TOKEN');
     if (!wt || body.token !== wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
