@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-1200';
+var SRC_VER = '20261025-1300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7287,11 +7287,20 @@ function baLooseBlocks_(s, cc, buried) {
   return ts.some(function (t) { return !t.id || !(buried && buried[String(t.id)]); });   // どれか1つでも「埋もれていない出品」なら止める
 }
 function baLooseAdd_(s, cc, id) { var tok = cc + (id ? ':' + id : ''); var ts = String(s || '').split(',').filter(Boolean); if (ts.indexOf(tok) >= 0) return s; ts.push(tok); return ts.join(',') + ','; }
+/* ★2026-10-25 足した記録（boshu_added_hist）を日ごとの鍵 boshu_added_hist_d_YYYYMMDD に分けた（ポータルの baAddedHist・05 の決め）。
+   全部の日を1本ずつ読んで合わせる。1本でも読めなければ null（BA_KV_ERR）＝欠けたまま使わない。目印が無い間は古い1本 */
+function baAddedHistAll_() {
+  var meta = baKv_('boshu_added_hist_meta');
+  if (!meta || !meta.days || !meta.days.length) return baKv_('boshu_added_hist');
+  var m = {};
+  for (var i = 0; i < meta.days.length; i++) { var k = 'boshu_added_hist_d_' + String(meta.days[i]).replace(/-/g, ''); var d = baKv_(k); if (BA_KV_FAIL[k] || BA_KV_ERR) return null; if (d && d.m) Object.keys(d.m).forEach(function (x) { m[x] = d.m[x]; }); }
+  return { m: m };
+}
 function baLooseMap_() {
   var L = baKv_(BA_LOOSE); if (L && typeof L === 'object') return L;
   if (BA_KV_ERR) return null;
   var errBefore = BA_KV_ERR; BA_KV_ERR = false;
-  var h = baKv_('boshu_added_hist');
+  var h = baAddedHistAll_();   /* ★2026-10-25 足した記録は日ごとの鍵（目印 boshu_added_hist_meta）。目印が無ければ古い1本 */
   if (BA_KV_ERR || !h || typeof h !== 'object' || !h.m) { BA_KV_ERR = BA_KV_ERR || errBefore; return null; }   // ③読めない／中身が無い＝空で作らない
   BA_KV_ERR = errBefore;
   L = {};
