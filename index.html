@@ -18730,12 +18730,34 @@
   // 🤖が出した明細の控え（boshu_added_hist）＝英名→日本語名・JAN・機種。仕入れ検索の語とJAN検索に使う（本人 2026-09-24「精度上げられるように」）
   let srcJa = null;
   const HW_JA = { switch: 'Switch', switch2: 'Switch2', ds: 'DS', '3ds': '3DS', gba: 'GBA', gb: 'GB', gbc: 'GBC', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', wii: 'Wii', wiiu: 'Wii U', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', psp: 'PSP', vita: 'Vita', pokeca: 'ポケカ', pokeca_old: 'ポケカ旧裏', yugioh: '遊戯王', yugioh_rush: '遊戯王RD', onepiece: 'ワンピカ', duema: 'デュエマ', weiss: 'ヴァイス', battlespirits: 'バトスピ', vanguard: 'ヴァンガード', wixoss: 'WIXOSS', zx: 'Z/X', digimon: 'デジカ', shadowverse: 'シャドバ', dbh: 'DBH', mtg: 'MTG', unionarena: 'UA', dbs: 'DBスーパー', gundam: 'ガンダムCG', fftcg: 'FFTCG', fecipher: 'サイファ', smt: '女神転生TCG', gamba: 'ガンバライジング', gambale: 'ガンバレジェンズ', goods_pokemon: 'ポケグッズ', goods_mario: 'マリオ雑貨', goods_zelda: 'ゼルダ雑貨', goods_kirby: 'カービィ雑貨', goods_anime: 'アニメ雑貨', goods_amiibo: 'amiibo' };   /* 🃏 2026-10-10 トレカ／🧸 グッズ */
-  function loadSrcJa() {
-    if (srcJa !== null) return Promise.resolve(srcJa);
-    srcJa = {};
-    return addedHistRead('')   /* ★2026-10-25 足した記録は日ごとの鍵（全部の日を1本ずつ順番に・5分使い回す）。古い作品の注文も引くので全部 */
-      .then(h => { const m = (h && h.m) || {}; const ix = {}; Object.values(m).forEach(a => { const k = normVar(a.en); if (!k) return; if (!ix[k] || (a.ja && !ix[k].ja)) ix[k] = { ja: a.ja || '', jan: a.jan || '', hw: a.hw || '' }; }); srcJa = ix; return srcJa; })
-      .catch(() => srcJa);
+  /* ★2026-10-25 05：①要る日の鍵だけ読む＝仕入れ待ちの注文の明細の model_id から listing_log の足した日（ymd）を引き、その日の鍵だけを読む。
+       明細番号があるのに listing_log で引けない明細がある時・listing_log を読めない時だけ、全部の日を読む（今までの道）。
+       明細番号の無い明細（単品の出品）は🤖が足した物ではない（🤖は明細を足すだけ）＝足した記録に無いので、引かない
+     ②画面は待たずに先に出す（押した瞬間に反応する決まり）。読み終わって中身が増えた時だけ描き直す（renderSourcing の終わり） */
+  let _srcJaDays = new Set(), _srcJaAll = false, _srcJaBusy = null;
+  function srcJaMerge(m) { const ix = srcJa || {}; Object.values(m || {}).forEach(a => { const k = normVar(a.en); if (!k) return; if (!ix[k] || (a.ja && !ix[k].ja)) ix[k] = { ja: a.ja || '', jan: a.jan || '', hw: a.hw || '' }; }); srcJa = ix; }
+  function loadSrcJa(items) {   /* 戻り値＝中身が増えたか（true なら描き直す） */
+    if (_srcJaAll) return Promise.resolve(false);
+    if (_srcJaBusy) return _srcJaBusy.then(() => false);
+    _srcJaBusy = (async () => {
+      const t0 = Date.now(); if (srcJa === null) srcJa = {};
+      const mids = [...new Set((items || []).map(x => x && x.it && x.it.model_id).filter(v => Number(v) > 0).map(String))];
+      let days = new Set(), all = false;
+      try {
+        const found = new Set();
+        for (let i = 0; i < mids.length; i += 100) { const rs = await sbGetAll('listing_log', 'select=model_id,ymd&model_id=in.(' + mids.slice(i, i + 100).join(',') + ')'); (rs || []).forEach(r => { found.add(String(r.model_id)); if (r.ymd) days.add(String(r.ymd).slice(0, 10)); }); }
+        if (mids.some(id => !found.has(id))) all = true;   /* 引けない明細がある＝全部を読む */
+      } catch (_) { all = true; }
+      const need = all ? null : [...days].filter(d => !_srcJaDays.has(d));
+      if (need && !need.length) return false;
+      const h = need ? await addedHistReadDays(need) : await addedHistRead('');
+      srcJaMerge(h && h.m);
+      if (need) need.forEach(d => _srcJaDays.add(d)); else _srcJaAll = true;
+      loadSrcJa._last = { mode: need ? 'days' : 'all', keys: h ? h.days : 0, ms: Date.now() - t0, items: mids.length };
+      try { console.info('[仕入れ検索] 足した記録', loadSrcJa._last); } catch (_) {}
+      return true;
+    })().catch(() => false).finally(() => { _srcJaBusy = null; });
+    return _srcJaBusy;
   }
   /* ★2026-10-04 名前だけで引くと別機種の控えに当たる（GC版「時のオカリナ」の注文に N64 版の日本語名が出た）。
      出品名から機種が1つに決まる時（明細名の頭「GBA:」か、題名に機種が1つだけ）は、控えの機種が違えば使わない */
@@ -19069,7 +19091,6 @@
     host.innerHTML = '<span class="smd-dim">未発送の注文を読み込み中...</span>';
     try { await loadSrcDict(); } catch (_) {}   // 🔎過去の仕入れタイトル辞書（検索語の精度）
     try { await loadSrcPast(); } catch (_) {}   // 📦過去の仕入額（実績比の判定）
-    try { await loadSrcJa(); } catch (_) {}     // 🤖が出した明細の日本語名・JAN
     try { await loadKwFix(); } catch (_) {}     // ✍️手で直した検索語（全PC共有・最優先）
     try { await kwAiLoad(); } catch (_) {}      // 🤖AIが作った日本語の検索語（控え）
     let orders;
@@ -19077,6 +19098,7 @@
     catch (e) { host.innerHTML = errBox(e); return; }
     const items = [];
     orders.forEach(o => (o.items || []).forEach((it, ix) => items.push({ o, it, ix })));
+    loadSrcJa(items).then(ch => { if (ch && host.isConnected) renderSourcing(host); });   // 🤖が出した明細の日本語名・JAN（★2026-10-25 待たずに表を出す・要る日だけ読む・増えたら描き直す）
     await srcLoadListings(items);   // 🎯 上限仕入額の算出に「現在の売値・重量」が要る
     await srcLoadCapData(orders);   // ⚠ 仕入れ上限＝この注文の入金（sn で絞る）・フロントの印・売り切りの印（どれも10分控える）
     // ★もう仕入れ・発送が済んだ注文は「仕入れを探す」対象ではない。3つの根拠で外す：
@@ -20922,6 +20944,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     })().then(v => { _ahCache[ck] = { at: Date.now(), v, p: null }; return v; }, e => { if (_ahCache[ck]) _ahCache[ck].p = null; throw e; });
     _ahCache[ck] = Object.assign(_ahCache[ck] || {}, { p });
     return p;
+  }
+  /* ★2026-10-25 05：要る日の鍵だけを読む（仕入れ検索）。目印に無い日は飛ばす。目印が無い間（移す前）は古い1本 */
+  async function addedHistReadDays(days) {
+    const mr = await sbGet('app_kv', 'select=v&k=eq.' + AH_META); const meta = mr && mr[0] && mr[0].v;
+    if (!meta || !Array.isArray(meta.days)) return addedHistRead('');
+    const have = new Set(meta.days), m = {}; let n = 0;
+    for (const d of [...new Set(days)].filter(d => have.has(d)).sort()) { const r = await sbGet('app_kv', 'select=v&k=eq.' + ahDayKey(d)); Object.assign(m, (r && r[0] && r[0].v && r[0].v.m) || {}); n++; }
+    return { m, days: n };
   }
   const ahKeyOf = a => a.cc + '#' + (a.model_id || (normVar(a.en) + '@' + String(a.at).slice(0, 13)));
   const ahRecOf = (a, runner) => ({ at: a.at, cc: a.cc, en: a.en || '', ja: a.ja || '', hw: a.hw || '', jan: a.jan || '', item_id: a.item_id || null, model_id: a.model_id || null, cat: String(a.cat || '').slice(0, 60), cost: a.cost || null, price: a.price || null, runner: runner });
@@ -24095,6 +24125,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-25', items: [
+      '⚡ <b>仕入れ検索が開くまでの待ちを減らしました</b>：🤖が出した明細の日本語名（足した記録）は、仕入れ待ちの注文の明細を足した日の分だけを読みます（全部の日を読むと、日が増えるほど遅くなるため）。読み終わるのを待たずに表を出し、日本語名が届いたら描き直します。',
       '🗂 <b>🤖が足した明細の控えを、足した日ごとに分けました</b>：前は1本（10MB・約3万件）を担当PCが1時間ごとに丸ごと読み書きしていました。今は1日1本（最大約760KB）に分け、書く時は新しく足した日の分だけを書きます。読む画面は要る日だけを1本ずつ順番に読みます（仕入れ検索＝全部・事業計画の転換率＝直近70日・出品一覧の🤖の印＝直近90日）。古い日も消さずに残します。最初の1回だけ、担当PCが古い1本を日ごとに移します（平日の9〜19時はやらない）。',
       '💸 <b>出品管理の「売れてるのに儲かっていない出品」の目標を、確定した値付けの基準にしました</b>：前は ⚙️目標粗利（既定¥1,200）で一律に見ていました。今は値付けの見直しと同じ線（フロント ¥250・それ以外 ¥1,500・仕入れ¥3,000超は仕入れの50%）を注文ごとの仕入れで出し、出品ごとに平均して比べます。粗利の下に「線 ¥…」を出します。',
       '🏷 <b>見積もりの英語名：表に無い機種の本体も名前を残す</b>：本体の英語名で、機種の表に無い物は「本体」の語だけ外して残りの名前を訳し、最後に Console を付けます（前は「Console」だけになっていた）。ネオジオポケット・ゲームギア・Xbox など古い機種を表に足しました。',
