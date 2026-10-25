@@ -44634,6 +44634,24 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         .catch(e => { console.warn('[SMD] product_ids保存失敗', e); try { toast('⚠ JAN・型番の台帳を保存できませんでした：' + ((e && e.message) || e), true); } catch (_) {} });
     }, 500);
   }
+  /* ★2026-10-26 台帳（product_ids）に【明細の鍵】で JAN を入れる入口（外から呼ぶ：Claude の確認・予定タスク）。
+     🤖の控え（st.added）から外れた明細は GAS の後埋め（baJanBackfill_）が拾えない（VN DS⑪ の Layton・Monster Racers／TH PS2② の Sukusuku で実測）。
+     鍵は 'id:<item_id>#<model_id>'。既に JAN がある鍵は触らない。保存は今までどおり変えた鍵だけ重ねて書く（saveProductIds） */
+  try { window.__smdJanSetByKey = async (list) => {
+    try { if (typeof demoOn === 'function' && demoOn()) return { ok: false, error: 'デモ表示中は書きません' }; } catch (_) {}
+    await ensureProductIds();
+    if (!kvOk.product_ids || !productIds) return { ok: false, error: 'JANの台帳を読めていません' };
+    let n = 0; const skip = [];
+    (list || []).forEach(e => {
+      const k = String((e && e.key) || ''), j = String((e && e.jan) || '').trim();
+      if (!/^id:\d+#\d+$/.test(k) || !/^\d{8}$|^\d{13}$/.test(j)) { skip.push(k + '：形が違う'); return; }
+      const prev = productIds[k] || {}; if (String(prev.jan || '').trim()) { skip.push(k + '：もうJANがある'); return; }
+      productIds[k] = Object.assign({}, prev, { jan: j, src: String((e && e.src) || 'Claudeが調べた'), srcUrl: String((e && e.url) || ''), jp: prev.jp || String((e && e.jp) || ''), at: Date.now(), noJan: undefined, noJanAt: undefined });
+      n++;
+    });
+    if (n) { _pidDupCache = null; saveProductIds(); try { logAct('出品', 'JANを明細の鍵で台帳に入れた', 'all', n + '明細'); } catch (_) {} }
+    return { ok: true, set: n, skip: skip };
+  }; } catch (_) {}
   // 🔁 同じJAN/型番が【別のカタログ】にも付いていたら重複出品の疑い。
   //   JANの無い商品は自社コード（例 BANDAI-PKFP-PIKACHU）を同じ欄に入れれば、同じ仕組みで重複を検知できる。
   //   値 → それが付いているキーの集合。キーの頭が別のカタログなら「被っている」と判断する。
