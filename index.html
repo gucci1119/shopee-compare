@@ -8354,7 +8354,11 @@
     [/^⚠ 取り込みが止まっている店 (\d+)$/, '⚠ Shops with a stopped import: $1'],
     [/^⚠ 取り込み状況を読めませんでした（(.*)）。止まっていないとは言えません。$/, '⚠ Could not read the import status ($1). Cannot say it is running.'],
     [/^⚠ 直近7日の分を読めませんでした（(.*)）$/, '⚠ Could not read the last 7 days ($1)'],
+    [/^⚠ 商品・カート（30日）が (.+?)届いていない（(.+) に途中まで）$/, '⚠ Products & cart (30 days) not received for $1 (partly sent at $2)'],
     [/^⚠ 商品・カート（30日）が (.+)届いていない$/, '⚠ Products & cart (30 days) not received for $1'],
+    [/^30日分は途中まで（(.+)）＝次の回に続きから$/, '30-day data partly sent ($1) = resumes next time'],
+    [/^今回の分は (.+) に途中で止まっている＝次の回に続きから$/, 'This run stopped partway at $1 = resumes next time'],
+    [/^前日のカートはまだ1日も届いていない$/, 'No daily cart data has arrived yet'],
     [/^⚠ 訪問者が (\d+)日届いていない$/, '⚠ Visitors not received for $1 days'],
     [/^⚠ 前日のカートが (.+) から届いていない$/, '⚠ Daily cart data missing since $1'],
     [/^仕入れ上限 ¥([\d,]+)$/, 'Max cost ¥$1'],
@@ -17362,7 +17366,7 @@
     const pp = await sbGetAll('app_kv', 'select=k,cc:v->>cc,name:v->>name,shop:v->>shop,done:v->>done_at,got:v->>got,total:v->>total,prun:v->>prun,pat:v->>pat&k=like.product_perf_*');
     const ids = (pp || []).map(r => String(r.shop || String(r.k || '').replace('product_perf_', ''))).filter(x => /^\d+$/.test(x));
     let tr = {};
-    if (ids.length) { const r = await sbGet('app_kv', 'select=' + ids.map(id => 'b' + id + ':v->byShop->' + id + '->>at').join(',') + '&k=eq.traffic_daily'); tr = (r && r[0]) || {}; }
+    if (ids.length) { const r = await sbGet('app_kv', 'select=' + ids.map(id => 'b' + id + ':v->byShop->%22' + id + '%22->>at').join(',') + '&k=eq.traffic_daily'); tr = (r && r[0]) || {}; }
     let sum = null, sumErr = '';
     try { const r = await sbGet('app_kv', 'select=v&k=eq.perf_d_sum'); sum = (r && r[0] && r[0].v) || null; } catch (e) { sumErr = String((e && e.message) || e); }
     const H = 3600000, now = Date.now(), ccOrd = ['PH', 'SG', 'MY', 'BR', 'VN', 'TH', 'TW'];
@@ -17372,7 +17376,9 @@
       const sd = sum && sum.shops && sum.shops[shop], dDays = sd && sd.days ? Object.keys(sd.days).sort() : [], dLast = dDays.length ? dDays[dDays.length - 1] : '';
       const red = [], note = [];
       const moving = patT && now - patT < 26 * H;   /* 途中まで送っている＝次の回に続きから（BR は2回の訪問で1回分） */
-      if (!doneT || now - doneT > 50 * H) { if (moving) note.push('30日分は途中まで（' + jstDateTime(patT) + '）＝次の回に続きから'); else red.push('商品・カート（30日）が ' + (doneT ? Math.floor((now - doneT) / 86400000) + '日' : '一度も') + '届いていない'); }
+      /* 50時間（2日ちょっと）届かなければ止まり。途中まで送っている店（BR は2回の訪問で1回分）は72時間までは「続きから」で待つ */
+      if (!doneT || now - doneT > 50 * H) { if (moving && doneT && now - doneT <= 72 * H) note.push('30日分は途中まで（' + jstDateTime(patT) + '）＝次の回に続きから'); else red.push('商品・カート（30日）が ' + (doneT ? Math.floor((now - doneT) / 86400000) + '日' : '一度も') + '届いていない' + (moving ? '（' + jstDateTime(patT) + ' に途中まで）' : '')); }
+      else if (r.prun && patT > doneT && now - patT > 30 * 60000) note.push('今回の分は ' + jstDateTime(patT) + ' に途中で止まっている＝次の回に続きから');
       if (trT && now - trT > 2 * 86400000 && now - trT <= 30 * 86400000) red.push('訪問者が ' + Math.floor((now - trT) / 86400000) + '日届いていない');
       if (sum && sum.v) { const yd = new Date(now - 2 * 86400000).toISOString().slice(0, 10); if (!dLast) note.push('前日のカートはまだ1日も届いていない'); else if (dLast < yd) red.push('前日のカートが ' + dLast + ' から届いていない'); }
       return { shop: shop, cc: String(r.cc || ''), name: String(r.name || ''), done: doneT, got: Number(r.got) || 0, total: Number(r.total) || 0, pat: patT, prun: r.prun || '', tr: trT, dLast: dLast, red: red, note: note };
