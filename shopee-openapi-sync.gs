@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-2350';
+var SRC_VER = '20261026-0005';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7519,10 +7519,21 @@ function baPreHCheck_(p) {
   (sbSelect_('app_kv', 'select=k,v&k=in.(' + baPreShardKeys_().join(',') + ')') || []).forEach(function (x) { Object.keys(x.v || {}).forEach(function (k) { a[k] = x.v[k]; }); });
   var hk = (meta.hws || []).concat(['_']).map(baPreHKey_);
   (sbSelect_('app_kv', 'select=k,v&k=in.(' + hk.map(encodeURIComponent).join(',') + ')') || []).forEach(function (x) { Object.keys(x.v || {}).forEach(function (k) { if (b[k]) where[k] = (where[k] || 1) + 1; b[k] = x.v[k]; }); });
-  var onlyOld = [], onlyNew = [], diff = [];
-  Object.keys(a).forEach(function (k) { if (!b[k]) onlyOld.push(k); else if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) diff.push(k); });
+  var onlyOld = [], onlyNew = [], diff = [], trim = [];
+  /* ★2026-10-25 1日目の点検で diff=10 → 10件とも「代わりの写真（alts）が片方の頭の部分」だけの違いだった（8分割 6件・機種の鍵 9〜10件）。
+     ポータルの baPreCompact は 21日を過ぎた控えの alts を6件に詰めるが、書き直すのは変更のあった分割／機種だけ＝詰める時期が2か所でずれる（写真は消えていない）。
+     → alts の頭がそろっていて他の項目が同じものは trim に数え、diff（本当のずれ）には入れない */
+  var sameButTrim = function (x, y) {
+    if (!x || !y || typeof x !== 'object' || typeof y !== 'object') return false;
+    var ks = {}; Object.keys(x).concat(Object.keys(y)).forEach(function (q) { ks[q] = 1; });
+    for (var q in ks) { if (q === 'alts') continue; if (JSON.stringify(x[q]) !== JSON.stringify(y[q])) return false; }
+    var xa = Array.isArray(x.alts) ? x.alts : [], ya = Array.isArray(y.alts) ? y.alts : [];
+    var sh = xa.length <= ya.length ? xa : ya, lo = xa.length <= ya.length ? ya : xa;
+    return JSON.stringify(sh) === JSON.stringify(lo.slice(0, sh.length));
+  };
+  Object.keys(a).forEach(function (k) { if (!b[k]) onlyOld.push(k); else if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) { if (sameButTrim(a[k], b[k])) trim.push(k); else diff.push(k); } });
   Object.keys(b).forEach(function (k) { if (!a[k]) onlyNew.push(k); });
-  var out = { ok: true, at: new Date().toISOString(), nOld: Object.keys(a).length, nNew: Object.keys(b).length, onlyOld: onlyOld.length, onlyNew: onlyNew.length, diff: diff.length, twice: Object.keys(where).length, sample: { onlyOld: onlyOld.slice(0, 5), onlyNew: onlyNew.slice(0, 5), diff: diff.slice(0, 5) } };
+  var out = { ok: true, at: new Date().toISOString(), nOld: Object.keys(a).length, nNew: Object.keys(b).length, onlyOld: onlyOld.length, onlyNew: onlyNew.length, diff: diff.length, trim: trim.length, twice: Object.keys(where).length, sample: { onlyOld: onlyOld.slice(0, 5), onlyNew: onlyNew.slice(0, 5), diff: diff.slice(0, 5), trim: trim.slice(0, 5) } };   /* trim＝写真の数だけの違い（ずれではない） */
   try { sbUpsert_('app_kv', [{ k: 'boshu_auto_pre_h_check', v: out, updated_at: out.at }], 'k'); } catch (eW) { out.saveErr = String(eW).slice(0, 120); }
   return out;
 }
