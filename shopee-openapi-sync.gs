@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261026-0300';
+var SRC_VER = '20261026-0310';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -678,6 +678,16 @@ function doGetInner_(e) {
         dbout = descBlockSet_(p.shop_id, p.item_id, String(p.block || ''), String(p.tag || '中文說明'), p.dry === '1');
       } catch (err) { dbout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dbcb + '(' + JSON.stringify(dbout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'update_weight') {   /* ★2026-10-26 重さだけを書いて読み直す（変わらなければまとめ買い割引を外して書き直し・すぐ戻す）・WRITE_TOKEN */
+      var wcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var wout;
+      try {
+        var wwt = P_().getProperty('WRITE_TOKEN'); if (!wwt || p.token !== wwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var wshop = parseInt(p.shop_id, 10); if (!getToken_(wshop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        wout = updateWeightSafe_(wshop, p.item_id, p.weight);
+      } catch (err) { wout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(wcb + '(' + JSON.stringify(wout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'update_item') {
       var ucb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -2617,6 +2627,33 @@ function priceUnlockPromo_(shopId, itemId) {
     } else out.other.push(ty || '不明な販促');
   });
   return out;
+}
+/* ★2026-10-26 01 商品部：TW 本店 54462537115（ロックマンワールド GB・まとめ買い割引に入っている）で update_item weight=0.2 が ok・注意書きなしなのに 0.5 のまま（update_time も不変）。
+   販促中の品物は重さが黙って無視される形かもしれない（推測）。→ 書いて読み直し、変わっていなければ【まとめ買い割引だけ】外して書き直し、すぐ戻す（値下げは外さない＝値段が変わるため）。
+   返事に、どの道で変わったか・読み直した重さ・外して戻した割引を全部出す */
+function updateWeightSafe_(shopId, itemId, kg) {
+  shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10); kg = parseFloat(kg);
+  if (!(kg > 0)) throw new Error('weight（kg）が要ります');
+  var readW = function () { var j = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(itemId) }, 'get'); var it = (((j || {}).response || {}).item_list || [])[0] || {}; return { w: parseFloat(it.weight), ut: it.update_time }; };
+  var same = function (a) { return Math.abs((Number(a) || 0) - kg) < 0.0005; };
+  var b0 = readW();
+  if (same(b0.w)) return { ok: true, how: 'already', weight: b0.w };
+  var r1 = updateItem_({ shop_id: shopId, item_id: itemId, weight: kg });
+  var a1 = readW();
+  if (same(a1.w)) return { ok: true, how: 'direct', weight: a1.w, r1: r1 };
+  var gj = callShop_(shopId, '/api/v2/product/get_item_promotion', { item_id_list: String(itemId) }, 'get');
+  var it = (((gj || {}).response || {}).success_list || [])[0] || {};
+  var bundles = (it.promotion || []).filter(function (pr) { return /bundle/i.test(String(pr.promotion_type || '')) && /ongoing|upcoming/i.test(String(pr.promotion_staging || 'ongoing')); }).map(function (pr) { return Number(pr.promotion_id); });
+  var others = (it.promotion || []).filter(function (pr) { return !/bundle/i.test(String(pr.promotion_type || '')); }).map(function (pr) { return String(pr.promotion_type || '') + ':' + pr.promotion_id; });
+  if (!bundles.length) return { ok: false, how: 'ignored', error: '重さが変わりません（まとめ買い割引には入っていない）', weight: a1.w, before: b0, r1: r1, otherPromo: others };
+  var out = [], outErr = [], back = [], backErr = [], r2 = null, a2 = null;
+  bundles.forEach(function (pid) { try { var dj = callShop_(shopId, '/api/v2/bundle_deal/delete_bundle_deal_item', null, 'post', { bundle_deal_id: pid, item_list: [{ item_id: itemId }] }); if (((dj.response || {}).success_list || []).length) out.push(pid); else outErr.push(pid + ' ' + JSON.stringify((dj.response || {}).failed_list || dj).slice(0, 100)); } catch (e1) { outErr.push(pid + ' ' + String(e1.message || e1).slice(0, 100)); } });
+  try {
+    if (out.length) { Utilities.sleep(1500); r2 = updateItem_({ shop_id: shopId, item_id: itemId, weight: kg }); Utilities.sleep(1500); a2 = readW(); }
+  } finally {
+    out.forEach(function (pid) { try { var aj = callShop_(shopId, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: pid, item_list: [{ item_id: itemId, status: 1 }] }); if (((aj.response || {}).success_list || []).length) back.push(pid); else backErr.push(pid + ' ' + JSON.stringify((aj.response || {}).failed_list || aj).slice(0, 100)); } catch (e2) { backErr.push(pid + ' ' + String(e2.message || e2).slice(0, 100)); } });
+  }
+  return { ok: !!(a2 && same(a2.w)), how: 'bundle', weight: a2 ? a2.w : a1.w, before: b0, r1: r1, r2: r2, bundleOut: out, bundleOutErr: outErr, bundleBack: back, bundleBackErr: backErr, otherPromo: others };
 }
 /* 外したまとめ買い割引に戻す（値下げは戻さない） */
 function priceRelockPromo_(shopId, itemId, promo) {
