@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261026-0310';
+var SRC_VER = '20261026-0320';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2641,11 +2641,33 @@ function updateWeightSafe_(shopId, itemId, kg) {
   var r1 = updateItem_({ shop_id: shopId, item_id: itemId, weight: kg });
   var a1 = readW();
   if (same(a1.w)) return { ok: true, how: 'direct', weight: a1.w, r1: r1 };
+  /* ★同日 まとめ買い割引から外しても変わらなかった（ロックマンワールド GB で実測）＝明細ごとに重さを持つ品物かもしれない（推測）。
+     get_model_list の生の返事に明細の重さがあれば、update_model で明細の重さを書く（50件ずつ） */
+  var mw = null, mres = null;
+  try {
+    var gm = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+    var rms = (((gm || {}).response || {}).model) || [];
+    mw = rms.map(function (m) { return { model_id: m.model_id, weight: m.weight, dim: m.dimension }; });
+    if (rms.some(function (m) { return m.weight != null && m.weight !== ''; })) {
+      mres = [];
+      for (var mi = 0; mi < rms.length; mi += 50) {
+        var ml = rms.slice(mi, mi + 50).map(function (m) { return { model_id: m.model_id, weight: kg }; });
+        try { var uj = callShop_(shopId, '/api/v2/product/update_model', null, 'post', { item_id: itemId, model_list: ml }); mres.push({ ok: true, warn: String(uj.warning || '').slice(0, 200), res: JSON.stringify(uj.response || {}).slice(0, 300) }); }
+        catch (eUm) { mres.push({ ok: false, error: String((eUm && eUm.message) || eUm).slice(0, 300) }); }
+      }
+      Utilities.sleep(1500);
+      var gm2 = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+      var rms2 = (((gm2 || {}).response || {}).model) || [];
+      var a1m = readW();
+      var allM = rms2.length && rms2.every(function (m) { return same(m.weight); });
+      return { ok: allM || same(a1m.w), how: 'model', weight: a1m.w, before: b0, r1: r1, modelBefore: mw, modelAfter: rms2.map(function (m) { return { model_id: m.model_id, weight: m.weight }; }), modelRes: mres };
+    }
+  } catch (eMw) { mres = [{ ok: false, error: '明細の重さを読めない ' + String((eMw && eMw.message) || eMw).slice(0, 200) }]; }
   var gj = callShop_(shopId, '/api/v2/product/get_item_promotion', { item_id_list: String(itemId) }, 'get');
   var it = (((gj || {}).response || {}).success_list || [])[0] || {};
   var bundles = (it.promotion || []).filter(function (pr) { return /bundle/i.test(String(pr.promotion_type || '')) && /ongoing|upcoming/i.test(String(pr.promotion_staging || 'ongoing')); }).map(function (pr) { return Number(pr.promotion_id); });
   var others = (it.promotion || []).filter(function (pr) { return !/bundle/i.test(String(pr.promotion_type || '')); }).map(function (pr) { return String(pr.promotion_type || '') + ':' + pr.promotion_id; });
-  if (!bundles.length) return { ok: false, how: 'ignored', error: '重さが変わりません（まとめ買い割引には入っていない）', weight: a1.w, before: b0, r1: r1, otherPromo: others };
+  if (!bundles.length) return { ok: false, how: 'ignored', error: '重さが変わりません（まとめ買い割引には入っていない）', weight: a1.w, before: b0, r1: r1, otherPromo: others, modelBefore: mw, modelRes: mres };
   var out = [], outErr = [], back = [], backErr = [], r2 = null, a2 = null;
   bundles.forEach(function (pid) { try { var dj = callShop_(shopId, '/api/v2/bundle_deal/delete_bundle_deal_item', null, 'post', { bundle_deal_id: pid, item_list: [{ item_id: itemId }] }); if (((dj.response || {}).success_list || []).length) out.push(pid); else outErr.push(pid + ' ' + JSON.stringify((dj.response || {}).failed_list || dj).slice(0, 100)); } catch (e1) { outErr.push(pid + ' ' + String(e1.message || e1).slice(0, 100)); } });
   try {
@@ -2653,7 +2675,7 @@ function updateWeightSafe_(shopId, itemId, kg) {
   } finally {
     out.forEach(function (pid) { try { var aj = callShop_(shopId, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: pid, item_list: [{ item_id: itemId, status: 1 }] }); if (((aj.response || {}).success_list || []).length) back.push(pid); else backErr.push(pid + ' ' + JSON.stringify((aj.response || {}).failed_list || aj).slice(0, 100)); } catch (e2) { backErr.push(pid + ' ' + String(e2.message || e2).slice(0, 100)); } });
   }
-  return { ok: !!(a2 && same(a2.w)), how: 'bundle', weight: a2 ? a2.w : a1.w, before: b0, r1: r1, r2: r2, bundleOut: out, bundleOutErr: outErr, bundleBack: back, bundleBackErr: backErr, otherPromo: others };
+  return { ok: !!(a2 && same(a2.w)), how: 'bundle', weight: a2 ? a2.w : a1.w, before: b0, r1: r1, r2: r2, modelBefore: mw, bundleOut: out, bundleOutErr: outErr, bundleBack: back, bundleBackErr: backErr, otherPromo: others };
 }
 /* 外したまとめ買い割引に戻す（値下げは戻さない） */
 function priceRelockPromo_(shopId, itemId, promo) {
