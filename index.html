@@ -6194,6 +6194,7 @@
     '🛒 依頼品＝仕入れ上限は見積もりの仕入れ目安で': '🛒 Requested item = use the quoted cost as the max', 
     'この売値では粗利の線を守れる仕入れ値がありません': 'No purchase price keeps the margin line at this price', '仕入れ上限': 'Max cost', '（入金がまだ無いので今の出品価格から見込み）': '(no payout yet; estimated from the current listing price)',
     '🔎仕入れ検索の「上限仕入額」を、確定した値付けの基準に置き換えました': 'The sourcing search max cost now follows the confirmed pricing standard',
+    'ヤフオクの候補が0件になっていたのを直しました': 'Fixed Yahoo! Auctions candidates showing 0 results',
     '未接続': 'Not connected', '読み込み中…': 'Loading…', '取得中…': 'Fetching…', '保存しました': 'Saved',
     '件': 'items', '該当なし': 'No matches', 'データがありません': 'No data',
     // ── サイドバー下部
@@ -17964,7 +17965,7 @@
   const SRC_SITES = [
     { k: 'mercari',   label: 'メルカリ',      bg: '#ff0211', url: kw => `https://jp.mercari.com/search?keyword=${kw}&sort=price&order=asc&status=on_sale` },
     { k: 'surugaya',  label: '駿河屋',        bg: '#c30d23', url: kw => `https://www.suruga-ya.jp/search?search_word=${kw}` },
-    { k: 'yahuoku',   label: 'ヤフオク',      bg: '#ff0033', url: kw => `https://auctions.yahoo.co.jp/search/search?p=${kw}&fixed=3&s1=cbids&o1=a` },
+    { k: 'yahuoku',   label: 'ヤフオク',      bg: '#ff0033', url: kw => `https://auctions.yahoo.co.jp/search/search?p=${kw}&fixed=1&s1=cbids&o1=a` },   // ★2026-10-25 fixed=3 は即決ありでなくなり入札だけの出品も並ぶ＝定額（fixed=1）を開く
     { k: 'paypay',    label: 'PayPay',        bg: '#ff0033', url: kw => `https://paypayfleamarket.yahoo.co.jp/search/${kw}?open=1` },
     { k: 'rakuten',   label: '楽天',          bg: '#bf0000', url: kw => `https://search.rakuten.co.jp/search/mall/${kw}/` },
     { k: 'yshopping', label: 'Yショッピング', bg: '#ff0033', url: kw => `https://shopping.yahoo.co.jp/search?p=${kw}` },
@@ -18295,6 +18296,29 @@
            影響：🤖が自前でヤフオクを叩いてGoogleのIPで弾かれ、見送りの54%（162/300）が「yahoowait」になっていた。 */
         const one = async (q, mode) => {
           const html = String(await bridgeRequest('GET', `https://auctions.yahoo.co.jp/search/search?p=${enc}&${q}`));
+          /* ★2026-10-25 05-08「GBA 本体でヤフオクだけ2回とも失敗なしの0件」→ 05-06 が実物を見た：検索ページが Next.js の作りに変わり、
+             <li class="Product…"> も data-auction-id も1つも無くなっていた（約30万字の HTML の中、商品50件は __NEXT_DATA__ の
+             props.pageProps.initialState.search.items.listing.items）。さらに fixed=3 は「即決あり」ではなくなっていた（50件中 即決7・入札だけ43）。
+             → 新しい形を先に読む：定額＝isFixedPrice の price／即決＝buyNowPrice のある物だけ（入札だけの現在価格は今すぐ買えない＝使わない）。
+             前の形も残す（戻った時用）。どちらの形も無い＝読めなかった＝0件にせず失敗として投げる（[[catch-empty-is-not-absence]]） */
+          const mj = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+          if (mj) {
+            let j = null; try { j = JSON.parse(mj[1]); } catch (_) { j = null; }
+            const S0 = j && j.props && ((j.props.pageProps && j.props.pageProps.initialState) || j.props.initialState);
+            const its = S0 && S0.search && S0.search.items && S0.search.items.listing && S0.search.items.listing.items;
+            if (Array.isArray(its)) {
+              return its.map(x => {
+                if (!x || !x.auctionId) return null;
+                const bn = Number(x.buyNowPrice) || 0;
+                const fx = !!x.isFixedPrice;   // 出品の種類で決める（即決の検索にも定額が混ざる＝その時も「定額」と書く。見積もりは定額だけ使う）
+                const price = fx ? (bn || Number(x.price) || 0) : (mode === 'fixed' ? 0 : bn);
+                if (!price) return null;
+                if (srcStrictOn() && /^USED(60|80)$/i.test(String(x.itemCondition || ''))) return null;   // 傷や汚れあり・全体的に状態が悪い＝Yahoo!フリマ・メルカリと同じく既定で外す（8/11 の決め・本人 10/24「おすすめで」）。「✨ 状態が良く発送が早いものだけ」を外すと出る
+                return { name: String(x.title || '').trim(), price, url: 'https://auctions.yahoo.co.jp/jp/auction/' + x.auctionId, cond: fx ? '定額' : '即決',
+                  addFee: Number(x.buyNowPriceShippingFee) || 0, img: String(x.imageUrl || ''), ycond: String(x.itemCondition || '') };
+              }).filter(x => x && x.name);
+            }
+          }
           const MARK = '<li class="Product';
           const blocks = [];
           for (let i = html.indexOf(MARK); i >= 0;) {
@@ -18302,6 +18326,7 @@
             blocks.push(html.slice(i, nx < 0 ? Math.min(html.length, i + 20000) : nx));
             i = nx;
           }
+          if (!blocks.length && !/一致する商品はありません|該当する商品はありません|条件に一致する商品/.test(html)) throw new Error('ヤフオクの検索ページの形が読めません（' + html.length + '字）');
           const out = [];
           blocks.forEach(b2 => {
             const id = (b2.match(/data-auction-id="([^"]+)"/) || [])[1]; if (!id) return;
@@ -24193,6 +24218,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-25', items: [
+      '🔎 <b>ヤフオクの候補が0件になっていたのを直しました</b>（見積もりで「ゲームボーイアドバンス 本体」のヤフオクだけが2回とも0件）：ヤフオクの検索ページの作りが変わって読めていませんでした。定額と即決（今すぐ買える物）だけを出し、傷や汚れのある物は他のサイトと同じく外します。手で開く「ヤフオク」の検索ボタンも定額の一覧を開くようにしました。仕入れ検索・見積もり・🤖の写真集めに効きます。',
       '🔌 <b>見積もりの仕入れ検索：1回目の失敗に備える</b>（1回目の 💴 で「Yahoo!フリマ×・メルカリ×・ヤフオク0」になり、↻ で通った）：見積もりの小さな窓では、探す前に Tampermonkey の中継の準備を待ち、動いていなければ「ブリッジが動いていません」と返します。全部のサイトで失敗した時だけ、3秒あけて1回だけ探し直します。サイトごとの失敗の理由とかかった時間を記録し、失敗の返事にも理由を入れます。ヤフオクが失敗した時に「0件」と出ていたのを、仕入れ検索の一覧も含めて「×」にしました。',
       '🎮 <b>本体の見積もりで限定モデルを選ばない</b>（3DS LL 本体の候補に「ジバニャン限定モデル」が残っていた・通常版と限定版は別物）：限定版の語の一覧に、限定モデル・限定カラー・コラボ・◯◯仕様を足しました。本体を探す時に探す品名に限定の語が無ければ、限定の候補は選ばずに灰色で「限定モデル（別物）」を出します。',
       '🎮 <b>本体の見積もりで型を照らす</b>（ゲームボーイアドバンス本体の候補に SP 本体が残っていた）：本体を探す時は、探す品名と候補の型（SP・ミクロ・LL・ライト・DSi・New・有機EL・Pro など）を比べ、違う型は選ばずに灰色で「型違い」を出します。あわせて、「難あり・訳あり」は外さずに後ろへ回し、箱説付きを探しているのに選んだ出品の名前に付属品の記載が無い時は「名前から分かりません」と注意を出します。',
