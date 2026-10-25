@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-1300';
+var SRC_VER = '20261025-1700';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1657,6 +1657,51 @@ function doGetInner_(e) {
         stout = { ok: true, list: stlist, exp: stmin, at: new Date().toISOString() };
       } catch (err) { stout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(stcb + '(' + JSON.stringify(stout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    /* ★2026-10-25 読むだけ：店ごとに Shopee 側の注文の件数を数える（00 事業本部→05 の依頼「2店舗目の注文が注文表に1件だけ＝少ないのか漏れか」）。
+       注文表（orders）には何も書かない。get_order_list は1回15日までなので、since から14日ずつ区切って数える（1区切り100件ごとに1回）。
+       params: token（WRITE_TOKEN）, shops＝'sub'（既定・登録簿 accounts の2店舗目）｜店IDのカンマ区切り, since＝YYYY-MM-DD（既定 2026-07-01・日本時間0時から）, max＝通信の上限（既定80・最大150） */
+    if (p.action === 'order_count') {
+      var occb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), ocout;
+      try {
+        var ocwt = P_().getProperty('WRITE_TOKEN');
+        if (!ocwt || p.token !== ocwt) throw new Error('WRITE_TOKEN不正');
+        if (ufDead_()) throw new Error('この台は接続枠が尽きているので数えません');
+        var ocSince = /^\d{4}-\d{2}-\d{2}$/.test(String(p.since || '')) ? String(p.since) : '2026-07-01';
+        var ocFrom = Math.floor(new Date(ocSince + 'T00:00:00+09:00').getTime() / 1000), ocTo = now_();
+        if (!(ocFrom > 0) || ocFrom >= ocTo) throw new Error('since が正しくありません: ' + ocSince);
+        var ocMax = Math.min(150, Math.max(1, parseInt(p.max, 10) || 80)), ocCalls = 0;
+        var ocShops = [];
+        if (!p.shops || p.shops === 'sub') {
+          ocShops = (sbSelect_('accounts', 'select=shop_id,label,cc&status=eq.sub') || []).map(function (a) { return { shop_id: String(a.shop_id), label: a.label || '', cc: a.cc || '' }; });
+        } else {
+          ocShops = String(p.shops).split(',').map(function (x) { return { shop_id: x.trim(), label: '', cc: '' }; }).filter(function (x) { return /^\d+$/.test(x.shop_id); });
+        }
+        if (!ocShops.length) throw new Error('数える店がありません');
+        var ocRes = [];
+        ocShops.forEach(function (s) {
+          var row = { shop_id: s.shop_id, label: s.label, cc: s.cc, n: 0, sns: [], calls: 0, done: false, err: '' };
+          ocRes.push(row);
+          if (!getToken_(parseInt(s.shop_id, 10))) { row.err = '未認可（この台にトークンが無い）'; return; }
+          try {
+            for (var w0 = ocFrom; w0 < ocTo; w0 += 14 * 86400) {
+              var w1 = Math.min(ocTo, w0 + 14 * 86400 - 1), cur = '';   /* 区切りの境目を重ねない（同じ注文を2回数えない） */
+              for (var pg = 0; pg < 30; pg++) {
+                if (ocCalls >= ocMax) throw new Error('通信の上限 ' + ocMax + ' 回で打ち切り（ここまでの件数は途中）');
+                ocCalls++; row.calls++;
+                var oj = callShop_(parseInt(s.shop_id, 10), '/api/v2/order/get_order_list', { time_range_field: 'create_time', time_from: w0, time_to: w1, page_size: 100, cursor: cur }, 'get');
+                var orr = oj.response || {};
+                (orr.order_list || []).forEach(function (o) { row.n++; if (row.sns.length < 200) row.sns.push(o.order_sn); });
+                if (!orr.more || !orr.next_cursor) break; cur = orr.next_cursor;
+              }
+            }
+            row.done = true;
+          } catch (eOc) { row.err = String((eOc && eOc.message) || eOc).slice(0, 200); }
+        });
+        ufPersist_();
+        ocout = { ok: true, action: 'order_count', src: SRC_VER, runner: baRunnerId_(), since: ocSince, calls: ocCalls, shops: ocRes };
+      } catch (eO) { ocout = { ok: false, error: String((eO && eO.message) || eO) }; }
+      return ContentService.createTextOutput(occb + '(' + JSON.stringify(ocout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'anthropic_receipts') {   /* 🧾 手で今すぐ（WRITE_TOKEN 必須） */
       var arcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), arout;
@@ -5259,6 +5304,24 @@ function cancelStockGuard_() {
   }
   return out;
 }
+/* ★2026-10-25 注文の同期の店ごとの結果を app_kv orders_sync_last に残す（00 事業本部→05 の依頼：2店舗目の注文が少ない時に「同期が通っているのか」を後から見られるように）。
+   中身 { <店ID>: { at, cc, n（この回に同期した注文の数・update_time の窓）, err, win（窓の日数）, force, runner } }。
+   書く直前に読み直し、この回に回った店の分だけを重ねる（他の台・他の店の分は残す）。読めなかった時は書かない（空で上書きしない）。
+   増える通信は1回の同期につき Supabase の読み1＋書き1＝2回。 */
+var ORD_SYNC_LAST_KEY = 'orders_sync_last';
+function ordersSyncLastSave_(log, force, daysWindow) {
+  var mine = {}, at = new Date().toISOString(), runner = baRunnerId_(), win = (daysWindow > 0 ? daysWindow : 15);
+  (log || []).forEach(function (x) {
+    if (!x || !x.shop_id) return;
+    mine[String(x.shop_id)] = { at: at, cc: x.cc || '', n: (x.orders != null ? x.orders : null), err: x.error ? String(x.error).slice(0, 200) : '', win: win, force: !!force, runner: runner };
+  });
+  if (!Object.keys(mine).length) return;
+  var cur = baKvFresh_(ORD_SYNC_LAST_KEY);
+  if (BA_KV_FAIL[ORD_SYNC_LAST_KEY]) { Logger.log('orders_sync_last を読めなかったので書きません'); return; }
+  cur = (cur && typeof cur === 'object' && !Array.isArray(cur)) ? cur : {};
+  Object.keys(mine).forEach(function (sid) { cur[sid] = mine[sid]; });
+  baKvSet_(ORD_SYNC_LAST_KEY, cur);
+}
 function syncOrdersAll(daysWindow, trkMode) {
   var force = (trkMode === 'force'); // ⚡今すぐ取得＝毎回追跡も取得。毎時トリガー(引数なし)＝背景。
   if (!force && !coreAllowed_()) { Logger.log('syncOrdersAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }   /* ★注文は業務の血流＝UF_STOP_CORE まで止めない */
@@ -5268,6 +5331,7 @@ function syncOrdersAll(daysWindow, trkMode) {
   if (!force) { var tl = parseInt(P_().getProperty('trkLast') || '0', 10) || 0; if (now_() - tl >= 6 * 3600) { doTrk = true; P_().setProperty('trkLast', String(now_())); } }
   var toks = listTokens_(), log = [];
   toks.forEach(function (tok) { try { log.push(syncOrdersForShop_(tok, daysWindow, doTrk, force)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  try { ordersSyncLastSave_(log, force, daysWindow); } catch (eSl) { Logger.log('orders_sync_last skip: ' + String(eSl).slice(0, 140)); }   /* ★2026-10-25 店ごとの結果を残す（同期は止めない） */
   try { log.push({ restock: stockRestoreRun_() }); } catch (eR) { log.push({ restock_error: String(eR).slice(0, 160) }); }
   try { log.push({ cancelGuard: cancelStockGuard_() }); } catch (eCg) { log.push({ cancelGuard_error: String(eCg).slice(0, 160) }); }   /* ↩ キャンセルで戻った在庫を引き戻す */   /* 🔁 注文で0になった明細を戻す（注文を読んだ直後に） */
   ufPersist_();
