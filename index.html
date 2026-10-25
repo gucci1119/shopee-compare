@@ -18733,8 +18733,8 @@
   function loadSrcJa() {
     if (srcJa !== null) return Promise.resolve(srcJa);
     srcJa = {};
-    return sbGetAll('app_kv', 'select=v&k=eq.boshu_added_hist')
-      .then(rows => { const m = (rows && rows[0] && rows[0].v && rows[0].v.m) || {}; const ix = {}; Object.values(m).forEach(a => { const k = normVar(a.en); if (!k) return; if (!ix[k] || (a.ja && !ix[k].ja)) ix[k] = { ja: a.ja || '', jan: a.jan || '', hw: a.hw || '' }; }); srcJa = ix; return srcJa; })
+    return addedHistRead('')   /* ★2026-10-25 足した記録は日ごとの鍵（全部の日を1本ずつ順番に・5分使い回す）。古い作品の注文も引くので全部 */
+      .then(h => { const m = (h && h.m) || {}; const ix = {}; Object.values(m).forEach(a => { const k = normVar(a.en); if (!k) return; if (!ix[k] || (a.ja && !ix[k].ja)) ix[k] = { ja: a.ja || '', jan: a.jan || '', hw: a.hw || '' }; }); srcJa = ix; return srcJa; })
       .catch(() => srcJa);
   }
   /* ★2026-10-04 名前だけで引くと別機種の控えに当たる（GC版「時のオカリナ」の注文に N64 版の日本語名が出た）。
@@ -20896,24 +20896,91 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     await sbUpsert('app_kv', [{ k: 'lst_daily', v: { d }, updated_at: new Date().toISOString() }]);
     localStorage.setItem('smdLstSnapDay', today);
   }
+  /* ★2026-10-25 05 の決め：🤖が足した明細の控え boshu_added_hist（1本 10.2MB・約3万件・9/23〜）を、担当PCが1時間ごとに丸ごと読んで書き直していた（毎時 約10MB の読み書き）。
+     → 足した日（日本時間）ごとの鍵 boshu_added_hist_d_YYYYMMDD（1日 最大約760KB＝9/25 の2,198件）＋小さい目印 boshu_added_hist_meta {v:1, days:['YYYY-MM-DD',…]} に分ける。
+       書き手は、新しく足した日の鍵だけを読み直して、無い物だけ足す。読む側は要る日だけを1本ずつ順番に読む（5分使い回す・読みかけには合流）。
+       古い日も消さない（04 の集計が 9/18 からの全部を使う＝日ごとの鍵なら、残しても1回に書く量は増えない）。
+       目印が無い間（移す前）は古い1本を読む。古い1本は移した後2週間残す（消すのは本人の了承の後＝05 が聞く） */
+  const AH_OLD = 'boshu_added_hist', AH_META = 'boshu_added_hist_meta', ahDayKey = d => 'boshu_added_hist_d_' + String(d).replace(/-/g, '');
+  const _ahCache = {};
+  function addedHistRead(sinceDay) {   /* sinceDay＝'YYYY-MM-DD'（その日から）・空＝全部。戻り値 { m, days }（m は前と同じ形） */
+    const ck = sinceDay || 'all', c = _ahCache[ck];
+    if (c && c.v && Date.now() - c.at < 5 * 60000) return Promise.resolve(c.v);
+    if (c && c.p) return c.p;
+    const p = (async () => {
+      const mr = await sbGet('app_kv', 'select=v&k=eq.' + AH_META);
+      const meta = mr && mr[0] && mr[0].v;
+      if (!meta || !Array.isArray(meta.days)) {   /* 移す前＝古い1本 */
+        const r0 = await sbGetAll('app_kv', 'select=v&k=eq.' + AH_OLD);
+        const m0 = (r0 && r0[0] && r0[0].v && r0[0].v.m) || {};
+        if (!sinceDay) return { m: m0, days: 0, old: true };
+        const m1 = {}; Object.keys(m0).forEach(k => { const x = m0[k]; if (x && jstDate(x.at) >= sinceDay) m1[k] = x; }); return { m: m1, days: 0, old: true };
+      }
+      const days = meta.days.filter(d => !sinceDay || d >= sinceDay).sort(), m = {};
+      for (const d of days) { const r = await sbGet('app_kv', 'select=v&k=eq.' + ahDayKey(d)); Object.assign(m, (r && r[0] && r[0].v && r[0].v.m) || {}); }   /* 1本ずつ順番に。1本でも読めなければ全体を失敗にする（欠けたまま数えない） */
+      return { m, days: days.length };
+    })().then(v => { _ahCache[ck] = { at: Date.now(), v, p: null }; return v; }, e => { if (_ahCache[ck]) _ahCache[ck].p = null; throw e; });
+    _ahCache[ck] = Object.assign(_ahCache[ck] || {}, { p });
+    return p;
+  }
+  const ahKeyOf = a => a.cc + '#' + (a.model_id || (normVar(a.en) + '@' + String(a.at).slice(0, 13)));
+  const ahRecOf = (a, runner) => ({ at: a.at, cc: a.cc, en: a.en || '', ja: a.ja || '', hw: a.hw || '', jan: a.jan || '', item_id: a.item_id || null, model_id: a.model_id || null, cat: String(a.cat || '').slice(0, 60), cost: a.cost || null, price: a.price || null, runner: runner });
+  /* 1回だけ：古い1本を日ごとに分けて書く → 読み直して件数を照らす → 合った時だけ目印を書く。平日の 9〜19 時はやらない（本人のコンサル業務・05 の決め） */
+  async function ahMigrate() {
+    const jh = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Tokyo', hour: 'numeric', hourCycle: 'h23' }).format(new Date())), jw = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Tokyo', weekday: 'short' }).format(new Date());
+    if (!/Sat|Sun/.test(jw) && jh >= 9 && jh < 19) return null;
+    const r0 = await sbGetAll('app_kv', 'select=v&k=eq.' + AH_OLD); const m0 = (r0 && r0[0] && r0[0].v && r0[0].v.m) || {};
+    const n0 = Object.keys(m0).length; if (!n0) return null;
+    const byDay = {}; Object.keys(m0).forEach(k => { const x = m0[k]; const d = x && jstDate(x.at); if (!d) return; (byDay[d] = byDay[d] || {})[k] = x; });
+    const days = Object.keys(byDay).sort(); let nIn = 0;
+    for (const d of days) {
+      const cur = await sbGet('app_kv', 'select=v&k=eq.' + ahDayKey(d));   /* もう日の鍵があれば重ねる（途中で止まった後のやり直し） */
+      const m = Object.assign({}, ((cur && cur[0] && cur[0].v) || {}).m || {}, byDay[d]);
+      await sbUpsert('app_kv', [{ k: ahDayKey(d), v: { m, day: d }, updated_at: new Date().toISOString() }]);
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    for (const d of days) { const r = await sbGet('app_kv', 'select=v&k=eq.' + ahDayKey(d)); const m = (r && r[0] && r[0].v && r[0].v.m) || {}; nIn += Object.keys(byDay[d]).filter(k => m[k]).length; }
+    if (nIn !== Object.keys(m0).filter(k => m0[k] && jstDate(m0[k].at)).length) { try { logAct('🤖控え', '日ごとへの移し替えを見送り', '', `件数が合わない（古い1本 ${n0}・日の鍵 ${nIn}）＝目印を書かず、次の回にやり直す`); } catch (_) {} return null; }
+    const meta = { v: 1, days, from: AH_OLD, n: n0, at: new Date().toISOString() };
+    await sbUpsert('app_kv', [{ k: AH_META, v: meta, updated_at: meta.at }]);
+    try { logAct('🤖控え', '足した記録を日ごとの鍵に移した', '', `${n0}件・${days.length}日（${days[0]}〜${days[days.length - 1]}）。古い1本 ${AH_OLD} は2週間残す`); } catch (_) {}
+    return meta;
+  }
+  async function ahWriteOld() {   /* 移す前だけの道（前の baAddedHist と同じ：古い1本を読んで足して書く・120日より古い物も残す） */
+    const cur = await sbGet('app_kv', 'select=v&k=eq.' + AH_OLD).catch(() => null); if (cur === null) return;
+    const v = ((cur || [])[0] || {}).v || {}; const m = v.m || {}; const n0 = Object.keys(m).length;
+    const sts = await sbGetAll('app_kv', 'select=k,v&k=in.(boshu_auto_status,boshu_auto_status_child2,boshu_auto_status_child3)').catch(() => null); if (!sts) return;
+    sts.forEach(x => { let sv = x.v; if (typeof sv === 'string') { try { sv = JSON.parse(sv); } catch (_) { sv = null; } } const runner = x.k.replace('boshu_auto_status', '') || 'main'; (sv && sv.added || []).forEach(a => { if (!a || !a.at || !a.cc) return; const k = ahKeyOf(a); if (!m[k]) m[k] = ahRecOf(a, runner); }); });
+    if (Object.keys(m).length === n0) return;
+    await sbUpsert('app_kv', [{ k: AH_OLD, v: { m }, updated_at: new Date().toISOString() }]);
+  }
   async function baAddedHist() {
     if (!settings.sbSecret || demoOn() || !pcIsOwner()) return;
     const last = Number(localStorage.getItem('smdBaHistAt') || 0); if (Date.now() - last < 60 * 60 * 1000) return;
     localStorage.setItem('smdBaHistAt', String(Date.now()));
-    const cur = await sbGet('app_kv', 'select=v&k=eq.boshu_added_hist').catch(() => null); if (cur === null) return;
-    const v = ((cur || [])[0] || {}).v || {}; const m = v.m || {};
-    const sts = await sbGetAll('app_kv', 'select=k,v&k=in.(boshu_auto_status,boshu_auto_status_child2,boshu_auto_status_child3)').catch(() => []);
-    let added = 0;
-    sts.forEach(x => { let sv = x.v; if (typeof sv === 'string') { try { sv = JSON.parse(sv); } catch (_) { sv = null; } } (sv && sv.added || []).forEach(a => {
-      if (!a || !a.at || !a.cc) return;
-      const key = a.cc + '#' + (a.model_id || (normVar(a.en) + '@' + String(a.at).slice(0, 13)));
-      if (m[key]) return;
-      m[key] = { at: a.at, cc: a.cc, en: a.en || '', ja: a.ja || '', hw: a.hw || '', jan: a.jan || '', item_id: a.item_id || null, model_id: a.model_id || null, cat: String(a.cat || '').slice(0, 60), cost: a.cost || null, price: a.price || null, runner: x.k.replace('boshu_auto_status', '') || 'main' }; added++;
+    const mr = await sbGet('app_kv', 'select=v&k=eq.' + AH_META).catch(() => null); if (mr === null) return;   /* 読めなければ書かない */
+    let meta = mr[0] && mr[0].v;
+    if (!meta || !Array.isArray(meta.days)) { meta = await ahMigrate().catch(() => null); if (!meta) { await ahWriteOld(); return; } }   /* 移す前（平日の昼で移せない・件数が合わない時）は、今までどおり古い1本に書く＝🤖の状態の300件から落ちる前に控える */
+    const sts = await sbGetAll('app_kv', 'select=k,v&k=in.(boshu_auto_status,boshu_auto_status_child2,boshu_auto_status_child3)').catch(() => null); if (!sts) return;
+    const byDay = {};
+    sts.forEach(x => { let sv = x.v; if (typeof sv === 'string') { try { sv = JSON.parse(sv); } catch (_) { sv = null; } } const runner = x.k.replace('boshu_auto_status', '') || 'main'; (sv && sv.added || []).forEach(a => {
+      if (!a || !a.at || !a.cc) return; const d = jstDate(a.at); if (!d) return;
+      (byDay[d] = byDay[d] || {})[ahKeyOf(a)] = ahRecOf(a, runner);
     }); });
-    const cut = Date.now() - 120 * 86400000;
-    Object.keys(m).forEach(k => { if (Date.parse(m[k].at) < cut) delete m[k]; });
-    if (!added && Object.keys(m).length === Object.keys(v.m || {}).length) return;
-    await sbUpsert('app_kv', [{ k: 'boshu_added_hist', v: { m }, updated_at: new Date().toISOString() }]);
+    const newDays = [];
+    for (const d of Object.keys(byDay).sort()) {
+      const cur = await sbGet('app_kv', 'select=v&k=eq.' + ahDayKey(d)).catch(() => null); if (cur === null) continue;   /* その日の鍵が読めなければ、その日は書かない */
+      const m = ((cur[0] || {}).v || {}).m || {}; let added = 0;
+      Object.keys(byDay[d]).forEach(k => { if (!m[k]) { m[k] = byDay[d][k]; added++; } });
+      if (!added) continue;
+      await sbUpsert('app_kv', [{ k: ahDayKey(d), v: { m, day: d }, updated_at: new Date().toISOString() }]);
+      if (!meta.days.includes(d)) newDays.push(d);
+    }
+    if (newDays.length) {   /* 目印は書く直前に読み直して、日を足すだけ */
+      const mr2 = await sbGet('app_kv', 'select=v&k=eq.' + AH_META).catch(() => null); const m2 = mr2 && mr2[0] && mr2[0].v;
+      if (m2 && Array.isArray(m2.days)) { m2.days = [...new Set(m2.days.concat(newDays))].sort(); m2.at = new Date().toISOString(); await sbUpsert('app_kv', [{ k: AH_META, v: m2, updated_at: m2.at }]); }
+    }
+    Object.keys(_ahCache).forEach(k => { delete _ahCache[k]; });
   }
   setTimeout(() => { lstDailySnap().catch(() => { try { localStorage.removeItem('smdLstSnapDay'); } catch (_) {} }); baAddedHist().catch(() => {}); }, 4 * 60 * 1000);
   /* ★2026-10-05 降格「カテゴリ違い」を Shopee の提案どおりに自動で直す（本人「ここに溜まっていってるのもちゃんと直してほしい」「Adopt Suggestion から Shopee がサジェストしてるカテゴリーにそのまま当てはめればいい」
@@ -20975,10 +21042,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const t0 = Math.floor((Date.now() - 70 * 86400000) / 1000);
       const [orders, kvs] = await Promise.all([
         sbGetAll('orders', 'select=cc,sn,tab,order_ts,items,cancel_reason&order_ts=gte.' + t0),
-        sbGetAll('app_kv', 'select=k,v&k=in.(lst_daily,boshu_added_hist)').catch(() => []),
+        sbGetAll('app_kv', 'select=k,v&k=in.(lst_daily)').catch(() => []),
       ]);
       const kv = {}; kvs.forEach(x => { kv[x.k] = x.v; });
-      const daily = (kv.lst_daily && kv.lst_daily.d) || {}; const hist = (kv.boshu_added_hist && kv.boshu_added_hist.m) || {};
+      /* ★2026-10-25 足した記録は日ごとの鍵＝この表が使う直近70日の分だけ読む */
+      const ah = await addedHistRead(jstDate(t0 * 1000)).catch(() => null);
+      const daily = (kv.lst_daily && kv.lst_daily.d) || {}; const hist = (ah && ah.m) || {};
       box.innerHTML = planConvHtml(orders, daily, hist);
     } catch (e) { box.innerHTML = `<div style="color:#b5341a;font-size:12px">⚠ 転換率の材料を読み込めませんでした（${esc(String(e && e.message || e).slice(0, 80))}）</div>`; }
   }
@@ -24026,6 +24095,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-25', items: [
+      '🗂 <b>🤖が足した明細の控えを、足した日ごとに分けました</b>：前は1本（10MB・約3万件）を担当PCが1時間ごとに丸ごと読み書きしていました。今は1日1本（最大約760KB）に分け、書く時は新しく足した日の分だけを書きます。読む画面は要る日だけを1本ずつ順番に読みます（仕入れ検索＝全部・事業計画の転換率＝直近70日・出品一覧の🤖の印＝直近90日）。古い日も消さずに残します。最初の1回だけ、担当PCが古い1本を日ごとに移します（平日の9〜19時はやらない）。',
       '💸 <b>出品管理の「売れてるのに儲かっていない出品」の目標を、確定した値付けの基準にしました</b>：前は ⚙️目標粗利（既定¥1,200）で一律に見ていました。今は値付けの見直しと同じ線（フロント ¥250・それ以外 ¥1,500・仕入れ¥3,000超は仕入れの50%）を注文ごとの仕入れで出し、出品ごとに平均して比べます。粗利の下に「線 ¥…」を出します。',
       '🏷 <b>見積もりの英語名：表に無い機種の本体も名前を残す</b>：本体の英語名で、機種の表に無い物は「本体」の語だけ外して残りの名前を訳し、最後に Console を付けます（前は「Console」だけになっていた）。ネオジオポケット・ゲームギア・Xbox など古い機種を表に足しました。',
       '🏷 <b>見積もりの英語名：本体は機種の英語名＋Console に</b>（「ゲームボーイアドバンス 本体」が「Substance GBA」になっていた）：探す語に「本体」がある時は、機種名をお客さんに見せる正式な英語（Game Boy Advance SP・New Nintendo 3DS XL・Nintendo Switch Lite など。LL は XL）にして最後に Console を付けます。表に無い機種は機種の略号で、それも分からなければ Console だけを付けます。',
@@ -46273,7 +46343,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (_lstAuto) return Promise.resolve(_lstAuto);
     if (_lstAutoLoading) return _lstAutoLoading;
     if (_lstAutoFailAt && Date.now() - _lstAutoFailAt < 5 * 60000) return Promise.resolve(null);
-    _lstAutoLoading = Promise.all([doneAllCached(), baKvGet('boshu_auto_en'), baKvGetRaw('boshu_fam_made'), baKvGetRaw('boshu_added_hist').catch(() => null)]).then(([rows, en, made, hist]) => {
+    _lstAutoLoading = Promise.all([doneAllCached(), baKvGet('boshu_auto_en'), baKvGetRaw('boshu_fam_made'), addedHistRead(jstDate(Date.now() - 90 * 86400000)).catch(() => null)]).then(([rows, en, made, hist]) => {   /* ★2026-10-25 足した記録は日ごとの鍵＝🤖の印の仕入れは直近90日の分だけ読む */
       if (!rows || made === undefined) throw new Error('台帳を読めませんでした');   /* ★2026-09-28 レビュー：一部だけ読めなかった状態を成功として固定しない */
       const byItem = new Map(), madeMap = new Map(); en = en || {};
       const nk = (x) => String(x || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
