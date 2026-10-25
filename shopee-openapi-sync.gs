@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261025-2330';
+var SRC_VER = '20261025-2350';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9890,7 +9890,24 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
        失敗したらこの回は見送る（新しいカタログは作らない） */
     if (!newItem && (tgt.models || []).length && (tgt.models || []).every(function (m) { return String((m && m.n) || '').toLowerCase() === 'test'; })) {
       try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); }
-      catch (eT) { res.note = 'test画像失敗（放置カタログの続き）: ' + String((eT && eT.message) || eT).slice(0, 60); baLog_(st, cc + ' ' + res.note + '・' + tgt.item_id); break; }
+      catch (eT) {
+        /* ★2026-10-25 01 商品部：作った回に test を1件目で上書きしても、DB の listings は「test だけ」のまま残る（同期が来るまで）。
+           次の回がここに入り「バリエが見つかりません: test」で5か国とも止まった（フレンダ 23:13）。見つからない時は Shopee から読み直し、
+           test が残っていなければ DB の行も直して続ける（アーケードの種類を足すたびに同じ形になるため） */
+        var _emT = String((eT && eT.message) || eT), _okT = false;
+        if (/見つかりません|not\s*found|no\s*such/i.test(_emT)) {
+          try {
+            var _gT = getModels_(tgt.shop_id, tgt.item_id) || {};
+            var _msT = (_gT.models || []).map(function (m) { return { id: m.model_id, n: m.name || '', sku: m.sku || '', img: m.img || '', price: parseFloat(m.price) || 0, stock: (m.stock != null ? m.stock : 0), sold: 0, ti: (m.tier_index || [])[0] }; });
+            if (_msT.length && !_msT.some(function (m) { return String(m.n || '').toLowerCase() === 'test'; })) {
+              tgt.models = _msT; _okT = true;
+              try { sbPatch_('listings', 'item_id=eq.' + encodeURIComponent(String(tgt.item_id)), { models: _msT, model_count: _msT.length }); } catch (eUp) {}   /* 行がある時だけ直す（新しい行は作らない） */
+              baLog_(st, cc + '：DB の明細が古かった（test だけ）→ Shopee から読み直して続けます（' + _msT.length + '明細・' + tgt.item_id + '）');
+            }
+          } catch (eG) {}
+        }
+        if (!_okT) { res.note = 'test画像失敗（放置カタログの続き）: ' + _emT.slice(0, 60); baLog_(st, cc + ' ' + res.note + '・' + tgt.item_id); break; }
+      }
     }
     var free2 = capOf(tgt) - (tgt.models || []).length;
     var batch = todo.slice(i, i + free2);
