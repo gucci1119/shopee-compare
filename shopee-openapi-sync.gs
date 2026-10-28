@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-0500';
+var SRC_VER = '20261029-0630';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8322,6 +8322,9 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
     if (!j0.judged) break;   /* 鍵なし・上限・障害＝今日はここまで（印は付けない＝次回また見る） */
     n++; changed = true;
     if (j0.ok) { rp.items[id] = { s: 'keep', v: BA_RULE_VER, at: new Date().toISOString() }; continue; }
+    /* ★2026-10-29 レビュー 10/25 中-3：機種の鍵を読む台（pre_h_meta の runners）では、写真の控えに今の回の機種しか入っていない。
+       見直すのは他の機種の作品なので、その機種の控えを読み足してから候補を探す。読めなかった時は印を付けない（「代わりなし」で30日止めない） */
+    if (hw && baPreHwMode_()) { try { baPreHEnsure_(hw); } catch (eHe) {} if (!BA_PRE_H_LOADED[hw] || BA_KV_FAIL['boshu_auto_pre']) { baLog_(st, '📷 写真の見直し：' + hw + ' の写真の控えを読めなかったので次の回へ: ' + a.en); continue; } }
     var pm = baPreOf_(pre, a.key, hw), cands = pm ? baPhotoOrder_([pm].concat(pm.alts || []), hw).slice(0, 5) : [];
     var done = false, lastKind = j0.kind;
     for (var k = 0; k < cands.length && !done; k++) {
