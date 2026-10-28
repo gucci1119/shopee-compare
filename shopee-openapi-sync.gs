@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-0300';
+var SRC_VER = '20261029-0500';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2053,7 +2053,7 @@ function perfDailyIngest_(body) {
 function ingestGate_(body) {   /* 返り＝断る時の文（通す時は ''） */
   var key = '', req = false; try { key = P_().getProperty('INGEST_KEY') || ''; req = P_().getProperty('INGEST_REQ') === '1'; } catch (e0) {}
   var has = !!(key && String(body.ik || '') === key);
-  try { { var sn = {}; try { sn = JSON.parse(P_().getProperty('INGEST_SEEN') || '{}'); } catch (e1) {} var a = String(body.action || ''), sh = String(body.shop_id || body.cc || '-').slice(0, 20); var k2 = a + '|' + sh; var x = sn[k2] = sn[k2] || { k: 0, n: 0 }; if (has) x.k++; else x.n++; x.at = new Date().toISOString(); x.v = String(body.ver || body.v || '').slice(0, 12); var ks = Object.keys(sn); if (ks.length > 80) ks.sort(function (p1, p2) { return String(sn[p1].at) < String(sn[p2].at) ? -1 : 1; }).slice(0, ks.length - 80).forEach(function (q) { delete sn[q]; }); P_().setProperty('INGEST_SEEN', JSON.stringify(sn)); } } catch (e2) {}   /* 数えるだけ＝Lock は取らない（取ると鍵なしの連打で🤖の巡回の Lock を邪魔できる）・同時に来た時に1つ数え落とすのは許す */
+  try { { var sn = {}; try { sn = JSON.parse(P_().getProperty('INGEST_SEEN') || '{}'); } catch (e1) {} var a = String(body.action || ''), sh = String(body.shop_id || body.cc || '-').slice(0, 20); var k2 = a + '|' + sh; if (!has && !sn[k2] && Object.keys(sn).length >= 60) throw new Error('skip');   /* ★2026-10-29 レビュー（脆弱性 5）：鍵なしの知らない店の行が増えて本物の数えを追い出さないよう、60行を超えたら鍵なしの新しい行は足さない */ var x = sn[k2] = sn[k2] || { k: 0, n: 0 }; if (has) x.k++; else x.n++; x.at = new Date().toISOString(); x.v = String(body.ver || body.v || '').slice(0, 12); var ks = Object.keys(sn); if (ks.length > 80) ks.sort(function (p1, p2) { return String(sn[p1].at) < String(sn[p2].at) ? -1 : 1; }).slice(0, ks.length - 80).forEach(function (q) { delete sn[q]; }); P_().setProperty('INGEST_SEEN', JSON.stringify(sn)); } } catch (e2) {}   /* 数えるだけ＝Lock は取らない（取ると鍵なしの連打で🤖の巡回の Lock を邪魔できる）・同時に来た時に1つ数え落とすのは許す */
   if (req && !has) return '取り込みの鍵がありません（userscript を新しい版に・鍵を入れ直す）';
   return '';
 }
@@ -7806,8 +7806,12 @@ var OUTREACH_API = 'https://script.google.com/macros/s/AKfycbyabXXBhsDZmB1X7K_4D
 function outreachAuth_(token) {
   token = String(token || ''); if (!token) return false;
   var c = CacheService.getScriptCache(); var ck = 'oa_' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, token, Utilities.Charset.UTF_8)).slice(0, 20);
-  try { if (c.get(ck) === '1') return true; } catch (e) {}
-  try { ufBump_(1, 'outreach_auth'); var r = UrlFetchApp.fetch(OUTREACH_API + '?action=outreach_stats&token=' + encodeURIComponent(token), { muteHttpExceptions: true, followRedirects: true }); var j = JSON.parse(r.getContentText() || '{}'); if (j && j.ok) { try { c.put(ck, '1', 300); } catch (e2) {} return true; } } catch (e) {}
+  try { var hv = c.get(ck); if (hv === '1') return true; if (hv === '0') return false; } catch (e) {}
+  /* ★2026-10-29 レビュー（脆弱性 1）：違う鍵でも毎回営業窓口へ問い合わせて接続枠を1回使っていた（公開の /exec を叩かれると枠が尽きる）。
+     断った鍵は10分覚える・断りが1時間に30回を超えたらその時間は問い合わせない */
+  try { var hk = 'oa_ng_' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMddHH'); var ng = Number(c.get(hk) || 0); if (ng >= 30) return false; } catch (e) {}
+  try { ufBump_(1, 'outreach_auth'); var r = UrlFetchApp.fetch(OUTREACH_API + '?action=outreach_stats&token=' + encodeURIComponent(token), { muteHttpExceptions: true, followRedirects: true }); var j = JSON.parse(r.getContentText() || '{}'); if (j && j.ok) { try { c.put(ck, '1', 300); } catch (e2) {} return true; }
+    if (j && j.ok === false) { try { c.put(ck, '0', 600); var hk2 = 'oa_ng_' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMddHH'); c.put(hk2, String(Number(c.get(hk2) || 0) + 1), 3700); } catch (e3) {} } } catch (e) {}   /* 窓口が「違う」と答えた時だけ覚える（通信の失敗は覚えない） */
   return false;
 }
 function outreachAi_(p) {
@@ -11485,7 +11489,7 @@ function tcgTick(manual) {
       delete st.tried[c.key];
     }
     if (BA_PRE_DIRTY_TCG) { try { var _frP = baKvFreshMany_(['tcg_pre']); var _mineP = {}; Object.keys(tPre).forEach(function (k) { var e = tPre[k]; if (e && (e.rej || e._dirty)) _mineP[k] = e; }); var _baseP = (_frP && _frP['tcg_pre']) || null; if (_baseP) { Object.keys(_mineP).forEach(function (k) { var f = _baseP[k] || {}; f.rej = _mineP[k].rej; if (_mineP[k]._dirty) f.imgs = _mineP[k].imgs; delete f._dirty; _baseP[k] = f; }); baKvSet_('tcg_pre', _baseP); } } catch (eTp) {} BA_PRE_DIRTY_TCG = false; }   /* ★2026-10-12 ポータルが同時に集めた分を消さない＝読み直した最新に、こちらで変えたカードの rej／imgs だけ重ねる */
-    if (ai.dirty) { try { baKvSetMerged_('tcg_names_ai', ai.cache, baKvFreshMany_(['tcg_names_ai']), 0); } catch (eN2) {} ai.dirty = 0; }   /* ★2026-10-12 複数の台で回すので読み直して足す
+    if (ai.dirty) { try { baKvSetMerged_('tcg_names_ai', ai.cache, baKvFreshMany_(['tcg_names_ai']), 0); } catch (eN2) {} ai.dirty = 0; }   /* ★2026-10-12 複数の台で回すので読み直して足す */   /* ★2026-10-29 ここが閉じておらず、次の3行（使った写真の印・tcg_sets の保存・候補0件で抜ける）が 10/12 から動いていなかった */
     if (usedDirty) { try { baKvSetMerged_(BA_IMGS, usedT, baKvFreshMany_([BA_IMGS]), 0); } catch (eUi) { baLog_(st, '使った写真の印の保存に失敗: ' + String(eUi).slice(0, 120)); } usedDirty = false; }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS2) {} ai.setsDirty = 0; }
     if (!picks.length) { st.zeroD.h[hw] = (Number(st.zeroD.h[hw]) || 0) + 1; try { if (Object.keys(judged).length !== _jN0) baKvSetMerged_('tcg_judged', judged, baKvFreshMany_(['tcg_judged']), 0); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }

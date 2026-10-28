@@ -243,4 +243,7 @@ if [ -n "$B9" ]; then echo "NG  PAGE_KEYS に無い画面がある（押して�
 A1=$(awk '/\/\*ARC_KINDS_BEGIN\*\//,/\/\*ARC_KINDS_END\*\//' shopee-openapi-sync.gs | sed 's/^ *//; s/.*ARC_KINDS_BEGIN/BEGIN/; s/ARC_KINDS_END.*/END/')
 A2=$(awk '/\/\*ARC_KINDS_BEGIN\*\//,/\/\*ARC_KINDS_END\*\//' index.html | sed 's/^ *//; s/.*ARC_KINDS_BEGIN/BEGIN/; s/ARC_KINDS_END.*/END/')
 if [ -z "$A1" ] || [ "$A1" != "$A2" ]; then echo "NG  アーケードの種類の表（ARCADE_KINDS）が GAS とポータルで違う／見つからない"; NG=1; else echo "OK  アーケードの種類の表は GAS とポータルで同じ（$(printf '%s\n' "$A1" | grep -c "hw: '") 種類）"; fi
+# 7-11 ★2026-10-29 行末のコメント「/* …」を閉じ忘れると、次の行からのコードが黙って動かなくなる（10/12 19:11〜10/29：🃏の使った写真の印・tcg_sets の保存・候補0件で抜ける処理の3行が17日間死んでいた）
+B11=$(python3 tools/chk_opencmt.py shopee-openapi-sync.gs index.html)
+if [ -n "$B11" ]; then echo "NG  行末のコメントが閉じていない（次の行のコードが動かない）"; echo "$B11"; NG=1; else echo "OK  行末のコメントは全部閉じている"; fi
 exit $NG
