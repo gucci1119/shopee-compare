@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-0450';
+var SRC_VER = '20261029-0455';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -424,6 +424,18 @@ function doGetInner_(e) {
     /* ★2026-09-22 2台目のGoogleアカウントを立ち上げる時の口。
        エディタの関数ドロップダウンは選んだつもりで別関数が走る（記録済み）ので、外から確実に呼べる形にした。
        WRITE_TOKEN 必須。子機なら🤖のトリガーだけ作られる（setupTriggers 側で分岐）。 */
+    if (p.action === 'bkc_cfg') {   /* ★2026-10-29 案2の切り替え（on=1|0・reset=1）。WRITE_TOKEN 必須 */
+      var _bcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), _bo;
+      try {
+        var _bwt = P_().getProperty('WRITE_TOKEN'); if (!_bwt || p.token !== _bwt) throw new Error('WRITE_TOKEN不正');
+        if (p.on === '1' || p.on === '0') { P_().setProperty('BKC_ON', p.on); BKC_ON_V = null; }
+        if (p.reset === '1') P_().deleteProperty('BKC_IDX');
+        var _bi = {}; try { _bi = JSON.parse(P_().getProperty('BKC_IDX') || '{}'); } catch (eB) {}
+        var _bl = {}; Object.keys(_bi).forEach(function (k) { _bl[k] = { len: _bi[k].len, n: _bi[k].n, u: _bi[k].u, ageMin: Math.round((Date.now() - Number(_bi[k].at || 0)) / 60000) }; });
+        _bo = { ok: true, on: bkcOn_(), runner: baRunnerId_(), keys: _bl, src: SRC_VER };
+      } catch (err) { _bo = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(_bcb + '(' + JSON.stringify(_bo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'sb_gzip_test') {   /* ★2026-10-29 圧縮の試し（読むだけ・2回の接続）。gzip=1|0 を付けるとこの台の SB_GZIP を切り替える */
       var _gcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), _go;
       try {
@@ -6788,6 +6800,56 @@ function sbSelect_(table, query) {
   return JSON.parse(_txt);
 }
 var SB_LAST_LEN = 0, BA_KV_SZ = {};
+/* ★2026-10-29 Supabase の通信量（egress）を減らす（事業本部の依頼・案2）。🤖の巡回は1回で約16〜35MB を毎回丸ごと読み直していた（kvSz で実測）。
+   大きな控え（10万字超）を、この台の CacheService に圧縮して置き、次の回は「更新時刻（updated_at）が同じなら」そこから使う。
+   守り（事業本部の3つ）：①更新時刻が読めない・控えが欠けた・長さが合わない時は今までどおり丸ごと読む ②スクリプト プロパティ BKC_ON='1' の台だけ（1台で1日見てから広げる）
+   ③控えは最長 BKC_MAX_MS で捨てる（更新時刻を付けずに書く所が残っていても、古い控えを使い続けない）。
+   前提：app_kv の行を書き換えたら updated_at も必ず新しくなること（データベースのトリガーで保証してから BKC_ON にする） */
+var BKC_MAX_MS = 60 * 60 * 1000, BKC_MIN_LEN = 100000, BKC_CHUNK = 90000, BKC_MAX_CHUNKS = 120, BKC_ON_V = null;
+function bkcOn_() { if (BKC_ON_V === null) { try { BKC_ON_V = P_().getProperty('BKC_ON') === '1'; } catch (e) { BKC_ON_V = false; } } return BKC_ON_V; }
+function bkcGet_(C, k, e) {
+  try {
+    var ks = []; for (var i = 0; i < e.n; i++) ks.push('bkc_' + k + '_' + i);
+    var got = C.getAll(ks); var parts = [];
+    for (var j = 0; j < ks.length; j++) { var x = got[ks[j]]; if (x == null) return undefined; parts.push(x); }
+    var str = Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(parts.join('')), 'application/x-gzip')).getDataAsString('UTF-8');
+    if (str.length !== e.len) return undefined;
+    return JSON.parse(str);
+  } catch (err) { return undefined; }
+}
+function bkcPut_(C, idx, k, u, v, now) {
+  if (!u) { delete idx[k]; return; }
+  var str = JSON.stringify(v); if (str.length < BKC_MIN_LEN) { delete idx[k]; return; }
+  var b64 = Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(str, 'application/json')).getBytes());
+  var n = Math.ceil(b64.length / BKC_CHUNK); if (n > BKC_MAX_CHUNKS) { delete idx[k]; return; }
+  var o = {}; for (var i = 0; i < n; i++) o['bkc_' + k + '_' + i] = b64.slice(i * BKC_CHUNK, (i + 1) * BKC_CHUNK);
+  C.putAll(o, 21600);
+  idx[k] = { u: String(u), at: now, n: n, len: str.length };
+}
+function bkcSelect_(q) {
+  var inq = 'k=in.(' + q.map(encodeURIComponent).join(',') + ')';
+  if (!bkcOn_()) return sbSelect_('app_kv', 'select=k,v&' + inq);
+  var meta; try { meta = sbSelect_('app_kv', 'select=k,updated_at&' + inq); } catch (eM) { SB_LAST_LEN = 0; return sbSelect_('app_kv', 'select=k,v&' + inq); }   /* ① */
+  var C = CacheService.getScriptCache(), now = Date.now(), idx = {};
+  try { idx = JSON.parse(P_().getProperty('BKC_IDX') || '{}') || {}; } catch (eI) { idx = {}; }
+  var out = [], miss = [], hit = 0, hitLen = 0, mu = {};
+  (meta || []).forEach(function (m) { mu[m.k] = m.updated_at; });
+  q.forEach(function (k) {
+    if (!Object.prototype.hasOwnProperty.call(mu, k)) return;   /* 行が無い鍵は今までどおり結果に出さない */
+    var e = idx[k];
+    if (e && mu[k] && e.u === String(mu[k]) && now - Number(e.at || 0) < BKC_MAX_MS) { var v = bkcGet_(C, k, e); if (v !== undefined) { out.push({ k: k, v: v }); hit++; hitLen += e.len; return; } }
+    miss.push(k);
+  });
+  var missLen = 0;
+  if (miss.length) {
+    SB_LAST_LEN = 0;
+    var r = sbSelect_('app_kv', 'select=k,v,updated_at&k=in.(' + miss.map(encodeURIComponent).join(',') + ')'); missLen = SB_LAST_LEN;
+    (r || []).forEach(function (x) { out.push({ k: x.k, v: x.v }); try { bkcPut_(C, idx, x.k, x.updated_at, x.v, now); } catch (eP) { delete idx[x.k]; } });
+  }
+  try { P_().setProperty('BKC_IDX', JSON.stringify(idx)); } catch (eS) {}
+  SB_LAST_LEN = missLen; try { BA_KV_SZ.__bkcHit = hit; BA_KV_SZ.__bkcHitLen = hitLen; BA_KV_SZ.__bkcMiss = miss.length; } catch (eZ) {}
+  return out;
+}
 var SB_GZIP_ON = null;
 function sbGzipOn_() { if (SB_GZIP_ON === null) { try { SB_GZIP_ON = P_().getProperty('SB_GZIP') === '1'; } catch (e) { SB_GZIP_ON = false; } } return SB_GZIP_ON; }
 // 1000件ずつ全部取る（PostgRESTの既定上限が1000のため、辞書づくりのように全件要るとき用）
@@ -7723,7 +7785,7 @@ function baKvPrefetch_(keys) {
     /* ★2026-10-24 写真の控えは 9/26 から8分割（boshu_auto_pre_s0〜s7）。古い1本 boshu_auto_pre は 9/25 から更新されていないのに毎回一緒に読んでいた（一括読み 約4,580万字の一部）。
        分割を先に読み、8つそろっていなければ古い1本を後から読む（移行途中でも壊れない） */
     if (wantPre) q = q.filter(function (k) { return k !== 'boshu_auto_pre'; }).concat(baPreShardKeys_());
-    SB_LAST_LEN = 0; var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + q.map(encodeURIComponent).join(',') + ')'); BA_KV_SZ.__batch = SB_LAST_LEN; BA_KV_SZ.__batchN = q.length;
+    SB_LAST_LEN = 0; var r = bkcSelect_(q); BA_KV_SZ.__batch = SB_LAST_LEN;   /* ★2026-10-29 BKC_ON=1 の台だけ「変わっていない大きな控えは手元の控えから」（既定は今までどおり全部読む） */ BA_KV_SZ.__batchN = q.length;
     if (wantPre) { var _hv = {}; (r || []).forEach(function (x) { _hv[x.k] = 1; }); if (baPreShardKeys_().some(function (k) { return !_hv[k]; })) { SB_LAST_LEN = 0; var rl = sbSelect_('app_kv', 'select=k,v&k=eq.boshu_auto_pre'); BA_KV_SZ['boshu_auto_pre(古い1本)'] = SB_LAST_LEN; r = (r || []).concat(rl || []); } }
     BA_KV_CACHE = {}; keys.forEach(function (k) { BA_KV_CACHE[k] = null; });
     var byKey = {}; (r || []).forEach(function (x) { byKey[x.k] = x.v; if (keys.indexOf(x.k) >= 0) BA_KV_CACHE[x.k] = x.v; });
