@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261026-0330';
+var SRC_VER = '20261029-0300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -414,7 +414,9 @@ function doGetInner_(e) {
   /* ★2026-09-28 レビュー（脆弱性）：公開URLから鍵なしで叩ける読み取りの口（外部URLの取得＝1回で最大20回ぶん枠を使う・明細/在庫の読み取り・ZIP作成）に鍵を要求する。
      叩かれ続けると接続枠（2万/日）が尽きて出品・発送手配まで止まる。ポータルは rk に WRITE_TOKEN を付けて呼ぶ（token だと書き込み扱いになり再試行しないため別名）。
      WRITE_TOKEN が未設定の台では止めない（止めすぎて写真集めを壊さない） */
-  if (/^(get_models|get_item_full|fetch_metas|fetch_meta|fetch_image|fetch_images|zip_variation_images)$/.test(String(p.action || '')) || (p.action === 'news' && p.force)) {
+  /* ★2026-10-29 本人（事業本部経由）「鍵なしの口を塞いで」（レビュー 10/28 高-1・10/25 ⑧）：Shopee を呼ぶ読み口を全部この一覧に（カテゴリ・属性・発送の設定・注文の詳細・アカウントの健全さ・ブランド・販促・クーポン・ニュース）。
+     ポータルは 10/29 から全部の GAS の読みに rk を付ける（先に出した）。開けたままの口＝uf_status（枠の数字だけ・Shopee を呼ばない）・outbox_pending（止めてある・空を返す）・auth（Shopee の認可の戻り） */
+  if (/^(get_models|get_item_full|fetch_metas|fetch_meta|fetch_image|fetch_images|zip_variation_images|get_categories|get_attributes|ship_param|get_order_detail|account_health|get_brand_list|item_promotion|voucher_get|news)$/.test(String(p.action || ''))) {
     var _rkw = ''; try { _rkw = P_().getProperty('WRITE_TOKEN') || ''; } catch (eRk) {}
     if (_rkw && p.rk !== _rkw && p.token !== _rkw) { var _rcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''); return ContentService.createTextOutput(_rcb + '(' + JSON.stringify({ ok: false, error: '鍵がありません（⚙️設定の WRITE_TOKEN）' }) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT); }
   }
@@ -422,6 +424,18 @@ function doGetInner_(e) {
     /* ★2026-09-22 2台目のGoogleアカウントを立ち上げる時の口。
        エディタの関数ドロップダウンは選んだつもりで別関数が走る（記録済み）ので、外から確実に呼べる形にした。
        WRITE_TOKEN 必須。子機なら🤖のトリガーだけ作られる（setupTriggers 側で分岐）。 */
+    if (p.action === 'ingest_cfg') {   /* ★2026-10-29 取り込みの口（userscript から POST）の鍵 INGEST_KEY と「必須にするか」INGEST_REQ を置く・届いた数（鍵あり／なし）を返す。WRITE_TOKEN 必須 */
+      var _icb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), _io;
+      try {
+        var _iwt = P_().getProperty('WRITE_TOKEN'); if (!_iwt || p.token !== _iwt) throw new Error('WRITE_TOKEN不正');
+        if (p.key != null && p.key !== '') { if (!/^[A-Za-z0-9_-]{24,80}$/.test(String(p.key))) throw new Error('key の形が違います（英数字24〜80字）'); P_().setProperty('INGEST_KEY', String(p.key)); }
+        if (p.req === '0' || p.req === '1') P_().setProperty('INGEST_REQ', p.req);
+        if (p.reset_seen === '1') P_().deleteProperty('INGEST_SEEN');
+        var _seen = {}; try { _seen = JSON.parse(P_().getProperty('INGEST_SEEN') || '{}'); } catch (eS) {}
+        _io = { ok: true, hasKey: !!P_().getProperty('INGEST_KEY'), req: P_().getProperty('INGEST_REQ') === '1', seen: _seen, src: SRC_VER };
+      } catch (err) { _io = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(_icb + '(' + JSON.stringify(_io) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'setup_triggers') {
       var _scb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var _so;
@@ -2036,6 +2050,13 @@ function perfDailyIngest_(body) {
     return { ok: true, d: d, shop: shop, cc: cc, n: tot[4] };
   } finally { try { lock.releaseLock(); } catch (e) {} }
 }
+function ingestGate_(body) {   /* 返り＝断る時の文（通す時は ''） */
+  var key = '', req = false; try { key = P_().getProperty('INGEST_KEY') || ''; req = P_().getProperty('INGEST_REQ') === '1'; } catch (e0) {}
+  var has = !!(key && String(body.ik || '') === key);
+  try { { var sn = {}; try { sn = JSON.parse(P_().getProperty('INGEST_SEEN') || '{}'); } catch (e1) {} var a = String(body.action || ''), sh = String(body.shop_id || body.cc || '-').slice(0, 20); var k2 = a + '|' + sh; var x = sn[k2] = sn[k2] || { k: 0, n: 0 }; if (has) x.k++; else x.n++; x.at = new Date().toISOString(); x.v = String(body.ver || body.v || '').slice(0, 12); var ks = Object.keys(sn); if (ks.length > 80) ks.sort(function (p1, p2) { return String(sn[p1].at) < String(sn[p2].at) ? -1 : 1; }).slice(0, ks.length - 80).forEach(function (q) { delete sn[q]; }); P_().setProperty('INGEST_SEEN', JSON.stringify(sn)); } } catch (e2) {}   /* 数えるだけ＝Lock は取らない（取ると鍵なしの連打で🤖の巡回の Lock を邪魔できる）・同時に来た時に1つ数え落とすのは許す */
+  if (req && !has) return '取り込みの鍵がありません（userscript を新しい版に・鍵を入れ直す）';
+  return '';
+}
 function doPost(e) {
   try { return doPostInner_(e); } finally { try { ufPersist_(); } catch (_uf) {} }
 }
@@ -2049,6 +2070,9 @@ function doPostInner_(e) {
        Business Insights の内部API（traffic/dashboard/trend）は anti-bot の署名付きヘッダが要るので外からは叩けない。
        Seller Center の datacenter ページで動く userscript（shopee-insights.user.js）がページ自身の応答を横取りして送ってくる。
        鍵なし（yamato_ship と同じ型）。書けるのは app_kv `traffic_daily` だけ。数値だけを国×日で上書き保存 */
+    /* ★2026-10-29 取り込みの口（userscript が POST・前は鍵なし）：鍵 INGEST_KEY を ik で受け取る。INGEST_REQ='1' の時だけ必須（userscript に鍵が行き渡ったのを ingest_cfg の数で確かめてから必須にする）。
+       書き込みと Lock より前で見る＝鍵なしで perf_d_* を書き換えたり、Lock で🤖の巡回を飛ばしたりできないようにする */
+    if (/^(traffic_ingest|ai_actual_ingest|product_perf_ingest|perf_daily_ingest)$/.test(String(body.action || ''))) { var _ign = ingestGate_(body); if (_ign) return ContentService.createTextOutput(JSON.stringify({ ok: false, error: _ign })).setMimeType(ContentService.MimeType.JSON); }
     if (body.action === 'traffic_ingest') { out = trafficIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     if (body.action === 'ai_actual_ingest') { out = aiActualIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }   /* ★2026-10-11 Claude Console のコスト（本当の請求）を userscript が横取りして送る＝鍵なし。書けるのは app_kv ai_actual だけ */
     if (body.action === 'product_perf_ingest') { out = productPerfIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }

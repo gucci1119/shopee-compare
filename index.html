@@ -1983,7 +1983,9 @@
   // 向こうでは処理が終わっていることがあるので、絶対に投げ直さない。
   async function jsonp(url, timeoutMs, once) {
     const tmo = timeoutMs || 15000;
-    const full = url + (url.includes('?') ? '&' : '?') + 'callback=cb';
+    let full = url + (url.includes('?') ? '&' : '?') + 'callback=cb';
+    /* ★2026-10-29 GAS の /exec を直接組み立てて呼ぶ所（発送の設定・注文の詳細・属性・ニュース）にも鍵（rk）を付ける。token か rk が既にあれば足さない */
+    try { if (/script\.google(usercontent)?\.com\/macros\//.test(full) && !/[?&](rk|token)=/.test(full) && settings.writeToken) full += '&rk=' + encodeURIComponent(settings.writeToken); } catch (_) {}
     let lastErr = null, corsFail = false;
     const MAX = once ? 1 : 2;
     for (let att = 0; att < MAX; att++) {
@@ -2737,7 +2739,7 @@
     /* 今日すでに枯れている側は最初から避ける（1回むだに叩かない） */
     if (ufUrlBlocked(base)) { const alt0 = gasPeerUrl(base); if (alt0 && !ufUrlBlocked(alt0)) base = alt0; }
     const q = Object.assign({}, params, { callback: 'cb' }); delete q.__onHop;
-    if (/^(fetch_metas|fetch_meta|fetch_image|fetch_images|zip_variation_images|get_models|get_item_full)$/.test(String(q.action || '')) && settings.writeToken && !q.token) q.rk = settings.writeToken;   /* ★2026-09-28 GAS の読み取りの口にも鍵（rk）を付ける。token にすると書き込み扱い（再試行なし）になるので別名 */
+    if (settings.writeToken && !q.token && !q.rk) q.rk = settings.writeToken;   /* ★2026-10-29 本人（事業本部経由）「鍵なしの口を塞いで」：GAS の読む口は全部鍵（rk）を付けて呼ぶ（前は7つだけ＝カテゴリ・属性・ブランド等は鍵なしで呼んでいた）。GAS 側で鍵を必須にする前に、こちらを先に出す */   /* ★2026-09-28 GAS の読み取りの口にも鍵（rk）を付ける。token にすると書き込み扱い（再試行なし）になるので別名 */
     const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
     const url = base + (base.includes('?') ? '&' : '?') + qs;
     try { if (base !== gasUrlFor(params && params.action, params) && typeof params.__onHop === 'function') params.__onHop(base); } catch (_) {}
@@ -4838,6 +4840,7 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "GAS の鍵なしで呼べた口を塞ぎました": "Closed GAS endpoints that could be called without a key",
     "出品枠の表示を実物に合わせました": "Listing-limit display now matches the real limits",
     "ポケモンのアーケード3種（ガオーレ・トレッタ・バトリオ）を🤖で出せる下地を作りました": "Laid the groundwork for 🤖 to list three Pokemon arcade kinds (Gaole, Tretta, Battrio)",
     /* ★2026-10-25 アクセス（各国）：取り込み状況・カートの日ごと（05-13） */
@@ -24352,6 +24355,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-10-29', items: [
+      '🔐 <b>GAS の鍵なしで呼べた口を塞ぎました</b>（本人・事業本部経由「鍵なしの口を05に直させて」・レビュー 10/28 高-1）：カテゴリ・属性・発送の設定・注文の詳細・アカウントの健全さ・ブランド・販促・クーポン・ニュースの読む口は、鍵（ポータルの WRITE_TOKEN）が無いと断るようにしました。ポータルは全部の読みに鍵を付けて呼びます。userscript が送る取り込み（アクセス・カート・Claude の実費）は、新しい鍵を受け付けて数えるところまでです。全部の店から鍵付きで届くのを確かめてから必須にします',
+    ] },
     { date: '2026-10-26', items: [
       '📐 <b>出品枠の表示を実物に合わせました</b>（事業本部・04 経営企画部の確認）：画面の枠はこの PC に入っていた古い値（MY 本店 500・TW 本店 500・2店舗目 1,000）を見ていて、Seller Centre の実物（MY 本店 1,000・TW 本店 100・2店舗目 100）と違っていました。🤖 が使っている「公式APIで取り直した枠」を画面も先に使うようにしました。10/26 1:20 に全13店を取り直し、実物と合っています',
     ] },
@@ -29106,7 +29112,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (catNameCache[cc] || !shopId || !settings.openapiUrl) return;
     catNameCache[cc] = {};   // 二重取得を防ぐ（失敗しても空で確定させる）
     try {
-      const qs = 'action=get_categories&shop_id=' + encodeURIComponent(shopId) + '&callback=cb';
+      const qs = 'action=get_categories&shop_id=' + encodeURIComponent(shopId) + '&callback=cb' + (settings.writeToken ? '&rk=' + encodeURIComponent(settings.writeToken) : '');   /* ★2026-10-29 鍵を付ける */
       const url = settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs;
       const ac = new AbortController(); const tm = setTimeout(() => ac.abort(), 30000);
       const t = await fetch(url, { signal: ac.signal, credentials: 'omit' }).then(r => r.text()).finally(() => clearTimeout(tm));
