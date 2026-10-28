@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-0630';
+var SRC_VER = '20261029-0450';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -424,6 +424,27 @@ function doGetInner_(e) {
     /* ★2026-09-22 2台目のGoogleアカウントを立ち上げる時の口。
        エディタの関数ドロップダウンは選んだつもりで別関数が走る（記録済み）ので、外から確実に呼べる形にした。
        WRITE_TOKEN 必須。子機なら🤖のトリガーだけ作られる（setupTriggers 側で分岐）。 */
+    if (p.action === 'sb_gzip_test') {   /* ★2026-10-29 圧縮の試し（読むだけ・2回の接続）。gzip=1|0 を付けるとこの台の SB_GZIP を切り替える */
+      var _gcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), _go;
+      try {
+        var _gwt = P_().getProperty('WRITE_TOKEN'); if (!_gwt || p.token !== _gwt) throw new Error('WRITE_TOKEN不正');
+        if (p.gzip === '1' || p.gzip === '0') { P_().setProperty('SB_GZIP', p.gzip); SB_GZIP_ON = null; }
+        var _gk = String(p.k || 'llog_cost_ds').replace(/[^A-Za-z0-9_]/g, '');
+        var _sk = cfg_('SB_SERVICE_KEY'), _su = cfg_('SB_URL') + '/rest/v1/app_kv?select=v&k=eq.' + _gk;
+        ufBump_(2, 'Supabase読み(圧縮の試し)');
+        var _r1 = UrlFetchApp.fetch(_su, { method: 'get', muteHttpExceptions: true, headers: { apikey: _sk, Authorization: 'Bearer ' + _sk } });
+        var _r2 = UrlFetchApp.fetch(_su, { method: 'get', muteHttpExceptions: true, headers: { apikey: _sk, Authorization: 'Bearer ' + _sk, 'Accept-Encoding': 'gzip' } });
+        var _t1 = _r1.getContentText(), _t2 = ''; var _e2 = '';
+        try { _t2 = _r2.getContentText(); } catch (eT2) { _e2 = String(eT2).slice(0, 120); }
+        var _h1 = _r1.getHeaders() || {}, _h2 = _r2.getHeaders() || {};
+        var _ce = function (h) { var o = ''; Object.keys(h).forEach(function (x) { if (/^content-encoding$/i.test(x)) o = String(h[x]); }); return o; };
+        var _cl = function (h) { var o = ''; Object.keys(h).forEach(function (x) { if (/^content-length$/i.test(x)) o = String(h[x]); }); return o; };
+        var _same = !_e2 && _t1 === _t2; var _json = false; try { JSON.parse(_t2); _json = true; } catch (eJ) {}
+        _go = { ok: true, k: _gk, code1: _r1.getResponseCode(), code2: _r2.getResponseCode(), len1: _t1.length, len2: _t2.length, bytes1: _r1.getContent().length, bytes2: _r2.getContent().length,
+          enc1: _ce(_h1), enc2: _ce(_h2), clen1: _cl(_h1), clen2: _cl(_h2), same: _same, json2: _json, err2: _e2, gzipOn: sbGzipOn_(), src: SRC_VER };
+      } catch (err) { _go = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(_gcb + '(' + JSON.stringify(_go) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'ingest_cfg') {   /* ★2026-10-29 取り込みの口（userscript から POST）の鍵 INGEST_KEY と「必須にするか」INGEST_REQ を置く・届いた数（鍵あり／なし）を返す。WRITE_TOKEN 必須 */
       var _icb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), _io;
       try {
@@ -6760,12 +6781,15 @@ function jobCancelled_(key) { if (!key) return false; var v = jobGet_(key); retu
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
   ufBump_(1, 'Supabase読み(' + table + ')');
-  var res; try { res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key } }); } catch (e) { ufNoteErr_(e); throw e; }
+  var _hd = { apikey: key, Authorization: 'Bearer ' + key }; if (sbGzipOn_()) _hd['Accept-Encoding'] = 'gzip';   /* ★2026-10-29 Supabase の通信量（egress）を減らす試し：SB_GZIP=1 の台だけ圧縮を頼む（事業本部「1台で試して確かめてから」） */
+  var res; try { res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: _hd }); } catch (e) { ufNoteErr_(e); throw e; }
   if (res.getResponseCode() >= 300) throw new Error('Supabase select ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   var _txt = res.getContentText(); SB_LAST_LEN = _txt.length;   /* ★2026-10-24 返事の長さ（文字数）を控える＝どの鍵が太ったかを、読む量を増やさずに数える（BA_KV_SZ） */
   return JSON.parse(_txt);
 }
 var SB_LAST_LEN = 0, BA_KV_SZ = {};
+var SB_GZIP_ON = null;
+function sbGzipOn_() { if (SB_GZIP_ON === null) { try { SB_GZIP_ON = P_().getProperty('SB_GZIP') === '1'; } catch (e) { SB_GZIP_ON = false; } } return SB_GZIP_ON; }
 // 1000件ずつ全部取る（PostgRESTの既定上限が1000のため、辞書づくりのように全件要るとき用）
 // ★バージョン200（2026-09-20）：sbSelect_ に limit=5000〜50000 と書いていた7か所を全部こちらへ。sbSelect_ は1000行で黙って切れる。
 //   実害：入金の同期で BR の入金 1,076行が1000で切れているのに「全部読めた」(prevFull) と判定→ 残り76行を新規扱いして amount_initial（暫定の入金額）を今の額で上書きしていた。
