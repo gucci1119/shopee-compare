@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-1915';
+var SRC_VER = '20261029-2350';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9267,7 +9267,7 @@ function boshuAutoTick(manual) {
       var _notes = Object.keys(out.ccs).map(function (c2) { return c2 + ':' + String((out.ccs[c2] || {}).note || ''); }).join(' ');
       var _realFail = /失敗|エラー|error|作れません/.test(_notes);   /* ★「複製はこの回はもう作りません」「満杯（複製OFF）」は失敗ではない（自分のレビューで発見・2026-09-25） */
       if (_realFail) { st.errStreak = (st.errStreak || 0) + 1; st.errAt = new Date().toISOString(); st.lastErr = '候補 ' + picks.length + '件が1件も入らなかった（' + _notes.slice(0, 160) + '）'; }
-      else { st.lastErr = ''; baLog_(st, hw + '：候補 ' + picks.length + '件は全部「対象なし」（既に出ている／見送り）＝エラーには数えない'); }
+      else { st.lastErr = ''; baSkipDay_(st, hw, 'taishonashi', true, picks.length); baLog_(st, hw + '：候補 ' + picks.length + '件は全部「対象なし」（既に出ている／見送り）＝エラーには数えない'); }
     }
     st.lastMsg = hw + '：' + picks.length + '件 → 明細 ' + out.added + '件追加（' + Object.keys(out.ccs).map(function (c) { var x = out.ccs[c]; return c + ' ' + (x.added || 0) + (x.note ? '(' + x.note + ')' : ''); }).join('・') + '）';
     baLog_(st, st.lastMsg + '  例: ' + picks.slice(0, 3).map(function (p) { return p.en + (p.stock ? '' : '(在庫0)'); }).join(' / '));
@@ -9595,7 +9595,18 @@ function setupCondIndexTrigger() {
   ScriptApp.newTrigger('condIndexTick').timeBased().everyMinutes(10).create();
   return { ok: true, had: had, every: 10 };
 }
-function baSkipRec_(st, hw, cc, p, why, hits) { try { var jaK = String((p && (p.ja || p.en)) || '').slice(0, 80); if (st.skipped.slice(0, 120).some(function (x) { return x && x.why === why && x.ja === jaK && (x.cc || '') === (cc || ''); })) return;   /* 同じ理由の同じ作品を30分ごとに積まない（yahoowait など） */ st.skipped.unshift({ at: new Date().toISOString(), hw: hw, key: String((p && p.key) || ''), cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
+/* ★2026-10-29 本人「なんで今日、こんなに出品できてないん？」→「数える仕組みを入れて」：見送りの控え（skipped）は直近300件（約30分）しか残らず、1日の理由別の数が分からなかった。
+   状態の鍵に1日分の数を持つ＝st.skipDay { d:日本の日付, n:{理由:回数（同じ作品を何度見ても数える）}, u:{理由:作品の数の目安（30分の重複を除く）}, hw:{'機種|理由':作品の数の目安} }。
+   日付が変わったら前の日を st.skipDayPrev に移す（朝に前の日の分を読める）。理由には見送り（nojan・costhigh 等）のほか shopfull:国（その国は満杯で足さない）・taishonashi（候補が全部出済み／見送り）も入る */
+function baSkipDay_(st, hw, why, isNew, k) {
+  try {
+    var d = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), S = st.skipDay, c = Math.max(1, Number(k) || 1);
+    if (!S || S.d !== d) { if (S && S.d) st.skipDayPrev = S; S = st.skipDay = { d: d, n: {}, u: {}, hw: {} }; }
+    why = String(why || '?').slice(0, 24); S.n[why] = (S.n[why] || 0) + c;
+    if (isNew) { S.u[why] = (S.u[why] || 0) + c; var hk = String(hw || '?').slice(0, 16) + '|' + why; S.hw[hk] = (S.hw[hk] || 0) + c; }
+  } catch (e) {}
+}
+function baSkipRec_(st, hw, cc, p, why, hits) { try { var jaK = String((p && (p.ja || p.en)) || '').slice(0, 80); var _dup = st.skipped.slice(0, 120).some(function (x) { return x && x.why === why && x.ja === jaK && (x.cc || '') === (cc || ''); }); baSkipDay_(st, hw, why, !_dup); if (_dup) return;   /* 同じ理由の同じ作品を30分ごとに積まない（yahoowait など） */ st.skipped.unshift({ at: new Date().toISOString(), hw: hw, key: String((p && p.key) || ''), cc: cc || '', ja: String((p && (p.ja || p.en)) || '').slice(0, 80), en: String((p && p.en) || '').slice(0, 40), why: why, hits: hits == null ? undefined : hits }); } catch (e) {} }
 // 候補づくり（tick と「🔜 次に出す予定」で同じ）：listings の明細名/JAN で「出している」を国別に、家族カタログ・関連カタログ・済み台帳もここで読む
 function baLoadCtx_(cfg, hw, ccs, opts) {
   var _tcg = !!(opts && opts.tcg);   /* ★2026-10-12 トレカ用＝カードのカタログ（約195件）だけ読み、ゲーム用の候補作り・写真の控え6MB・product_ids・90日分の注文は読まない */
@@ -10278,7 +10289,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (baShopFull_(cc, base.shop_id)) {
         if (BA_FAM_TICK >= 1) { res.note = '2店舗目のカタログはこの回はもう作りません（1回1件）'; break; }   /* ★2026-09-23 Codex指摘：作成の上限がこの経路に無かった */
         var sub1 = baCloneToSub_(cc, base, newName, st, hw, _role);   /* ★2026-09-26 元の名前（①のまま）でなく、国の中で空いている番号の名前で作る */
-        if (!sub1) { res.note = hw + ' の複製先が無い（この店は出品枠が満杯・2店舗目も無いか満杯）→ この国は今日は足しません'; baLog_(st, cc + '：' + res.note); break; }   /* ★2026-10-18 ここで止めないと下へ抜けて【満杯の店】に複製を作り続けていた（実測 TH 2店舗目に SV ③④⑤⑥・どれも公開できず） */
+        if (!sub1) { res.note = hw + ' の複製先が無い（この店は出品枠が満杯・2店舗目も無いか満杯）→ この国は今日は足しません'; baSkipDay_(st, hw, 'shopfull:' + cc, true); baLog_(st, cc + '：' + res.note); break; }   /* ★2026-10-18 ここで止めないと下へ抜けて【満杯の店】に複製を作り続けていた（実測 TH 2店舗目に SV ③④⑤⑥・どれも公開できず） */
         if (sub1) {
           BA_FAM_TICK++; st.cloneMade.n++;
           tgt = sub1; rows.push(tgt); newItem = true;
