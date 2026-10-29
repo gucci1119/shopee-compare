@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-0455';
+var SRC_VER = '20261029-1130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -10985,8 +10985,31 @@ var TCG_VAR_EN = [/* ★2026-10-14 本人「これはモンコレなのか？」
 function tcgVarEn_(v) { for (var i = 0; i < TCG_VAR_EN.length; i++) if (TCG_VAR_EN[i][0].test(v)) return TCG_VAR_EN[i][1]; return ''; }
 /* 汎用の題名パーサー：「番号[レアリティ]：名前」（遊戯王 BETB-JP027[UL]：…／ワンピ OP17-118[SEC]：(パラレル)…／デュエマ 33/100[VR]：…＜フレーバー＞／ヴァイス GA04/S131-100[RR]：…／ヴァンガ DZ-BT16/045[RR]：…）
    ポケカは専用（tcgParsePokeca_）。番号が無い題名（遊戯王「[UR]：青眼の白龍(MANGA-STYLE)」）は出さない＝同じ名前の別カードを取り違えるより出さない */
+/* 🎰 2026-10-29 一番くじ（本人「一番くじ系出品してほしい」「フィギュアもでかいのは出さないで」・01 商品部の依頼）。
+   駿河屋の品名「<名前> <種類> 「一番くじ <シリーズ>」 <X>賞」を読む。白リスト方式＝行の ok の語が品名に無い物は出さない（大きいフィギュアは ok に入らない）。
+   KUJI_NG は ok の語が入っていても大きい物・まとめ物・紙物を落とす。英語名の辞書は無い＝Claude が tcg_names_ai に入れた物だけ出る（辞書の鍵 tcg_names_<hw> は空） */
+var KUJI_NG = /MASTERLISE|マスタライズ|マスターライズ|造形王|SOFVICS|ソフビ|フィギュアーツ|ジオラマ|ラストワン|ダブルチャンス|\bBIG\b|ビッグ|ジャンボ|特大|巨大|バスタオル|ブランケット|クッション|ぬいぐるみ|ポスター|色紙|ビジュアルボード|タペストリー|全\s*\d+\s*種|コンプ|セット|まとめ|BOX|ボックス|未開封|新品/i;
+function tcgParseKuji_(a, t) {
+  var x = String(t || '').normalize('NFKC').replace(/^(?:\[[^\]]*\]\s*|【[^】]*】\s*)+/, '').replace(/\s+/g, ' ').trim();
+  if (!/一番くじ/.test(x) || KUJI_NG.test(x)) return null;
+  var okRe = null; try { okRe = a.ok ? new RegExp(a.ok, 'i') : null; } catch (eR) { return null; }
+  if (!okRe || !okRe.test(x)) return null;   /* 白リスト：行の語が無ければ出さない */
+  var m = x.match(/^(.+?)\s*「([^」]*一番くじ[^」]*)」\s*(.*)$/); if (!m) return null;
+  var head = m[1].replace(/\s*\((?:箱|台紙|袋|タグ|付属)[^()]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  head = head.replace(/([^\s])(フィギュア)/g, '$1 $2');   /* 「ちょこのっこフィギュア」→「ちょこのっこ フィギュア」（メルカリの照合を語ごとにする） */
+  if (!head || !okRe.test(head)) return null;
+  if (!head.replace(okRe, ' ').replace(/フィギュア|一番くじ|[\s・]/g, '')) return null;   /* キャラ名の無い品名（「アクリルスタンド 「一番くじ …」」）は何の品か決まらない＝出さない */   /* 種類の語は「」の前（名前のすぐ後ろ）にある物だけ＝シリーズ名に語があるだけの別の品物を拾わない */
+  var series = String(m[2]).replace(/^.*?一番くじ\s*/, '').trim();
+  var prize = ((m[3] || '').match(/([A-Z]{1,2})\s*賞/) || [])[1] || '';
+  /* 名前＝英語名の鍵（Claude の判定 merge.py も jaName をそのまま鍵にする）。版（シリーズ・賞）まで入れて、別の一番くじの同じキャラを取り違えない。
+     メルカリの検索と照合は「 「」の前（キャラ名＋種類）だけ＝tcgKujiHead_（売り手はシリーズ名を書かないことが多い） */
+  var name = (head + ' 「一番くじ ' + series + '」' + (prize ? ' ' + prize + '賞' : '')).replace(/\s+/g, ' ').trim().slice(0, 90);
+  return { num: '', rar: '', name: name, vars: [], varEn: '', series: series, setTag: '', prize: prize };
+}
+function tcgKujiHead_(hw, jaName) { return (BA_ARC[hw] && BA_ARC[hw].pz === 'kuji') ? String(jaName || '').split(' 「')[0] : String(jaName || ''); }   /* 🎰 検索に使う名前（一番くじはキャラ名＋種類だけ） */
 function tcgParseCard_(hw, t, k) {
   if (hw === 'pokeca' || hw === 'pokeca_old') return tcgParsePokeca_(t);
+  if (BA_ARC[hw] && BA_ARC[hw].pz === 'kuji') return tcgParseKuji_(BA_ARC[hw], t);
   /* 🪙 2026-10-11 小物（本人「トレカ以外も」）：妖怪メダル「[コード保証無し] 名前 種類(レア) 「弾」」／モンコレ「モンコレ MS-23 ピチュー 「ポケットモンスター」」。番号が無い物は名前で見分ける（写真の検索も名前で） */
   if (hw === 'yokai') {
     var y = String(t || '').normalize('NFKC').replace(/^\[[^\]]*\]\s*/, '').trim();
@@ -11041,7 +11064,7 @@ function tcgLocalFamName_(hw, cc) {
   var en = TCG_LOC_EN[hw]; if (!en) return '';
   var kind = tcgItemKind_(hw);   /* メザスタのタグ・フレンダのピックはカードと呼ばない（TCG_ITEM_KIND と同じ表＝🕹 アーケードの種類もここに入る） */
   if (cc === 'TW') { var w = en.replace(/ Single Card/, '').split(' '), nm = '【二手】' + (TCG_LOC_ZH[hw] || '') + ' ' + en + ' 日版'; while (nm.length > 57 && w.length > 1) { nm = '【二手】' + (TCG_LOC_ZH[hw] || '') + ' ' + w.join(' ') + ' 日版'; if (nm.length > 57) w.splice(w.length - 2, 1); } return nm; }   /* 台湾は60字まで（番号の分を空ける）。Card/TCG は末尾なので残る */
-  var L = { TH: ['[มือสอง]', { card: 'การ์ด', medal: 'เหรียญ', figure: 'ฟิกเกอร์', tag: 'แท็ก', disk: 'แผ่น', chip: 'ชิป', piece: 'ตัวหมาก' }, '| สินค้าญี่ปุ่น'], VN: ['[Đã qua sử dụng]', { card: 'Thẻ bài', medal: 'Huy hiệu', figure: 'Mô hình', tag: 'Thẻ', disk: 'Đĩa', chip: 'Chip', piece: 'Quân' }, '| Hàng Nhật'], BR: ['[Usado]', { card: 'Carta', medal: 'Medalha', figure: 'Figura', tag: 'Tag', disk: 'Disco', chip: 'Chip', piece: 'Peça' }, '| Japonês'] }[cc];
+  var L = { TH: ['[มือสอง]', { acsta: 'อะคริลิคสแตนด์', towel: 'ผ้าขนหนู', strap: 'พวงกุญแจยาง', card: 'การ์ด', medal: 'เหรียญ', figure: 'ฟิกเกอร์', tag: 'แท็ก', disk: 'แผ่น', chip: 'ชิป', piece: 'ตัวหมาก' }, '| สินค้าญี่ปุ่น'], VN: ['[Đã qua sử dụng]', { acsta: 'Standee mica', towel: 'Khăn', strap: 'Móc khóa cao su', card: 'Thẻ bài', medal: 'Huy hiệu', figure: 'Mô hình', tag: 'Thẻ', disk: 'Đĩa', chip: 'Chip', piece: 'Quân' }, '| Hàng Nhật'], BR: ['[Usado]', { acsta: 'Display de acrílico', towel: 'Toalha', strap: 'Chaveiro de borracha', card: 'Carta', medal: 'Medalha', figure: 'Figura', tag: 'Tag', disk: 'Disco', chip: 'Chip', piece: 'Peça' }, '| Japonês'] }[cc];
   if (!L) return '';
   return L[0] + ' ' + (L[1][kind] || L[1].tag) + ' ' + en + ' ' + L[2];   /* 語の無い品物の種類は tag の語（undefined を出さない） */
 }
@@ -11060,7 +11083,7 @@ var TCG_NG_TITLE = /box|ボックス|パック(?!マン)|未開封|付録|とじ
 /* ★2026-10-12 本人「モンコレってフィギュアでしょ？」「妖怪メダルとメザスタタグ これはトレカじゃないね」：小物はカード1枚の判定にかけると kind≠card で全部落ちていた（妖怪 5枚試して0明細＝AI料金だけ）。
    シリーズごとに「正しい形」を決め、その形の実物写真なら通す（カード以外の問い） */
 var TCG_ITEM_KIND = { goods_amiibo: 'figure', moncolle: 'figure', yokai: 'medal', mezastar: 'tag', frienda: 'tag' };   /* 🪙 2026-10-13 フレンダのピックはタグと同じ扱い */
-var TCG_ITEM_JA = { figure: 'フィギュア（小さな人形）', medal: 'メダル', tag: 'タグ（ゲーム機で読み込むプラスチックのカード状のタグ）', disk: 'ディスク（ゲーム機で読み込むプラスチックの円盤）', chip: 'チップ（ゲーム機で読み込む小さなプラスチックの駒）', piece: 'コマ（ゲーム機で読み込む円いプラスチックの駒）' };
+var TCG_ITEM_JA = { acsta: 'アクリルスタンド（透明なアクリル板に絵が印刷された立て札と台座）', towel: 'タオル（キャラクターの絵柄の布）', strap: 'ラバーストラップ・ラバーチャーム（ゴム製の小さな飾り）', figure: 'フィギュア（小さな人形）', medal: 'メダル', tag: 'タグ（ゲーム機で読み込むプラスチックのカード状のタグ）', disk: 'ディスク（ゲーム機で読み込むプラスチックの円盤）', chip: 'チップ（ゲーム機で読み込む小さなプラスチックの駒）', piece: 'コマ（ゲーム機で読み込む円いプラスチックの駒）' };
 /* 🕹 2026-10-25 アーケードの種類（本人「種類の数は多く打っておきたい」「種類ってのは、がおーれ、フレンダ、メザスタ、とかの粒度の種類」・01 商品部の依頼）。
    ここに1行足せば GAS の全部（SKU の頭・英名・現地語名・検索語・品物の種類・ばら売りの JAN 免除・巡回の絞り込み・名前の辞書）に効く。
    ポータル index.html の ARCADE_KINDS と同じ中身（chk.sh が突き合わせる）。表紙 img/cover_<hw>.png・cfg.family/cfg.tcg.hws・写真判定は 01 が用意する。
@@ -11070,7 +11093,16 @@ var ARCADE_KINDS = /*ARC_KINDS_BEGIN*/[
   { hw: 'frienda', ja: 'ポケモンフレンダ', kindJa: 'ピック', label: 'フレンダ ピック', en: 'Pokemon Frienda Pick', zh: '寶可夢 Frienda 卡匣', sku: 'FRIENDA', kind: 'tag', names: 'pokeca', q: 'ポケモンフレンダ', mq: '', cat: '501080174', sq: '', cap: 50, re: 'frienda|フレンダ' },
   { hw: 'gaole', ja: 'ポケモンガオーレ', kindJa: 'ディスク', label: 'ガオーレ ディスク', en: 'Pokemon Gaole Disk', zh: '寶可夢 加傲樂 Gaole 卡匣', sku: 'GAOLE', kind: 'disk', names: 'pokeca', q: 'ポケモンガオーレ ディスク', mq: 'ガオーレ', cat: '501080146', sq: '', cap: 50, re: 'gaole|ga-?ol[eé]|ガオーレ' },
   { hw: 'tretta', ja: 'ポケモントレッタ', kindJa: 'チップ', label: 'トレッタ チップ', en: 'Pokemon Tretta Chip', zh: '寶可夢 Tretta 卡匣', sku: 'TRETTA', kind: 'chip', names: 'pokeca', q: 'ポケモントレッタ', mq: 'トレッタ', cat: '501080124', sq: '', cap: 45, re: 'tretta|トレッタ' },
-  { hw: 'battrio', ja: 'ポケモンバトリオ', kindJa: 'コマ', label: 'バトリオ コマ', en: 'Pokemon Battrio Piece', zh: '寶可夢 Battrio 卡匣', sku: 'BATTRIO', kind: 'piece', names: 'pokeca', q: 'ポケモンバトリオ', mq: 'バトリオ', cat: '501080114', sq: '', cap: 45, re: 'battrio|バトリオ' }
+  { hw: 'battrio', ja: 'ポケモンバトリオ', kindJa: 'コマ', label: 'バトリオ コマ', en: 'Pokemon Battrio Piece', zh: '寶可夢 Battrio 卡匣', sku: 'BATTRIO', kind: 'piece', names: 'pokeca', q: 'ポケモンバトリオ', mq: 'バトリオ', cat: '501080114', sq: '', cap: 45, re: 'battrio|バトリオ' },
+  { hw: 'kuji_choko', ja: '一番くじ ちょこのっこ', kindJa: 'フィギュア', label: '一番くじ ちょこのっこ', en: 'Ichiban Kuji Chokonokko Figure', zh: '一番賞 Chokonokko 坐姿公仔', sku: 'KUJICHOKO', kind: 'figure', names: '', q: '一番くじ ちょこのっこ', mq: '一番くじ', cat: '', sq: '一番くじ ちょこのっこ', cap: 60, re: 'chokonokko|ちょこのっこ', pz: 'kuji', ok: 'ちょこのっこ' },
+  { hw: 'kuji_defo', ja: '一番くじ デフォルメフィギュア', kindJa: 'フィギュア', label: '一番くじ デフォルメ', en: 'Ichiban Kuji Deformed Figure', zh: '一番賞 Q版公仔', sku: 'KUJIDEFO', kind: 'figure', names: '', q: '一番くじ デフォルメ フィギュア', mq: '一番くじ', cat: '', sq: '一番くじ デフォルメ', cap: 30, re: 'ichiban\\s*kuji[^\\n]{0,30}deformed|一番くじ[^\\n]{0,40}デフォルメ', pz: 'kuji', ok: 'デフォルメ.{0,12}フィギュア' },
+  { hw: 'kuji_chibi', ja: '一番くじ ちびきゅんキャラ', kindJa: 'フィギュア', label: '一番くじ ちびきゅん', en: 'Ichiban Kuji Chibi Kyun Chara', zh: '一番賞 Chibi Kyun 公仔', sku: 'KUJICHIBI', kind: 'figure', names: '', q: '一番くじ ちびきゅんキャラ', mq: '一番くじ', cat: '', sq: '一番くじ ちびきゅんキャラ', cap: 24, re: 'chibi\\s*kyun|ちびきゅん', pz: 'kuji', ok: 'ちびきゅん' },
+  { hw: 'kuji_mini', ja: '一番くじ ミニフィギュア', kindJa: 'フィギュア', label: '一番くじ ミニフィギュア', en: 'Ichiban Kuji Mini Figure', zh: '一番賞 迷你公仔', sku: 'KUJIMINI', kind: 'figure', names: '', q: '一番くじ ミニフィギュア', mq: '一番くじ', cat: '', sq: '一番くじ ミニフィギュア', cap: 15, re: 'ichiban\\s*kuji[^\\n]{0,30}mini\\s*figure|一番くじ[^\\n]{0,40}ミニフィギュア', pz: 'kuji', ok: 'ミニフィギュア' },
+  { hw: 'kuji_wcf', ja: '一番くじ ワールドコレクタブルフィギュア', kindJa: 'フィギュア', label: '一番くじ ワーコレ', en: 'Ichiban Kuji World Collectable Figure', zh: '一番賞 WCF 公仔', sku: 'KUJIWCF', kind: 'figure', names: '', q: '一番くじ ワールドコレクタブルフィギュア', mq: '一番くじ', cat: '', sq: '一番くじ ワールドコレクタブル', cap: 7, re: 'ichiban\\s*kuji[^\\n]{0,30}world\\s*collectable|一番くじ[^\\n]{0,40}(ワールドコレクタブル|ワーコレ)', pz: 'kuji', ok: 'ワールドコレクタブル|ワーコレ' },
+  { hw: 'kuji_acsta', ja: '一番くじ アクリルスタンド', kindJa: 'アクリルスタンド', label: '一番くじ アクスタ', en: 'Ichiban Kuji Acrylic Stand', zh: '一番賞 壓克力立牌', sku: 'KUJIACSTA', kind: 'acsta', names: '', q: '一番くじ アクリルスタンド', mq: '一番くじ', cat: '', sq: '一番くじ アクリルスタンド', cap: 60, re: 'ichiban\\s*kuji[^\\n]{0,30}acrylic|一番くじ[^\\n]{0,40}(アクリルスタンド|アクスタ)', pz: 'kuji', ok: 'アクリルスタンド|アクスタ' },
+  { hw: 'kuji_towel', ja: '一番くじ タオル', kindJa: 'タオル', label: '一番くじ タオル', en: 'Ichiban Kuji Towel', zh: '一番賞 毛巾', sku: 'KUJITOWEL', kind: 'towel', names: '', q: '一番くじ タオル', mq: '一番くじ', cat: '', sq: '一番くじ タオル', cap: 40, re: 'ichiban\\s*kuji[^\\n]{0,30}towel|一番くじ[^\\n]{0,40}タオル', pz: 'kuji', ok: 'タオル' },
+  { hw: 'kuji_rstrap', ja: '一番くじ ラバーストラップ', kindJa: 'ラバーストラップ', label: '一番くじ ラバスト', en: 'Ichiban Kuji Rubber Strap', zh: '一番賞 橡膠吊飾', sku: 'KUJIRSTRAP', kind: 'strap', names: '', q: '一番くじ ラバーストラップ', mq: '一番くじ', cat: '', sq: '一番くじ ラバーストラップ', cap: 40, re: 'ichiban\\s*kuji[^\\n]{0,30}rubber\\s*strap|一番くじ[^\\n]{0,40}ラバーストラップ', pz: 'kuji', ok: 'ラバーストラップ' },
+  { hw: 'kuji_rcharm', ja: '一番くじ ラバーチャーム', kindJa: 'ラバーチャーム', label: '一番くじ ラバーチャーム', en: 'Ichiban Kuji Rubber Charm', zh: '一番賞 橡膠掛飾', sku: 'KUJIRCHARM', kind: 'strap', names: '', q: '一番くじ ラバーチャーム', mq: '一番くじ', cat: '', sq: '一番くじ ラバーチャーム', cap: 40, re: 'ichiban\\s*kuji[^\\n]{0,30}rubber\\s*charm|一番くじ[^\\n]{0,40}ラバーチャーム', pz: 'kuji', ok: 'ラバーチャーム' }
 ]/*ARC_KINDS_END*/;
 var BA_ARC = {}, BA_ARC_SKU_OR = '';
 (function () {
@@ -11204,7 +11236,8 @@ function tcgEnName_(hw, pr, names, ai) {
   if (!(ai.budget > 0) || !ai.st) return '';
   ai.budget--;
   var _isPk = (hw === 'pokeca' || hw === 'pokeca_old');
-  var o = baClaudeJson_((_isPk ? 'Japanese Pokémon TCG card name: "' + pr.name + '" (game: ' + (TCG_HW_JA[hw] || hw) + ').\nReply JSON only: {"en": "<the official English card name exactly as printed on the English version of this card (Trainer/Supporter/Item/Energy names included). Empty string if you are not sure>", "kind":' : 'Japanese trading card game "' + (TCG_EN[hw] || TCG_HW_JA[hw] || hw) + '" card name (Japanese): "' + pr.name + '".\nReply JSON only: {"en": "<English card name: the official English name if this card exists in an English edition; otherwise a short natural English translation or romanization that collectors would use. Max 28 characters. Empty string only if unreadable>", "kind": "pokemon|trainer|energy|other"}'), ai.st, 'tcg_name', 200);
+  var _kj = BA_ARC[hw] && BA_ARC[hw].pz === 'kuji';   /* 🎰 一番くじの景品はカードではない＝キャラ名＋品物の英語名を聞く */
+  var o = _kj ? baClaudeJson_('Japanese "Ichiban Kuji" lottery prize item (' + (BA_ARC[hw].en || '') + '). Japanese name: "' + pr.name + '".\nReply JSON only: {"en": "<short English item name collectors use: the character\'s official English name + the item type, e.g. \"Luffy Chokonokko Figure\". Max 28 characters. Empty string if unreadable>", "kind": "other"}', ai.st, 'tcg_name', 200) : baClaudeJson_((_isPk ? 'Japanese Pokémon TCG card name: "' + pr.name + '" (game: ' + (TCG_HW_JA[hw] || hw) + ').\nReply JSON only: {"en": "<the official English card name exactly as printed on the English version of this card (Trainer/Supporter/Item/Energy names included). Empty string if you are not sure>", "kind":' : 'Japanese trading card game "' + (TCG_EN[hw] || TCG_HW_JA[hw] || hw) + '" card name (Japanese): "' + pr.name + '".\nReply JSON only: {"en": "<English card name: the official English name if this card exists in an English edition; otherwise a short natural English translation or romanization that collectors would use. Max 28 characters. Empty string only if unreadable>", "kind": "pokemon|trainer|energy|other"}'), ai.st, 'tcg_name', 200);
   if (!o || o.nokey) { ai.budget++; return ''; }
   var en2 = String(o.en || '').trim();
   if (/[ぁ-んァ-ヶ一-龠]/.test(en2) || en2.length > 30) en2 = '';
@@ -11309,7 +11342,7 @@ function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenE
 }
 /* 写真を1枚：題名に番号が入る出品だけ → AI判定（カード用）。戻り {img, src, srcTitle, hits} か null。blocked なら {blocked:1} */
 function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
-  var q = (TCG_SEARCH_WORD[hw] || '') + ' ' + c.jaName + ' ' + c.num;
+  var q = (TCG_SEARCH_WORD[hw] || '') + ' ' + tcgKujiHead_(hw, c.jaName) + ' ' + c.num;
   /* ★2026-10-12 本人「ヤフオクだけで探してるの？メルカリは？」：トレカは Yahoo!フリマ1本で、弾かれると全部止まっていた（10/11 13:22 以降 0件）。
      GAS はメルカリを読めないので、ポータル（家の回線のブラウザ）がメルカリで集めた写真の控え tcg_pre を先に使う＝ゲームの boshu_auto_pre と同じ形。
      控えは boshu_auto_pre（約6MB）に相乗りしない＝4台目が30分ごとに数MBを読むと DB が落ちる（10/10・10/11） */
@@ -11641,7 +11674,7 @@ function tcgPreview_(p) {
   var n = Math.max(1, Math.min(200, Number((p && p.n) || 40)));
   var _tpOnce = baKv_('tcg_pre') || {};   /* ★2026-10-12 1回だけ読む（前は候補ごとに読み直し＝1回の呼び出しで最大41回・BA_KV_CACHE が無いと控えが効かない） */
   /* ★2026-10-12 ポータルがメルカリで写真を集めるための材料（key・検索語・番号・NG語）も返す。並びは巡回が試す順のまま */
-  return { ok: true, hw: hw, stat: cands.stat, ng: TCG_NG_TITLE.source, list: cands.list.slice(0, n).map(function (c) { return { rej: (((_tpOnce[c.key] || {}).rej || {}).imgs) || [], key: c.key, en: c.en, ja: c.ja, jaName: c.jaName, num: c.num, q: (TCG_SEARCH_WORD[hw] || '') + ' ' + c.jaName + ' ' + c.num, cost: c.cost, need: c.need.length, k: c.k, sku: c.sku }; }) };
+  return { ok: true, hw: hw, stat: cands.stat, ng: TCG_NG_TITLE.source, list: cands.list.slice(0, n).map(function (c) { return { rej: (((_tpOnce[c.key] || {}).rej || {}).imgs) || [], key: c.key, en: c.en, ja: c.ja, jaName: c.jaName, num: c.num, q: (TCG_SEARCH_WORD[hw] || '') + ' ' + tcgKujiHead_(hw, c.jaName) + ' ' + c.num, cost: c.cost, need: c.need.length, k: c.k, sku: c.sku }; }) };
 }
 /* 担当の台（cfg.tcg.runner）で、Head で走る boshuAutoTick の中から tcgCron の時間トリガーを1回だけ作る＝/exec の再デプロイ無しで動き出す（gas-deploy スキル：Head から作ったトリガーは保存だけで最新） */
 function tcgEnsureTrigger_(cfg) {
