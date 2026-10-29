@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-1600';
+var SRC_VER = '20261029-1915';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6836,6 +6836,7 @@ function bkcGet_(C, k, e) {
 }
 function bkcPut_(C, idx, k, u, v, now) {
   if (!u) { delete idx[k]; return; }
+  if (/^(boshu_auto_status|tcg_auto_status)/.test(String(k))) { delete idx[k]; return; }   /* ★2026-10-29 事業本部：状態の鍵は毎回変わる＝控えても当たらない。控えの対象から外す（案2を入にする時に一緒に） */
   var str = JSON.stringify(v); if (str.length < BKC_MIN_LEN) { delete idx[k]; return; }
   var b64 = Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(str, 'application/json')).getBytes());
   var n = Math.ceil(b64.length / BKC_CHUNK); if (n > BKC_MAX_CHUNKS) { delete idx[k]; return; }
