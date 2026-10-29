@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-1230';
+var SRC_VER = '20261029-1300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7972,7 +7972,41 @@ function baEnTidy_(en) {
 }
 // 英名：①作品マスタの英名 ②控え（前にAIに聞いた） ③Claude に正式な英題（＋30字の短縮形）を聞く ④Google翻訳（最後の手段）
 //   ★v182 まで Google翻訳→30字で機械的に切っていたので「Incredibles: Rise of」のような途中切れの明細名が出ていた（買い手が検索する名前＝一番効く所）
+/* ★2026-10-29 本人（01 経由）：TH の注文「ノラと皇女と野良猫ハート2」の英語名に「2」が無かった。01 の洗い出し（01商品部_英語名の番号抜け_2026-10-29.json）で 101作品・548明細。
+   原因＝英語名が30字を超えた時の短縮（AI の short・最後の機械切り）で末尾の番号が落ちる（Professional Baseball Spirits 5＝31字→「…Spirits」）。
+   → ①元の英語名にある続編の印（2〜9・II〜IX・Vol.N）が短い名前に無ければ、前を詰めて印を残す ②英語名に数字・ローマ数字が1つも無く日本語名に印がある時は、
+   作品マスタの英名（公式）でない時だけ印を足す（逆転裁判5＝Dual Destinies のような公式の英題は触らない）。30字に収まらなければ空＝出さない */
+var BA_SEQ_EN_RE = /\b(Vol\.?\s*\d{1,2}|[2-9]|II|III|IV|V|VI|VII|VIII|IX)\b/g;
+function baSeqTok_(en) { var m = String(en || '').match(BA_SEQ_EN_RE); return m ? m[m.length - 1].replace(/^Vol\.?\s*/i, 'Vol.') : ''; }
+function baSeqJa_(ja) {
+  var j = baCleanJa_(ja).normalize('NFKC').replace(/(19|20)\d{2}/g, ' ');   /* 年（プロ野球スピリッツ2019）は続編の印にしない */
+  var mv = j.match(/vol\.?\s*(\d{1,2})/i); if (mv) return 'Vol.' + mv[1];
+  var mr = j.match(/(?:^|[^A-Za-z])(Ⅱ|Ⅲ|Ⅳ|Ⅴ|Ⅵ|Ⅶ|Ⅷ|Ⅸ|II|III|IV|VI|VII|VIII|IX)(?![A-Za-z])/); if (mr) return ({ 'Ⅱ': 'II', 'Ⅲ': 'III', 'Ⅳ': 'IV', 'Ⅴ': 'V', 'Ⅵ': 'VI', 'Ⅶ': 'VII', 'Ⅷ': 'VIII', 'Ⅸ': 'IX' })[mr[1]] || mr[1];
+  var md = j.match(/(?:^|[^\d])([2-9])(?:\s|$|[^\d])/); return md ? md[1] : '';
+}
+function baSeqFit_(out, tok) {
+  out = String(out || ''); if (!tok) return out;
+  var esc = tok.replace(/\./g, '\\.');
+  if (new RegExp('(^|[\\s:.\\-])' + esc + '(\\b|$)', 'i').test(out)) return out;
+  var room = 30 - tok.length - 1, base = out.replace(/^the\s+/i, '');
+  if (base.length > room) { var c = base.slice(0, room + 1), sp = c.lastIndexOf(' '); base = (sp >= 4 ? c.slice(0, sp) : base.slice(0, room)); }
+  base = base.replace(/(\s+(of|the|and|a|an|to|in|for|with|vs\.?)|[\s:\-–&,]+)+$/i, '').trim();
+  var r = (base + ' ' + tok).trim(); return r.length <= 30 ? r : '';
+}
 function baEnName_(row, st, enCache, hw) {
+  var out = baEnName0_(row, st, enCache, hw); if (!out) return out;
+  try {
+    var full = String((row && row.en) || '').trim(), key = (row && (row.key || baKey_(row.ja) || baKey_(row.en))) || '';
+    var c = (enCache && key) ? enCache[key] : null; if (!full && c && c.en) full = String(c.en);
+    var tok = baSeqTok_(baEnTidy_(full || out));
+    if (tok) return baSeqFit_(out, tok) || out;
+    if (/\d|\b(II|III|IV|V|VI|VII|VIII|IX)\b/.test(full + ' ' + out)) return out;   /* 英語名に何かの番号がある＝公式の数え方に任せる */
+    var official = !!String((row && row.en) || '').trim() || !!(c && c.known === true);
+    var jt = baSeqJa_(row && row.ja); if (!jt || official) return out;
+    return baSeqFit_(out, jt) || '';   /* 収まらなければ出さない（1作目と区別のつかない名前で出さない） */
+  } catch (eS) { return out; }
+}
+function baEnName0_(row, st, enCache, hw) {
   var en = String(row.en || '').trim(), ja = String(row.ja || '').trim();
   var key = row.key || baKey_(ja) || baKey_(en);
   var cached = (enCache && key) ? enCache[key] : null;
