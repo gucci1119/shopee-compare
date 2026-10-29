@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-1300';
+var SRC_VER = '20261029-1400';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -424,6 +424,23 @@ function doGetInner_(e) {
     /* ★2026-09-22 2台目のGoogleアカウントを立ち上げる時の口。
        エディタの関数ドロップダウンは選んだつもりで別関数が走る（記録済み）ので、外から確実に呼べる形にした。
        WRITE_TOKEN 必須。子機なら🤖のトリガーだけ作られる（setupTriggers 側で分岐）。 */
+    if (p.action === 'revalue') {   /* 🔁 2026-10-29 相場の見直し：run=1 で1回まわす（見るだけ）・控えの数と最新の判定を返す。WRITE_TOKEN 必須 */
+      var _rcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), _ro;
+      try {
+        var _rwt = P_().getProperty('WRITE_TOKEN'); if (!_rwt || p.token !== _rwt) throw new Error('WRITE_TOKEN不正');
+        var _rcfg = baKv_(BA_CFG) || {};
+        if (p.on === '1' || p.on === '0') {   /* 入・切（見るだけのまま）：設定は読み直して revalue だけ重ねる＝01 の他の設定を消さない */
+          var _fc = baKvFresh_(BA_CFG); if (BA_KV_FAIL[BA_CFG] || !_fc || typeof _fc !== 'object') throw new Error('設定を読めないので書かない');
+          _fc.revalue = Object.assign({}, _fc.revalue || {}, { on: p.on === '1', mode: 'dry', runner: String(p.runner || (_fc.revalue || {}).runner || 'child3').replace(/[^a-z0-9]/g, '') });
+          baKvSet_(BA_CFG, _fc); _rcfg = _fc;
+        }
+        var _trg = ''; try { _trg = rvEnsureTrigger_(_rcfg); } catch (eT) { _trg = 'err ' + String(eT).slice(0, 60); }
+        var _run = (p.run === '1') ? rvRun_(true) : null;
+        var _S = baKvFresh_(RV_KEY) || {};
+        _ro = { ok: true, runner: baRunnerId_(), cfg: rvCfg_(_rcfg), trigger: _trg, run: _run, at: _S.at, since: _S.since, cnt: _S.cnt, pos: _S.pos, hwi: _S.hwi, blockedUntil: _S.blockedUntil, res: (_S.res || []).slice(0, Math.min(50, Number(p.n) || 20)), src: SRC_VER };
+      } catch (err) { _ro = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(_rcb + '(' + JSON.stringify(_ro) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'bkc_cfg') {   /* ★2026-10-29 案2の切り替え（on=1|0・reset=1）。WRITE_TOKEN 必須 */
       var _bcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), _bo;
       try {
@@ -8684,6 +8701,119 @@ function boshuAutoRecheck() {
   try { lock.releaseLock(); } catch (e4) {}
   return out;
 }
+
+/* 🔁 2026-10-29 出した明細の相場の見直し（01 の依頼・本人「まず見るだけで1日。minHits 未満は sold 0 の明細だけ削除・sold がある物は値上げ。目安が上がったら値上げ優先」）。
+   起き方：TH「ノラと皇女と野良猫ハート2」は 9/30 の目安 ¥3,200（Yahoo!フリマの販売中3件）で出たまま、今は ¥11,500〜13,000。出した後に相場を見る仕組みが無かった
+   （boshuAutoRecheck は st.added の在庫1だけ・在庫0にするだけ）。
+   作り：cfg.revalue＝{on:true, mode:'dry'|'live', runner:'child3', perRun:15, rise:1.5}。担当の台が1時間に1回、ゲームの台帳 boshu_auto_done_<hw> を古い順に perRun 作品ずつ回し、
+   Yahoo!フリマの販売中（GAS が読める所）で件数と相場を取り直す。件数が minHits 未満か、相場が控え（llog_cost_<hw>）の rise 倍を超えた作品だけ、国ごとの明細の値段と注文を見て
+   delete（sold 0）／raise（値上げ）／keep を決め、控え boshu_revalue に書く。
+   ★いまは見るだけ（mode:'dry'）。Shopee には何も書かない。live は 01 が1日分の判定を見てから作る。
+   ★メルカリは GAS から読めない＝件数は少なめに出る（「少ない」の判定は多めに出る）。live の前にポータルのメルカリの件数を足す。
+   ★sold は orders.items（10/4 から item_id・model_id・明細名が入る）で数える。番号か名前のどちらかが合えば「売れた」＝消さない側に倒す（詰め直しで番号の中身が動くため） */
+var RV_KEY = 'boshu_revalue';
+function rvCfg_(cfg) { var r = (cfg && cfg.revalue) || {}; return { on: r.on === true, mode: r.mode === 'live' ? 'live' : 'dry', runner: String(r.runner || 'child3'), perRun: Math.max(1, Math.min(40, Number(r.perRun) || 15)), rise: Math.max(1.1, Number(r.rise) || 1.5) }; }
+function rvEnsureTrigger_(cfg) {
+  var rc = rvCfg_(cfg); if (!rc.on || rc.runner !== baRunnerId_()) return '';
+  var P = P_(); if (P.getProperty('RV_TRIG') === 'v1') return 'had';
+  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'boshuRevalueTick'; });
+  if (!has) ScriptApp.newTrigger('boshuRevalueTick').timeBased().everyHours(1).create();
+  P.setProperty('RV_TRIG', 'v1'); return has ? 'had' : 'made';
+}
+function rvGameHws_(cfg) { return Object.keys((cfg && cfg.family) || {}).filter(function (h) { return !!BA_HW_WORD[h] && !(typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[h]) && !baArc_(h); }).sort(); }
+function boshuRevalueTick() { try { var r = rvRun_(false); console.log('revalue ' + JSON.stringify(r).slice(0, 300)); } catch (e) { console.log('revalue err ' + e); } }
+/* 注文に出たか：item_id ごとに orders の items を1回で読み、番号か明細名が合えば 1。読めなければ -1（＝分からない＝消さない） */
+function rvSoldMap_(places) {
+  var out = {}, byCc = {};
+  places.forEach(function (p) { (byCc[p.cc] = byCc[p.cc] || {})[p.item] = 1; });
+  Object.keys(byCc).forEach(function (cc) {
+    var ids = Object.keys(byCc[cc]);
+    for (var i = 0; i < ids.length; i += 15) {
+      var part = ids.slice(i, i + 15), rows = null;
+      try { rows = sbSelect_('orders', 'select=items&cc=eq.' + cc + '&or=(' + part.map(function (id) { return 'items.cs.' + encodeURIComponent(JSON.stringify([{ item_id: Number(id) }])); }).join(',') + ')&limit=1000'); } catch (eO) { rows = null; }
+      part.forEach(function (id) { out[cc + '|' + id] = rows ? [] : null; });
+      (rows || []).forEach(function (r) { (r.items || []).forEach(function (it) { var k = cc + '|' + String(it.item_id || ''); if (out[k]) out[k].push({ m: String(it.model_id || ''), n: baTmKey_(String(it.variation || '')) }); }); });
+    }
+  });
+  return function (p, name) { var a = out[p.cc + '|' + p.item]; if (a === null || a === undefined) return -1; var nk = baTmKey_(name || ''); return a.some(function (x) { return x.m === String(p.model) || (nk && x.n === nk); }) ? 1 : 0; };
+}
+function rvRun_(manual) {
+  var cfg = baKv_(BA_CFG) || {}; if (BA_KV_ERR) return { ok: false, error: '設定を読めない' };
+  var rc = rvCfg_(cfg);
+  if (!manual && (!rc.on || rc.runner !== baRunnerId_())) return { ok: false, skipped: 'off_or_not_runner' };
+  if (rc.mode !== 'dry') return { ok: false, error: 'live（Shopee に書く方）はまだ作っていない＝見るだけの結果を 01 が見てから' };
+  if (!bgAllowed_()) return { ok: false, skipped: 'bg' };
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return { ok: false, skipped: 'busy' };
+  var out = { ok: true, mode: rc.mode, hw: '', checked: 0, keep: 0, flagged: 0, del: 0, raise: 0 };
+  try {
+    var S = baKvFresh_(RV_KEY); if (BA_KV_FAIL[RV_KEY]) throw new Error('控え ' + RV_KEY + ' を読めない（空で上書きしない）');
+    S = (S && typeof S === 'object') ? S : {}; S.pos = S.pos || {}; S.res = S.res || []; S.cnt = S.cnt || {};
+    if (S.blockedUntil && Date.now() < S.blockedUntil) { out.skipped = 'blocked'; return out; }
+    var hws = rvGameHws_(cfg); if (!hws.length) { out.skipped = 'no_hw'; return out; }
+    var hw = hws[(Number(S.hwi) || 0) % hws.length]; out.hw = hw;
+    var ledger = baKvFresh_('boshu_auto_done_' + hw), lc = baKvFresh_('llog_cost_' + hw);
+    if (BA_KV_FAIL['boshu_auto_done_' + hw] || BA_KV_FAIL['llog_cost_' + hw]) throw new Error(hw + ' の台帳か仕入れ目安を読めない');
+    ledger = ledger || {}; var lm = (lc && lc.m) || {};
+    var keys = Object.keys(ledger), pos = Math.min(Number(S.pos[hw]) || 0, keys.length), minHits = Math.max(1, Number(cfg.minHits) || 3), picked = [];
+    while (pos < keys.length && picked.length < rc.perRun) {
+      var k = keys[pos++], o = ledger[k] || {}, places = [];
+      Object.keys(o).forEach(function (cc) { var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (m) places.push({ cc: cc, item: m[1], model: m[2] }); });
+      if (!places.length) continue;
+      var ja = '', en = '', c0 = 0;
+      places.forEach(function (pl) { var e = lm[pl.cc + '|' + pl.item + '|' + pl.model]; if (e && typeof e === 'object') { if (!ja && e.ja) ja = String(e.ja); if (!en && e.en) en = String(e.en); pl.c = Number(e.c) || 0; pl.en = String(e.en || ''); if (pl.c > c0) c0 = pl.c; } });
+      if (!ja) { S.cnt.noja = (S.cnt.noja || 0) + 1; continue; }
+      picked.push({ k: k, ja: ja, en: en, c0: c0, places: places });
+    }
+    if (pos >= keys.length) { S.pos[hw] = 0; S.hwi = (Number(S.hwi) || 0) + 1; } else S.pos[hw] = pos;
+    var t0 = Date.now(), flagged = [];
+    for (var i = 0; i < picked.length; i++) {
+      if (Date.now() - t0 > 200000) break;
+      var t = picked[i];
+      var y = baPaypay_((baCleanJa_(t.ja) + ' ' + (BA_HW_WORD[hw] || '')).trim());
+      if (y.blocked) { S.blockedUntil = Date.now() + 6 * 3600 * 1000; out.blocked = 1; break; }
+      var hits = baMatch_(y.items || [], t.ja, hw); t.hits = hits.length; t.cNow = hits.length ? baCostOfHits_(hits) : 0; t.lo = hits.length ? hits[0].price : 0;
+      out.checked++;
+      t.few = t.hits < minHits; t.up = (t.c0 > 0 && t.cNow > t.c0 * rc.rise);
+      if (t.few || t.up) flagged.push(t); else { t.act = 'keep'; out.keep++; }
+      Utilities.sleep(1500 + Math.floor(Math.random() * 1500));
+    }
+    if (flagged.length) {
+      var allP = []; flagged.forEach(function (t) { t.places.forEach(function (pl) { allP.push(pl); }); });
+      var rows = {}; var ids = allP.map(function (pl) { return pl.item; }).filter(function (v, i2, a) { return a.indexOf(v) === i2; });
+      for (var j = 0; j < ids.length; j += 30) (sbSelect_('listings', 'select=cc,item_id,weight,models&item_id=in.(' + ids.slice(j, j + 30).join(',') + ')') || []).forEach(function (r) { rows[String(r.item_id)] = r; });
+      var soldOf = rvSoldMap_(allP);
+      flagged.forEach(function (t) {
+        out.flagged++;
+        t.places.forEach(function (pl) {
+          var r = rows[pl.item], md = r ? (r.models || []).filter(function (m) { return String(m.id) === String(pl.model); })[0] : null;
+          if (!md) { pl.act = 'gone'; return; }
+          pl.name = String(md.n || ''); pl.price = Number(md.price) || 0; pl.stock = Number(md.stock) || 0;
+          if ((pl.en || t.en) && baTmKey_(pl.en || t.en) !== baTmKey_(pl.name)) { pl.act = 'mismatch'; return; }   /* 番号の中身が別の作品（詰め直しで動いた）＝触らない */
+          var wG = Math.round((Number(r.weight) || 0) * 1000) || Number(((cfg.family || {})[hw] || {}).weightG) || 150;
+          var costFor = t.cNow > 0 ? Math.max(t.cNow, t.few ? (pl.c || t.c0) : 0) : Math.round((pl.c || t.c0) * rc.rise);
+          var np = costFor > 0 ? (baPriceFromTbl_(cfg, pl.cc, wG, costFor) || 0) : 0; pl.newPrice = np;
+          if (t.few) { pl.sold = soldOf(pl, pl.name); pl.act = pl.sold === 0 ? 'delete' : (np > pl.price ? 'raise' : 'keep'); if (pl.sold < 0) pl.act = np > pl.price ? 'raise' : 'unknown'; }
+          else pl.act = np > pl.price ? 'raise' : 'keep';
+          if (pl.act === 'delete') out.del++; else if (pl.act === 'raise') out.raise++;
+        });
+        t.act = t.places.some(function (pl) { return pl.act === 'delete'; }) ? 'delete' : (t.places.some(function (pl) { return pl.act === 'raise'; }) ? 'raise' : 'keep');
+      });
+    }
+    var now = new Date().toISOString();
+    picked.filter(function (t) { return t.hits != null; }).forEach(function (t) {
+      if (t.act === 'keep' && !t.few && !t.up) { S.cnt.keep = (S.cnt.keep || 0) + 1; return; }   /* そのままの作品は数だけ（控えを小さく） */
+      S.cnt[t.act] = (S.cnt[t.act] || 0) + 1;
+      S.res.unshift({ at: now, hw: hw, k: t.k, ja: String(t.ja).slice(0, 60), en: String(t.en).slice(0, 40), c0: t.c0, cNow: t.cNow, lo: t.lo, hits: t.hits, few: t.few ? 1 : 0, up: t.up ? 1 : 0, act: t.act,
+        pl: t.places.map(function (pl) { return { cc: pl.cc, item: pl.item, model: pl.model, act: pl.act || '', price: pl.price, np: pl.newPrice, stock: pl.stock, sold: pl.sold }; }) });
+    });
+    if (S.res.length > 300) S.res.length = 300;   /* 控えは小さく（1時間ごとに読み書きする） */
+    S.at = now; S.mode = rc.mode; S.runner = baRunnerId_(); S.src = 'yfm'; S.last = out;
+    S.cnt.checked = (S.cnt.checked || 0) + out.checked; if (!S.since) S.since = now;
+    baKvSet_(RV_KEY, S);
+  } catch (e) { out.ok = false; out.error = String((e && e.message) || e).slice(0, 200); }
+  finally { try { ufPersist_(); } catch (eU) {} try { lock.releaseLock(); } catch (eL) {} }
+  return out;
+}
 // ★本体。manual=true はポータルの「▶ 今すぐ1回まわす」から（結果を返す）
 // ── 🧾 Claude（Anthropic）API のクレジット購入を経費へ（本人 2026-09-29「claudeのこれも月々の経費で入れたい」「その時のレートでいいです」）──
 //   領収書メール（invoice+statements@mail.anthropic.com「Your receipt from Anthropic」）は ryoya.kawaguchi1119@gmail.com 宛て＝3台目の持ち主。
@@ -8746,6 +8876,7 @@ function boshuAutoTick(manual) {
     var _c0 = baKv_(BA_CFG);
     if (_c0 && !BA_KV_ERR) {
       try { tcgEnsureTrigger_(_c0); } catch (eTg0) {}
+      try { rvEnsureTrigger_(_c0); } catch (eRv0) {}   /* 🔁 2026-10-29 相場の見直し（担当の台だけ・1回だけ作る） */
       var _r0 = baRunnerId_();
       if (_c0.runners && typeof _c0.runners === 'object' && Object.keys(_c0.runners).length && !(_c0.runners[_r0] && _c0.runners[_r0].length)) { ufPersist_(); try { lock.releaseLock(); } catch (eL0) {} return { ok: false, skipped: 'not_runner', runner: _r0 }; }
       var _h0 = (_c0.hws || []).filter(function (h) { return _c0.family && _c0.family[h] && (_c0.family[h].sku || _c0.family[h].nameKey); });
@@ -8766,6 +8897,7 @@ function boshuAutoTick(manual) {
   if (BA_KV_PREFETCH_ERR) { try { baLog_(st, '⚠ 控えの一括読みに失敗→1本ずつ読んで続けます：' + BA_KV_PREFETCH_ERR.slice(0, 120)); } catch (ePf) {} }
   try {
     var cfg = baKv_(BA_CFG) || {};
+    try { rvEnsureTrigger_(cfg); } catch (eRv) {}
     try { tcgEnsureTrigger_(cfg); } catch (eTg) {}   /* 🃏 2026-10-10 担当の台に tcgCron（Head 固定の時間トリガー）を1回だけ作る */
     /* ★2026-09-21 🤖の担当は【1つだけ】。本体と2台目（別Googleアカウント）の両方で動くと
        **同じ作品を二重に出す**。担当は app_kv.boshu_auto_cfg.runner（既定 'main'＝本体）。
