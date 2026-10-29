@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-1130';
+var SRC_VER = '20261029-1200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -10988,19 +10988,32 @@ function tcgVarEn_(v) { for (var i = 0; i < TCG_VAR_EN.length; i++) if (TCG_VAR_
 /* 🎰 2026-10-29 一番くじ（本人「一番くじ系出品してほしい」「フィギュアもでかいのは出さないで」・01 商品部の依頼）。
    駿河屋の品名「<名前> <種類> 「一番くじ <シリーズ>」 <X>賞」を読む。白リスト方式＝行の ok の語が品名に無い物は出さない（大きいフィギュアは ok に入らない）。
    KUJI_NG は ok の語が入っていても大きい物・まとめ物・紙物を落とす。英語名の辞書は無い＝Claude が tcg_names_ai に入れた物だけ出る（辞書の鍵 tcg_names_<hw> は空） */
-var KUJI_NG = /MASTERLISE|マスタライズ|マスターライズ|造形王|SOFVICS|ソフビ|フィギュアーツ|ジオラマ|ラストワン|ダブルチャンス|\bBIG\b|ビッグ|ジャンボ|特大|巨大|バスタオル|ブランケット|クッション|ぬいぐるみ|ポスター|色紙|ビジュアルボード|タペストリー|全\s*\d+\s*種|コンプ|セット|まとめ|BOX|ボックス|未開封|新品/i;
+var KUJI_NG = /MASTERLISE|マスタライズ|マスターライズ|造形王|SOFVICS|ソフビ|フィギュアーツ|ジオラマ|ラストワン|ダブルチャンス|\bBIG\b|ビッグ|ジャンボ|特大|巨大|バスタオル|ブランケット|クッション|ぬいぐるみ(?!風)|ポスター|色紙|ビジュアルボード|タペストリー|全\s*\d+\s*種|コンプ|セット|まとめ|BOX|ボックス|未開封|新品/i;
 function tcgParseKuji_(a, t) {
   var x = String(t || '').normalize('NFKC').replace(/^(?:\[[^\]]*\]\s*|【[^】]*】\s*)+/, '').replace(/\s+/g, ' ').trim();
   if (!/一番くじ/.test(x) || KUJI_NG.test(x)) return null;
   var okRe = null; try { okRe = a.ok ? new RegExp(a.ok, 'i') : null; } catch (eR) { return null; }
   if (!okRe || !okRe.test(x)) return null;   /* 白リスト：行の語が無ければ出さない */
-  var m = x.match(/^(.+?)\s*「([^」]*一番くじ[^」]*)」\s*(.*)$/); if (!m) return null;
-  var head = m[1].replace(/\s*\((?:箱|台紙|袋|タグ|付属)[^()]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim();
-  head = head.replace(/([^\s])(フィギュア)/g, '$1 $2');   /* 「ちょこのっこフィギュア」→「ちょこのっこ フィギュア」（メルカリの照合を語ごとにする） */
-  if (!head || !okRe.test(head)) return null;
-  if (!head.replace(okRe, ' ').replace(/フィギュア|一番くじ|[\s・]/g, '')) return null;   /* キャラ名の無い品名（「アクリルスタンド 「一番くじ …」」）は何の品か決まらない＝出さない */   /* 種類の語は「」の前（名前のすぐ後ろ）にある物だけ＝シリーズ名に語があるだけの別の品物を拾わない */
-  var series = String(m[2]).replace(/^.*?一番くじ\s*/, '').trim();
-  var prize = ((m[3] || '').match(/([A-Z]{1,2})\s*賞/) || [])[1] || '';
+  var head = '', series = '', prize = '';
+  var m = x.match(/^(.+?)\s*「([^」]*一番くじ[^」]*)」\s*(.*)$/);
+  if (m) {
+    /* 形1「<名前> <種類> 「一番くじ <シリーズ>」 <X>賞」／形2「<名前> 「一番くじ… <シリーズ>」 <X>賞 <種類>」（ちびきゅん・ワーコレ＝種類が賞の後ろ・10/29 01 実測） */
+    series = String(m[2]).replace(/^.*?一番くじ\s*/, '').trim();
+    var tail = String(m[3] || '');
+    prize = (tail.match(/([A-Z]{1,2})\s*賞/) || [])[1] || '';
+    var tailKind = tail.replace(/[A-Z]{1,2}\s*賞/, ' ').replace(/\s+/g, ' ').trim();
+    head = m[1] + (tailKind && okRe.test(tailKind) ? ' ' + tailKind : '');
+  } else {
+    /* 形3（古い形・「」なし）「一番くじ<シリーズ> ミニタオル賞 J <名前>」「一番くじ <シリーズ> <X>賞 <種類> <名前>」 */
+    var m3 = x.match(/^一番くじ\s*(.+?)\s+(?:([A-Z]{1,2})\s*賞|([^\s]+?)賞\s*([A-Z]{1,2})?)\s+(.+)$/);
+    if (!m3) return null;
+    series = m3[1].trim(); prize = m3[2] || m3[4] || '';
+    head = m3[5] + (m3[3] ? ' ' + m3[3] : '');
+  }
+  head = head.replace(/\s*\((?:箱|台紙|袋|タグ|付属|本体)(?:[^()]|\([^()]*\))*\)\s*/g, ' ').replace(/\s+/g, ' ').trim();   /* 状態の印（箱なし・本体不備 等）は外す。「(制服)」「(シルバーver.)」は別物なので残す */
+  if (!head || !okRe.test(head)) return null;   /* 種類の語は名前の側（「」の前か賞の後ろ）にある物だけ＝シリーズ名に語があるだけの別の品物を拾わない */
+  if (!head.replace(okRe, ' ').replace(/フィギュア|一番くじ|[\s・()]/g, '')) return null;   /* キャラ名の無い品名（「アクリルスタンド 「一番くじ …」」）は何の品か決まらない＝出さない */
+  head = head.replace(/([^\s])(?<!ミニ)(フィギュア)/g, '$1 $2');   /* 「ちょこのっこフィギュア」→「ちょこのっこ フィギュア」（メルカリの照合を語ごとにする）。「ミニフィギュア」は1語のまま（白リストの語） */
   /* 名前＝英語名の鍵（Claude の判定 merge.py も jaName をそのまま鍵にする）。版（シリーズ・賞）まで入れて、別の一番くじの同じキャラを取り違えない。
      メルカリの検索と照合は「 「」の前（キャラ名＋種類）だけ＝tcgKujiHead_（売り手はシリーズ名を書かないことが多い） */
   var name = (head + ' 「一番くじ ' + series + '」' + (prize ? ' ' + prize + '賞' : '')).replace(/\s+/g, ' ').trim().slice(0, 90);
