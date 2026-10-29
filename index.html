@@ -10117,7 +10117,7 @@
           others: (window._pcLastDeals || []).filter(d => !pcQuote.deal || String(d.url || '') !== String(pcQuote.deal.url || '')).slice(0, 5).map(d => ({ site: d.site || '', url: d.url || '', img: d.img || '', price: Math.round(Number(d.eff || d.price) || 0), name: String(d.name || '').slice(0, 80), acc: pcAccOf(d.name), cond: pcCondOf(d), overCap: (r && r.pf) ? Math.round(Number(d.eff || d.price) || 0) > srcCapOf(r.pf.payoutJpy, false) : false })),
           excluded: (window._pcSrcGrey || []).slice(0, 6).map(d => ({ site: d.site || '', url: d.url || '', img: d.img || '', price: Math.round(Number(d.eff || d.price) || 0), name: String(d.name || '').slice(0, 80), why: d._why || '' })),   /* ★2026-10-25 選ばない候補（中身なし・動かない恐れ・箱説なし）。カードでは灰色で出す */
           plans: {} };
-        ['1', '2', '3'].forEach(pl => {
+        const mkPlan = (pl) => {
           if (plSel) { plSel.value = pl; }
           const o = { stages: {} };
           ['quote', 'deal'].forEach(st => {
@@ -10154,8 +10154,16 @@
             rows2.push({ label: '粗利', jpy: raw.payoutJpy + (pl !== '1' ? raw.ppAskJpy - raw.ppFeeJpy : 0) - raw.cost, sum: true });
             o.bd = { rate: raw.rate, rateSrc: raw.rateSrc, saleJpy: sale, rows: rows2, raw: raw };
           } catch (_) {}
-          out.plans[pl] = o;
-        });
+          return o;
+        };
+        ['1', '2', '3'].forEach(pl => { out.plans[pl] = mkPlan(pl); });
+        /* ★2026-10-29 quote-card-spec 16.7：②③を「お客さんが払う額＝①の total」にした版（sameTotal）。仕入れ先・仕入額・重さは同じ（検索し直さない）。
+           計算の行 r の②③の値を st に一時的に入れ替えて同じ作り方で出し、必ず元に戻す。&sale の時は付けない */
+        if (out.saleInput == null && r && r.st) {
+          const keepR = {}; Object.keys(r.st).forEach(k => { keepR[k] = r[k]; });
+          try { Object.assign(r, r.st); out.sameTotal = {}; ['2', '3'].forEach(pl => { const o3 = mkPlan(pl); o3.profitPlus = Math.round(o3.profit - (out.plans['1'].profit || 0)); out.sameTotal[pl] = o3; }); }
+          catch (eS) { delete out.sameTotal; } finally { Object.assign(r, keepR); }
+        }
         /* ★2026-10-29 quote-card-spec 16：売値を指定した時は、粗利が線を下回るか（belowLine＝①・各案は plans[n].belowLine）・赤字・VN の上限を知らせる。値段は sale のまま（下げない） */
         out.belowLine = false;
         if (out.saleInput != null) {
@@ -10345,7 +10353,16 @@
       const need3 = Math.max(0, pf.profit - minPf.profit);
       const pp3Ask = saleTot ? Math.floor(Math.max(0, saleTot - minLocal) * rg.rateJpy + 1e-9) : (need3 > 0 ? Math.round((need3 + ppFix) / (1 - ppRate)) : 0);
       const pp3Net = Math.max(0, Math.round(pp3Ask - (pp3Ask * ppRate + ppFix)));
-      return { rg, cc, local, pf, lowLocal, lowPf, ppAsk, ppFee, ppNet, minLocal, minPf, pp3Ask, pp3Net, ov: !!ovP, basis: basis };
+      /* ★2026-10-29 quote-card-spec 16.7（本人「そして、合計の売値を揃えた版も欲しい」）：②③を「お客さんが払う額＝①の掲載額」にした版。Shopee に載せる額はいつもの②③と同じ・PayPal＝①−Shopee の額。
+         見積もりの返事の sameTotal だけが使う（画面の表は今までどおり）。売値の指定（&sale）の時は②③がもう①と同じ合計なので作らない */
+      let st = null;
+      if (!saleP) {
+        const T = local, stAsk = (shop) => Math.floor(Math.max(0, T - shop) * rg.rateJpy + 1e-9), stNet = (a) => Math.max(0, Math.round(a - (a * ppRate + ppFix)));
+        const sLow = Math.min(lowLocal, T), sLowPf = sLow === lowLocal ? lowPf : priceProfitFor(cc, cost, sLow, opt), sAsk = stAsk(sLow);
+        const sMin = Math.min(minLocal, T), sMinPf = sMin === minLocal ? minPf : priceProfitFor(cc, cost, sMin, opt), sAsk3 = stAsk(sMin);
+        st = { lowLocal: sLow, lowPf: sLowPf, ppAsk: sAsk, ppFee: sAsk > 0 ? Math.round(sAsk * ppRate + ppFix) : 0, ppNet: stNet(sAsk), minLocal: sMin, minPf: sMinPf, pp3Ask: sAsk3, pp3Net: stNet(sAsk3) };
+      }
+      return { rg, cc, local, pf, lowLocal, lowPf, ppAsk, ppFee, ppNet, minLocal, minPf, pp3Ask, pp3Net, ov: !!ovP, basis: basis, st: st };
     });
     window._pcRows = rows; window._pcRunAt = Date.now(); try { pcSrcCapPaint(); } catch (_) {} try { pcQuoteRender(); } catch (eQ) { console.warn('[pcQuote]', eQ); }
     const vol = (dW && dH && dD) ? Math.round(dW * dH * dD / 6) : 0;   // 容積重量(g)
@@ -24481,7 +24498,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-29', items: [
-      '💴 <b>見積もり（Smart Reply・WhatsApp の 💴）で売値を指定できるようにしました</b>（本人「Shopee で 350 で売ってるらしいので、売値を変えられたりもする？」・03 営業部の依頼）：チャットから売値（現地通貨）を渡すと、①はその値段で、②③はお客さんが払う合計をその値段にして粗利を出します。粗利が基準の線を下回る・赤字・ベトナムの上限超えの時は知らせますが、値段は勝手に変えません。カードの欄は営業部がこれから作ります。',
+      '💴 <b>見積もり（Smart Reply・WhatsApp の 💴）で売値を指定できるようにしました</b>（本人「Shopee で 350 で売ってるらしいので、売値を変えられたりもする？」・03 営業部の依頼）：チャットから売値（現地通貨）を渡すと、①はその値段で、②③はお客さんが払う合計をその値段にして粗利を出します。粗利が基準の線を下回る・赤字・ベトナムの上限超えの時は知らせますが、値段は勝手に変えません。あわせて、②③の払い方を「お客さんが払う合計を①と同じ」にした版も返すようにしました（本人「合計の売値を揃えた版も欲しい」）。カードの欄は営業部がこれから作ります。',
       '🔤 <b>値付けの見直しの表の言葉を分かりやすくしました</b>（本人「分かりにくい」・事業本部の案に本人「良い」）：見出し「今の利益（1個）」→「今の値段で売れたら（1個）」、その下の小さい字「売れた時の利益」→「前に売れた時（実績）」。計算は変えていません。',
       '↔ <b>値付けの見直しの「商品・明細」の列を細くしました</b>（本人「幅、狭められるように」「商品・明細のところは見切れてもいいので」）：商品名は2行まで・明細名は1行で切り、全部の名前は行に指を乗せると出ます',
       '🔁 <b>🤖が出した明細の相場の見直し（見るだけ）の相場集めを、担当の PC のポータルでするようにしました</b>：GAS からはメルカリが読めず、Yahoo!フリマにも弾かれるため。GAS が並べた作品を、メルカリと Yahoo!フリマの販売中で（写真集めと同じ照合・新品は数えない）15分ごとに8作品ずつ探します。Shopee には書きません',
