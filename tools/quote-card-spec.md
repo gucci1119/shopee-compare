@@ -196,3 +196,21 @@ paypal-link-filler（userscript）がリンクをコピーする。カードの�
    - `profitPlus`＝その案の粗利−①の粗利（円）。カードの「＋¥…」にそのまま使える
    - ①の額が③の最低額より安い時は全部 Shopee（PayPal 0）。&sale の時は sameTotal を付けない（キーが無い）
    - 画面（ポータルの価格計算の表）の②③は今までどおり（①と同じ粗利の形）。sameTotal は返事だけ
+10. **②の Shopee の額を打ち替える `&shop2=`**（2026-10-30・03 営業部の決め）
+   - 本人の言葉：「shopee+paypal の時に、shopee の額修正できたりする？」と聞かれ、粗利と合計のどちらをそのままにするかを尋ねたら「ケースバイケースです」
+   - カード（WA だけ。SR は ① だけなので無し）：表の「内訳」の②の Shopee の額を、打ち替えられる欄にする（③は Shopee を最低額にする案なので打たない）。数字は売値と同じ読み方（カンマ・小数・VND は整数）
+   - 渡し方：打って ↻ すると `&shop2=<現地の額>` を付ける。&profit・&sale はそのまま一緒に送ってよい
+   - ポータル：返事に `shopEdit: { keepProfit: {...}, keepTotal: {...} }` を足す。形はどちらも plans[n] と同じ（shop・pp・total・profit・roi・bd・stages）
+     - keepProfit：② の Shopee 分＝shop2 にして、② の粗利（&sale の時は ① の粗利）を保つように PayPal の額を計算し直す（合計は変わる）
+     - keepTotal：② の Shopee 分＝shop2 にして、合計＝今の ② の total（&sale の時は sale）を保つ。PayPal＝合計−shop2（粗利が変わる）。profitPlus（② の粗利との差）も付ける
+     - shop2 が ③ の最低額より安い、または合計を超える時は、warn を出してその案は返さない
+     - 仕入れ先・仕入れ額・重さは同じ物を使い、仕入れ検索はやり直さない
+   - カードの出し方：表に「Shopee の額を R$… にした時」の見出しと、「粗利そのまま」「合計そのまま」の2列（Shopee 分・PayPal 分・合計・粗利）を最初から出す（押さないと見えない、を作らない）。どちらも押して選べ、選んだ案の文面・内訳・PayPal の額になる（qc.plan に 'k1'＝keepProfit・'k2'＝keepTotal）。決めるのは本人
+   - 控え：`wa_qc_state` に `shop2` と `shop2User` を残す。売値と同じく、品物が変わったら外す（qcSaleCarry と同じ条件）
+11. **ポータルに入れた（2026-10-30・05 情報システム部・&shop2）**
+   - `&shop2=` は数字と小数点だけ読む（&sale と同じ）。国の刻みに丸める。返事に `shop2Input`（受け取った数のまま）
+   - `shopEdit.keepProfit`／`shopEdit.keepTotal` は plans[n] と同じ形（shop・pp・total・profit・roi・bd・stages）＋`profitPlus`（その案の粗利−plans['2'] の粗利・円）
+   - keepProfit の保つ粗利は ① の粗利（&sale なしなら ② と同じ・&sale ありなら ① の粗利）。shop2 だけで粗利を超える時は PayPal 0（粗利は増える）
+   - keepTotal の合計は今の ② の total（&sale の時は sale）。PayPal の円は切り捨て（現地通貨に戻すとちょうど差額）
+   - shop2 が ③ の最低額より安い → 2案とも返さない（shopEdit のキーが無い）・warn に理由。shop2 が合計を超える → keepTotal だけ返さない・warn に理由
+   - 文面（stages）は合計が ① より安い時だけ「pay less」、同じ・高い時は「Or you can split the payment」（a347139）
