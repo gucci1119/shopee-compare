@@ -35806,16 +35806,30 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const cleanJa = (t) => String(t || '').replace(/【[^】]{0,80}】/g, ' ').replace(/[（(\[［].*?[）)\]］]/g, ' ').replace(/(初回限定版|完全生産限定版|限定版|通常版|廉価版|ベスト版|Best版|新価格版|同梱版|特装版|豪華版|the Best|PlayStation the Best|Nintendo Selects)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
     return { HWJA, coreOf, matchOk, cleanJa };
   }
+  /* ★2026-10-29 15時台：🤖の写真集め（baAutoCollectTick）が1分ごとに動き、その間は丸ごと飛ばして15分後まで待つ作りだった＝ほぼ毎回重なって 15:35・15:50 の回が何もしなかった（推測・作りからの見立て）。
+     → 1分ごとに「やれるか」を見て、空いた時に動く（前に動いてから10分たっていれば）。飛ばした理由の回数と、試した数・書いた数を小さな控え boshu_revalue_st に残す（Mac から理由を読めるように） */
+  const RV_SKIP = { busy: 0, collecting: 0, buy: 0, bridge: 0 };
+  async function rvCollectTick() {
+    if (!settings.sbSecret || demoOn() || !pcIsOwner()) return;
+    let last = 0; try { last = Number(localStorage.getItem('smdRvAt') || 0); } catch (_) {}
+    if (Date.now() - last < 10 * 60000) return;
+    if (rvCollect.busy) { RV_SKIP.busy++; return; }
+    if (lst._baCollecting) { RV_SKIP.collecting++; return; }
+    try { if (_buyBusyAny()) { RV_SKIP.buy++; return; } } catch (_) {}
+    if (bridgeTimeoutStreak >= 3) { RV_SKIP.bridge++; return; }
+    try { localStorage.setItem('smdRvAt', String(Date.now())); } catch (_) {}
+    await rvCollect();
+  }
   async function rvCollect() {
     if (!settings.sbSecret || demoOn() || !pcIsOwner()) return;
-    if (rvCollect.busy || lst._baCollecting) return;
-    try { if (_buyBusyAny()) return; } catch (_) {}
-    if (bridgeTimeoutStreak >= 3) return;
+    if (rvCollect.busy) return;
     rvCollect.busy = true;
+    const stat = { at: new Date().toISOString(), tried: 0, wrote: 0, mcFail: 0, yfmFail: 0, qLen: 0, skips: Object.assign({}, RV_SKIP), why: '' };
     try {
       const qr = await sbGet('app_kv', 'select=q:v->queue&k=eq.boshu_revalue').catch(() => null);
-      const q = ((qr || [])[0] || {}).q; if (!Array.isArray(q) || !q.length) return;
-      const cur = await sbGet('app_kv', 'select=v&k=eq.boshu_revalue_mc').catch(() => null); if (cur === null) return;   /* 読めなければ書かない */
+      if (qr === null) { stat.why = '待ち行列を読めない'; return; }
+      const q = ((qr || [])[0] || {}).q; stat.qLen = Array.isArray(q) ? q.length : 0; if (!Array.isArray(q) || !q.length) { stat.why = '待ち行列が空'; return; }
+      const cur = await sbGet('app_kv', 'select=v&k=eq.boshu_revalue_mc').catch(() => null); if (cur === null) { stat.why = '相場の控えを読めない'; return; }   /* 読めなければ書かない */
       const have = ((((cur || [])[0] || {}).v || {}).items) || {};
       const now = Date.now(), mine = {}; let tried = 0;
       for (const e of q) {
@@ -35823,13 +35837,14 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         if (!e || !e.hw || !e.k || !e.ja) continue;
         const key = e.hw + '|' + e.k, old = have[key];
         if (old && now - Date.parse(old.at || 0) < 40 * 3600000) continue;
-        tried++;
+        tried++; stat.tried = tried;
         const kit = rvKit(e.hw), core = kit.coreOf(e.ja);
         const kw = (kit.cleanJa(e.ja) + ' ' + (kit.HWJA[e.hw] || '')).trim();
         let mi = null; try { mi = await mercariSearch(kw, { relevance: true }); } catch (_) { mi = null; }
         await new Promise(rs => setTimeout(rs, 2500));
         let y = null; try { y = await yfmSearch(kw); } catch (_) { y = null; }
         const yOk = !!(y && !y.blocked);
+        if (mi === null) stat.mcFail++; if (!yOk) stat.yfmFail++;
         if (mi === null && !yOk) { await new Promise(rs => setTimeout(rs, 2500)); continue; }
         const mH = (mi || []).filter(x => Number(x.cid) !== 1 && !/未使用|新品/.test(String(x.cond || '')) && kit.matchOk(x.name, core, e.ja, e.en));
         const yH = (yOk ? (y.items || []) : []).filter(x => !/^new/i.test(String(x.cond || '')) && !/未使用|新品未開封/.test(String(x.name || '')) && kit.matchOk(x.name, core, e.ja, e.en));
@@ -35837,18 +35852,22 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         mine[key] = { n: mH.length + yH.length, mc: mi === null ? -1 : mH.length, yfm: yOk ? yH.length : -1, p, at: new Date().toISOString() };
         await new Promise(rs => setTimeout(rs, 2500));
       }
-      if (!Object.keys(mine).length) return;
+      if (!Object.keys(mine).length) { stat.why = stat.tried ? '探したが書ける物が無い（メルカリも Yahoo!フリマも読めなかった）' : '待ち行列の作品は全部集め済み'; return; }
       /* 書く直前に読み直して、自分の分だけ重ねる（7日より古い分は捨てる） */
       const cur2 = await sbGet('app_kv', 'select=v&k=eq.boshu_revalue_mc').catch(() => null); if (cur2 === null) return;
       const base = Object.assign({}, ((((cur2 || [])[0] || {}).v || {}).items) || {});
       Object.keys(mine).forEach(k => { base[k] = mine[k]; });
       Object.keys(base).forEach(k => { if (now - Date.parse((base[k] || {}).at || 0) > 7 * 86400000) delete base[k]; });
       await sbUpsert('app_kv', [{ k: 'boshu_revalue_mc', v: { items: base, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]);
-    } catch (e) { console.warn('[相場の見直し] 集めるのに失敗:', e); }
-    finally { rvCollect.busy = false; }
+      stat.wrote = Object.keys(mine).length;
+    } catch (e) { stat.why = '失敗: ' + String((e && e.message) || e).slice(0, 120); console.warn('[相場の見直し] 集めるのに失敗:', e); }
+    finally {
+      rvCollect.busy = false; Object.keys(RV_SKIP).forEach(k => { RV_SKIP[k] = 0; });
+      try { await sbUpsert('app_kv', [{ k: 'boshu_revalue_st', v: stat, updated_at: new Date().toISOString() }]); } catch (_) {}   /* 小さな控え（動いた回の様子） */
+    }
   }
-  setTimeout(() => { rvCollect().catch(() => {}); }, 7 * 60 * 1000);
-  setInterval(() => { rvCollect().catch(() => {}); }, 15 * 60 * 1000);
+  setTimeout(() => { rvCollectTick().catch(() => {}); }, 7 * 60 * 1000);
+  setInterval(() => { rvCollectTick().catch(() => {}); }, 60 * 1000);
   async function baCollectMercari(rows, hwKey, opts) {
     opts = opts || {};
     const HWJA = { psp: 'PSP', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', switch2: 'Switch2', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCエンジン', ws: 'ワンダースワン', gg: 'ゲームギア' };
