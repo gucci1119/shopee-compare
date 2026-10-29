@@ -4850,6 +4850,7 @@
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
     /* ★2026-10-29 値付けの見直しの表の言い方 */
+    "値付けの見直しの表示を速くしました": "Made the pricing review load faster",
     "値付けの見直しの表を見やすくしました": "Made the pricing review table easier to read",
     "売れた数": "Units sold",
     "今の利益（1個）": "Profit now (per unit)",
@@ -24457,6 +24458,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-29', items: [
+      '🐢 <b>値付けの見直しの表示を速くしました</b>（本人「なんでこんなに表示遅いの？」）：出品データはポータルを開いた時に読んだ物を使い回し（前は開くたびに約7,900行を明細付きで読み直していた）、🤖の仕入れ目安の控え46本は3本ずつ並べて読み、30分は使い回します。🔄 を押すと全部読み直します',
       '🏷 <b>値付けの見直しの表を見やすくしました</b>（本人「どう見たらいいかいまいち分からない」「線とかもよく分からない」「メリハリもしっかり」）：「線（粗利）」を「基準の利益（1個）」に、今の利益の下に「✗ 基準まであと¥…」／「✓ 基準に届く」を太字・色付きで。提案する値段の下は「▲ 36% 値上げ」「そのまま」、提案の値段での利益の下にも基準に届くかを出します。損益分岐は今の値段の下に「…より下は赤字」、売れた頃は「前に売れた値段」に。大事な数字は太く大きく、補足は灰色に',
       '🎰 <b>一番くじの区分ごとに「外す語」を足しました</b>：ちょこのっこ等のフィギュアの区分からキーホルダー・チャーム・アクリル・ラバー・ストラップを、タオルから巾着・ポーチを外します（商品部が候補を見て見つけた混ざり物）',
       '🎰 <b>一番くじの品名の読み取りを、駿河屋の実際の品名の形に合わせました</b>：種類が賞の後ろにある形（ちびきゅんキャラ・ワールドコレクタブル）・「」の無い古いタオルの形・「ぬいぐるみ風ミニフィギュア」を読みます。写真探しは「秋山澪(制服)」を「秋山澪」「制服」の2語で照らします',
@@ -40119,14 +40121,16 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   /* ★2026-10-25 05 の決め：仕入れ目安の控え llog_cost_*（埋め戻した後は約11MB・46本）は、出品ログと値付けの見直しで【5分以内に読んだ物を使い回す】。
      読む時は鍵を1本ずつ順番に読む（並べて同時に投げない＝Supabase に一度に大きな読みを重ねない）。読みかけの時は同じ約束に合流する */
   let _llogAll = { at: 0, v: null, p: null };
-  function llogFetchAll(force) {
-    if (!force && _llogAll.v && Date.now() - _llogAll.at < 5 * 60000) return Promise.resolve(_llogAll.v);
+  function llogFetchAll(force, maxAgeMs) {
+    if (!force && _llogAll.v && Date.now() - _llogAll.at < (maxAgeMs || 5 * 60000)) return Promise.resolve(_llogAll.v);
     if (_llogAll.p) return _llogAll.p;
     _llogAll.p = (async () => {
-      const ks = await sbGet('app_kv', 'select=k&k=like.llog_cost_*');
-      const out = [];
-      for (const x of (ks || [])) { if (!x || !x.k) continue; const r = await sbGet('app_kv', 'select=k,v&k=eq.' + encodeURIComponent(x.k)); if (r && r[0]) out.push(r[0]); }
-      return out;
+      const ks = (await sbGet('app_kv', 'select=k&k=like.llog_cost_*') || []).filter(x => x && x.k).map(x => x.k);
+      /* ★2026-10-29 本人「値付けの見直し、なんでこんなに表示遅いの？」（01 が数えた：46本を1本ずつ＝46往復）→ 3本ずつ並べて読む（DB の負担を見て同時は3本まで） */
+      const out = new Array(ks.length); let i = 0;
+      const worker = async () => { while (i < ks.length) { const j = i++; const r = await sbGet('app_kv', 'select=k,v&k=eq.' + encodeURIComponent(ks[j])); if (r && r[0]) out[j] = r[0]; } };
+      await Promise.all([worker(), worker(), worker()]);
+      return out.filter(Boolean);
     })().then(v => { _llogAll = { at: Date.now(), v, p: null }; return v; }, err => { _llogAll.p = null; throw err; });
     return _llogAll.p;
   }
@@ -43167,12 +43171,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         sbGetAll('income', 'select=cc,sn,amount,fees'),
         sbGetAll('costs', 'select=cc,sn,cost'),
         sbGetAll('inventory', 'select=shopee_sn,price&shopee_sn=not.is.null'),
-        sbGetAll('listings', 'select=cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku'),   /* ★2026-10-25 親SKU＝トレカのフロントの見分け（列が1つ増えるだけ） */
+        /* ★2026-10-29 本人「なんでこんなに表示遅いの？」：出品（7,890行・明細付き 約30MB・推測）はポータルの起動時にも全件読んでいる（lst.byCc）＝🔄 の時だけ読み直し、普段は使い回す */
+        ((!force && lst.loaded && lst.byCc) ? Promise.resolve([].concat(...Object.values(lst.byCc))) : (!force && lst._ensureP && !lst.loaded) ? lst._ensureP.then(() => (lst.byCc ? [].concat(...Object.values(lst.byCc)) : sbGetAll('listings', 'select=cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku'))) : sbGetAll('listings', 'select=cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku')),   /* ★2026-10-25 親SKU＝トレカのフロントの見分け（列が1つ増えるだけ） */
         sbGetAll('app_kv', 'select=v&k=eq.price_adj_log').catch(() => null),
         sbGetAll('app_kv', 'select=v&k=eq.profit_sheet'),   // 📗利益計算表（仕入の3番目の控え・PayPal分）＝利益明細と同じ材料
         sbGetAll('app_kv', 'select=v&k=eq.front_items').catch(() => null),
         sbGetAll('inventory', 'select=name,name_supplier,price&status=eq.' + encodeURIComponent('在庫保管中') + '&shopee_sn=is.null').catch(() => null),   /* ★2026-10-25 手元の在庫の目安（約1,500行・3列）。読めなければ「読めませんでした」と出す */
-        llogFetchAll(!!force).catch(() => null),   /* ★2026-10-25 🤖の仕入れ目安（46本・埋め戻し後 約11MB）。出品ログと5分は使い回す・1本ずつ順番に読む。名前か SKU が今の明細と合う物だけ使う */
+        llogFetchAll(!!force, 30 * 60000).catch(() => null),   /* 値付けの見直しでは30分使い回す（🔄で読み直し） */   /* ★2026-10-25 🤖の仕入れ目安（46本・埋め戻し後 約11MB）。出品ログと5分は使い回す・1本ずつ順番に読む。名前か SKU が今の明細と合う物だけ使う */
       ]);
       PA.llog = {}; PA.llogOk = Array.isArray(llogKv); (llogKv || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(k0 => { const v0 = m[k0]; if (v0 && typeof v0 === 'object' && Number(v0.c) > 0) PA.llog[k0] = v0; }); });
       PA.handInv = Array.isArray(handInv) ? handInv : null; PA.handMemo = {};
