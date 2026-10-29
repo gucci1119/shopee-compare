@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-1400';
+var SRC_VER = '20261029-1500';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8712,7 +8712,7 @@ function boshuAutoRecheck() {
    ★メルカリは GAS から読めない＝件数は少なめに出る（「少ない」の判定は多めに出る）。live の前にポータルのメルカリの件数を足す。
    ★sold は orders.items（10/4 から item_id・model_id・明細名が入る）で数える。番号か名前のどちらかが合えば「売れた」＝消さない側に倒す（詰め直しで番号の中身が動くため） */
 var RV_KEY = 'boshu_revalue';
-function rvCfg_(cfg) { var r = (cfg && cfg.revalue) || {}; return { on: r.on === true, mode: r.mode === 'live' ? 'live' : 'dry', runner: String(r.runner || 'child3'), perRun: Math.max(1, Math.min(40, Number(r.perRun) || 15)), rise: Math.max(1.1, Number(r.rise) || 1.5) }; }
+function rvCfg_(cfg) { var r = (cfg && cfg.revalue) || {}; return { on: r.on === true, mode: r.mode === 'live' ? 'live' : 'dry', runner: String(r.runner || 'child3'), perRun: Math.max(1, Math.min(40, Number(r.perRun) || 15)), rise: Math.max(1.1, Number(r.rise) || 1.5), fall: Math.max(1.2, Number(r.fall) || 2) }; }   /* fall＝控えの目安が今の相場の何倍を超えたら「値下げの候補」（10/29 01「今の2倍超も印を」・値下げするかは本人） */
 function rvEnsureTrigger_(cfg) {
   var rc = rvCfg_(cfg); if (!rc.on || rc.runner !== baRunnerId_()) return '';
   var P = P_(); if (P.getProperty('RV_TRIG') === 'v1') return 'had';
@@ -8773,8 +8773,8 @@ function rvRun_(manual) {
       if (y.blocked) { S.blockedUntil = Date.now() + 6 * 3600 * 1000; out.blocked = 1; break; }
       var hits = baMatch_(y.items || [], t.ja, hw); t.hits = hits.length; t.cNow = hits.length ? baCostOfHits_(hits) : 0; t.lo = hits.length ? hits[0].price : 0;
       out.checked++;
-      t.few = t.hits < minHits; t.up = (t.c0 > 0 && t.cNow > t.c0 * rc.rise);
-      if (t.few || t.up) flagged.push(t); else { t.act = 'keep'; out.keep++; }
+      t.few = t.hits < minHits; t.up = (t.c0 > 0 && t.cNow > t.c0 * rc.rise); t.down = (t.cNow > 0 && t.c0 > t.cNow * rc.fall);   /* 控えの目安が今の相場より大きく高い＝高すぎて売れない側（ネコ・トモ ¥7,450→今 ¥800〜1,500） */
+      if (t.few || t.up || t.down) flagged.push(t); else { t.act = 'keep'; out.keep++; }
       Utilities.sleep(1500 + Math.floor(Math.random() * 1500));
     }
     if (flagged.length) {
@@ -8793,17 +8793,18 @@ function rvRun_(manual) {
           var costFor = t.cNow > 0 ? Math.max(t.cNow, t.few ? (pl.c || t.c0) : 0) : Math.round((pl.c || t.c0) * rc.rise);
           var np = costFor > 0 ? (baPriceFromTbl_(cfg, pl.cc, wG, costFor) || 0) : 0; pl.newPrice = np;
           if (t.few) { pl.sold = soldOf(pl, pl.name); pl.act = pl.sold === 0 ? 'delete' : (np > pl.price ? 'raise' : 'keep'); if (pl.sold < 0) pl.act = np > pl.price ? 'raise' : 'unknown'; }
+          else if (t.down) { var npD = t.cNow > 0 ? (baPriceFromTbl_(cfg, pl.cc, wG, t.cNow) || 0) : 0; pl.newPrice = npD; pl.act = (npD > 0 && npD < pl.price) ? 'lower' : 'keep'; }   /* 値下げの候補（見るだけ・下げるかは本人） */
           else pl.act = np > pl.price ? 'raise' : 'keep';
-          if (pl.act === 'delete') out.del++; else if (pl.act === 'raise') out.raise++;
+          if (pl.act === 'delete') out.del++; else if (pl.act === 'raise') out.raise++; else if (pl.act === 'lower') out.lower = (out.lower || 0) + 1;
         });
-        t.act = t.places.some(function (pl) { return pl.act === 'delete'; }) ? 'delete' : (t.places.some(function (pl) { return pl.act === 'raise'; }) ? 'raise' : 'keep');
+        t.act = t.places.some(function (pl) { return pl.act === 'delete'; }) ? 'delete' : (t.places.some(function (pl) { return pl.act === 'raise'; }) ? 'raise' : (t.places.some(function (pl) { return pl.act === 'lower'; }) ? 'lower' : 'keep'));
       });
     }
     var now = new Date().toISOString();
     picked.filter(function (t) { return t.hits != null; }).forEach(function (t) {
-      if (t.act === 'keep' && !t.few && !t.up) { S.cnt.keep = (S.cnt.keep || 0) + 1; return; }   /* そのままの作品は数だけ（控えを小さく） */
+      if (t.act === 'keep' && !t.few && !t.up && !t.down) { S.cnt.keep = (S.cnt.keep || 0) + 1; return; }   /* そのままの作品は数だけ（控えを小さく） */
       S.cnt[t.act] = (S.cnt[t.act] || 0) + 1;
-      S.res.unshift({ at: now, hw: hw, k: t.k, ja: String(t.ja).slice(0, 60), en: String(t.en).slice(0, 40), c0: t.c0, cNow: t.cNow, lo: t.lo, hits: t.hits, few: t.few ? 1 : 0, up: t.up ? 1 : 0, act: t.act,
+      S.res.unshift({ at: now, hw: hw, k: t.k, ja: String(t.ja).slice(0, 60), en: String(t.en).slice(0, 40), c0: t.c0, cNow: t.cNow, lo: t.lo, hits: t.hits, few: t.few ? 1 : 0, up: t.up ? 1 : 0, down: t.down ? 1 : 0, act: t.act,
         pl: t.places.map(function (pl) { return { cc: pl.cc, item: pl.item, model: pl.model, act: pl.act || '', price: pl.price, np: pl.newPrice, stock: pl.stock, sold: pl.sold }; }) });
     });
     if (S.res.length > 300) S.res.length = 300;   /* 控えは小さく（1時間ごとに読み書きする） */
