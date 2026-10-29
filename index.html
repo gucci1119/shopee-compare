@@ -4850,6 +4850,7 @@
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
     /* ★2026-10-29 値付けの見直しの表の言い方 */
+    "🤖が出した明細の相場の見直し（見るだけ）の相場集めを、担当の PC のポータルでするようにしました": "Market data for the 🤖 listing re-check (dry run) is now collected by the owner PC's portal",
     "値付けの見直しの表示を速くしました": "Made the pricing review load faster",
     "値付けの見直しの表を見やすくしました": "Made the pricing review table easier to read",
     "売れた数": "Units sold",
@@ -24458,6 +24459,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-10-29', items: [
+      '🔁 <b>🤖が出した明細の相場の見直し（見るだけ）の相場集めを、担当の PC のポータルでするようにしました</b>：GAS からはメルカリが読めず、Yahoo!フリマにも弾かれるため。GAS が並べた作品を、メルカリと Yahoo!フリマの販売中で（写真集めと同じ照合・新品は数えない）15分ごとに8作品ずつ探します。Shopee には書きません',
       '🐢 <b>値付けの見直しの表示を速くしました</b>（本人「なんでこんなに表示遅いの？」）：出品データはポータルを開いた時に読んだ物を使い回し（前は開くたびに約7,900行を明細付きで読み直していた）、🤖の仕入れ目安の控え46本は3本ずつ並べて読み、30分は使い回します。🔄 を押すと全部読み直します',
       '🏷 <b>値付けの見直しの表を見やすくしました</b>（本人「どう見たらいいかいまいち分からない」「線とかもよく分からない」「メリハリもしっかり」）：「線（粗利）」を「基準の利益（1個）」に、今の利益の下に「✗ 基準まであと¥…」／「✓ 基準に届く」を太字・色付きで。提案する値段の下は「▲ 36% 値上げ」「そのまま」、提案の値段での利益の下にも基準に届くかを出します。損益分岐は今の値段の下に「…より下は赤字」、売れた頃は「前に売れた値段」に。大事な数字は太く大きく、補足は灰色に',
       '🎰 <b>一番くじの区分ごとに「外す語」を足しました</b>：ちょこのっこ等のフィギュアの区分からキーホルダー・チャーム・アクリル・ラバー・ストラップを、タオルから巾着・ポーチを外します（商品部が候補を見て見つけた混ざり物）',
@@ -35777,6 +35779,76 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   const baPreKeyFor = (pre, key, hw) => (hw && (pre[key + '@' + hw] || (pre[key] && !baPreFits(pre[key], hw)))) ? key + '@' + hw : key;
   const baPreOf = (pre, key, hw) => { if (!pre || !key) return undefined; const at = hw ? pre[key + '@' + hw] : null; if (at) return at; const e = pre[key]; return (e && baPreFits(e, hw)) ? e : undefined; };
   const baPlatOkFor = (name, hw) => { const ps = platsOf(String(name || '').normalize('NFKC').toLowerCase()); if (!ps.length) return true; return ps.includes(String(hw || '')) || (hw === 'gbc' && ps.includes('gb')); };
+  /* 🔁 2026-10-29 出した明細の相場の見直し（01 の依頼・本人「まず見るだけで1日。minHits 未満は sold 0 の明細だけ削除・sold がある物は値上げ。目安が上がったら値上げ優先」）。
+     GAS は相場を読めない（Yahoo!フリマは Google の回線を約16回で弾いた・メルカリは読めない）＝担当の PC がここで集める。
+     GAS（rvRun_）が app_kv boshu_revalue の queue に入れた作品を、メルカリ（販売中・関連順60件）と Yahoo!フリマ（販売中）で探し、
+     ゲームの写真集め（baCollectMercari）と【同じ照合】で同じ物の件数と値段を app_kv boshu_revalue_mc（{items:{機種|作品の鍵: {n, mc, yfm, p, at}}}）に書く。
+     新品・未使用は数えない。どちらも読めなかった作品は書かない（0件と言わない）。1回8作品・15分ごと・判定は GAS。 */
+  function rvKit(hwKey) {
+    const HWJA = { psp: 'PSP', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', switch2: 'Switch2', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCエンジン', ws: 'ワンダースワン', gg: 'ゲームギア' };
+    const NG = /限定版|限定盤|完全生産限定|初回限定|数量限定|限定セット|エディション|edition|コレクターズ|collector|black\s*box|特装版|豪華版|同梱版|特典付|特典あり|特典同梱|新品|未開封|未使用|体験版|非売品|サンプル版|攻略|ガイド|説明書のみ|箱のみ|空箱|ケースのみ|パッケージのみ|ソフトなし|ソフト無し|まとめ|セット|複数|同梱|ジャンク|サントラ|サウンドトラック|フィギュア|ポスター|キーホルダー|Tシャツ|カードのみ|\d+本|本セット|冊|画集|資料集|コントローラ|本体|メモリーカード|ケーブル|アダプタ|ストラップ|ステッカー|シール(?!ド)|早期購入特典|購入特典|特典のみ|プロモ|トレカ|トレーディングカード|カードゲーム|カードダス|ポケモンカード|ポケカ|台紙|空容器|空ケース|マグネット|マグネッツ|パスケース|ぬいぐるみ|アクリルスタンド|アクスタ|缶バッジ|クリアファイル|マスコット|下敷き|グッズ|食玩|雑貨|タオル|マグカップ|弁当箱|ランチボックス|エコバッグ|うちわ|ポーチ|北米版|海外版|欧州版|アジア版|韓国版|中国版|輸入版|US版|EU版|NTSC-?U|PAL版/;
+    const NG_G = new RegExp(NG.source, 'g');   // 当たった語を取り出す用（題名にも入っていれば除外しない）   // 北米版などは「Japanese Ver」の明細に使えない（実測：スパイダーマン2 に北米版の写真が付いた 2026-09-17）
+    // ★作品名の核が【長い語の一部】に当たるのを止める：前後がカナ・漢字・英数なら別の語（実測：「カーズ」が「マリオストライ**カーズ**」に当たった 2026-09-17）
+    const hasCore = (t, c) => { let i = -1; while ((i = t.indexOf(c, i + 1)) >= 0) { const b = t[i - 1] || '', a = t[i + c.length] || ''; const W = /[ぁ-んァ-ヶー一-龠a-z0-9]/; if (!(b && W.test(b)) && !(a && W.test(a))) return true; if (c.length >= 6) return true; } return false; };
+    const coreOf = (ja) => { const base = String(ja || '').normalize('NFKC').toLowerCase().replace(/[【】\[\]（）()「」『』]/g, ' '); const toks = base.split(/[\s\/／・:：\-–—~〜!！?？,、。]+/).map(x => x.trim()).filter(x => x.length >= 2); toks.sort((a, b) => b.length - a.length); return toks.slice(0, 2).map(x => x.replace(/\s+/g, '')); };
+    // 数字・ローマ数字（V3・2・II…）は作品の違いそのもの。作品名に無い数字を持つ出品は続編＝別作品（GAS baMatch_ と同じ規則）
+    const numsOf = (t) => { const o = {}; (String(t).match(/(?:^|[^a-z0-9])(v?\d{1,3}|ii|iii|iv|vi|vii|viii|ix|xi|xii)(?=[^a-z0-9]|$)/g) || []).forEach(m => { o[m.replace(/^[^a-z0-9]+/, '')] = 1; }); return o; };
+    /* ★2026-09-20 本人「10件とか12件とかの中にもノイズあると思うので、そこまで見分けられる？」。実測（GBA の AI NG 25枚のうち9枚）＝同じ題名の【別の機種版】が混ざっていた（PS2版・DS版など。写真も相場も別物）。
+       出品名に機種の語があって、それが狙いの機種でなければ落とす。機種の語が無い出品は今までどおり（題名の語で照合）。GB と GBC は同じ扱い */
+    const platOk = (raw) => { const ps = platsOf(raw); if (!ps.length) return true; const want = String(hwKey || ''); return ps.includes(want) || (want === 'gbc' && ps.includes('gb')); };
+    /* ★2026-09-21 除外語の誤爆を止める（実測で2件）：`GBASP用 MiniポーチSP` と `GAMEBOY MICRO専用 ゲームポーチM` は
+       **商品そのものがポーチ**なのに「ポーチ」で除外していた。過去の教訓（[[ng-word-substring-kills-real-titles]]）と同じ型。
+       → 除外語が**探している商品の題名にも入っている時は除外しない**。「ぬいぐるみ」「タオル」等も同じ理屈で守られる。 */
+    const ngOk = (name, ja, en) => { const hit = String(name || '').match(NG_G); if (!hit) return true;
+      const want = (String(ja || '') + ' ' + String(en || '')).normalize('NFKC').toLowerCase();
+      return hit.every(w => want.indexOf(String(w).normalize('NFKC').toLowerCase()) >= 0); };
+    const matchOk = (name, core, ja, en) => { const raw = String(name || '').normalize('NFKC').toLowerCase(); const t = raw.replace(/\s+/g, ''); if (!ngOk(name, ja, en)) return false; if (!platOk(raw)) return false; if (!(core.length && core.every(c => hasCore(t, c)))) return false; const qn = numsOf(String(ja || en || '').normalize('NFKC').toLowerCase());   /* ★2026-09-23 Codex指摘：日本語題が無い作品は英題の数字で照合（前は空＝英題の 7 等が余計な数字扱いで落ちていた） */ const ln = numsOf(raw); return !Object.keys(ln).some(k => !qn[k] && (/^v\d/.test(k) || !/^(1|2|3|4|64|100|200[0-8])$/.test(k))); };
+    const cleanJa = (t) => String(t || '').replace(/【[^】]{0,80}】/g, ' ').replace(/[（(\[［].*?[）)\]］]/g, ' ').replace(/(初回限定版|完全生産限定版|限定版|通常版|廉価版|ベスト版|Best版|新価格版|同梱版|特装版|豪華版|the Best|PlayStation the Best|Nintendo Selects)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
+    return { HWJA, coreOf, matchOk, cleanJa };
+  }
+  async function rvCollect() {
+    if (!settings.sbSecret || demoOn() || !pcIsOwner()) return;
+    if (rvCollect.busy || lst._baCollecting) return;
+    try { if (_buyBusyAny()) return; } catch (_) {}
+    if (bridgeTimeoutStreak >= 3) return;
+    rvCollect.busy = true;
+    try {
+      const qr = await sbGet('app_kv', 'select=q:v->queue&k=eq.boshu_revalue').catch(() => null);
+      const q = ((qr || [])[0] || {}).q; if (!Array.isArray(q) || !q.length) return;
+      const cur = await sbGet('app_kv', 'select=v&k=eq.boshu_revalue_mc').catch(() => null); if (cur === null) return;   /* 読めなければ書かない */
+      const have = ((((cur || [])[0] || {}).v || {}).items) || {};
+      const now = Date.now(), mine = {}; let tried = 0;
+      for (const e of q) {
+        if (tried >= 8) break;
+        if (!e || !e.hw || !e.k || !e.ja) continue;
+        const key = e.hw + '|' + e.k, old = have[key];
+        if (old && now - Date.parse(old.at || 0) < 40 * 3600000) continue;
+        tried++;
+        const kit = rvKit(e.hw), core = kit.coreOf(e.ja);
+        const kw = (kit.cleanJa(e.ja) + ' ' + (kit.HWJA[e.hw] || '')).trim();
+        let mi = null; try { mi = await mercariSearch(kw, { relevance: true }); } catch (_) { mi = null; }
+        await new Promise(rs => setTimeout(rs, 2500));
+        let y = null; try { y = await yfmSearch(kw); } catch (_) { y = null; }
+        const yOk = !!(y && !y.blocked);
+        if (mi === null && !yOk) { await new Promise(rs => setTimeout(rs, 2500)); continue; }
+        const mH = (mi || []).filter(x => Number(x.cid) !== 1 && !/未使用|新品/.test(String(x.cond || '')) && kit.matchOk(x.name, core, e.ja, e.en));
+        const yH = (yOk ? (y.items || []) : []).filter(x => !/^new/i.test(String(x.cond || '')) && !/未使用|新品未開封/.test(String(x.name || '')) && kit.matchOk(x.name, core, e.ja, e.en));
+        const p = mH.map(x => Number(x.price) || 0).concat(yH.map(x => Number(x.price) || 0)).filter(v => v > 0).sort((a, b) => a - b).slice(0, 24);
+        mine[key] = { n: mH.length + yH.length, mc: mi === null ? -1 : mH.length, yfm: yOk ? yH.length : -1, p, at: new Date().toISOString() };
+        await new Promise(rs => setTimeout(rs, 2500));
+      }
+      if (!Object.keys(mine).length) return;
+      /* 書く直前に読み直して、自分の分だけ重ねる（7日より古い分は捨てる） */
+      const cur2 = await sbGet('app_kv', 'select=v&k=eq.boshu_revalue_mc').catch(() => null); if (cur2 === null) return;
+      const base = Object.assign({}, ((((cur2 || [])[0] || {}).v || {}).items) || {});
+      Object.keys(mine).forEach(k => { base[k] = mine[k]; });
+      Object.keys(base).forEach(k => { if (now - Date.parse((base[k] || {}).at || 0) > 7 * 86400000) delete base[k]; });
+      await sbUpsert('app_kv', [{ k: 'boshu_revalue_mc', v: { items: base, at: new Date().toISOString() }, updated_at: new Date().toISOString() }]);
+    } catch (e) { console.warn('[相場の見直し] 集めるのに失敗:', e); }
+    finally { rvCollect.busy = false; }
+  }
+  setTimeout(() => { rvCollect().catch(() => {}); }, 7 * 60 * 1000);
+  setInterval(() => { rvCollect().catch(() => {}); }, 15 * 60 * 1000);
   async function baCollectMercari(rows, hwKey, opts) {
     opts = opts || {};
     const HWJA = { psp: 'PSP', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5', vita: 'Vita', ds: 'DS', '3ds': '3DS', switch: 'Switch', switch2: 'Switch2', wii: 'Wii', wiiu: 'WiiU', gc: 'ゲームキューブ', n64: 'N64', sfc: 'スーパーファミコン', fc: 'ファミコン', gba: 'GBA', gb: 'ゲームボーイ', md: 'メガドライブ', ss: 'サターン', dc: 'ドリームキャスト', xbox: 'Xbox', xbox360: 'Xbox360', xboxone: 'XboxOne', pce: 'PCエンジン', ws: 'ワンダースワン', gg: 'ゲームギア' };

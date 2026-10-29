@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-1530';
+var SRC_VER = '20261029-1600';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8709,7 +8709,7 @@ function boshuAutoRecheck() {
    Yahoo!フリマの販売中（GAS が読める所）で件数と相場を取り直す。件数が minHits 未満か、相場が控え（llog_cost_<hw>）の rise 倍を超えた作品だけ、国ごとの明細の値段と注文を見て
    delete（sold 0）／raise（値上げ）／keep を決め、控え boshu_revalue に書く。
    ★いまは見るだけ（mode:'dry'）。Shopee には何も書かない。live は 01 が1日分の判定を見てから作る。
-   ★メルカリは GAS から読めない＝件数は少なめに出る（「少ない」の判定は多めに出る）。live の前にポータルのメルカリの件数を足す。
+   ★2026-10-29 15時：GAS からは相場を読めない（Yahoo!フリマは Google の回線を弾く・メルカリは読めない）→ 相場は担当の PC のポータル（rvCollect）がメルカリと Yahoo!フリマで集める（boshu_revalue_mc）。
    ★sold は orders.items（10/4 から item_id・model_id・明細名が入る）で数える。番号か名前のどちらかが合えば「売れた」＝消さない側に倒す（詰め直しで番号の中身が動くため） */
 var RV_KEY = 'boshu_revalue';
 function rvCfg_(cfg) { var r = (cfg && cfg.revalue) || {}; return { on: r.on === true, mode: r.mode === 'live' ? 'live' : 'dry', runner: String(r.runner || 'child3'), perRun: Math.max(1, Math.min(40, Number(r.perRun) || 15)), rise: Math.max(1.1, Number(r.rise) || 1.5), fall: Math.max(1.2, Number(r.fall) || 2) }; }   /* fall＝控えの目安が今の相場の何倍を超えたら「値下げの候補」（10/29 01「今の2倍超も印を」・値下げするかは本人） */
@@ -8744,42 +8744,49 @@ function rvRun_(manual) {
   if (rc.mode !== 'dry') return { ok: false, error: 'live（Shopee に書く方）はまだ作っていない＝見るだけの結果を 01 が見てから' };
   if (!bgAllowed_()) return { ok: false, skipped: 'bg' };
   var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return { ok: false, skipped: 'busy' };
-  var out = { ok: true, mode: rc.mode, hw: '', checked: 0, keep: 0, flagged: 0, del: 0, raise: 0 };
+  var out = { ok: true, mode: rc.mode, hw: '', queued: 0, checked: 0, keep: 0, flagged: 0, del: 0, raise: 0 };
   try {
+    /* ★2026-10-29 15時 GAS からは相場を読めない（Yahoo!フリマは Google の回線を約16回で弾いた・メルカリは読めない）＝自分では探さない。
+       見直したい作品を S.queue に入れ、担当の PC のポータル（rvCollect）がメルカリと Yahoo!フリマの販売中で集めた件数と値段（boshu_revalue_mc）で判定する */
     var S = baKvFresh_(RV_KEY); if (BA_KV_FAIL[RV_KEY]) throw new Error('控え ' + RV_KEY + ' を読めない（空で上書きしない）');
-    S = (S && typeof S === 'object') ? S : {}; S.pos = S.pos || {}; S.res = S.res || []; S.cnt = S.cnt || {};
-    if (S.blockedUntil && Date.now() < S.blockedUntil) { out.skipped = 'blocked'; return out; }
-    var hws = rvGameHws_(cfg); if (!hws.length) { out.skipped = 'no_hw'; return out; }
-    var hw = hws[(Number(S.hwi) || 0) % hws.length]; out.hw = hw;
-    var ledger = baKvFresh_('boshu_auto_done_' + hw), lc = baKvFresh_('llog_cost_' + hw);
-    if (BA_KV_FAIL['boshu_auto_done_' + hw] || BA_KV_FAIL['llog_cost_' + hw]) throw new Error(hw + ' の台帳か仕入れ目安を読めない');
-    ledger = ledger || {}; var lm = (lc && lc.m) || {};
-    var keys = Object.keys(ledger), pos = Math.min(Number(S.pos[hw]) || 0, keys.length), minHits = Math.max(1, Number(cfg.minHits) || 3), picked = [];
-    while (pos < keys.length && picked.length < rc.perRun) {
-      var k = keys[pos++], o = ledger[k] || {}, places = [];
-      Object.keys(o).forEach(function (cc) { var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (m) places.push({ cc: cc, item: m[1], model: m[2] }); });
-      if (!places.length) continue;
-      var ja = '', en = '', c0 = 0;
-      places.forEach(function (pl) { var e = lm[pl.cc + '|' + pl.item + '|' + pl.model]; if (e && typeof e === 'object') { if (!ja && e.ja) ja = String(e.ja); if (!en && e.en) en = String(e.en); pl.c = Number(e.c) || 0; pl.en = String(e.en || ''); if (pl.c > c0) c0 = pl.c; } });
-      if (!ja) { S.cnt.noja = (S.cnt.noja || 0) + 1; continue; }
-      picked.push({ k: k, ja: ja, en: en, c0: c0, places: places, pi: pos - 1 });
+    S = (S && typeof S === 'object') ? S : {}; S.pos = S.pos || {}; S.res = S.res || []; S.cnt = S.cnt || {}; S.queue = Array.isArray(S.queue) ? S.queue : [];
+    delete S.blockedUntil;
+    var MC = baKvFresh_('boshu_revalue_mc'); if (BA_KV_FAIL['boshu_revalue_mc']) throw new Error('相場の控え boshu_revalue_mc を読めない');
+    var mcI = (MC && MC.items) || {}, nowMs = Date.now(), minHits = Math.max(1, Number(cfg.minHits) || 3);
+    /* 1) 待ち行列のうち、相場が集まった作品を取り出す（48時間以内の物だけ）。7日集まらない物は捨てる */
+    var ready = [], keepQ = [];
+    S.queue.forEach(function (q) { var m = mcI[q.hw + '|' + q.k]; if (m && nowMs - Date.parse(m.at || 0) < 48 * 3600000 && Number(m.n) >= 0) { q.m = m; ready.push(q); } else if (nowMs - Date.parse(q.at || 0) < 7 * 86400000) keepQ.push(q); else S.cnt.expired = (S.cnt.expired || 0) + 1; });
+    /* 2) 待ち行列が少なければ、台帳から古い順に足す（1回 perRun 作品・機種は順番に） */
+    var hws = rvGameHws_(cfg);
+    if (hws.length && keepQ.length < rc.perRun * 3) {
+      var hw = hws[(Number(S.hwi) || 0) % hws.length]; out.hw = hw;
+      var ledger = baKvFresh_('boshu_auto_done_' + hw), lc = baKvFresh_('llog_cost_' + hw);
+      if (BA_KV_FAIL['boshu_auto_done_' + hw] || BA_KV_FAIL['llog_cost_' + hw]) throw new Error(hw + ' の台帳か仕入れ目安を読めない');
+      ledger = ledger || {}; var lm = (lc && lc.m) || {};
+      var keys = Object.keys(ledger), pos = Math.min(Number(S.pos[hw]) || 0, keys.length), added = 0, inQ = {};
+      keepQ.forEach(function (q) { inQ[q.hw + '|' + q.k] = 1; }); ready.forEach(function (q) { inQ[q.hw + '|' + q.k] = 1; });
+      while (pos < keys.length && added < rc.perRun) {
+        var k = keys[pos++], o = ledger[k] || {}, places = [];
+        Object.keys(o).forEach(function (cc) { var m = /^(\d+)#(\d+)$/.exec(String(o[cc] || '')); if (m) places.push({ cc: cc, item: m[1], model: m[2] }); });
+        if (!places.length || inQ[hw + '|' + k]) continue;
+        var ja = '', en = '', c0 = 0;
+        places.forEach(function (pl) { var e = lm[pl.cc + '|' + pl.item + '|' + pl.model]; if (e && typeof e === 'object') { if (!ja && e.ja) ja = String(e.ja); if (!en && e.en) en = String(e.en); pl.c = Number(e.c) || 0; pl.en = String(e.en || '').slice(0, 80); if (pl.c > c0) c0 = pl.c; } });
+        if (!ja) { S.cnt.noja = (S.cnt.noja || 0) + 1; continue; }
+        keepQ.push({ hw: hw, k: k, ja: ja.slice(0, 80), en: en.slice(0, 80), c0: c0, places: places, at: new Date().toISOString() }); added++;
+      }
+      if (pos >= keys.length) { S.pos[hw] = 0; S.hwi = (Number(S.hwi) || 0) + 1; } else S.pos[hw] = pos;
+      out.queued = added;
     }
-    var endPos = pos;
-    var t0 = Date.now(), flagged = [], stopAt = -1;
-    for (var i = 0; i < picked.length; i++) {
-      if (Date.now() - t0 > 200000) { stopAt = i; break; }
-      var t = picked[i];
-      var y = baPaypay_((baCleanJa_(t.ja) + ' ' + (BA_HW_WORD[hw] || '')).trim());
-      if (y.blocked) { S.blockedUntil = Date.now() + 6 * 3600 * 1000; out.blocked = 1; stopAt = i; break; }
-      var hits = baMatch_(y.items || [], t.ja, hw); t.hits = hits.length; t.cNow = hits.length ? baCostOfHits_(hits) : 0; t.lo = hits.length ? hits[0].price : 0;
+    S.queue = keepQ.slice(0, 200);
+    /* 3) 相場が集まった作品を判定（今までと同じ決め） */
+    var flagged = [];
+    ready.forEach(function (t) {
+      var p = (t.m.p || []).filter(function (v) { return Number(v) > 0; }).map(Number).sort(function (a, b) { return a - b; });
+      t.hits = Number(t.m.n) || 0; t.cNow = p.length ? baCostOfHits_(p.map(function (v) { return { price: v }; })) : 0; t.lo = p.length ? p[0] : 0; t.src = { mc: t.m.mc, yfm: t.m.yfm };
       out.checked++;
       t.few = t.hits < minHits; t.up = (t.c0 > 0 && t.cNow > t.c0 * rc.rise); t.down = (t.cNow > 0 && t.c0 > t.cNow * rc.fall);   /* 控えの目安が今の相場より大きく高い＝高すぎて売れない側（ネコ・トモ ¥7,450→今 ¥800〜1,500） */
       if (t.few || t.up || t.down) flagged.push(t); else { t.act = 'keep'; out.keep++; }
-      Utilities.sleep(1500 + Math.floor(Math.random() * 1500));
-    }
-    /* ★2026-10-29 弾かれた・時間切れで途中で止まった時は、見ていない作品の位置から次の回を始める（前は見ていない分まで飛ばしていた） */
-    if (stopAt >= 0) S.pos[hw] = picked[stopAt].pi;
-    else if (endPos >= keys.length) { S.pos[hw] = 0; S.hwi = (Number(S.hwi) || 0) + 1; } else S.pos[hw] = endPos;
+    });
     if (flagged.length) {
       var allP = []; flagged.forEach(function (t) { t.places.forEach(function (pl) { allP.push(pl); }); });
       var rows = {}; var ids = allP.map(function (pl) { return pl.item; }).filter(function (v, i2, a) { return a.indexOf(v) === i2; });
@@ -8792,26 +8799,27 @@ function rvRun_(manual) {
           if (!md) { pl.act = 'gone'; return; }
           pl.name = String(md.n || ''); pl.price = Number(md.price) || 0; pl.stock = Number(md.stock) || 0;
           if ((pl.en || t.en) && baTmKey_(pl.en || t.en) !== baTmKey_(pl.name)) { pl.act = 'mismatch'; return; }   /* 番号の中身が別の作品（詰め直しで動いた）＝触らない */
-          var wG = Math.round((Number(r.weight) || 0) * 1000) || Number(((cfg.family || {})[hw] || {}).weightG) || 150;
+          var wG = Math.round((Number(r.weight) || 0) * 1000) || Number(((cfg.family || {})[t.hw] || {}).weightG) || 150;
           var costFor = t.cNow > 0 ? Math.max(t.cNow, t.few ? (pl.c || t.c0) : 0) : Math.round((pl.c || t.c0) * rc.rise);
           var np = costFor > 0 ? (baPriceFromTbl_(cfg, pl.cc, wG, costFor) || 0) : 0; pl.newPrice = np;
           if (t.few) { pl.sold = soldOf(pl, pl.name); pl.act = pl.sold === 0 ? 'delete' : (np > pl.price ? 'raise' : 'keep'); if (pl.sold < 0) pl.act = np > pl.price ? 'raise' : 'unknown'; }
           else if (t.down) { var npD = t.cNow > 0 ? (baPriceFromTbl_(cfg, pl.cc, wG, t.cNow) || 0) : 0; pl.newPrice = npD; pl.act = (npD > 0 && npD < pl.price) ? 'lower' : 'keep'; }   /* 値下げの候補（見るだけ・下げるかは本人） */
           else pl.act = np > pl.price ? 'raise' : 'keep';
-          if (pl.act === 'delete') out.del++; else if (pl.act === 'raise') out.raise++; else if (pl.act === 'lower') out.lower = (out.lower || 0) + 1;
+          if (pl.cc === 'VN' && pl.act === 'raise' && pl.newPrice >= 1000000) pl.act = 'cap';   /* VN は 1,000,000 VND 未満しか出せない＝上げられない（live では削除か止める） */
+          if (pl.act === 'delete') out.del++; else if (pl.act === 'raise') out.raise++; else if (pl.act === 'lower') out.lower = (out.lower || 0) + 1; else if (pl.act === 'cap') out.cap = (out.cap || 0) + 1;
         });
-        t.act = t.places.some(function (pl) { return pl.act === 'delete'; }) ? 'delete' : (t.places.some(function (pl) { return pl.act === 'raise'; }) ? 'raise' : (t.places.some(function (pl) { return pl.act === 'lower'; }) ? 'lower' : 'keep'));
+        t.act = t.places.some(function (pl) { return pl.act === 'delete'; }) ? 'delete' : (t.places.some(function (pl) { return pl.act === 'raise'; }) ? 'raise' : (t.places.some(function (pl) { return pl.act === 'lower'; }) ? 'lower' : (t.places.some(function (pl) { return pl.act === 'cap'; }) ? 'cap' : 'keep')));
       });
     }
     var now = new Date().toISOString();
-    picked.filter(function (t) { return t.hits != null; }).forEach(function (t) {
+    ready.forEach(function (t) {
       if (t.act === 'keep' && !t.few && !t.up && !t.down) { S.cnt.keep = (S.cnt.keep || 0) + 1; return; }   /* そのままの作品は数だけ（控えを小さく） */
       S.cnt[t.act] = (S.cnt[t.act] || 0) + 1;
-      S.res.unshift({ at: now, hw: hw, k: t.k, ja: String(t.ja).slice(0, 60), en: String(t.en).slice(0, 40), c0: t.c0, cNow: t.cNow, lo: t.lo, hits: t.hits, few: t.few ? 1 : 0, up: t.up ? 1 : 0, down: t.down ? 1 : 0, act: t.act,
+      S.res.unshift({ at: now, hw: t.hw, k: t.k, ja: String(t.ja).slice(0, 60), en: String(t.en).slice(0, 40), c0: t.c0, cNow: t.cNow, lo: t.lo, hits: t.hits, src: t.src, few: t.few ? 1 : 0, up: t.up ? 1 : 0, down: t.down ? 1 : 0, act: t.act,
         pl: t.places.map(function (pl) { return { cc: pl.cc, item: pl.item, model: pl.model, act: pl.act || '', price: pl.price, np: pl.newPrice, stock: pl.stock, sold: pl.sold }; }) });
     });
     if (S.res.length > 300) S.res.length = 300;   /* 控えは小さく（1時間ごとに読み書きする） */
-    S.at = now; S.mode = rc.mode; S.runner = baRunnerId_(); S.src = 'yfm'; S.last = out;
+    S.at = now; S.mode = rc.mode; S.runner = baRunnerId_(); S.src = 'portal:mercari+yfm'; S.last = out;
     S.cnt.checked = (S.cnt.checked || 0) + out.checked; if (!S.since) S.since = now;
     baKvSet_(RV_KEY, S);
   } catch (e) { out.ok = false; out.error = String((e && e.message) || e).slice(0, 200); }
