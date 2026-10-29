@@ -212,5 +212,6 @@ paypal-link-filler（userscript）がリンクをコピーする。カードの�
    - `shopEdit.keepProfit`／`shopEdit.keepTotal` は plans[n] と同じ形（shop・pp・total・profit・roi・bd・stages）＋`profitPlus`（その案の粗利−plans['2'] の粗利・円）
    - keepProfit の保つ粗利は ① の粗利（&sale なしなら ② と同じ・&sale ありなら ① の粗利）。shop2 だけで粗利を超える時は PayPal 0（粗利は増える）
    - keepTotal の合計は今の ② の total（&sale の時は sale）。PayPal の円は切り捨て（現地通貨に戻すとちょうど差額）
-   - shop2 が ③ の最低額より安い → 2案とも返さない（shopEdit のキーが無い）・warn に理由。shop2 が合計を超える → keepTotal だけ返さない・warn に理由
+   - shop2 が ③ の最低額より安い・または今の ② の合計を超える → 2案とも返さない（shopEdit のキーが無い）・warn に理由（合計を超えると keepProfit も PayPal 0 で「+ 0 BRL via PayPal」の文になったため・00:3x に直した）
+   - 入力欄へ入れた後の返事（smdQuoteAck）を待つ時間は 10 秒（前は3秒）。切れた後も60秒は待ち、遅れて ok が来たらポータルの表示を「後から入りました（コピーした文は貼らないでください）」に書き換える（2026-10-30・03 営業部）
    - 文面（stages）は合計が ① より安い時だけ「pay less」、同じ・高い時は「Or you can split the payment」（a347139）

@@ -9951,8 +9951,10 @@
     if (!buyer) { fallback('相手のユーザー名が空なので入れていません'); return; }
     let op = null; try { op = window.opener; } catch (_) {}
     if (!op || op.closed) { fallback('開いた元の webchat が見つかりません（ポータルを直接開いた・webchat を閉じた）'); return; }
-    const id = 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5); let done = false;
+    const id = 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5); let done = false, late = false;
     const onAck = (e) => { const d = e.data || {}; if (!d || d.smdQuoteAck !== id || !pcChatOrigin(e.origin) || e.origin !== pcChatOrigin(pcQuote.o)) return; done = true; window.removeEventListener('message', onAck);
+      /* ★2026-10-30 03 営業部：待ちが切れた後に遅れて入った＝コピーした文を貼ると二重になる（10/29 Rodrigo さんに二重で届いた） */
+      if (late) { if (d.ok) { msg.textContent = '💬 ' + (d.buyer || buyer) + ' さんの入力欄に後から入りました（コピーした文は貼らないでください。貼ると二重になります）'; try { toast('💬 後から入りました。コピーした文は貼らないでください', 8000); } catch (_) {} } return; }
       if (d.ok) { const app = pcQuote.src === 'wa' ? 'WhatsApp' : 'webchat'; msg.textContent = '💬 ' + (d.buyer || buyer) + ' さんの入力欄に入れました。' + app + ' で中身を見て、写真も付けて自分で送信してください'; try { toast('💬 ' + app + ' の入力欄に入れました（送信はしていません）'); } catch (_) {} }
       else fallback(String(d.err || '入れられませんでした')); };
     window.addEventListener('message', onAck);
@@ -9960,7 +9962,9 @@
     if (!to) { window.removeEventListener('message', onAck); fallback('開いた元が Shopee の webchat・WhatsApp か確かめられないので入れていません'); return; }
     try { op.postMessage({ smdQuoteInsert: t, buyer: buyer, cc: cc, id: id }, to); } catch (e) { window.removeEventListener('message', onAck); fallback('webchat に渡せませんでした'); return; }
     msg.textContent = '⏳ ' + (pcQuote.src === 'wa' ? 'WhatsApp' : 'Smart Reply') + ' の入力欄へ入れています…';
-    setTimeout(() => { if (done) return; window.removeEventListener('message', onAck); fallback(pcQuote.src === 'wa' ? 'WhatsApp から返事がありません（WhatsApp のスクリプトが古い版・WhatsApp を読み直した）' : 'Smart Reply から返事がありません（Smart Reply が古い版・webchat を読み直した・別の国の webchat から開いた）'); }, 3000);
+    /* ★2026-10-30 03 営業部：3秒→10秒（WA 1.4.62〜 は貼った後に入ったかを最大5.5秒確かめ、1.4.66〜 は相手の確かめも0.5〜0.75秒）。切れた後も60秒は遅れた返事を待って表示を書き換える */
+    setTimeout(() => { setTimeout(() => window.removeEventListener('message', onAck), 60000); }, 10000);
+    setTimeout(() => { if (done) return; late = true; fallback(pcQuote.src === 'wa' ? 'WhatsApp から返事がありません（WhatsApp のスクリプトが古い版・WhatsApp を読み直した）' : 'Smart Reply から返事がありません（Smart Reply が古い版・webchat を読み直した・別の国の webchat から開いた）'); }, 10000);
   }
   /* ★2026-10-24 本人「リクエスト商品の明細追加するときは、こんな感じの画像にして欲しい」「だれだれ専用的な」：
      上に赤い帯で Reserved for / [相手] / Other customers / cannot purchase.、下に仕入れ先の写真（白地・正方形 1000px）。
@@ -10168,14 +10172,14 @@
         if (r && r.se) {
           const se = r.se, w5 = []; out.shop2Input = window._pcShop2 ? window._pcShop2.v : null;
           if (se.below) w5.push('Shopee に載せる額（' + se.s2 + '）が③の最低額（' + se.min + '）より安いので、Shopee 側が赤字になります（打ち替えの案は返しません）');
+          else if (se.over) w5.push('Shopee に載せる額（' + se.s2 + '）が今の②の合計（' + se.tot + '）を超えるので、打ち替えの案は返しません（PayPal が 0 以下になる）');
           else {
             const KS = ['lowLocal', 'lowPf', 'ppAsk', 'ppFee', 'ppNet'], keepR = {}; KS.forEach(k => { keepR[k] = r[k]; });
             const p2 = out.plans['2'] || {};
             try {
               out.shopEdit = {};
               Object.assign(r, se.kp); { const a = mkPlan('2'); a.profitPlus = Math.round(a.profit - (Number(p2.profit) || 0)); out.shopEdit.keepProfit = a; }
-              if (se.kt) { Object.assign(r, se.kt); const b = mkPlan('2'); b.profitPlus = Math.round(b.profit - (Number(p2.profit) || 0)); out.shopEdit.keepTotal = b; }
-              else w5.push('Shopee に載せる額（' + se.s2 + '）が今の②の合計（' + se.tot + '）を超えるので、「合計そのまま」の案は返しません');
+              Object.assign(r, se.kt); { const b = mkPlan('2'); b.profitPlus = Math.round(b.profit - (Number(p2.profit) || 0)); out.shopEdit.keepTotal = b; }
             } catch (eE) { delete out.shopEdit; } finally { Object.assign(r, keepR); }
           }
           if (w5.length) out.warn = [out.warn].concat(w5).filter(Boolean).join(' ／ ');
@@ -10379,10 +10383,10 @@
         const s2 = roundLocal(shop2P, unit), s2Pf = priceProfitFor(cc, cost, s2, opt), tot2 = saleTot ? saleTot : (lowLocal + pcPPLocal(ppAsk, rg));
         const ppOf = (a) => ({ ppAsk: a, ppFee: a > 0 ? Math.round(a * ppRate + ppFix) : 0, ppNet: Math.max(0, Math.round(a - (a * ppRate + ppFix))) });
         se = { s2: s2, min: minLocal, tot: tot2, below: s2 < minLocal, over: s2 > tot2 };
-        if (!se.below) {
+        if (!se.below && !se.over) {
           const needK = Math.max(0, pf.profit - s2Pf.profit);
           se.kp = Object.assign({ lowLocal: s2, lowPf: s2Pf }, ppOf(needK > 0 ? Math.round((needK + ppFix) / (1 - ppRate)) : 0));
-          if (!se.over) se.kt = Object.assign({ lowLocal: s2, lowPf: s2Pf }, ppOf(Math.floor(Math.max(0, tot2 - s2) * rg.rateJpy + 1e-9)));
+          se.kt = Object.assign({ lowLocal: s2, lowPf: s2Pf }, ppOf(Math.floor(Math.max(0, tot2 - s2) * rg.rateJpy + 1e-9)));
         }
       }
       let st = null;
@@ -24533,6 +24537,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const CHANGELOG = [
     { date: '2026-10-30', items: [
       '💴 <b>見積もり（WhatsApp の 💴）で、②の Shopee に載せる額を打ち替えられるようにしました</b>（本人「shopee+paypal の時に、shopee の額修正できたりする？」「ケースバイケースです」・03 営業部の依頼）：打った額で「粗利そのまま（PayPal を計算し直す）」と「合計そのまま（PayPal＝合計−Shopee の額）」の2つの案を返します。③の最低額より安い時・合計を超える時は知らせて、その案は返しません。カードの欄は営業部が作ります。',
+      '⏱ <b>見積もりの文をチャットの入力欄へ入れた後、返事を待つ時間を3秒から10秒に延ばしました</b>（03 営業部の依頼・10/29 に文が二重でお客さんに届いた件の続き）：WhatsApp は入ったかを確かめてから返事をするので、3秒では「返事がありません」と出てコピーした文を貼ると二重になりえました。待ちが切れた後に遅れて入った時は「後から入りました（コピーした文は貼らないでください）」と出します。',
     ] },
     { date: '2026-10-29', items: [
       '💴 <b>見積もり（Smart Reply・WhatsApp の 💴）で売値を指定できるようにしました</b>（本人「Shopee で 350 で売ってるらしいので、売値を変えられたりもする？」・03 営業部の依頼）：チャットから売値（現地通貨）を渡すと、①はその値段で、②③はお客さんが払う合計をその値段にして粗利を出します。粗利が基準の線を下回る・赤字・ベトナムの上限超えの時は知らせますが、値段は勝手に変えません。あわせて、②③の払い方を「お客さんが払う合計を①と同じ」にした版も返すようにしました（本人「合計の売値を揃えた版も欲しい」）。カードの欄は営業部がこれから作ります。',
