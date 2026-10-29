@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-1500';
+var SRC_VER = '20261029-1530';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8762,21 +8762,24 @@ function rvRun_(manual) {
       var ja = '', en = '', c0 = 0;
       places.forEach(function (pl) { var e = lm[pl.cc + '|' + pl.item + '|' + pl.model]; if (e && typeof e === 'object') { if (!ja && e.ja) ja = String(e.ja); if (!en && e.en) en = String(e.en); pl.c = Number(e.c) || 0; pl.en = String(e.en || ''); if (pl.c > c0) c0 = pl.c; } });
       if (!ja) { S.cnt.noja = (S.cnt.noja || 0) + 1; continue; }
-      picked.push({ k: k, ja: ja, en: en, c0: c0, places: places });
+      picked.push({ k: k, ja: ja, en: en, c0: c0, places: places, pi: pos - 1 });
     }
-    if (pos >= keys.length) { S.pos[hw] = 0; S.hwi = (Number(S.hwi) || 0) + 1; } else S.pos[hw] = pos;
-    var t0 = Date.now(), flagged = [];
+    var endPos = pos;
+    var t0 = Date.now(), flagged = [], stopAt = -1;
     for (var i = 0; i < picked.length; i++) {
-      if (Date.now() - t0 > 200000) break;
+      if (Date.now() - t0 > 200000) { stopAt = i; break; }
       var t = picked[i];
       var y = baPaypay_((baCleanJa_(t.ja) + ' ' + (BA_HW_WORD[hw] || '')).trim());
-      if (y.blocked) { S.blockedUntil = Date.now() + 6 * 3600 * 1000; out.blocked = 1; break; }
+      if (y.blocked) { S.blockedUntil = Date.now() + 6 * 3600 * 1000; out.blocked = 1; stopAt = i; break; }
       var hits = baMatch_(y.items || [], t.ja, hw); t.hits = hits.length; t.cNow = hits.length ? baCostOfHits_(hits) : 0; t.lo = hits.length ? hits[0].price : 0;
       out.checked++;
       t.few = t.hits < minHits; t.up = (t.c0 > 0 && t.cNow > t.c0 * rc.rise); t.down = (t.cNow > 0 && t.c0 > t.cNow * rc.fall);   /* 控えの目安が今の相場より大きく高い＝高すぎて売れない側（ネコ・トモ ¥7,450→今 ¥800〜1,500） */
       if (t.few || t.up || t.down) flagged.push(t); else { t.act = 'keep'; out.keep++; }
       Utilities.sleep(1500 + Math.floor(Math.random() * 1500));
     }
+    /* ★2026-10-29 弾かれた・時間切れで途中で止まった時は、見ていない作品の位置から次の回を始める（前は見ていない分まで飛ばしていた） */
+    if (stopAt >= 0) S.pos[hw] = picked[stopAt].pi;
+    else if (endPos >= keys.length) { S.pos[hw] = 0; S.hwi = (Number(S.hwi) || 0) + 1; } else S.pos[hw] = endPos;
     if (flagged.length) {
       var allP = []; flagged.forEach(function (t) { t.places.forEach(function (pl) { allP.push(pl); }); });
       var rows = {}; var ids = allP.map(function (pl) { return pl.item; }).filter(function (v, i2, a) { return a.indexOf(v) === i2; });
