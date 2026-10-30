@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261030-1610';
+var SRC_VER = '20261030-1850';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3847,18 +3847,32 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
      （BR 58220600159 で「With Iron and Blood ST05-01 x2」を消した時：名前は上へ動いたのに、ここで止まって価格の付け直しをしなかった＝16明細の値段が隣どうしで入れ替わった）。
      失敗の返事の後は待って読み直し、名前が新しい並びになっていれば【通った】として①-b 以降（価格・在庫・SKU の付け直し・控えの付け替え・末尾の削除・名前での突き合わせ）を続ける。
      元の並びのままなら何も変わっていない＝そのまま失敗を返す。どちらでもない（途中まで）なら、続けずに最後の名前での突き合わせだけ行い ok:false で返す */
+  /* ★2026-10-30 夕 01 商品部：【成功の返事】でも効いていないことがある（SG 51169303747 ワンピース100明細：名前は1つも動かず、
+     ①-b の SKU の付け直しだけ通って82明細の SKU が1つずれ、②で末尾の「Boa Hancock Parallel PRB02-017」（消す対象ではない）を消した）。
+     → 返事が成功でも失敗でも、待って読み直し、名前が【新しい並び】（残す明細が上へ詰まり、末尾が __del の一時名）になっている時だけ先へ進む。
+       元の並びのまま＝何も触らずに失敗で返す。途中まで（または読めない）＝消す前の名前で書き戻して失敗で返す。どの場合も末尾は消さない */
   var _tvErr = null;
   try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], newModels); }
   catch (eTv) { _tvErr = eTv; }
-  if (_tvErr) {
-    var _rTv = null; Utilities.sleep(5000); try { _rTv = read(); } catch (eRd) { Utilities.sleep(5000); try { _rTv = read(); } catch (eRd2) {} }
-    var _nmNow = _rTv ? _rTv.opt.map(function (o) { return vnNorm_(o.option); }) : null;
-    var _nmNew = newOpts.map(function (o) { return vnNorm_(o.option); }), _nmOld = optList.map(function (o) { return vnNorm_(o.option); });
-    var _same = function (a, b) { if (!a || a.length < k) return false; for (var q = 0; q < k; q++) if (a[q] !== b[q]) return false; return true; };
-    if (_same(_nmNow, _nmOld)) throw _tvErr;   /* 何も動いていない＝そのまま失敗（今まで通り） */
-    if (!_same(_nmNow, _nmNew)) {
-      /* 途中まで動いた（または読めない）＝付け直しの元の位置が決められない。消す前の名前→値段・在庫・SKU で突き合わせて書き戻すだけ行い、失敗として返す */
-      var _fx = { ok: false, mode: 'shift', error: '⚠ 明細の並べ替えが「' + String((_tvErr && _tvErr.message) || _tvErr).slice(0, 120) + '」で途中まで動いた（または読み直せない）。名前で値段・在庫・SKU を書き戻しました。画面で確かめてください', names: resolved.slice(0, 20) };
+  var _nmNew = newOpts.map(function (o) { return vnNorm_(o.option); }), _nmOld = optList.map(function (o) { return vnNorm_(o.option); });
+  var _same = function (a, b) { if (!a || a.length < k) return false; for (var q = 0; q < k; q++) if (a[q] !== b[q]) return false; return true; };
+  var _isNew = function (a) { if (!_same(a, _nmNew) || a.length < n) return false; for (var q = k; q < n; q++) if (a[q].indexOf('__del') !== 0) return false; return true; };
+  var _rTv = null, _nmNow = null, _waits = [3000, 6000, 10000];
+  for (var _w = 0; _w < _waits.length; _w++) {
+    Utilities.sleep(_waits[_w]);
+    try { _rTv = read(); _nmNow = _rTv.opt.map(function (o) { return vnNorm_(o.option); }); } catch (eRd) { _rTv = null; _nmNow = null; }
+    if (_isNew(_nmNow)) break;
+  }
+  var _tvMsg = _tvErr ? String((_tvErr && _tvErr.message) || _tvErr).slice(0, 120) : '';
+  if (!_isNew(_nmNow)) {
+    if (_same(_nmNow, _nmOld)) {
+      if (_tvErr) throw _tvErr;   /* 失敗の返事で何も動いていない＝そのまま失敗（今まで通り） */
+      return { ok: false, mode: 'shift', tv_noeffect: true, names: resolved.slice(0, 20),
+        error: '⚠ 明細の並べ替えが Shopee に効いていません（成功の返事でしたが、19秒待っても名前が動いていない）。何も消していません・値段・在庫・SKU も触っていません。数分おいて画面を🔄更新し、名前が動いていなければもう一度。もし後から名前が1つずつ上へ動いていたら、値段・在庫・SKU がずれているので知らせてください' };
+    }
+    /* 途中まで動いた（または読めない）＝付け直しの元の位置が決められない。消す前の名前→値段・在庫・SKU で突き合わせて書き戻すだけ行い、失敗として返す */
+    {
+      var _fx = { ok: false, mode: 'shift', error: '⚠ 明細の並べ替えが' + (_tvErr ? '「' + _tvMsg + '」で' : '（成功の返事でしたが）') + '途中まで動いた（または読み直せない）。何も消していません。名前で値段・在庫・SKU を書き戻しました。画面で確かめてください', names: resolved.slice(0, 20) };
       try {
         if (_rTv) {
           var _ex = {}; for (var xq = 0; xq < n; xq++) { var _nmq = String((optList[xq] || {}).option || ''); if (_nmq && bySlot[xq]) _ex[vnNorm_(_nmq)] = bySlot[xq]; }
@@ -3875,8 +3889,8 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
       } catch (eFx) { _fx.fix_error = String((eFx && eFx.message) || eFx).slice(0, 160); }
       return _fx;
     }
-    /* 名前は新しい並び＝通っていた。下へ続ける（戻り値の note に残す） */
   }
+  /* 名前は新しい並び＝効いていた（失敗の返事だった時も）。下へ続ける（戻り値の note に残す） */
 
   // ①-b ★2026-10-13 update_tier_variation は既にある枠の SKU・価格・在庫を受け付けない（名前と画像だけ上へ動き、
   //   SKU・価格・在庫は枠に残る＝1つ上の作品の値になる。10/6 の削除で 13カタログ・238明細がずれた）。
@@ -3905,6 +3919,18 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
     for (var snR = 0; snR < n; snR++) if (bySlot[snR]) _nmR[String(bySlot[snR].model_id)] = String((optList[snR] || {}).option || '');
     _llRk = baLlogRekey_(shopId, itemId, _mvR, _gnR, _nmR);
   } catch (eRk0) { _llRk = { error: String((eRk0 && eRk0.message) || eRk0).slice(0, 200) }; }
+
+  /* ★2026-10-30 夕 01 商品部：消す直前にもう一度読み、消す枠の名前が __del の一時名かを model_id で確かめる。
+     違えば（並べ替えが後から戻された・別の明細が入っている）消さずに失敗で返す＝関係ない明細を消さない */
+  var _r2 = null; try { _r2 = read(); } catch (eR2) { Utilities.sleep(4000); try { _r2 = read(); } catch (eR2b) {} }
+  var _bad2 = [];
+  if (!_r2) _bad2.push('読み直せない');
+  else {
+    var _nm2 = {}; _r2.models.forEach(function (m) { var oi = (m.tier_index || [])[0]; _nm2[String(m.model_id)] = String(((_r2.opt[oi] || {}).option) || ''); });
+    for (var sq = k; sq < n; sq++) { var nq = _nm2[String(bySlot[sq].model_id)]; if (nq == null || nq.indexOf('__del') !== 0) _bad2.push(nq == null ? 'ID ' + bySlot[sq].model_id + ' が無い' : nq); }
+  }
+  if (_bad2.length) return { ok: false, mode: 'shift', names: resolved.slice(0, 20), llog: _llRk, fixed: { sku: fixSku.length, price: fixPr.length, stock: fixSt.length }, fix_errors: fixErr,
+    error: '⚠ 消す直前に読み直したら、消す予定の末尾の枠が一時名（__del）ではありません（' + _bad2.slice(0, 3).join(' / ') + '）。関係ない明細を消さないよう、末尾は消していません。画面で名前・値段・SKU を確かめてください' };
 
   // ② あまった末尾の枠を消す（末尾なので位置が動かない＝安全）
   for (var s2 = k; s2 < n; s2++) {
