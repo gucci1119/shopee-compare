@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261030-1850';
+var SRC_VER = '20261030-2240';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1867,7 +1867,14 @@ function doGetInner_(e) {
         var dswt = P_().getProperty('WRITE_TOKEN');
         if (!dswt || p.token !== dswt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         var dsshop = parseInt(p.shop_id, 10); if (!getToken_(dsshop)) throw new Error('未認可 shop_id=' + p.shop_id);
-        dsout = removeVariationShift_(dsshop, p.item_id, String(p.mids || ''), String(p.vnames || '').split('\u0001'));
+        /* ★2026-10-30 夜 01 商品部：同じカタログの詰め直し削除が2本重なった（TH 28346037147：1本目が Shopee の遅れで306秒かかっている間に、
+           呼び出し側が返事を待てずに送り直し→2本目は入口の名前の確かめで止まったが、1本目は後から末尾を消して終わった）。
+           カタログごとに「動いている」の印を6分置き、印がある間は2本目を断る（この台の中だけ。印は終わったら外す） */
+        var dsC = CacheService.getScriptCache(), dsK = 'vshift_' + String(p.item_id || '').replace(/\D/g, ''), dsBusy = dsC.get(dsK);
+        if (dsBusy) throw new Error('同じカタログの詰め直し削除がまだ動いています（' + Math.round((Date.now() - (parseInt(dsBusy, 10) || Date.now())) / 1000) + '秒前に始まった）。何もしていません。数分待って名前を読み直してから、要るならもう一度');
+        dsC.put(dsK, String(Date.now()), 360);
+        try { dsout = removeVariationShift_(dsshop, p.item_id, String(p.mids || ''), String(p.vnames || '').split('\u0001')); }
+        finally { try { dsC.remove(dsK); } catch (eDsC) {} }
       } catch (err) { dsout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dscb + '(' + JSON.stringify(dsout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -3979,6 +3986,9 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
     if (rs.length) { try { updateStockList_(shopId, itemId, rs); } catch (eRs) { fixErr.push('在庫(やり直し) ' + String((eRs && eRs.message) || eRs).slice(0, 120)); } }
     for (var fk = 0; fk < rk.length; fk += 50) { try { updateModelSku_(shopId, itemId, rk.slice(fk, fk + 50)); } catch (eRk) { fixErr.push('SKU(やり直し) ' + String((eRk && eRk.message) || eRk).slice(0, 120)); } }
     Utilities.sleep(4000); r4 = read(); bad4 = compare(r4);
+    /* ★2026-10-30 夜 01 商品部：BR 58270563711 で「8件ずれ」と返したが、少し後に名前で読み比べるとずれ0だった（Shopee の反映待ちと見ている＝推測）。
+       失敗と言う前にもう一度だけ待って読む */
+    if (bad4.length) { Utilities.sleep(10000); r4 = read(); bad4 = compare(r4); }
   }
   return {
     ok: bad4.length === 0, mode: 'shift', removed: mids.length, names: resolved.slice(0, 20),
