@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261029-2350';
+var SRC_VER = '20261030-1530';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -10408,7 +10408,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         try {
           baLooseMark_(hw, cc, _x0._p.ja, tgt.item_id);
           st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', mpn: _x0._p.mpn || '', jc: _x0._p.jc || 0, jw: _x0._p.jan ? 1 : 0, jv: BA_RULE_VER,
-            shop_id: tgt.shop_id, key: _x0._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: _x0._p.src || '', q: _x0._p.q || '', from: _x0._p.from || 'yahoo',
+            shop_id: tgt.shop_id, key: _x0._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: _x0._p.src || '', srcTitle: String(_x0._p.srcTitle || '').slice(0, 60), srcPrice: Number(_x0._p.srcPrice) || 0, q: _x0._p.q || '', from: _x0._p.from || 'yahoo',
             en: _x0.option, ja: String(_x0._p.ja || '').slice(0, 80), price: _x0.price, stock: (_ru.stock != null ? _ru.stock : _x0.stock),
             img: _x0._p.imageId || '', cost: _x0._p.cost || 0, hits: _x0._p.hits || 0, reused: 1, partial: _ru.partial ? 1 : 0 });
           if (st.added.length > 400) st.added.length = 400;
@@ -10471,7 +10471,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (mid) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; _addedHere++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
         if (mid && x._p.jan && !BA_LOOSE_HW.test(String(hw))) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
-        try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', mpn: x._p.mpn || '', jc: x._p.jc || 0, jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', mpn: x._p.mpn || '', jc: x._p.jc || 0, jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', srcTitle: String(x._p.srcTitle || '').slice(0, 60), srcPrice: Number(x._p.srcPrice) || 0, q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
@@ -10701,7 +10701,7 @@ function baListLogWrite_(st, t0) {
       if (!a || !a.at || a.at < since || !a.item_id || !a.model_id || !a.cc || !a.hw || !(Number(a.cost) > 0)) return;
       var tcg = (typeof TCG_HW_JA !== 'undefined' && TCG_HW_JA[a.hw]);
       var sku = String(a.sku || '') || (tcg ? '' : (function () { try { return baSkuOf_(a.hw, a.en); } catch (eS) { return ''; } })());
-      (byHw[a.hw] = byHw[a.hw] || {})[a.cc + '|' + a.item_id + '|' + a.model_id] = { c: Math.round(Number(a.cost)), src: String(a.src || '').slice(0, 200), from: String(a.from || ''), ja: String(a.ja || '').slice(0, 80), en: String(a.en || '').slice(0, 120), sku: sku.slice(0, 100), jan: String(a.jan || ''), mpn: String(a.mpn || ''), jc: a.jc ? 1 : 0, at: String(a.at).slice(0, 10) };   /* ★2026-10-16 JAN・型番も控える＝ポータルの出品ログが出す。jc=1 は JAN を確かめ済み（無ければ「JAN なし」）・★2026-10-11 目安の元（駿河屋の題名）と写真の元（出品URL）も */
+      (byHw[a.hw] = byHw[a.hw] || {})[a.cc + '|' + a.item_id + '|' + a.model_id] = { c: Math.round(Number(a.cost)), src: String(a.src || '').slice(0, 200), srcTitle: String(a.srcTitle || '').slice(0, 60), srcPrice: Number(a.srcPrice) || 0, from: String(a.from || ''), ja: String(a.ja || '').slice(0, 80), en: String(a.en || '').slice(0, 120), sku: sku.slice(0, 100), jan: String(a.jan || ''), mpn: String(a.mpn || ''), jc: a.jc ? 1 : 0, at: String(a.at).slice(0, 10) };   /* ★2026-10-16 JAN・型番も控える＝ポータルの出品ログが出す。jc=1 は JAN を確かめ済み（無ければ「JAN なし」）・★2026-10-11 目安の元（駿河屋の題名）と写真の元（出品URL）も */
     });
     Object.keys(byHw).forEach(function (h) {
       var kk = 'llog_cost_' + h, n = Object.keys(byHw[h]).length, ok = false, why = '';
@@ -11173,6 +11173,47 @@ var TCG_EN = { goods_amiibo: 'Nintendo amiibo Figure', acnh: 'Animal Crossing am
 /* 駿河屋の題名の「(パラレル)」「(ホロ)」「(SECRET)」等＝同じ番号でも別のカード（値段が10倍違う）。落とさず短い英語の札にして名前・SKU・鍵に残す */
 var TCG_VAR_EN = [/* ★2026-10-14 本人「これはモンコレなのか？」：ポケデルゼはボールの種類（モンスターボール等）で別の商品＝名前に入れる */ [/マスターボール/, 'Master Ball'], [/ハイパーボール/, 'Ultra Ball'], [/スーパーボール/, 'Great Ball'], [/モンスターボール/, 'Poke Ball'], [/プレミアボール/, 'Premier Ball'], [/パラレル|parallel/i, 'Parallel'], [/ホロ|holo/i, 'Holo'], [/secret|シークレット/i, 'Secret'], [/サイン|signed|箔押し/i, 'Signed'], [/覇王色|spパラレル|\bsp\b/i, 'SP'], [/プロモ|promo/i, 'Promo'], [/フルアート|full\s*art/i, 'Full Art'], [/モノクロ/i, 'Mono'], [/カラー/i, 'Color'], [/オーバーフレーム/i, 'Over Frame'], [/キラ|foil|フォイル/i, 'Foil'], [/ゴールデン|golden/i, 'Golden Tag'], [/スーパータグ|super\s*tag/i, 'Super Tag'], [/ダブルタグ|double\s*tag/i, 'Double Tag'], [/スペシャルタグ|special\s*tag/i, 'Special Tag']];
 function tcgVarEn_(v) { for (var i = 0; i < TCG_VAR_EN.length; i++) if (TCG_VAR_EN[i][0].test(v)) return TCG_VAR_EN[i][1]; return ''; }
+/* ★2026-10-30 01 商品部（事業本部の依頼）：ガンダム2枚（マリーダ GD01-093・エアリアル ST13-006）が仕入れ目安 ¥300 で売れ、本人が各 ¥4,444 で仕入れることになった。
+   仕入れ目安は駿河屋の通常の版（キラ）、写真はメルカリのパラレル版（R+・LR+）の出品だった＝写真の元の題名も値段も、目安の版と突き合わせていなかった。
+   → 写真の元の題名に【候補に無い版の印】があれば、その写真は使わない。逆に【候補にある版の印（パラレル・サイン・色違い・イラスト違い・ボール・ミラー）】が題名に無い写真も使わない。
+   同じ表を Claude の写真判定（~/.claude/skills/tcg-claude-judge/merge.py の VAR_MARKS）でも使う＝直す時は両方。
+   各行：[印の名前, 題名の正規表現, 逆向きも見るか(1), 日本語の名前] */
+var TCG_VAR_MARKS = [
+  ['par', /パラレル|parallel|ﾊﾟﾗﾚﾙ|コミパラ|(?:^|[^a-z0-9])(?:c|uc|u|r|rr|sr|lr|ur|hr|sec|l|p)\+|(?:^|[\s\[\(])(?:c|uc|r|sr|l|sec|ur)-p(?=$|[\s\]\)])/i, 1, 'パラレル（＋の版）'],
+  ['sec', /シークレット|secret|(?:^|[^a-z])sec(?![a-z])/i, 0, 'シークレット'],
+  ['promo', /プロモ|promo|(?:^|[^a-z])pr(?![a-z])/i, 0, 'プロモ'],
+  ['sp', /(?:^|[^a-z])sp(?![a-z])|覇王色|スペシャルカード/i, 0, 'SP'],
+  ['sign', /サイン|signed|autograph|箔押し/i, 1, 'サイン'],
+  ['cr', /コレクションレア|コレレア/i, 0, 'コレクションレア'],
+  ['color', /色違い/i, 1, '色違い'],
+  ['alt', /イラスト違い|別イラスト|異画|alt\.?\s*art|オルタナ/i, 1, 'イラスト違い'],
+  ['mirror', /ミラー|mirror/i, 1, 'ミラー'],
+  ['mball', /マスターボール|master\s*ball/i, 1, 'マスターボール'],
+  ['hball', /ハイパーボール|ultra\s*ball/i, 1, 'ハイパーボール'],
+  ['sball', /スーパーボール|great\s*ball/i, 1, 'スーパーボール'],
+  ['pball', /モンスターボール|poke\s*ball/i, 1, 'モンスターボール'],
+  ['prball', /プレミアボール|premier\s*ball/i, 1, 'プレミアボール']
+];
+function tcgVarMarks_(t) { var x = String(t || '').normalize('NFKC'), o = {}; for (var i = 0; i < TCG_VAR_MARKS.length; i++) if (TCG_VAR_MARKS[i][1].test(x)) o[TCG_VAR_MARKS[i][0]] = 1; return o; }
+/* 写真を使ってはいけない理由（日本語）か ''。title＝写真の元の出品の題名・price＝その値段・copies＝写真の枚数（N枚の写真なら1枚あたりで比べる） */
+function tcgPhotoVarNg_(hw, c, title, price, copies, cfg) {
+  if (tcgItemKind_(hw) !== 'card' || baArc_(hw)) return '';   /* カードだけ（amiibo・メダル・タグ等は版の印の付け方が違う＝「スマブラSP」で落ちる） */
+  var t = String(title || '');
+  if (t) {
+    var pm = tcgVarMarks_(t), cf = tcgVarMarks_([c.ja, c.rar, c.num, c.k].join(' ')), cr = tcgVarMarks_([c.ja, c.rar].join(' '));
+    for (var i = 0; i < TCG_VAR_MARKS.length; i++) {
+      var g = TCG_VAR_MARKS[i][0];
+      if (pm[g] && !cf[g]) return 'tcgvar:写真の題名が「' + TCG_VAR_MARKS[i][3] + '」・候補は違う版';
+      if (TCG_VAR_MARKS[i][2] && cr[g] && !pm[g]) return 'tcgvar:候補は「' + TCG_VAR_MARKS[i][3] + '」・写真の題名に無い';
+    }
+  }
+  /* 写真の元の出品が仕入れ目安よりずっと高い＝高い版か、目安が古い（どちらも ¥300 で出すと仕入れで赤字）。既定＝2倍以上かつ ¥1,500 以上高い */
+  var tc = (cfg && cfg.tcg) || {}, X = Number(tc.srcPriceX) || 2, GAP = Number(tc.srcPriceGap) || 1500;
+  var cost = Number(c.cost) || 0, p = (Number(price) || 0) / Math.max(1, Number(copies) || 1);
+  if (cost > 0 && p > 0 && p >= cost * X && p - cost >= GAP) return 'tcgsrcprice:写真の出品 ¥' + Math.round(p) + '・仕入れ目安 ¥' + Math.round(cost);
+  return '';
+}
+function tcgPhotoVarSkip_(st, hw, c, why) { try { baSkipRec_(st, hw, '', c, String(why).split(':')[0]); var k = String(c.key || ''); st._vng = st._vng || {}; if (!st._vng[k]) { st._vng[k] = 1; baLog_(st, hw + '：' + (c.en || c.ja) + ' の写真を使わない（' + String(why).split(':').slice(1).join(':') + '）'); } } catch (e) {} }
 /* 汎用の題名パーサー：「番号[レアリティ]：名前」（遊戯王 BETB-JP027[UL]：…／ワンピ OP17-118[SEC]：(パラレル)…／デュエマ 33/100[VR]：…＜フレーバー＞／ヴァイス GA04/S131-100[RR]：…／ヴァンガ DZ-BT16/045[RR]：…）
    ポケカは専用（tcgParsePokeca_）。番号が無い題名（遊戯王「[UR]：青眼の白龍(MANGA-STYLE)」）は出さない＝同じ名前の別カードを取り違えるより出さない */
 /* 🎰 2026-10-29 一番くじ（本人「一番くじ系出品してほしい」「フィギュアもでかいのは出さないで」・01 商品部の依頼）。
@@ -11558,7 +11599,7 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
   var mNg = [], mMulti = null;
   /* ★2026-10-15 本人「1枚きり抜けたりしない？」：同じカードN枚の写真から切り抜いた単品（app_kv.tcg_crop[key]・merge.py が作る）を先に見る＝これが ok なら単品 x1 として使える */
   var _crops = ((baKv_('tcg_crop') || {})[c.key]) || [], _single = null;
-  for (var ci0 = 0; ci0 < _crops.length && !_single; ci0++) { var cu0 = String((_crops[ci0] || {}).img || ''); if (!cu0) continue; if (String(baManualOf_(cu0, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue; if (!baUsedOk_(mUsed, cu0, c.key, hw)) continue; _single = { img: cu0, src: '', srcTitle: 'crop', hits: mImgs.length, q: q, from: 'mercari-crop' }; }
+  for (var ci0 = 0; ci0 < _crops.length && !_single; ci0++) { var cu0 = String((_crops[ci0] || {}).img || ''); if (!cu0) continue; if (String(baManualOf_(cu0, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue; if (!baUsedOk_(mUsed, cu0, c.key, hw)) continue; var _cf0 = String((_crops[ci0] || {}).from || ''), _om0 = null; for (var oi0 = 0; oi0 < mImgs.length && !_om0; oi0++) { var _ou0 = String(mImgs[oi0].img || '').replace(/\?.*$/, ''); if (_ou0 === _cf0 || baJpgUrl_(_ou0) === _cf0) _om0 = mImgs[oi0]; } if (!_om0) continue; var _cp0 = Number((/x(\d+)$/.exec(String((_crops[ci0] || {}).copies || '')) || [])[1]) || 1; var _vng0 = tcgPhotoVarNg_(hw, c, _om0.name, _om0.price, _cp0, cfg); if (_vng0) { tcgPhotoVarSkip_(st, hw, c, _vng0); continue; }   /* ★2026-10-30 切り抜きも元の出品の題名と値段で見る */ _single = { img: cu0, src: String(_om0.src || ''), srcTitle: String(_om0.name || '').slice(0, 80), srcPrice: Math.round((Number(_om0.price) || 0) / _cp0), hits: mImgs.length, q: q, from: 'mercari-crop' }; }
   for (var mi = 0; mi < mImgs.length && mTried < 3; mi++) {
     var mu = baJpgUrl_(String(mImgs[mi].img || '').replace(/\?.*$/, '')); if (!mu) continue; if (rejSet[mu] && String(baManualOf_(mu, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue;   /* 判定する写真と上げる写真を同じ jpg に。★2026-10-15 古いNG（rej）でも Claude が ok にした写真は使う */
     if (!baUsedOk_(mUsed, mu, c.key, hw)) continue;
@@ -11571,17 +11612,19 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
     /* ★2026-10-15 本人「1枚の写真がないのなら仕方ないけど、その枚数分の金額にして」「そして、何枚と書いておいて」：
        同じカードが複数枚並んだ写真（Claude の判定 ok:claude:xN）は【単品の写真が無い時だけ】使い、N枚セットとして出す（名前に xN・仕入 ×N・SKU に _XN）。単品が後で見つかれば単品が先 */
     var _mvC = /^ok:claude:x(\d+)$/.exec(String(baManualOf_(mu, { key: c.key, hwKey: '' }) || ''));
+    var _vng = tcgPhotoVarNg_(hw, c, mImgs[mi].name, mImgs[mi].price, _mvC ? Number(_mvC[1]) : 1, cfg);   /* ★2026-10-30 版違い・高すぎる写真は使わない（NG に入れる＝ポータルは別の出品を集め直す） */
+    if (_vng) { mNg.push(mu); tcgPhotoVarSkip_(st, hw, c, _vng); continue; }
     if (_mvC) { if (!mMulti) mMulti = { mu: mu, mi: mi, copies: Number(_mvC[1]) }; continue; }
     if (_single) continue;   /* 切り抜きの単品がある＝元の写真は N枚セット用にだけ使う */
     mTried++;
     var mj = baJudge_(mu, st, judged, capN, { key: c.key, hw: hw, hwKey: '', tcg: 1, game: TCG_HW_JA[hw] || hw, name: c.ja });
-    if (mj.ok) return { img: mu, src: mImgs[mi].src || '', srcTitle: String(mImgs[mi].name || '').slice(0, 80), hits: mImgs.length, q: q, from: 'mercari' };
+    if (mj.ok) return { img: mu, src: mImgs[mi].src || '', srcTitle: String(mImgs[mi].name || '').slice(0, 80), srcPrice: Number(mImgs[mi].price) || 0, hits: mImgs.length, q: q, from: 'mercari' };
     if (mj.kind === 'budget' || mj.kind === 'error' || mj.kind === 'aidown') return { stop: mj.kind };
     mNg.push(mu);
   }
-  var _multiOut = (mMulti && mMulti.copies >= 2) ? { img: mMulti.mu, copies: mMulti.copies, src: mImgs[mMulti.mi].src || '', srcTitle: String(mImgs[mMulti.mi].name || '').slice(0, 80) } : null;
+  var _multiOut = (mMulti && mMulti.copies >= 2) ? { img: mMulti.mu, copies: mMulti.copies, src: mImgs[mMulti.mi].src || '', srcTitle: String(mImgs[mMulti.mi].name || '').slice(0, 80), srcPrice: Number(mImgs[mMulti.mi].price) || 0 } : null;
   if (_single) { if (_multiOut) _single.multi = _multiOut; return _single; }   /* 単品（切り抜き）＋ N枚セット（元写真）の両方 */
-  if (_multiOut) return { img: _multiOut.img, copies: _multiOut.copies, src: _multiOut.src, srcTitle: _multiOut.srcTitle, hits: mImgs.length, q: q, from: 'mercari' };
+  if (_multiOut) return { img: _multiOut.img, copies: _multiOut.copies, src: _multiOut.src, srcTitle: _multiOut.srcTitle, srcPrice: _multiOut.srcPrice, hits: mImgs.length, q: q, from: 'mercari' };
   if (mNg.length && pre) {
     var r0 = pre.rej || {}; var allNg = (r0.imgs || []).concat(mNg).filter(function (u, k, arr) { return arr.indexOf(u) === k; }).slice(-30);
     pre.rej = { imgs: allNg, n: (Number(r0.n) || 0) + 1, at: new Date().toISOString() }; BA_PRE_DIRTY_TCG = true;
@@ -11608,9 +11651,10 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
     var u = String(hits[i].img || '').replace(/\?.*$/, ''); if (!u) continue;
     if (!baUsedOk_(used, u, c.key, hw)) continue;
     if (cfg && cfg.tcg && cfg.tcg.claudeOnly === true && String(baManualOf_(u, { key: c.key, hwKey: '' }) || '').indexOf('ok') !== 0) continue;   /* ★2026-10-14 Claude だけモード */
+    var _vngY = tcgPhotoVarNg_(hw, c, hits[i].t, hits[i].price, 1, cfg); if (_vngY) { tcgPhotoVarSkip_(st, hw, c, _vngY); continue; }   /* ★2026-10-30 版違い・高すぎる写真は使わない */
     tried++;
     var j = baJudge_(u, st, judged, capN, { key: c.key, hw: hw, hwKey: '', tcg: 1, game: TCG_HW_JA[hw] || hw, name: c.ja });
-    if (j.ok) return { img: u, src: hits[i].url || (hits[i].id ? ('https://auctions.yahoo.co.jp/jp/auction/' + hits[i].id) : ''), srcTitle: String(hits[i].t || '').slice(0, 80), hits: hits.length, q: q, from: y.src || 'paypay' };
+    if (j.ok) return { img: u, src: hits[i].url || (hits[i].id ? ('https://auctions.yahoo.co.jp/jp/auction/' + hits[i].id) : ''), srcTitle: String(hits[i].t || '').slice(0, 80), srcPrice: Number(hits[i].price) || 0, hits: hits.length, q: q, from: y.src || 'paypay' };
     if (j.kind === 'budget' || j.kind === 'error' || j.kind === 'aidown') return { stop: j.kind };
   }
   return { miss: 1, hits: hits.length, q: q };
@@ -11644,9 +11688,9 @@ function tcgTick(manual) {
   var st = baKv_(SK) || {}; st.log = st.log || []; st.added = st.added || []; st.skipped = st.skipped || []; st.runner = rid0;
   /* ★2026-10-24 sgJanFromPage_ の st._sgJan（控えの写し）・st._sgJanN（その実行で駿河屋を読んだ回数）が状態に保存され、次の実行に持ち越していた。
      実測：tcg_auto_status_child3 に _sgJan={}・_sgJanN=20 ＝次の実行も「上限20に達した」で駿河屋を一度も読まず、空の {} のせいで jan_sg_cache も読み直さない（グッズの JAN が埋まらない）。その実行の中だけで使う */
-  try { delete st._sgJan; delete st._sgJanN; } catch (eSj) {}
+  try { delete st._sgJan; delete st._sgJanN; delete st._vng; } catch (eSj) {}
   var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {}, runner: rid0 };
-  var finish_ = function (msg) { try { if (UF_PROBE_NOTE) { baLog_(st, UF_PROBE_NOTE); UF_PROBE_NOTE = ''; } } catch (ePn2) {} try { delete st._sgJan; delete st._sgJanN; st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eSj2) {} try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
+  var finish_ = function (msg) { try { if (UF_PROBE_NOTE) { baLog_(st, UF_PROBE_NOTE); UF_PROBE_NOTE = ''; } } catch (ePn2) {} try { delete st._sgJan; delete st._sgJanN; delete st._vng; st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eSj2) {} try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
   try {
     var cfg = baKv_(BA_CFG) || {};
     if (BA_KV_ERR) { ufPersist_(); try { lock.releaseLock(); } catch (e0) {} return { ok: false, skipped: 'cfg_unreadable' }; }
@@ -11807,11 +11851,11 @@ function tcgTick(manual) {
       if (ph.multi && Number(ph.multi.copies) >= 2) {   /* 切り抜きの単品が本命・元の写真で N枚セットも足す（同じ回・別の明細・台帳の鍵は key~xN） */
         var _mN = Number(ph.multi.copies), _enS = String(c.en || ''), _tagS = ' x' + _mN; if ((_enS + _tagS).length > 30) _enS = _enS.slice(0, 30 - _tagS.length).trim();
         var _imgS = ph.multi.img, _idS = null; try { _idS = uploadImageUrl_(_imgS); } catch (eUp2) { _idS = null; }
-        if (_idS) { picks.push({ jc: c.jc || 0, mpn: (c.mpn || tcgMpnOf_(c)), key: c.key + '~x' + _mN, ja: c.ja, en: _enS + _tagS, jan: String(c.jan || ''), img: _imgS, imageId: _idS, hits: ph.hits || 0, cost: Math.round((Number(c.cost) || 0) * _mN), need: c.need, src: ph.multi.src, srcTitle: ph.multi.srcTitle, q: ph.q, from: 'mercari', stock: 1, sg: 1, sku: (c.sku ? String(c.sku) + '_X' + _mN : c.sku), setCode: c.setCode }); baLog_(st, hw + '：' + _enS + ' は単品（切り抜き）に加えて同じカード ' + _mN + '枚のセットも出す（仕入 ×' + _mN + '）'); }
+        if (_idS) { picks.push({ jc: c.jc || 0, mpn: (c.mpn || tcgMpnOf_(c)), key: c.key + '~x' + _mN, ja: c.ja, en: _enS + _tagS, jan: String(c.jan || ''), img: _imgS, imageId: _idS, hits: ph.hits || 0, cost: Math.round((Number(c.cost) || 0) * _mN), need: c.need, src: ph.multi.src, srcTitle: ph.multi.srcTitle, srcPrice: ph.multi.srcPrice || 0, q: ph.q, from: 'mercari', stock: 1, sg: 1, sku: (c.sku ? String(c.sku) + '_X' + _mN : c.sku), setCode: c.setCode }); baLog_(st, hw + '：' + _enS + ' は単品（切り抜き）に加えて同じカード ' + _mN + '枚のセットも出す（仕入 ×' + _mN + '）'); }
         c = Object.assign({}, c, { en: ((String(c.en || '') + ' x1').length > 30 ? String(c.en || '').slice(0, 27).trim() : String(c.en || '')) + ' x1' });   /* 本人「何枚と書いておいて」＝単品も x1 と書く */
       }
       if (_cpN >= 2) { var _enB = String(c.en || ''), _tag = ' x' + _cpN; if ((_enB + _tag).length > 30) _enB = _enB.slice(0, 30 - _tag.length).trim(); c = Object.assign({}, c, { en: _enB + _tag, cost: Math.round((Number(c.cost) || 0) * _cpN), sku: (c.sku ? String(c.sku) + '_X' + _cpN : c.sku) }); baLog_(st, hw + '：' + _enB + ' は単品の写真が無いので同じカード ' + _cpN + '枚の写真＝' + _cpN + '枚セット（仕入 ×' + _cpN + '）で出す'); }
-      picks.push({ jc: c.jc || 0, mpn: (c.mpn || tcgMpnOf_(c)), key: c.key, ja: c.ja, en: c.en, jan: String(c.jan || ''), img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
+      picks.push({ jc: c.jc || 0, mpn: (c.mpn || tcgMpnOf_(c)), key: c.key, ja: c.ja, en: c.en, jan: String(c.jan || ''), img: ph.img, imageId: imageId, hits: ph.hits || 0, cost: c.cost, need: c.need, src: ph.src, srcTitle: ph.srcTitle, srcPrice: ph.srcPrice || 0, q: ph.q, from: ph.from, stock: 1, sg: 1, sku: c.sku, setCode: c.setCode });
       delete st.tried[c.key];
     }
     if (BA_PRE_DIRTY_TCG) { try { var _frP = baKvFreshMany_(['tcg_pre']); var _mineP = {}; Object.keys(tPre).forEach(function (k) { var e = tPre[k]; if (e && (e.rej || e._dirty)) _mineP[k] = e; }); var _baseP = (_frP && _frP['tcg_pre']) || null; if (_baseP) { Object.keys(_mineP).forEach(function (k) { var f = _baseP[k] || {}; f.rej = _mineP[k].rej; if (_mineP[k]._dirty) f.imgs = _mineP[k].imgs; delete f._dirty; _baseP[k] = f; }); baKvSet_('tcg_pre', _baseP); } } catch (eTp) {} BA_PRE_DIRTY_TCG = false; }   /* ★2026-10-12 ポータルが同時に集めた分を消さない＝読み直した最新に、こちらで変えたカードの rej／imgs だけ重ねる */
