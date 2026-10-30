@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261030-1530';
+var SRC_VER = '20261030-1535';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -97,7 +97,7 @@ function baAiYenToday_() {
   try {
     /* ★2026-10-12 ①状態の控え（1つ400KB）を丸ごと読んでいた→ uf だけ読む ②トレカの台の分（ai_spend_<台>）も足す。同じ台が両方にあれば新しい方だけ。自分の台は除く */
     var _me = baRunnerId_(), byRid = {};
-    (sbSelect_('app_kv', 'select=k,u:v->uf&k=like.boshu_auto_status*') || []).forEach(function (r) {
+    (sbSelect_('app_kv', 'select=k,u:v-%3Euf&k=like.boshu_auto_status*') || [])   /* ★2026-10-30「>」を符号化（素のままだと UrlFetchApp が無効な引数で落ちる・baLlogRekey_ で実測） */.forEach(function (r) {
       if (!r || r.k === BA_ST) return; var u = r.u; if (!u || !u.aiSpend || !u.aiSpend.days) return;
       var id = String(u.runner || r.k); if (id === _me) return; byRid[id] = { at: String(u.at || ''), y: baAiYenOfDay_(u.aiSpend.days[day]) };
     });
@@ -3757,9 +3757,11 @@ function baLlogRekey_(shopId, itemId, moves, gone, nameOf) {
   var it = String(parseInt(itemId, 10)), K = function (mid) { return cc + '|' + it + '|' + mid; };
   var ids = {}; moves.forEach(function (mv) { ids[mv[0]] = 1; ids[mv[1]] = 1; }); gone.forEach(function (g) { ids[g] = 1; });
   var all = Object.keys(ids), keys = {};
-  for (var i = 0; i < all.length; i += 20) {
-    var q = all.slice(i, i + 20).map(function (mid) { return 'v->m->>' + encodeURIComponent('"' + K(mid) + '"') + '.not.is.null'; }).join(',');
-    (sbSelect_('app_kv', 'select=k&k=like.llog_cost_*&or=(' + q + ')') || []).forEach(function (r) { if (r && r.k) keys[r.k] = 1; });
+  for (var i = 0; i < all.length; i += 15) {
+    /* ★2026-10-30 01 商品部：「->」「->>」の「>」を素のまま URL に入れていて UrlFetchApp が「無効な引数」で落ちていた（ガンダムの削除14回中13回の返事で実測）。10/25 の作り（59f455c）からこの形なので、それ以降の付け替えは起きていなかったと見ている（推測・いつからかは確かめていない）。
+       or(...) の中身を丸ごと符号化する（Supabase は符号化した形を読める＝Mac で確かめた）。1回の URL を短く保つため15件ずつ */
+    var q = all.slice(i, i + 15).map(function (mid) { return 'v->m->>"' + K(mid) + '".not.is.null'; }).join(',');
+    (sbSelect_('app_kv', 'select=k&k=like.llog_cost_*&or=' + encodeURIComponent('(' + q + ')')) || []).forEach(function (r) { if (r && r.k) keys[r.k] = 1; });
   }
   var out = { n: 0, keys: [], ledger: 0 }, today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
   Object.keys(keys).forEach(function (kk) {
@@ -11179,8 +11181,8 @@ function tcgVarEn_(v) { for (var i = 0; i < TCG_VAR_EN.length; i++) if (TCG_VAR_
    同じ表を Claude の写真判定（~/.claude/skills/tcg-claude-judge/merge.py の VAR_MARKS）でも使う＝直す時は両方。
    各行：[印の名前, 題名の正規表現, 逆向きも見るか(1), 日本語の名前] */
 var TCG_VAR_MARKS = [
-  ['par', /パラレル|parallel|ﾊﾟﾗﾚﾙ|コミパラ|(?:^|[^a-z0-9])(?:c|uc|u|r|rr|sr|lr|ur|hr|sec|l|p)\+|(?:^|[\s\[\(])(?:c|uc|r|sr|l|sec|ur)-p(?=$|[\s\]\)])/i, 1, 'パラレル（＋の版）'],
-  ['sec', /シークレット|secret|(?:^|[^a-z])sec(?![a-z])/i, 0, 'シークレット'],
+  ['par', /パラレル|parallel|ﾊﾟﾗﾚﾙ|コミパラ|(?:^|[^a-z0-9])(?:c|uc|u|r|rr|sr|lr|ur|hr|sec|l|lk|p)\+|(?:^|[^a-z0-9])(?:c|uc|u|r|sr|lr|ur|sec)\s*★|(?:^|[\s\[\(])(?:c|uc|r|sr|l|sec|ur)-p(?=$|[\s\]\)])/i, 1, 'パラレル（＋・★の版）'],
+  ['sec', /シークレット|secret|(?:^|[^a-z])sec(?![a-z])|シク(?!ル)/i, 0, 'シークレット'],
   ['promo', /プロモ|promo|(?:^|[^a-z])pr(?![a-z])/i, 0, 'プロモ'],
   ['sp', /(?:^|[^a-z])sp(?![a-z])|覇王色|スペシャルカード/i, 0, 'SP'],
   ['sign', /サイン|signed|autograph|箔押し/i, 1, 'サイン'],
@@ -11194,17 +11196,35 @@ var TCG_VAR_MARKS = [
   ['pball', /モンスターボール|poke\s*ball/i, 1, 'モンスターボール'],
   ['prball', /プレミアボール|premier\s*ball/i, 1, 'プレミアボール']
 ];
-function tcgVarMarks_(t) { var x = String(t || '').normalize('NFKC'), o = {}; for (var i = 0; i < TCG_VAR_MARKS.length; i++) if (TCG_VAR_MARKS[i][1].test(x)) o[TCG_VAR_MARKS[i][0]] = 1; return o; }
+function tcgVarMarks_(t) { var x = String(t || '').normalize('NFKC').replace(/☆/g, '★'), o = {}; for (var i = 0; i < TCG_VAR_MARKS.length; i++) if (TCG_VAR_MARKS[i][1].test(x)) o[TCG_VAR_MARKS[i][0]] = 1; return o; }
+/* 候補（駿河屋の題名）の版の印：題名の印に加え、駿河屋の書き方を読む（01 商品部 vercheck.py の marks_expect と同じ）。
+   SR☆＝パラレル・(P)／レアリティ SE・SCR 等＝シークレット／P・PR・P-番号＝プロモ／SP／新規イラスト＝イラスト違い／バトリオは題名の頭がボールの種類（ノーマル＝モンスターボール） */
+function tcgCandMarks_(c, withK) {
+  var ja = String(c.ja || '').normalize('NFKC').replace(/☆/g, '★').trim(), rar = String(c.rar || '').normalize('NFKC').trim();
+  var o = tcgVarMarks_([ja, rar, withK ? c.num : '', withK ? c.k : ''].join(' '));
+  if (/★|\(P\)|parallel/i.test(ja + ' ' + rar + ' ' + String(c.en || ''))) o.par = 1;
+  if (/^(SE|SEC|SCR|QCSE|PSE|HR|SSP)\b/.test(rar || ja)) o.sec = 1;
+  if (/^(P|PR)\b/.test(rar || ja) || /(?:^|[^A-Z])P-\d/.test(String(c.num || ''))) o.promo = 1;
+  if (/^SP\b|\(SP\)/.test(rar + ' ' + ja)) o.sp = 1;
+  if (/新規イラスト|イラスト版/.test(ja)) o.alt = 1;
+  var hd = [['マスター', 'mball'], ['ハイパー', 'hball'], ['スーパー', 'sball'], ['ノーマル', 'pball'], ['モンスター', 'pball']];
+  for (var i = 0; i < hd.length; i++) if (ja.indexOf(hd[i][0]) === 0) o[hd[i][1]] = 1;
+  return o;
+}
+var TCG_VAR_LIGHT = { color: 1, mball: 1, hball: 1, sball: 1, pball: 1, prball: 1 };   /* カード以外（アーケード・フィギュア・メダル）で見る印＝色違いとボールの種類だけ（「スマブラSP」等で落とさない） */
 /* 写真を使ってはいけない理由（日本語）か ''。title＝写真の元の出品の題名・price＝その値段・copies＝写真の枚数（N枚の写真なら1枚あたりで比べる） */
 function tcgPhotoVarNg_(hw, c, title, price, copies, cfg) {
-  if (tcgItemKind_(hw) !== 'card' || baArc_(hw)) return '';   /* カードだけ（amiibo・メダル・タグ等は版の印の付け方が違う＝「スマブラSP」で落ちる） */
+  /* ★2026-10-30 夕 01 商品部：カード以外（バトリオ「ハイパー ルカリオ」¥300 に「マスターボール」¥3,000 の写真・モンコレ「ニンフィア」に「色違い」¥3,000）も、
+     色違いとボールの種類は見る。値段の守りは全部の区分で見る */
+  var isCard = tcgItemKind_(hw) === 'card' && !baArc_(hw);
   var t = String(title || '');
   if (t) {
-    var pm = tcgVarMarks_(t), cf = tcgVarMarks_([c.ja, c.rar, c.num, c.k].join(' ')), cr = tcgVarMarks_([c.ja, c.rar].join(' '));
+    var pm = tcgVarMarks_(t), cf = tcgCandMarks_(c, true), cr = tcgCandMarks_(c, false);
     for (var i = 0; i < TCG_VAR_MARKS.length; i++) {
       var g = TCG_VAR_MARKS[i][0];
+      if (!isCard && !TCG_VAR_LIGHT[g]) continue;
       if (pm[g] && !cf[g]) return 'tcgvar:写真の題名が「' + TCG_VAR_MARKS[i][3] + '」・候補は違う版';
-      if (TCG_VAR_MARKS[i][2] && cr[g] && !pm[g]) return 'tcgvar:候補は「' + TCG_VAR_MARKS[i][3] + '」・写真の題名に無い';
+      if (TCG_VAR_MARKS[i][2] && (isCard || g === 'color') && cr[g] && !pm[g]) return 'tcgvar:候補は「' + TCG_VAR_MARKS[i][3] + '」・写真の題名に無い';
     }
   }
   /* 写真の元の出品が仕入れ目安よりずっと高い＝高い版か、目安が古い（どちらも ¥300 で出すと仕入れで赤字）。既定＝2倍以上かつ ¥1,500 以上高い */
