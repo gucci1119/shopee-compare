@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261030-2240';
+var SRC_VER = '20261031-0130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3864,7 +3864,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
   var _nmNew = newOpts.map(function (o) { return vnNorm_(o.option); }), _nmOld = optList.map(function (o) { return vnNorm_(o.option); });
   var _same = function (a, b) { if (!a || a.length < k) return false; for (var q = 0; q < k; q++) if (a[q] !== b[q]) return false; return true; };
   var _isNew = function (a) { if (!_same(a, _nmNew) || a.length < n) return false; for (var q = k; q < n; q++) if (a[q].indexOf('__del') !== 0) return false; return true; };
-  var _rTv = null, _nmNow = null, _waits = [3000, 6000, 10000];
+  var _rTv = null, _nmNow = null, _waits = [3000, 6000, 10000, 15000];   /* ★2026-10-31 19秒→34秒（後から効く分を拾う） */
   for (var _w = 0; _w < _waits.length; _w++) {
     Utilities.sleep(_waits[_w]);
     try { _rTv = read(); _nmNow = _rTv.opt.map(function (o) { return vnNorm_(o.option); }); } catch (eRd) { _rTv = null; _nmNow = null; }
@@ -3875,7 +3875,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
     if (_same(_nmNow, _nmOld)) {
       if (_tvErr) throw _tvErr;   /* 失敗の返事で何も動いていない＝そのまま失敗（今まで通り） */
       return { ok: false, mode: 'shift', tv_noeffect: true, names: resolved.slice(0, 20),
-        error: '⚠ 明細の並べ替えが Shopee に効いていません（成功の返事でしたが、19秒待っても名前が動いていない）。何も消していません・値段・在庫・SKU も触っていません。数分おいて画面を🔄更新し、名前が動いていなければもう一度。もし後から名前が1つずつ上へ動いていたら、値段・在庫・SKU がずれているので知らせてください' };
+        error: '⚠ 明細の並べ替えが Shopee に効いていません（成功の返事でしたが、34秒待っても名前が動いていない）。何も消していません・値段・在庫・SKU も触っていません。数分おいて画面を🔄更新し、名前が動いていなければもう一度。もし後から名前が1つずつ上へ動いていたら、値段・在庫・SKU がずれているので知らせてください' };
     }
     /* 途中まで動いた（または読めない）＝付け直しの元の位置が決められない。消す前の名前→値段・在庫・SKU で突き合わせて書き戻すだけ行い、失敗として返す */
     {
@@ -3913,9 +3913,12 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
   /* ★2026-10-24 全体レビュー（出品管理 #8）：あまった末尾の枠は②で消すが、消すのを断られると「__delN」の名前で元の在庫・値段のまま残り【買える】。先に在庫0にする */
   for (var s0 = k; s0 < n; s0++) { var st0 = parseInt(stockOf(bySlot[s0]), 10); if (st0 > 0) fixSt.push({ model_id: bySlot[s0].model_id, stock: 0 }); }
   var fixErr = [];
-  for (var f1 = 0; f1 < fixSku.length; f1 += 50) { try { updateModelSku_(shopId, itemId, fixSku.slice(f1, f1 + 50)); } catch (eS) { fixErr.push('SKU ' + String((eS && eS.message) || eS).slice(0, 80)); } }
-  if (fixPr.length) { try { updatePriceList_(shopId, itemId, fixPr); } catch (eP) { fixErr.push('価格 ' + String((eP && eP.message) || eP).slice(0, 80)); } }
-  if (fixSt.length) { try { updateStockList_(shopId, itemId, fixSt); } catch (eT) { fixErr.push('在庫 ' + String((eT && eT.message) || eT).slice(0, 80)); } }
+  /* ★2026-10-31 01 商品部（BR 58270275439 デジモン）：Shopee が busy の時間帯は値段の書き込みも断られる（①-b の値段が通らず、34明細が1つ下の値段のまま残った）。
+     書き込みは失敗したら4秒おいて1回だけやり直す（値段・在庫・SKU は同じ値を送り直しても害がない） */
+  var _w2 = function (label, fn) { try { fn(); } catch (e1) { Utilities.sleep(4000); try { fn(); } catch (e2) { fixErr.push(label + ' ' + String((e2 && e2.message) || e2).slice(0, 100)); } } };
+  for (var f1 = 0; f1 < fixSku.length; f1 += 50) { (function (sl) { _w2('SKU', function () { updateModelSku_(shopId, itemId, sl); }); })(fixSku.slice(f1, f1 + 50)); }
+  if (fixPr.length) _w2('価格', function () { updatePriceList_(shopId, itemId, fixPr); });
+  if (fixSt.length) _w2('在庫', function () { updateStockList_(shopId, itemId, fixSt); });
   /* ★2026-10-25 仕入れ目安の控え（llog_cost_<hw>）と🤖の台帳（boshu_auto_done_<hw>）も中身と一緒に引っ越す（下の baLlogRekey_）。
      ①で Shopee の中身はもう動いているので、②③で止まっても付け替える＝ここで呼ぶ（戻り値の所だけだと、途中で止まった時に付け替わらない） */
   var _llRk = null;
@@ -3939,23 +3942,37 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
   if (_bad2.length) return { ok: false, mode: 'shift', names: resolved.slice(0, 20), llog: _llRk, fixed: { sku: fixSku.length, price: fixPr.length, stock: fixSt.length }, fix_errors: fixErr,
     error: '⚠ 消す直前に読み直したら、消す予定の末尾の枠が一時名（__del）ではありません（' + _bad2.slice(0, 3).join(' / ') + '）。関係ない明細を消さないよう、末尾は消していません。画面で名前・値段・SKU を確かめてください' };
 
+  /* ★2026-10-31 01 商品部（BR 58270275439 デジモン 59→58）：②で末尾を消した後、③の詰め（update_tier_variation）が busy で例外を投げ、
+     下の「名前での突き合わせと書き戻し」まで届かずに止まった（①-b の値段も busy で通っていなかった＝34明細が1つ下の値段のまま・返事は busy の失敗だけ）。
+     → ②③の例外は受け止めて記録し、最後の突き合わせ・書き戻しは必ず行う。③は失敗したら5秒おいて1回やり直す（読み直してから作るので何度でも同じ結果） */
+  var _stageErr = '';
   // ② あまった末尾の枠を消す（末尾なので位置が動かない＝安全）
-  for (var s2 = k; s2 < n; s2++) {
-    var dj = callShop_(shopId, '/api/v2/product/delete_model', null, 'post', { item_id: itemId, model_id: bySlot[s2].model_id });
-    if (dj && dj.error && dj.error !== '') throw new Error('明細の削除に失敗: ' + dj.error + ' ' + (dj.message || ''));
-  }
+  try {
+    for (var s2 = k; s2 < n; s2++) {
+      var dj = callShop_(shopId, '/api/v2/product/delete_model', null, 'post', { item_id: itemId, model_id: bySlot[s2].model_id });
+      if (dj && dj.error && dj.error !== '') throw new Error('明細の削除に失敗: ' + dj.error + ' ' + (dj.message || ''));
+    }
+  } catch (eDel) { _stageErr = '末尾の一時枠（__del）の削除: ' + String((eDel && eDel.message) || eDel).slice(0, 120) + '（一時枠は在庫0にしてあります）'; }
 
   // ③ option_list を残り件数に詰める（Shopeeが既に詰めていれば何もしない）
-  var r3 = read();
-  var used3 = {};
-  r3.models.forEach(function (m) { var oi = (m.tier_index || [])[0]; if (oi != null) used3[oi] = 1; });
-  var keep3 = [];
-  for (var s3 = 0; s3 < r3.opt.length; s3++) if (used3[s3]) keep3.push(s3);
-  var shifted3 = keep3.some(function (oi, ni) { return oi !== ni; });
-  if (keep3.length !== r3.opt.length && !shifted3) {
-    updateTierVariation_(shopId, itemId,
-      [{ name: r3.tier.name, option_list: keep3.map(function (oi) { return tierOpt_(r3.opt[oi]); }) }],
-      r3.models.map(function (m) { return entryOf(m, (m.tier_index || [])[0]); }));
+  var do3 = function () {
+    var r3 = read();
+    var used3 = {};
+    r3.models.forEach(function (m) { var oi = (m.tier_index || [])[0]; if (oi != null) used3[oi] = 1; });
+    var keep3 = [];
+    for (var s3 = 0; s3 < r3.opt.length; s3++) if (used3[s3]) keep3.push(s3);
+    var shifted3 = keep3.some(function (oi, ni) { return oi !== ni; });
+    if (keep3.length !== r3.opt.length && !shifted3) {
+      updateTierVariation_(shopId, itemId,
+        [{ name: r3.tier.name, option_list: keep3.map(function (oi) { return tierOpt_(r3.opt[oi]); }) }],
+        r3.models.map(function (m) { return entryOf(m, (m.tier_index || [])[0]); }));
+    }
+  };
+  if (!_stageErr) {
+    try { do3(); } catch (e3a) {
+      Utilities.sleep(5000);
+      try { do3(); } catch (e3b) { _stageErr = '空き枠の詰め（③）: ' + String((e3b && e3b.message) || e3b).slice(0, 120) + '（中身のない枠が1つ残ることがある＝「🧹 中身のない明細を掃除する」で消える）'; }
+    }
   }
 
   /* ★2026-10-21 TW 53568339509 で2件消した後、残り74件の値段が1つずつずれたまま ok:true を返した（本人「学んでないよね」「本当、どうにかならんのか」）。
@@ -3974,31 +3991,35 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
   };
   /* ★2026-10-21 書き込み直後に読むと反映前の値が返り「ずれあり（ok:false）」と誤って出た（BR 2カタログ・直後の読み直しでは正しい値）。
      読む前に待ち、ずれて見えたら書き直す前にもう一度読み直す（反映待ちの見かけのずれで書き直さない） */
+  var _rd = function () { try { return read(); } catch (eRd1) { Utilities.sleep(5000); try { return read(); } catch (eRd2) { return null; } } };
   Utilities.sleep(4000);
-  var r4 = read(), bad4 = compare(r4), retried = 0;
-  if (bad4.length) { Utilities.sleep(6000); r4 = read(); bad4 = compare(r4); }
+  var r4 = _rd(), retried = 0;
+  if (!r4) return { ok: false, mode: 'shift', removed: mids.length, names: resolved.slice(0, 20), llog: _llRk, fixed: { sku: fixSku.length, price: fixPr.length, stock: fixSt.length }, fix_errors: fixErr, stage_error: _stageErr || undefined,
+    error: '⚠ 並べ替えは通り' + (_stageErr ? '（' + _stageErr + '）' : '末尾も消しました') + 'が、最後の読み直しができません。値段・在庫・SKU が名前と合っているか、名前で確かめてください' + (fixErr.length ? '。⚠書き直しの失敗: ' + fixErr.join(' / ') : '') };
+  var bad4 = compare(r4);
+  if (bad4.length) { Utilities.sleep(6000); var _r4b = _rd(); if (_r4b) { r4 = _r4b; bad4 = compare(r4); } }
   if (bad4.length) {
     retried = bad4.length;
     var rp = bad4.filter(function (b) { return Math.abs(b.now.price - b.want.price) > 0.001 && b.want.price > 0; }).map(function (b) { return { model_id: b.model_id, price: b.want.price }; });
     var rs = bad4.filter(function (b) { return b.now.stock !== b.want.stock && !isNaN(b.want.stock); }).map(function (b) { return { model_id: b.model_id, stock: b.want.stock }; });
     var rk = bad4.filter(function (b) { return b.now.sku !== b.want.sku; }).map(function (b) { return { model_id: b.model_id, sku: b.want.sku }; });
-    if (rp.length) { try { Utilities.sleep(1500); updatePriceList_(shopId, itemId, rp); } catch (eRp) { fixErr.push('価格(やり直し) ' + String((eRp && eRp.message) || eRp).slice(0, 120)); } }
-    if (rs.length) { try { updateStockList_(shopId, itemId, rs); } catch (eRs) { fixErr.push('在庫(やり直し) ' + String((eRs && eRs.message) || eRs).slice(0, 120)); } }
-    for (var fk = 0; fk < rk.length; fk += 50) { try { updateModelSku_(shopId, itemId, rk.slice(fk, fk + 50)); } catch (eRk) { fixErr.push('SKU(やり直し) ' + String((eRk && eRk.message) || eRk).slice(0, 120)); } }
-    Utilities.sleep(4000); r4 = read(); bad4 = compare(r4);
+    if (rp.length) { Utilities.sleep(1500); _w2('価格(やり直し)', function () { updatePriceList_(shopId, itemId, rp); }); }
+    if (rs.length) _w2('在庫(やり直し)', function () { updateStockList_(shopId, itemId, rs); });
+    for (var fk = 0; fk < rk.length; fk += 50) { (function (sl) { _w2('SKU(やり直し)', function () { updateModelSku_(shopId, itemId, sl); }); })(rk.slice(fk, fk + 50)); }
+    Utilities.sleep(4000); var _r4c = _rd(); if (_r4c) { r4 = _r4c; bad4 = compare(r4); }
     /* ★2026-10-30 夜 01 商品部：BR 58270563711 で「8件ずれ」と返したが、少し後に名前で読み比べるとずれ0だった（Shopee の反映待ちと見ている＝推測）。
        失敗と言う前にもう一度だけ待って読む */
-    if (bad4.length) { Utilities.sleep(10000); r4 = read(); bad4 = compare(r4); }
+    if (bad4.length) { Utilities.sleep(10000); var _r4d = _rd(); if (_r4d) { r4 = _r4d; bad4 = compare(r4); } }
   }
   return {
-    ok: bad4.length === 0, mode: 'shift', removed: mids.length, names: resolved.slice(0, 20),
+    ok: bad4.length === 0 && !_stageErr, mode: 'shift', stage_error: _stageErr || undefined, removed: mids.length, names: resolved.slice(0, 20),
     /* ★2026-10-24 全体レビュー（出品管理 #9）：moves＝[移す元の model_id, 移した先の model_id]（先の枠に元の作品が入った）・gone＝消えた末尾の枠・dels＝消した明細 */
     moves: (function () { var mv = []; for (var sm = 0; sm < k; sm++) if (keep[sm] !== sm) mv.push([String(bySlot[keep[sm]].model_id), String(bySlot[sm].model_id)]); return mv; })(),
     gone: (function () { var gn = []; for (var sg = k; sg < n; sg++) gn.push(String(bySlot[sg].model_id)); return gn; })(),
     dels: mids.map(String), llog: _llRk,
     remain: r4.opt.length, models_remain: r4.models.length,
     fixed: { sku: fixSku.length, price: fixPr.length, stock: fixSt.length }, fix_errors: fixErr, retried: retried,
-    mismatch: bad4.slice(0, 30), error: bad4.length ? '⚠ 消した後、残した明細 ' + bad4.length + ' 件の値段・在庫・SKU が消す前と違います（やり直しても直らない）: ' + bad4.slice(0, 5).map(function (b) { return b.name; }).join(' / ') : undefined,
+    mismatch: bad4.slice(0, 30), error: bad4.length ? '⚠ 消した後、残した明細 ' + bad4.length + ' 件の値段・在庫・SKU が消す前と違います（やり直しても直らない）: ' + bad4.slice(0, 5).map(function (b) { return b.name; }).join(' / ') + (_stageErr ? '／' + _stageErr : '') : (_stageErr ? '⚠ 並べ替えと値段・在庫・SKU の付け直しは済み（名前で突き合わせてずれ0）。ただし ' + _stageErr : undefined),
     tv_busy: _tvErr ? String((_tvErr && _tvErr.message) || _tvErr).slice(0, 120) : undefined,
     note: '順番は崩していません（販売数の表示だけ1つずれます）' + (_tvErr ? '。並べ替えは失敗の返事だったが実際には通っていたので、付け直しを続けました' : '') + (retried ? '。ずれた ' + retried + ' 件を書き直しました' : '') + (fixErr.length ? '。⚠書き直しの失敗: ' + fixErr.join(' / ') : '')
   };
