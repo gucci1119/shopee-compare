@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261030-1535';
+var SRC_VER = '20261030-1610';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3843,7 +3843,40 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
       newModels.push(entryOf(bySlot[s], s));
     }
   }
-  updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], newModels);
+  /* ★2026-10-30 01 商品部：update_tier_variation が Shopee の「busy」で失敗の返事を返しても、実際には通っていることがある
+     （BR 58220600159 で「With Iron and Blood ST05-01 x2」を消した時：名前は上へ動いたのに、ここで止まって価格の付け直しをしなかった＝16明細の値段が隣どうしで入れ替わった）。
+     失敗の返事の後は待って読み直し、名前が新しい並びになっていれば【通った】として①-b 以降（価格・在庫・SKU の付け直し・控えの付け替え・末尾の削除・名前での突き合わせ）を続ける。
+     元の並びのままなら何も変わっていない＝そのまま失敗を返す。どちらでもない（途中まで）なら、続けずに最後の名前での突き合わせだけ行い ok:false で返す */
+  var _tvErr = null;
+  try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: newOpts }], newModels); }
+  catch (eTv) { _tvErr = eTv; }
+  if (_tvErr) {
+    var _rTv = null; Utilities.sleep(5000); try { _rTv = read(); } catch (eRd) { Utilities.sleep(5000); try { _rTv = read(); } catch (eRd2) {} }
+    var _nmNow = _rTv ? _rTv.opt.map(function (o) { return vnNorm_(o.option); }) : null;
+    var _nmNew = newOpts.map(function (o) { return vnNorm_(o.option); }), _nmOld = optList.map(function (o) { return vnNorm_(o.option); });
+    var _same = function (a, b) { if (!a || a.length < k) return false; for (var q = 0; q < k; q++) if (a[q] !== b[q]) return false; return true; };
+    if (_same(_nmNow, _nmOld)) throw _tvErr;   /* 何も動いていない＝そのまま失敗（今まで通り） */
+    if (!_same(_nmNow, _nmNew)) {
+      /* 途中まで動いた（または読めない）＝付け直しの元の位置が決められない。消す前の名前→値段・在庫・SKU で突き合わせて書き戻すだけ行い、失敗として返す */
+      var _fx = { ok: false, mode: 'shift', error: '⚠ 明細の並べ替えが「' + String((_tvErr && _tvErr.message) || _tvErr).slice(0, 120) + '」で途中まで動いた（または読み直せない）。名前で値段・在庫・SKU を書き戻しました。画面で確かめてください', names: resolved.slice(0, 20) };
+      try {
+        if (_rTv) {
+          var _ex = {}; for (var xq = 0; xq < n; xq++) { var _nmq = String((optList[xq] || {}).option || ''); if (_nmq && bySlot[xq]) _ex[vnNorm_(_nmq)] = bySlot[xq]; }
+          var _p2 = [], _s2 = [], _k2 = [];
+          _rTv.models.forEach(function (m) { var oi = (m.tier_index || [])[0], nmT = String(((_rTv.opt[oi] || {}).option) || '');
+            if (/^__del/.test(nmT)) { if (parseInt(stockOf(m), 10) > 0) _s2.push({ model_id: m.model_id, stock: 0 }); return; }   /* 一時名の余り枠は買えないように在庫0 */
+            var src = _ex[vnNorm_(nmT)]; if (!src || String(src.model_id) === String(m.model_id)) return;
+            var pw = parseFloat(priceOf(src)); if (pw > 0 && Math.abs((parseFloat(priceOf(m)) || 0) - pw) > 0.001) _p2.push({ model_id: m.model_id, price: pw });
+            var sw = parseInt(stockOf(src), 10); if (!isNaN(sw) && parseInt(stockOf(m), 10) !== sw) _s2.push({ model_id: m.model_id, stock: sw });
+            if (String(m.model_sku || '') !== String(src.model_sku || '')) _k2.push({ model_id: m.model_id, sku: String(src.model_sku || '') }); });
+          if (_p2.length) updatePriceList_(shopId, itemId, _p2); if (_s2.length) updateStockList_(shopId, itemId, _s2); for (var f2 = 0; f2 < _k2.length; f2 += 50) updateModelSku_(shopId, itemId, _k2.slice(f2, f2 + 50));
+          _fx.fixed = { price: _p2.length, stock: _s2.length, sku: _k2.length };
+        }
+      } catch (eFx) { _fx.fix_error = String((eFx && eFx.message) || eFx).slice(0, 160); }
+      return _fx;
+    }
+    /* 名前は新しい並び＝通っていた。下へ続ける（戻り値の note に残す） */
+  }
 
   // ①-b ★2026-10-13 update_tier_variation は既にある枠の SKU・価格・在庫を受け付けない（名前と画像だけ上へ動き、
   //   SKU・価格・在庫は枠に残る＝1つ上の作品の値になる。10/6 の削除で 13カタログ・238明細がずれた）。
@@ -3930,7 +3963,8 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
     remain: r4.opt.length, models_remain: r4.models.length,
     fixed: { sku: fixSku.length, price: fixPr.length, stock: fixSt.length }, fix_errors: fixErr, retried: retried,
     mismatch: bad4.slice(0, 30), error: bad4.length ? '⚠ 消した後、残した明細 ' + bad4.length + ' 件の値段・在庫・SKU が消す前と違います（やり直しても直らない）: ' + bad4.slice(0, 5).map(function (b) { return b.name; }).join(' / ') : undefined,
-    note: '順番は崩していません（販売数の表示だけ1つずれます）' + (retried ? '。ずれた ' + retried + ' 件を書き直しました' : '') + (fixErr.length ? '。⚠書き直しの失敗: ' + fixErr.join(' / ') : '')
+    tv_busy: _tvErr ? String((_tvErr && _tvErr.message) || _tvErr).slice(0, 120) : undefined,
+    note: '順番は崩していません（販売数の表示だけ1つずれます）' + (_tvErr ? '。並べ替えは失敗の返事だったが実際には通っていたので、付け直しを続けました' : '') + (retried ? '。ずれた ' + retried + ' 件を書き直しました' : '') + (fixErr.length ? '。⚠書き直しの失敗: ' + fixErr.join(' / ') : '')
   };
 }
 function bulkEditTier_(shopId, itemId, opts, imgs) {
