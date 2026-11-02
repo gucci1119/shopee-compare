@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261031-0130';
+var SRC_VER = '20261102-1615';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -204,6 +204,8 @@ function baAiQuotaOk_(st) {
   if (st && !st._aiUfW) { st._aiUfW = 1; try { baLog_(st, '🐢 この台のGAS枠を ' + used + '回使ったので、今日はAIに聞きません（' + BA_AI_UF_STOP + '回で止める決まり・16:00(JST)に戻ります）'); } catch (e) {} }
   return false;
 }
+/* ★2026-11-02 枠が戻る時刻（日本時間）。米国西海岸の0時＝夏時間 16:00・冬時間 17:00（11/1 に冬時間へ）。決め打ちにしない */
+function ufResetJstStr_() { try { var z = parseInt(Utilities.formatDate(new Date(), 'America/Los_Angeles', 'Z'), 10); return ((9 - Math.round(z / 100) + 48) % 24) + ':00'; } catch (e) { return '17:00'; } }
 function ufToday_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd'); }
 function ufState_() { var o = null; try { var s = P_().getProperty('ufCount'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || o.d !== ufToday_()) o = { d: ufToday_(), n: 0 }; return o; }
 /* ★2026-09-21 🔴 安全弁が【自分のプロジェクトの分しか数えていなかった】。
@@ -9060,7 +9062,7 @@ function boshuAutoTick(manual) {
     /* ★2026-09-20「絶対に止まらないように」：停止線(15,000)の【手前 2,000】で🤖は自分から降りる。
        🤖は1回で数十回使うので、ぎりぎりまで回すと注文・入金・発送の枠を食う */
     var ufNow = ufTotal_();
-    if (ufNow > ufStopLine_() - 2000) { st.lastMsg = '🛡 Shopee枠の残りが少ないので今回は見送り（' + ufNow + '／停止線 ' + ufStopLine_() + '）。16:00(JST)に戻ります'; baLog_(st, st.lastMsg); return finish_(st.lastMsg); }
+    if (ufNow > ufStopLine_() - 2000) { st.lastMsg = '🛡 Shopee枠の残りが少ないので今回は見送り（' + ufNow + '／停止線 ' + ufStopLine_() + '）。' + ufResetJstStr_() + '(JST)に戻ります'; baLog_(st, st.lastMsg); return finish_(st.lastMsg); }
     if (!bgAllowed_()) { st.lastMsg = 'urlfetch 予約枠を確保するため今回は見送り'; return finish_(st.lastMsg); }
     /* ★v187 ヤフオクに弾かれても全体は止めない（2026-09-18 実測：ON の2回目で HTTP 500→6時間まるごと休み。メルカリの写真は187件集まっているのに1件も出なくなった）。休むのはヤフオクの検索だけ＝その間はメルカリの写真がある作品だけを進める */
     var yahooOk = !(st.blockedUntil && Date.now() < st.blockedUntil);
