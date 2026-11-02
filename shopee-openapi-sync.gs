@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261102-1615';
+var SRC_VER = '20261102-2040';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4273,17 +4273,34 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) 
   if (sku) model.model_sku = String(sku);
   // ★add_model が失敗すると、直前に足した「中身のないオプション」だけが商品に残ってしまう。
   //   （価格が Shopee の許容範囲外＝価格差上限に触れる等でよく起きる）。失敗したら必ず巻き戻す。
-  var am;
+  /* ★2026-11-02 01 商品部（BR 22795373829・58220535399 の途中の空き枠 __del98）：販促（まとめ買い割引・値下げ）に入っているカタログは add_model を断られる
+     （product.error_cannt_init_tier_in_promotion）。一括追加（addVariationsBulk_）と同じく、断られた時だけ販促から外して足し、まとめ買い割引はすぐ戻す（値下げは外したまま）。
+     途中の空き枠を埋める（existIdx・並びは動かさない）のもここを通る */
+  var am, _promo = null;
   try {
-    am = addModel_(shopId, itemId, [model]);
+    try { am = addModel_(shopId, itemId, [model]); }
+    catch (eA1) {
+      var emA = String((eA1 && eA1.message) || eA1);
+      if (!/in_promotion|has promotion/i.test(emA)) throw eA1;
+      _promo = priceUnlockPromo_(shopId, itemId);
+      if (_promo.other.length || (!_promo.bundleOut.length && !_promo.discountOut.length)) throw new Error('販促中で足せません。販促を外せませんでした: ' + String(_promo.other.join(',') || _promo.raw || '').slice(0, 160));
+      Utilities.sleep(1500);
+      am = addModel_(shopId, itemId, [model]);
+    }
   } catch (eAdd) {
     if (existIdx < 0) {
       try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs.slice(0, optObjs.length - 1) }], remap); } catch (eRb) {}
     }
     throw eAdd;
+  } finally {
+    if (_promo) {
+      priceRelockPromo_(shopId, itemId, _promo);
+      try { var lg = baKvFresh_('promo_unlock_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), shop: String(shopId), item: String(itemId), stage: 'add_variation', bundleOut: _promo.bundleOut, bundleBack: _promo.bundleBack, bundleBackErr: (_promo.bundleBackErr || []).slice(0, 3), discountOut: _promo.discountOut, other: _promo.other.slice(0, 3) }); lg.items = a.slice(0, 80); baKvSet_('promo_unlock_log', lg); } catch (eN) {}
+    }
   }
   var nm = ((am && am.model) || [])[0] || {};
-  return { ok: true, item_id: itemId, option: optionName, model_id: nm.model_id, tier_index: newIndex, image_id: newImageId || undefined };
+  var _pr = _promo ? { bundleOut: _promo.bundleOut.length, bundleBack: _promo.bundleBack.length, discountOut: _promo.discountOut.length, backErr: (_promo.bundleBackErr || []).slice(0, 2) } : undefined;
+  return { ok: true, item_id: itemId, option: optionName, model_id: nm.model_id, tier_index: newIndex, image_id: newImageId || undefined, promo: _pr };
 }
 // ★明細名(バリエ名)を置換：tierのoption名に含まれる before→after を書き換え（既存model据え置き）。1層/2層どちらもOK。
 /* ★2026-09-25 本人「在庫ゼロのもの（VNの100万ドン超え）は明細の題名の最初に印」＝指定した明細名の頭に印を付ける。1カタログ＝読み1回＋書き1回。既に印があるものは触らない */
