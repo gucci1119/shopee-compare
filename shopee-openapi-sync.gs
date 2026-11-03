@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0130';
+var SRC_VER = '20261104-0200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -11720,14 +11720,11 @@ function tcgSetCode_(hw, setName, ai, pr) {
     if (o1.code) { ai.sets[setName] = { code: o1.code, src: 'official', why: o1.why, at: Date.now() }; ai.setsDirty = 1; return o1.code; }
     ai.sets[setName] = { code: (c && c.code) || '', src: (c && c.src) || (c && c.code ? 'ai' : ''), officialTried: 1, offWhy: o1.why, at: Date.now() }; ai.setsDirty = 1; c = ai.sets[setName];
   }
-  if (c) return String(c.code || '');
-  if (!(ai.setBudget > 0) || !ai.st) return '';
-  ai.setBudget--;
-  var o = baClaudeJson_('Japanese Pokémon TCG expansion (set) name: "' + setName + '". Reply JSON only: {"code": "<the set code printed at the bottom-left of its cards, e.g. sv8a, M3a, SV-P, s12a. Empty string if not sure>"}', ai.st, 'tcg_set', 120);
-  if (!o || o.nokey) { ai.setBudget++; return ''; }
-  var code = String(o.code || '').trim(); if (!/^[A-Za-z0-9\-]{1,8}$/.test(code)) code = '';
-  ai.sets[setName] = { code: code, src: 'ai', at: Date.now() }; ai.setsDirty = 1;
-  return code;
+  /* ★2026-11-04 01 商品部（本人「洗って」）：公式で1つに決まらない区分（ambiguous）に AI の答え（src:'ai'）が残り、SKU に使われていた
+     （sv4pt が古代の咆哮・黒炎の支配者など約25区分・s4a が6区分・メガゲンガーに M3a（正しくは MBG）＝ポケカの明細 4,247件のうち SV4PT が 1,533件）。
+     → SKU・型番に使う記号は公式（official）か手で決めた物（manual）だけ。決まらなければ空（SKU は駿河屋の商品IDで見分ける・tcgFinishCand_）。AI には聞かない */
+  if (c && (c.src === 'official' || (c.code && c.src === 'manual'))) return String(c.code || '');
+  return '';
 }
 function tcgEnName_(hw, pr, names, ai) {
   var en = '';
@@ -11839,6 +11836,8 @@ function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenE
     var sku = ((BA_HW_LABEL[hw] || hw).toUpperCase() + '_' + (setCode ? setCode.toUpperCase() + '_' : '') + pr.num.replace(/[^A-Za-z0-9]+/g, '_') + (pr.rar ? '_' + tcgRarEn_(pr.rar).replace(/[^A-Za-z0-9]+/g, '') : '') + (pr.varEn ? '_' + pr.varEn.replace(/[^A-Za-z0-9]+/g, '') : '')).replace(/_+/g, '_').slice(0, 100);
     sku = sku.replace(/_+$/, '');   /* ★2026-10-14 レア度が日本語だけ（アルティメットレア等）だと「DBH_MM2_031_」で止まっていた＝英語の略号にして末尾の _ を落とす */
     if (typeof skuN !== 'undefined' && skuN) sku = skuN;   /* SKU＝区分_弾記号_番号_レアリティ（POKECA_M3A_132_103_SAR） */
+    /* ★2026-11-04 弾の記号が公式で決まらないポケカは、別の弾の同じ番号と SKU が重ならないよう駿河屋の商品IDの末尾6桁を付ける（POKECA_003_021_SR_SG123456） */
+    if ((hw === 'pokeca' || hw === 'pokeca_old') && !setCode && String(r.id || '').replace(/\D/g, '')) sku = (sku + '_SG' + String(r.id).replace(/\D/g, '').slice(-6)).replace(/_+/g, '_').slice(0, 100);
     if (typeof _disSku !== 'undefined' && _disSku) sku = (sku + '_' + String(_disSku).replace(/[^A-Za-z0-9]+/g, '')).replace(/_+/g, '_').slice(0, 100);   /* 名前を区別したら SKU も同じ札で区別する */
     var need = ccs.filter(function (cc) { var d = (ledger[key] || {})[cc]; if (d && (/^\d/.test(String(d)) || TCG_SKIP_DONE.test(String(d)))) return false; var set = listedByCc[cc] || {}; return !set[k1]; });
     if (!need.length) { stat.listed = (stat.listed || 0) + 1; return null; }
