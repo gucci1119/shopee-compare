@@ -2887,32 +2887,35 @@
      在庫0固定は、同じ番号の JAN 台帳の移り先へ付いていく（当たらなければ外す）。dry=true は数えるだけ。担当の PC で Claude が呼ぶ（ボタンは無い） */
   window.__smdRekeyByName = async function (items, dry) {
     const nrm = t => String(t || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+    const an = t => String(t || '').normalize('NFKC').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const codeOf = e => { const m = String((e && e.mpn) || '').trim(); return (m.length >= 4 && /\d/.test(m) && /[A-Za-z]/.test(m) && !/^x\d+$/i.test(m)) ? an(m) : ''; };
     await ensureProductIds(); if (!productIds || kvOk.product_ids === false) throw new Error('JAN 台帳を読めない');
     if (lstMeta === null || window._lstMetaLoading) { await lstLoadMeta(); } if (!kvOk.listing_meta) throw new Error('在庫0固定の台帳を読めない');
-    const ll = await llogFetchAll(true, 0); const byItem = {};
-    (ll || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(k => { const a = k.split('|'); if (a.length !== 3) return; (byItem[a[1]] = byItem[a[1]] || []).push({ mid: a[2], ja: nrm(m[k].ja), en: m[k].en || '' }); }); });
-    /* 10/30 夕まで GAS の控えの付け替えが落ちていた時期がある＝控えの英語名が今の Shopee の明細名（出品の表）と合う番号だけ正にする */
-    const ids = [...new Set((items || []).map(x => String(x.item_id || '').replace(/\D/g, '')).filter(Boolean))], curName = {};
-    for (let i = 0; i < ids.length; i += 40) { const rows = await sbGetAll('listings', 'select=item_id,models&item_id=in.(' + ids.slice(i, i + 40).join(',') + ')'); (rows || []).forEach(r => { (r.models || []).forEach(m => { if (m && m.id) curName[String(r.item_id) + '#' + String(m.id)] = nrm(m.n); }); }); }
-    const out = { dry: !!dry, items: 0, kept: 0, moved: 0, dropped: 0, nojp: 0, k0moved: 0, k0dropped: 0, k0kept: 0, llogBad: 0, detail: [] };
-    for (const it of (items || [])) {
-      const id = String(it.item_id || '').replace(/\D/g, ''); if (!id) continue; out.items++;
-      const lls = (byItem[id] || []).filter(e => { const cn = curName[id + '#' + e.mid]; const ok = cn && e.en && cn === nrm(e.en); if (!ok) out.llogBad++; return ok; }); const jaToMid = {}; const dupJa = {};
-      lls.forEach(e => { if (!e.ja) return; if (jaToMid[e.ja] && jaToMid[e.ja] !== e.mid) dupJa[e.ja] = 1; else jaToMid[e.ja] = e.mid; });
-      const pref = 'id:' + id + '#', keys = Object.keys(productIds).filter(k => k.indexOf(pref) === 0);
-      const snap = {}; keys.forEach(k => { snap[k] = productIds[k]; });
+    const ll = await llogFetchAll(true, 0); const llOf = {};
+    (ll || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(k => { const q = k.split('|'); if (q.length === 3) llOf[q[1] + '#' + q[2]] = { ja: nrm(m[k].ja), en: nrm(m[k].en) }; }); });
+    const ids = [...new Set((items || []).map(x => String(x.item_id || '').replace(/\D/g, '')).filter(Boolean))], cur = {};
+    for (let i = 0; i < ids.length; i += 40) { const rows = await sbGetAll('listings', 'select=item_id,models&item_id=in.(' + ids.slice(i, i + 40).join(',') + ')'); (rows || []).forEach(r => { cur[String(r.item_id)] = (r.models || []).filter(m => m && m.id && !m.ghost).map(m => ({ mid: String(m.id), n: nrm(m.n), na: an(m.n), sa: an(m.sku) })); }); }
+    const out = { dry: !!dry, items: 0, kept: 0, moved: 0, dropped: 0, empty: 0, noListing: 0, k0moved: 0, k0dropped: 0, k0kept: 0, detail: [] };
+    for (const id of ids) {
+      out.items++; const ms = cur[id]; if (!ms) { out.noListing++; continue; }
+      /* 明細ごとの見分け：控えの和名（今の明細名と控えの英語名が合う時だけ）と、明細名・SKU の英数字 */
+      const jaAt = {}; ms.forEach(m => { const l = llOf[id + '#' + m.mid]; if (l && l.ja && l.en && l.en === m.n) jaAt[m.mid] = l.ja; });
+      const fits = (m, e) => { const jp = nrm(e.jp || ''), c = codeOf(e); if (jp && jaAt[m.mid]) return jaAt[m.mid] === jp; if (c) return m.na.indexOf(c) >= 0 || m.sa.indexOf(c) >= 0; return null; };
+      const pref = 'id:' + id + '#', keys = Object.keys(productIds).filter(k => k.indexOf(pref) === 0), snap = {}; keys.forEach(k => { snap[k] = productIds[k]; });
       const plan = {}, moveOf = {};
-      keys.forEach(k => { const oldMid = k.slice(pref.length), e = snap[k] || {}; const jp = nrm(e.jp || '');
-        if (!jp) { out.nojp++; plan[k] = e; moveOf[oldMid] = oldMid; return; }
-        const nm = (!dupJa[jp] && jaToMid[jp]) || '';
-        if (!nm) { out.dropped++; moveOf[oldMid] = null; out.detail.push({ id, oldMid, jp: e.jp, to: '外す' }); return; }
-        const nk = pref + nm; if (plan[nk] && plan[nk] !== e) { out.dropped++; moveOf[oldMid] = null; out.detail.push({ id, oldMid, jp: e.jp, to: '外す（同じ移り先が2つ）' }); return; }
-        plan[nk] = e; moveOf[oldMid] = nm; if (nm === oldMid) out.kept++; else { out.moved++; out.detail.push({ id, oldMid, jp: e.jp, to: nm }); } });
+      keys.forEach(k => { const om = k.slice(pref.length), e = snap[k] || {}; const meaningful = String(e.jan || '').trim() || codeOf(e) || nrm(e.jp || '');
+        if (!meaningful) { out.empty++; plan[k] = plan[k] || e; moveOf[om] = om; return; }
+        const here = ms.find(m => m.mid === om); const f0 = here ? fits(here, e) : false;
+        if (f0 === true) { out.kept++; plan[k] = e; moveOf[om] = om; return; }
+        if (f0 === null) { out.kept++; plan[k] = e; moveOf[om] = om; return; }   /* 見分ける材料が無い（和名も型番も無く JAN だけ）＝触らない */
+        const cand = ms.filter(m => fits(m, e) === true);
+        if (cand.length === 1 && !plan[pref + cand[0].mid]) { plan[pref + cand[0].mid] = e; moveOf[om] = cand[0].mid; out.moved++; out.detail.push({ id, from: om, to: cand[0].mid, mpn: e.mpn || '', jp: e.jp || '', jan: e.jan || '' }); return; }
+        out.dropped++; moveOf[om] = null; out.detail.push({ id, from: om, to: cand.length > 1 ? '外す（候補が2つ以上）' : '外す（合う明細が無い）', mpn: e.mpn || '', jp: e.jp || '', jan: e.jan || '' }); });
       const mt = lstMeta && lstMeta[id], k0 = (mt && mt.keep0m) ? Object.assign({}, mt.keep0m) : null, nk0 = {};
-      if (k0) Object.keys(k0).forEach(om => { if (!k0[om]) return; const to = moveOf[om]; if (to === undefined) { out.k0kept++; nk0[om] = k0[om]; } else if (to === null) out.k0dropped++; else { nk0[to] = k0[om]; if (to === om) out.k0kept++; else out.k0moved++; } });
+      if (k0) Object.keys(k0).forEach(om => { if (!k0[om]) return; const to = moveOf[om]; if (to === undefined || to === om) { out.k0kept++; nk0[om] = k0[om]; } else if (to === null) out.k0dropped++; else { nk0[to] = k0[om]; out.k0moved++; } });
       if (!dry) { keys.forEach(k => { delete productIds[k]; }); Object.keys(plan).forEach(k => { productIds[k] = plan[k]; }); if (k0) mt.keep0m = nk0; }
     }
-    if (!dry) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); saveListingMeta(); try { logAct('出品', 'JAN・在庫0固定の名前での付け直し', String(out.items) + 'カタログ', '移した ' + out.moved + '・外した ' + out.dropped + '・そのまま ' + out.kept + '・和名なし ' + out.nojp + '／在庫0固定 移した ' + out.k0moved + '・外した ' + out.k0dropped); } catch (_) {} }
+    if (!dry) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); saveListingMeta(); try { logAct('出品', 'JAN・在庫0固定の名前での付け直し', String(out.items) + 'カタログ', '移した ' + out.moved + '・外した ' + out.dropped + '・そのまま ' + out.kept + '・空 ' + out.empty + '／在庫0固定 移した ' + out.k0moved + '・外した ' + out.k0dropped); } catch (_) {} }
     out.detail = out.detail.slice(0, 300);
     return out;
   };
