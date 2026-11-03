@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0400';
+var SRC_VER = '20261104-0430';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -10897,6 +10897,7 @@ function baStockOk_(resp) {
    ② グッズ（goods_*）で JAN が無い時は駿河屋の商品ページ（候補の鍵＝駿河屋の商品ID）から JAN を1回だけ読む（控え jan_sg_cache・1回の実行で最大 SG_JAN_PER_RUN 件・1.2秒あける）
    ③ それでも無ければ出さずに jan_todo_auto へ積む（夜の Claude の JAN 調べが埋める→次の回で出る） */
 function tcgMpnOf_(c) {
+  if (c && c.kmpn) return String(c.kmpn);   /* ★2026-11-04 一番くじの型番（01 の決め） */
   var m = ((c && c.setCode ? String(c.setCode).toUpperCase() + ' ' : '') + String((c && c.num) || '')).trim(); if (m) return m;
   var t = String((c && (c.en || c.ja)) || '').split(/\s+/);
   for (var q = t.length - 1; q >= 0; q--) { if (/\d/.test(t[q]) && /[\/-]/.test(t[q]) && /^[A-Za-z0-9\/\-]+$/.test(t[q])) { var r = t[q]; if (q > 0 && /^[A-Z0-9]{2,8}$/.test(t[q - 1]) && /\d/.test(t[q - 1])) r = t[q - 1] + ' ' + r; return r; } }
@@ -11561,7 +11562,10 @@ function tcgParseKuji_(a, t) {
   /* 名前＝英語名の鍵（Claude の判定 merge.py も jaName をそのまま鍵にする）。版（シリーズ・賞）まで入れて、別の一番くじの同じキャラを取り違えない。
      メルカリの検索と照合は「 「」の前（キャラ名＋種類）だけ＝tcgKujiHead_（売り手はシリーズ名を書かないことが多い） */
   var name = (head + ' 「一番くじ ' + series + '」' + (prize ? ' ' + prize + '賞' : '')).replace(/\s+/g, ' ').trim().slice(0, 90);
-  return { num: '', rar: '', name: name, vars: [], varEn: '', series: series, setTag: '', prize: prize };
+  /* ★2026-11-04 01 商品部の決め：型番＝日本語のまま「一番くじ <シリーズ名> <X>賞 <キャラ名>」（同じ賞の絵柄違いをキャラ名で分ける）。シリーズ・賞・キャラ名のどれかが読めなければ型番は空 */
+  var chr = head.replace(okRe, ' ').replace(/フィギュア|一番くじ/g, ' ').replace(/\s+/g, ' ').trim();
+  var kmpn = (series && prize && chr) ? ('一番くじ ' + series + ' ' + prize + '賞 ' + chr).replace(/\s+/g, ' ').trim().slice(0, 100) : '';
+  return { num: '', rar: '', name: name, vars: [], varEn: '', series: series, setTag: '', prize: prize, kmpn: kmpn };
 }
 function tcgKujiHead_(hw, jaName) { return (BA_ARC[hw] && BA_ARC[hw].pz === 'kuji') ? String(jaName || '').split(' 「')[0] : String(jaName || ''); }   /* 🎰 検索に使う名前（一番くじはキャラ名＋種類だけ） */
 function tcgParseCard_(hw, t, k) {
@@ -11679,9 +11683,12 @@ var BA_ARC = {}, BA_ARC_SKU_OR = '';
   /* ★2026-11-04 全体レビュー 10/31 低-12（事業本部：本人の決まり 10/16「出品には JAN〈無ければ型番〉を必ず付ける・無い物は出さない」）：
      一番くじはばら売りの小物（10/17 の例外）に入れない＝JAN も型番も無ければ出さない。賞と弾を型番の代わりにするかは 01 と決める（決まるまでは出さない）。
      JAN の調べ待ち（jan_todo_auto）には積まない＝くじの賞品は JAN が無いことが多く、待ちが埋まるだけ */
+  /* ★2026-11-04 訂正（事業本部・本人の 10/16「無ければ無いでいい・『ない』と書いて・空欄だけはやめて」10/17「ばら売りは JAN 不要」）：
+     一番くじはグッズと同じ＝JAN が無くても出して「JAN 未取得」と出し、夜の JAN 調べに積む（ばら売りの小物の扱い＝JAN を付けない・積まない、からは外す）。
+     見分けは型番（一番くじ <シリーズ> <X>賞 <キャラ名>・01 の決め）と英語名・SKU */
   BA_LOOSE_HW = new RegExp('^(yokai|acnh|' + jL + ')$');
-  BA_JAN_TODO_LOOSE = new RegExp('^(yokai|acnh|' + j + ')$');
-  BA_GAME_JAN_EXEMPT = new RegExp('^goods_|^moncolle$|^(yokai|acnh|' + jL + ')$');
+  BA_JAN_TODO_LOOSE = new RegExp('^(yokai|acnh|' + jL + ')$');
+  BA_GAME_JAN_EXEMPT = new RegExp('^goods_|^moncolle$|^(yokai|acnh|' + j + ')$');
 })();
 function baArc_(hw) { return !!BA_ARC[String(hw || '')]; }
 function tcgNamesKey_(hw) { hw = String(hw || ''); if (hw === 'moncolle') return 'pokeca'; var a = BA_ARC[hw]; return (a && a.names) || hw; }   /* 名前の辞書（モンコレ・ポケモンのアーケードはポケカの辞書） */
@@ -11893,10 +11900,12 @@ function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenE
     if (typeof skuN !== 'undefined' && skuN) sku = skuN;   /* SKU＝区分_弾記号_番号_レアリティ（POKECA_M3A_132_103_SAR） */
     /* ★2026-11-04 弾の記号が公式で決まらないポケカは、別の弾の同じ番号と SKU が重ならないよう駿河屋の商品IDの末尾6桁を付ける（POKECA_003_021_SR_SG123456） */
     if ((hw === 'pokeca' || hw === 'pokeca_old') && !setCode && String(r.id || '').replace(/\D/g, '')) sku = (sku + '_SG' + String(r.id).replace(/\D/g, '').slice(-6)).replace(/_+/g, '_').slice(0, 100);
+    /* ★2026-11-04 事業本部（本人 10/16「全部被らないように」）：一番くじは番号が無く SKU が「区分_英語名」だけ＝英語名に賞が入らないと別の賞・絵柄と同じ SKU になる。賞と駿河屋の商品IDの末尾6桁を必ず付ける */
+    if (BA_ARC[hw] && BA_ARC[hw].pz === 'kuji') sku = (sku + (pr.prize ? '_' + String(pr.prize).replace(/[^A-Za-z0-9]/g, '') : '') + (String(r.id || '').replace(/\D/g, '') ? '_SG' + String(r.id).replace(/\D/g, '').slice(-6) : '')).replace(/_+/g, '_').slice(0, 100);
     if (typeof _disSku !== 'undefined' && _disSku) sku = (sku + '_' + String(_disSku).replace(/[^A-Za-z0-9]+/g, '')).replace(/_+/g, '_').slice(0, 100);   /* 名前を区別したら SKU も同じ札で区別する */
     var need = ccs.filter(function (cc) { var d = (ledger[key] || {})[cc]; if (d && (/^\d/.test(String(d)) || TCG_SKIP_DONE.test(String(d)))) return false; var set = listedByCc[cc] || {}; return !set[k1]; });
     if (!need.length) { stat.listed = (stat.listed || 0) + 1; return null; }
-    return { key: key, hw: hw, id: String(r.id || ''), ja: (pr.rar ? pr.rar + ' ' : '') + (pr.vars && pr.vars.length ? '(' + pr.vars.join(')(') + ')' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: full, cost: price, need: need, k: String(r.k || ''), mp: r.mp ? 1 : 0, setCode: setCode, sku: sku };
+    return { key: key, hw: hw, id: String(r.id || ''), ja: (pr.rar ? pr.rar + ' ' : '') + (pr.vars && pr.vars.length ? '(' + pr.vars.join(')(') + ')' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: full, cost: price, need: need, k: String(r.k || ''), mp: r.mp ? 1 : 0, setCode: setCode, sku: sku, kmpn: pr.kmpn || '' };
   }
 }
 /* 写真を1枚：題名に番号が入る出品だけ → AI判定（カード用）。戻り {img, src, srcTitle, hits} か null。blocked なら {blocked:1} */
@@ -12157,7 +12166,7 @@ function tcgTick(manual) {
         if (!_janG && !_mpnG) {
           /* グッズ（amiibo・妖怪メダル等）は型番が無く、駿河屋の商品ページは Cloudflare に止められることがある（10/16 実測「Just a moment...」）。
              既定＝出した上で夜の JAN 調べ（ポータルの「駿河屋のJANを埋める」＝ブラウザ経由）に回す。cfg.tcg.requireIdGoods=true なら出さない（本人の判断で切替） */
-          var _strict = !(/^goods_|^yokai$|^moncolle$|^acnh$/.test(String(hw)) || baArc_(hw)) || !!(tc && tc.requireIdGoods) || !!(BA_ARC[hw] && BA_ARC[hw].pz === 'kuji');   /* ★2026-11-04 低-12：一番くじは JAN も型番も無ければ出さない（型番の形は 01 と決めるまで無し） */
+          var _strict = !(/^goods_|^yokai$|^moncolle$|^acnh$/.test(String(hw)) || baArc_(hw)) || !!(tc && tc.requireIdGoods);
           tcgJanTodoPush_(hw, c);
           if (_strict) { baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN も型番も無いので出さない（夜の JAN 調べに回す）'); baSkipRec_(st, hw, '', c, 'nojan'); continue; }
           baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN が未取得のまま出す（夜の JAN 調べに積んだ）');
