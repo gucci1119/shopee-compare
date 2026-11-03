@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0530';
+var SRC_VER = '20261104-0600';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1891,12 +1891,12 @@ function doGetInner_(e) {
         if (!dsBusy) { var _bz2 = vshiftBusyAt_(p.item_id); if (_bz2 && Date.now() - _bz2 < 6 * 60000) dsBusy = String(_bz2); }   /* ★2026-11-04 中-1：別の台で動いている印も見る */
         if (dsBusy) throw new Error('同じカタログの詰め直し削除がまだ動いています（' + Math.round((Date.now() - (parseInt(dsBusy, 10) || Date.now())) / 1000) + '秒前に始まった）。何もしていません。数分待って名前を読み直してから、要るならもう一度');
         dsC.put(dsK, String(Date.now()), 360);
-        var _vsId = String(p.item_id || '').replace(/\D/g, ''); VSHIFT_SELF[_vsId] = 1; vshiftBusySet_(_vsId, true);
+        var _vsId = String(p.item_id || '').replace(/\D/g, ''); VSHIFT_SELF[_vsId] = 1; vshiftBusySet_(_vsId, true); SHIFT_RID = String(p.rid || '').slice(0, 40);
         try { dsout = removeVariationShift_(dsshop, p.item_id, String(p.mids || ''), String(p.vnames || '').split('\u0001')); }
         finally { try { dsC.remove(dsK); } catch (eDsC) {} delete VSHIFT_SELF[_vsId]; vshiftBusySet_(_vsId, false); }
         /* ★2026-11-04 全体レビュー 新-1：ポータルは300秒で打ち切るが GAS は最大360秒動く＝返事が届かないと JAN・在庫0固定が古い番号に残る。
            付け替えの元（moves・gone）を app_kv shift_result_<shop>_<item> に残す（小さい・上書き）。ポータルは時間切れの時これを読んで当てる */
-        try { if (dsout && Array.isArray(dsout.moves) && (dsout.moves.length || (dsout.gone || []).length)) sbUpsert_('app_kv', [{ k: 'shift_result_' + dsshop + '_' + String(p.item_id || '').replace(/\D/g, ''), v: { at: Date.now(), rid: String(p.rid || '').slice(0, 40), ok: !!dsout.ok, moves: dsout.moves, gone: dsout.gone || [], llog: dsout.llog ? { n: dsout.llog.n || 0 } : null }, updated_at: new Date().toISOString() }], 'k'); } catch (eSr) {}
+        try { if (dsout) shiftResultPut_(dsshop, p.item_id, { at: Date.now(), rid: String(p.rid || '').slice(0, 40), src: 'direct', ok: !!dsout.ok, moves: dsout.moves, gone: dsout.gone || [], llog: dsout.llog ? { n: dsout.llog.n || 0 } : null }); } catch (eSr) {}
       } catch (err) { dsout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dscb + '(' + JSON.stringify(dsout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -3833,6 +3833,9 @@ function baLlogRekey_(shopId, itemId, moves, gone, nameOf) {
    → 効いたと確かめられなかった時は、消す前の中身（名前ごとの値段・在庫・SKU）と期待する並びを app_kv shift_pending（小さい）に控える。
      後の回（次にそのカタログを詰め直す時・🤖の回の頭）で読み直し、名前が新しい並びに動いていたら名前で値段・在庫・SKU を付け直し、__del を在庫0にし、仕入れ目安の控えを付け替える。
      元の並びのまま30分たったら効かなかった＝控えを捨てる。24時間で捨てる。末尾の __del は消さない（在庫0で買えない・🧹か詰め直しで消える） */
+/* ★2026-11-04 全体レビュー 2回目 新2-1・新2-2：詰め直しの結果（付け替えの元）を app_kv shift_result_<shop>_<item> に残す。rid＝ポータルが呼ぶたびに付ける番号（どの削除の結果か） */
+var SHIFT_RID = '';
+function shiftResultPut_(shopId, itemId, v) { try { if (!v || !Array.isArray(v.moves) || !(v.moves.length || (v.gone || []).length)) return false; sbUpsert_('app_kv', [{ k: 'shift_result_' + parseInt(shopId, 10) + '_' + String(itemId).replace(/\D/g, ''), v: v, updated_at: new Date().toISOString() }], 'k'); return true; } catch (e) { return false; } }
 function shiftPendKey_(shopId, itemId) { return String(parseInt(shopId, 10)) + '|' + String(parseInt(itemId, 10)); }
 function shiftPendSave_(shopId, itemId, rec) {
   try {
@@ -3897,6 +3900,8 @@ function shiftPendCheck_(onlyKey, maxN) {
     if (stOk) rec.stockDone = true;   /* ★2026-11-04 全体レビュー 新-4②：失敗した時は立てない（以後その作品の在庫を直さなくなる） */
     try { for (var f = 0; f < sk.length; f += 50) updateModelSku_(sid, iid, sk.slice(f, f + 50)); } catch (e3) { err.push('SKU ' + String(e3.message || e3).slice(0, 80)); }
     if (isNew && rec.moves && rec.moves.length && !rec.llogDone) { try { baLlogRekey_(sid, iid, rec.moves, rec.gone || [], rec.nameOf || {}); rec.llogDone = true; } catch (e4) { err.push('控え ' + String(e4).slice(0, 60)); } }
+    /* ★2026-11-04 全体レビュー 2回目 新2-1：後から効いた時、ポータルの JAN・型番・状態（product_ids）と在庫0固定（keep0m）は誰も付け替えていなかった＝結果を src:'pending' で残す（ポータルの担当の PC が読んで1回だけ当て、appliedAt を付ける） */
+    if (isNew && !rec.resultDone && rec.moves && (rec.moves.length || (rec.gone || []).length)) { if (shiftResultPut_(sid, iid, { at: Date.now(), rid: String(rec.rid || ''), src: 'pending', ok: true, moves: rec.moves, gone: rec.gone || [] })) rec.resultDone = true; }
     out.fixed += pr.length + st.length + sk.length; out.notes.push(key + (isNew ? ' 後から効いていた' : ' 途中まで') + '：値段' + pr.length + '・在庫' + st.length + '・SKU' + sk.length + (err.length ? '（失敗 ' + err.join(' / ') + '）' : ''));
     if (!err.length) { delete it[key]; ch = true; }
     try { var lg = baKvFresh_('shift_pending_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), key: key, isNew: isNew, price: pr.length, stock: st.length, sku: sk.length, err: err.slice(0, 3) }); lg.items = a.slice(0, 60); baKvSet_('shift_pending_log', lg); } catch (eL) {}
@@ -3996,7 +4001,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
       var _snap = {}; for (var xs = 0; xs < n; xs++) { var _nx = String((optList[xs] || {}).option || ''); if (_nx && bySlot[xs]) { var _bm = bySlot[xs]; _snap[vnNorm_(_nx)] = { id: String(_bm.model_id), p: parseFloat(priceOf(_bm)) || 0, s: parseInt(stockOf(_bm), 10), k: String(_bm.model_sku || '') }; } }
       var _mvP = [], _gnP = [], _noP = {}; for (var smP = 0; smP < k; smP++) if (keep[smP] !== smP) _mvP.push([String(bySlot[keep[smP]].model_id), String(bySlot[smP].model_id)]);
       for (var snP = 0; snP < n; snP++) if (bySlot[snP]) _noP[String(bySlot[snP].model_id)] = String((optList[snP] || {}).option || '');
-      _pendSaved = shiftPendSave_(shopId, itemId, { k: k, newNames: _nmNew, oldNames: _nmOld, snap: _snap, moves: _mvP, gone: _gnP, nameOf: _noP });
+      _pendSaved = shiftPendSave_(shopId, itemId, { k: k, newNames: _nmNew, oldNames: _nmOld, snap: _snap, moves: _mvP, gone: _gnP, nameOf: _noP, rid: SHIFT_RID || '' });
     } catch (ePs) {}
     if (_same(_nmNow, _nmOld)) {
       if (_tvErr) throw _tvErr;   /* 失敗の返事で何も動いていない＝そのまま失敗（今まで通り） */

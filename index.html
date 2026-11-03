@@ -2836,25 +2836,50 @@
      失敗は今までどおり例外にする（付け替えてから投げ直す） */
   /* ★2026-11-04 全体レビュー 新-1：ポータルは300秒で打ち切るが GAS は最大360秒動いて最後まで済ませる＝返事（moves）が届かず JAN・在庫0固定が古い番号に残っていた。
      GAS が残す結果（app_kv shift_result_<shop>_<item>）を、時間切れの後に4回（30秒・90秒・3分・5分）読みに行き、呼んだ時より後の物なら1回だけ当てる */
+  /* ★2026-11-04 全体レビュー 2回目 新2-2：同じカタログの別の詰め直し削除の結果を当てないよう、呼ぶたびの番号（rid）が合う物だけ当てる。当てた rid はこの端末に控える */
+  function shiftApplied(rid) { try { const m = JSON.parse(localStorage.getItem('smdShiftAppliedRid') || '{}'); return !!m[rid]; } catch (_) { return false; } }
+  function shiftMarkApplied(rid) { try { const m = JSON.parse(localStorage.getItem('smdShiftAppliedRid') || '{}'); m[rid] = Date.now(); const ks = Object.keys(m).sort((a, b) => m[b] - m[a]); ks.slice(50).forEach(k => { delete m[k]; }); localStorage.setItem('smdShiftAppliedRid', JSON.stringify(m)); } catch (_) {} }
   function shiftResultPoll(params, t0) {
     const key = 'shift_result_' + String(parseInt(params.shop_id, 10) || '') + '_' + String(params.item_id || '').replace(/\D/g, ''); if (/_$/.test(key)) return;
-    const doneK = 'smdShiftApplied|' + key;
+    const rid = String(params.rid || ''); if (!rid) return;
     [30, 90, 180, 300].forEach(sec => setTimeout(async () => {
       try {
-        let applied = ''; try { applied = localStorage.getItem(doneK) || ''; } catch (_) {}
+        if (shiftApplied(rid)) return;
         const rows = await sbGet('app_kv', 'select=v&k=eq.' + encodeURIComponent(key)); const v = rows && rows[0] && rows[0].v;
-        if (!v || !(Number(v.at) >= t0 - 5000) || applied === String(v.at)) return;
-        try { localStorage.setItem(doneK, String(v.at)); } catch (_) {}
+        if (!v || String(v.rid || '') !== rid || v.appliedAt || v.src === 'pending') return;   /* 後から効いた分（pending）は担当の PC がまとめて当てる（2台で2回当てない） */
+        shiftMarkApplied(rid);
         const n = pidRekeyAfterShift(params.item_id, { moves: v.moves || [], gone: v.gone || [], llog: v.llog || null });
         try { toast('🔁 返事が来なかった詰め直し削除の結果を後から読み、JAN・在庫0固定を付け替えました（' + (v.moves || []).length + '件の移動）', 8000); } catch (_) {}
         try { logAct('出品', '詰め直しの付け替え（後から）', String(params.item_id), '移動 ' + (v.moves || []).length + '・消えた ' + (v.gone || []).length + '・JAN ' + n); } catch (_) {}
       } catch (e) { console.warn('[詰め直しの結果] 読めませんでした', e && e.message); }
     }, sec * 1000));
   }
+  /* ★2026-11-04 全体レビュー 2回目 新2-1：並べ替えが後から効いた時は、GAS（🤖の回の shiftPendCheck_）が結果を src:'pending' で残す。
+     担当の PC（pcIsOwner）が起動の後と10分ごとに読み（直近2日・小さい鍵）、appliedAt の無い物を1回だけ当てて appliedAt を書く（2台で2回当てない） */
+  async function shiftPendingApplyTick() {
+    try {
+      if (!settings.sbSecret || demoOn() || (typeof pcIsOwner === 'function' && !pcIsOwner())) return;
+      const since = new Date(Date.now() - 2 * 86400000).toISOString();
+      const rows = await sbGet('app_kv', 'select=k,v&k=like.shift_result_*&updated_at=gte.' + encodeURIComponent(since));
+      for (const row of (rows || [])) {
+        const v = row && row.v; if (!v || v.src !== 'pending' || v.appliedAt || !Array.isArray(v.moves)) continue;
+        const m = /^shift_result_\d+_(\d+)$/.exec(String(row.k || '')); if (!m) continue;
+        if (v.rid && shiftApplied(v.rid)) continue;
+        await sbUpsert('app_kv', [{ k: row.k, v: Object.assign({}, v, { appliedAt: Date.now(), appliedBy: (typeof pcName === 'function' ? pcName() : '') }), updated_at: new Date().toISOString() }], 'k');   /* 先に印（2台で2回当てない） */
+        if (v.rid) shiftMarkApplied(v.rid);
+        const n = pidRekeyAfterShift(m[1], { moves: v.moves, gone: v.gone || [] });
+        try { logAct('出品', '詰め直しの付け替え（後から効いた）', m[1], '移動 ' + v.moves.length + '・消えた ' + (v.gone || []).length + '・JAN ' + n); } catch (_) {}
+        try { toast('🔁 後から効いた詰め直し削除の付け替えを当てました（' + m[1] + '・' + v.moves.length + '件の移動）', 6000); } catch (_) {}
+      }
+    } catch (e) { console.warn('[詰め直しの後から効いた分] 読めませんでした', e && e.message); }
+  }
+  setTimeout(() => { shiftPendingApplyTick(); setInterval(shiftPendingApplyTick, 10 * 60000); }, 90000);
   async function gasCallShift(params, timeoutMs) {
     let r = null; const t0 = Date.now();
+    if (!params.rid) params.rid = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);   /* ★2026-11-04 新2-2：どの削除の結果かの番号（GAS が結果の控えに残す） */
     try { r = await gasCall(params, timeoutMs); }
-    catch (e) { if (e && e.res) { try { pidRekeyAfterShift(params.item_id, e.res); } catch (_) {} } else if (/__DISCONNECTED__/.test(String((e && e.message) || ''))) { try { shiftResultPoll(params, t0); } catch (_) {} } throw e; }
+    catch (e) { if (e && e.res) { shiftMarkApplied(params.rid); try { pidRekeyAfterShift(params.item_id, e.res); } catch (_) {} } else if (/__DISCONNECTED__/.test(String((e && e.message) || ''))) { try { shiftResultPoll(params, t0); } catch (_) {} } throw e; }
+    shiftMarkApplied(params.rid);
     try { pidRekeyAfterShift(params.item_id, r); } catch (_) {}
     return r;
   }
@@ -4897,6 +4922,7 @@
     "見積もりに「まとめ買い」の口を足しました": "Added bundle quotes",
     "全体レビュー（10/31・11/4）の直し": "Fixes from the full reviews (10/31, 11/4)",
     "全体レビューの残りを直しました": "Fixed the rest of the full-review items",
+    "詰め直し削除の付け替えの残りを直しました": "Fixed remaining re-key issues after shift deletes",
     "⚠ リクエスト品の印を読めませんでした（印の付いた品も表に出ています）。🔄で読み直してください": "⚠ Couldn’t read the request-item marks (marked items are still shown). Press 🔄 to reload",
     "売れた数": "Units sold",
     "今の値段で売れたら（1個）": "If sold at today's price (per unit)",
@@ -24640,6 +24666,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-04', items: [
+      '🔁 <b>詰め直し削除の付け替えの残りを直しました</b>（全体レビュー2回目）：①並べ替えが後から効いた時も、担当の PC が10分ごとに結果を読み、JAN・在庫0固定を1回だけ付け替えます ②時間切れの後に読む結果は、その削除の番号が合う物だけ当てます（別の削除の結果で2回ずらさない）③出品一覧を開いていなくても在庫0固定の台帳を読んでから付け替えます',
       '🧯 <b>全体レビューの残りを直しました</b>：①キャンセルで戻った在庫を、明細名が変わっていて引き戻せなかった件を ⚠️自動検知に出します（その明細はまた買える状態かもしれません）②詰め直し削除の「動いている」印を GAS の台をまたいで見ます（🤖が名前を元に戻さない）③相場の見直し：写真集めと同時に叩かない・3回続けて読めなければ6時間休む・止めた時は集めない・10/4 より前の注文も明細名で「売れた」と数える ④一番くじに型番「一番くじ ＜シリーズ＞ ＜X＞賞 ＜キャラ名＞」を付け、SKU に賞と駿河屋の番号を入れて被らないようにしました（JAN が無ければ「JAN 未取得」で出して夜に調べます）',
       '🧯 <b>全体レビュー（10/31・11/4）の直し</b>：①詰め直し削除の返事が300秒で来なかった時も、GAS が残した結果を後から読んで JAN・在庫0固定を付け替えます ②出品一覧の読み込み中に付け替えて捨てない ③Smart Reply が PayPal で断った文は、コピーも「貼って」も出しません ④⚠️自動検知は、見ていない時は中身を作りません（バッジの数だけ） ⑤口座を切り替えた後の値付けの見直しが0件になる・前の口座の提案が出る、を直しました ⑥「Shopee の額＝合計」で PayPal 0 の案を返しません ⑦JAN の台帳が読めなかった後は5分あけて読み直します',
       '🧺 <b>見積もりに「まとめ買い」の口を足しました</b>（03 営業部・本人「これ２つなの？画像１個しかないけど」「タイトル何かぐちゃぐちゃになってない？」）：WhatsApp・Smart Reply から N点まとめて頼むと、仕入れは合計、粗利は1件ずつの線の合計で計算し、英語名は品物ごとの名前をそのまま使います（混ぜて作り直しません）。文面は「We found N items: A and B」で、品物ごとの写真を返します。VN で上限（909,090）を超える時は、分け方の案を出します',
@@ -34088,6 +34115,16 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   // ★JAN台帳(product_ids)は他のページを開いた時にしか読まれず、読み直し直後の母数では「JANが一致 0件」になっていた
   //   （2026-09-11 本人「JANで紐づけているのに出てこない」。画面の見出しも 204件→0件に化けていた）。母数を描く前に必ず読む。
   let _pidsLoading = null;
+  /* ★2026-11-04 全体レビュー 2回目 新2-3：listing_meta（在庫0固定 keep0m 等）を読むのは出品一覧の中だけだった＝出品一覧を開かずに詰め直し削除をすると、
+     付け替えが「読み終わり」を待っても読まれず、keep0m が古い番号に残った。読み込みを関数にして、付け替えからも呼ぶ。読めなければ知らせる */
+  function lstLoadMeta() {
+    if (window._lstMetaLoading) return window._lstMetaP;
+    lstMeta = lstMeta || {}; window._lstMetaLoading = true;
+    window._lstMetaP = sbGetAll('app_kv', 'select=v,updated_at&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.listing_meta = true; kvBaseSet('listing_meta', lstMeta, rows && rows[0] && rows[0].updated_at); try { lstRedrawSoon(); } catch (_) {} return lstMeta; })
+      .catch(e => { lstMeta = lstMeta || {}; try { toast('⚠ 出品の印（在庫0固定など）を読めませんでした。詰め直し削除の付け替えができていないかもしれません（出品一覧を開き直してください）', 8000); } catch (_) {} return null; })
+      .finally(() => { window._lstMetaLoading = false; });
+    return window._lstMetaP;
+  }
   async function ensureProductIds() {
     // ★読み込み中に2回目が来たら同じ約束を待つ（先に {} を返すと「JAN 0件」で描かれる・2026-09-12 レビュー）
     //   ★2026-10-29 レビュー（改善 中-1）：出品一覧が先に仮の {} を入れて読み始めた時も、ここで待つ（前は {} を「読めた」と見て返していた）
@@ -47506,7 +47543,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { let mx = 0; all.forEach(r => { const t = Date.parse(r.synced_at || r.updated_at || 0) || 0; if (t > mx) mx = t; }); lst._dataFreshMs = mx; } // GASの実自動同期の新しさ（最終同期ラベル用）
     // 仕入元ソース状態(dropship_status)を初回のみ裏で取得→完了後に再描画
     if (lstDropStatus === null) { lstDropStatus = {}; sbGetAll('app_kv', 'select=v&k=eq.dropship_status').then(rows => { lstDropStatus = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; lstRedrawSoon(); }).catch(() => { lstDropStatus = {}; }); }
-    if (lstMeta === null) { lstMeta = {}; window._lstMetaLoading = true; sbGetAll('app_kv', 'select=v,updated_at&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.listing_meta = true; kvBaseSet('listing_meta', lstMeta, rows && rows[0] && rows[0].updated_at); lstRedrawSoon(); }).catch(() => { lstMeta = {}; }).finally(() => { window._lstMetaLoading = false; }); }
+    if (lstMeta === null) lstLoadMeta();
     if (productIds === null && !_pidsLoading) { _pidsLoading = sbGetAll('app_kv', 'select=v,updated_at&k=eq.product_ids').then(rows => { productIds = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.product_ids = true; kvBaseSet('product_ids', productIds, rows && rows[0] && rows[0].updated_at); try { lst._na = null; } catch (_) {} lstRedrawSoon(); return productIds; }).catch(() => { productIds = {}; kvOk.product_ids = false; window._pidsFailAt = Date.now(); return productIds; }).finally(() => { _pidsLoading = null; }); productIds = {}; }   /* ★2026-10-29 読み終わったら「まだ無い商品」の控えも捨てる */ // ★#5・#6 読めなければ保存させない 🔖JAN/型番（出品一覧・各国そろえる共通）
     if (lstSpecs === null) { lstSpecs = {}; sbGetAll('app_kv', 'select=v&k=like.listing_specs_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstSpecs = m; lstRedrawSoon(); }).catch(() => { lstSpecs = {}; }); }
     /* ★2026-09-26 本人「いいねとか販売とか閲覧数はもう出てない？」：期間（直近30日など）は保存して開き直しても戻るのに、差分の取得はボタンを押した時だけ＝開き直すと全行が ⋯ のまま（1ページ180個）。期間が戻っていて差分が未取得なら1回だけ取りに行く（描画の外で） */
