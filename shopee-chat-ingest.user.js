@@ -2,7 +2,7 @@
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @name:ja      【Shopeeチャット】📥 会話ログを取り込む（→ポータル）
 // @namespace    gucci-shopee-chat
-// @version      3.44.6
+// @version      3.44.7
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -445,7 +445,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.44.6';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.44.7';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1193,7 +1193,16 @@
   let cycling = false, cycleInfo = '', cycleTarget = null; // cycleTarget＝巡回中に開いている会話の{buyer,cc}（一覧の行から取る＝信頼できる）
   const lastSig = {}; // 会話ごとの「最終プレビュー署名」。変化＝新着があった会話だけ開く（過去の読み直しを省く）
   // 一覧の行からバイヤー名と国を取る（ヘッダ再検出より信頼できる）
-  function rowInfo(row) { const t = (row.innerText || '').replace(/\r/g, ''); const buyer = (t.split('\n')[0] || '').trim(); const cc = (t.match(/\(([A-Z]{2})\)/) || [])[1] || CC; return { buyer, cc }; }
+  /* ★2026-11-03 03-12・事業本部：一覧の行の1行目をそのまま名前にしていた＝行の頭に「Unread」「Pinned」などの札が出ていると、それが相手の名前になり
+     chat_messages に「Unread」さんの行が入っていた（📮 の相手が Unread）。札を飛ばし、名前の形（英数字と . _）をした最初の行を名前にする。
+     （SKIP_CHIP は後ろで作るので、ここでは使わない＝作る前に呼ばれて止まらないように） */
+  function rowBuyerOf(lines) {
+    const chip = /^(Closed|Overdue|Pinned|Unread|Auto-?Reply|Muted|New|Read|Sent|Delivered)$/i;
+    const ls = (lines || []).map(s => String(s || '').trim()).filter(Boolean);
+    for (const s of ls) { if (chip.test(s)) continue; if (/^[\w.]{2,}$/.test(s)) return s; break; }
+    return '';
+  }
+  function rowInfo(row) { const t = (row.innerText || '').replace(/\r/g, ''); const buyer = rowBuyerOf(t.split('\n')); const cc = (t.match(/\(([A-Z]{2})\)/) || [])[1] || CC; return { buyer, cc }; }
   // 一覧の行から時刻/日付/ステータスを除いた本文署名を作る
   // ★署名から「未読バッジの数字」も外す。
   //   本人は webchat で手動で未読に戻して"未対応の目印"にしている。ところがバッジが付くと
@@ -1593,7 +1602,7 @@
       const raw = (row.innerText || '').replace(/\r/g, '');
       const t = raw.split('\n').map(s => s.trim()).filter(Boolean);
       if (!t.length) return;
-      const buyer = t[0];
+      const buyer = rowBuyerOf(t);   /* ★2026-11-03 札（Unread・Pinned 等）を名前にしない */
       if (!buyer || !/^[\w.]{2,}$/.test(buyer)) return; // 名前らしくない行（見出し等）は無視
       const cc = (raw.match(/\(([A-Z]{2})\)/) || [])[1] || CC;
       const when = t.find(s => /^\d{1,2}:\d{2}$/.test(s) || /^\d{1,2}\/\d{1,2}$/.test(s) || /^(Yesterday|Today)$/i.test(s)) || '';

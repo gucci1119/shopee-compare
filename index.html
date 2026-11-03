@@ -2757,7 +2757,7 @@
     const isWrite = !!params.token;
     if (isWrite) shopeeWriteGuard(String(params.action || '書き込み'), params);
     const tries = isWrite ? 1 : 3;
-    let lastErr = '';
+    let lastErr = '', lastRes = null;   /* ★2026-11-03 全体レビュー 10/31 高-2：GAS が ok:false で返した中身（詰め直し削除の moves 等）を例外に付ける */
     for (let att = 0; att < tries; att++) {
       const ac = new AbortController();
       const tm = setTimeout(() => ac.abort(), timeoutMs || 60000);
@@ -2766,7 +2766,7 @@
         const t = await r.text();
         const m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t);
         if (!m) { lastErr = 'GAS応答エラー HTTP ' + r.status + '（GASは同時に1件しか処理できません。他の重い処理＝統計更新/注文取得などが走っていると詰まります。少し待って再実行してください）'; }
-        else { const res = JSON.parse(m[1]); if (res && res.ok) return res; lastErr = (res && res.error) || '失敗';
+        else { const res = JSON.parse(m[1]); if (res && res.ok) return res; lastRes = res; lastErr = (res && res.error) || '失敗';
           // ★枠切れは【実際に断られた事実】が唯一の正。カウンタは数え漏れることがある（2026-08-22 実測で12,329回ぶん漏れていた）。
           //   断られた瞬間を覚えて、上の表示を⛔に落とす。数字だけ見て「まだ余裕」と誤解させない。
           /* ★2026-09-27 本人の🗑削除が「接続枠が尽きているので更新できません（もう一方のアカウントが更新します）」で止まった。
@@ -2811,7 +2811,7 @@
               }
             }
             ufQuotaDraw(); } catch (_) {} }
-          if (!/timeout|busy|internal|502|503/i.test(lastErr)) { const eF = new Error(lastErr); eF.__final = 1; throw eF; } }
+          if (!/timeout|busy|internal|502|503/i.test(lastErr)) { const eF = new Error(lastErr); eF.__final = 1; eF.res = lastRes; throw eF; } }
       } catch (e) {
         if (e && e.__final) throw e;   /* ★2026-10-24 全体レビュー：GAS が断った（ok:false）のを自分の catch が握って3回投げ直していた */
         const msg = String((e && e.message) || '');
@@ -2830,7 +2830,16 @@
     }
     // __DISCONNECTED__ は「通信が切れただけ（GAS側は動いている可能性が高い）」の内部マーカー。
     // 呼び出し側の判定に使うだけで、画面には出さない。
-    throw new Error(lastErr || 'GAS呼び出しに失敗');
+    { const eL = new Error(lastErr || 'GAS呼び出しに失敗'); eL.res = lastRes; throw eL; }
+  }
+  /* ★2026-11-03 全体レビュー 10/31 高-2：詰め直し削除は ok:false でも中身が動いていることがある＝返事を必ず受け取って JAN・在庫0固定を付け替える。
+     失敗は今までどおり例外にする（付け替えてから投げ直す） */
+  async function gasCallShift(params, timeoutMs) {
+    let r = null;
+    try { r = await gasCall(params, timeoutMs); }
+    catch (e) { if (e && e.res) { try { pidRekeyAfterShift(params.item_id, e.res); } catch (_) {} } throw e; }
+    try { pidRekeyAfterShift(params.item_id, r); } catch (_) {}
+    return r;
   }
 
   // ---------------- 公式API 書き込み（在庫/価格）: GAS JSONP経由・ブリッジ不要 ----------------
@@ -3021,6 +3030,17 @@
     return slot.filter(Boolean);
   }
   // 公式APIで明細(モデル)一覧を読む（get_model_list）→ [{model_id,tier_index,name,sku,price,stock}]
+  /* ★2026-11-03 全体レビュー 10/31 高-5：🔀移す（値付けの見直し）は起動時の古い在庫・明細名のまま移し先に「買える明細」を足していた
+     （売れて在庫0になった物が在庫1で増える・詰め直しで番号が別の作品に移っていても足す）。足す前に Shopee の今の元の明細を読み、名前が同じかを確かめ、在庫は今の値を使う */
+  async function paLiveSrc(sid, e) {
+    const gm = await openapiGetModels(sid, e.item_id);
+    const m = ((gm && gm.models) || []).find(x => String(x.model_id) === String(e.model_id));
+    const norm = t => String(t || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!m) throw new Error('元の明細が Shopee に見つかりません（もう消えた・番号が変わった）。何もしていません。画面を🔄更新してください');
+    if (norm(m.name) !== norm(e.vari || e.name)) throw new Error('元の番号の明細が「' + String(m.name || '').slice(0, 40) + '」に入れ替わっています（詰め直し削除の後など）。何もしていません。画面を🔄更新してください');
+    const stk = Math.max(0, parseInt(m.stock, 10) || 0);
+    return { stock: stk, name: String(m.name || '') };
+  }
   async function openapiGetModels(shopId, itemId) {
     if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const qs = 'action=get_models&rk=' + encodeURIComponent(settings.writeToken || '') + '&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId);
@@ -9964,7 +9984,7 @@
     window.addEventListener('message', onAck);
     const to = pcChatOrigin(pcQuote.o);   /* ★2026-10-24 価格計算レビュー3：決まった相手でなければ渡さない（前は '*'＝誰にでも） */
     if (!to) { window.removeEventListener('message', onAck); fallback('開いた元が Shopee の webchat・WhatsApp か確かめられないので入れていません'); return; }
-    try { op.postMessage({ smdQuoteInsert: t, buyer: buyer, cc: cc, id: id }, to); } catch (e) { window.removeEventListener('message', onAck); fallback('webchat に渡せませんでした'); return; }
+    try { op.postMessage({ smdQuoteInsert: t, buyer: buyer, cc: cc, id: id, at: Date.now() }, to);   /* ★2026-11-03 全体レビュー 10/31 高-6：送った時刻を付ける＝SR 6.19.47・WA 1.4.72 は8秒を過ぎた文を入れずに断る（10秒待ちの後に遅れて入って二重送信になるのを防ぐ） */ } catch (e) { window.removeEventListener('message', onAck); fallback('webchat に渡せませんでした'); return; }
     msg.textContent = '⏳ ' + (pcQuote.src === 'wa' ? 'WhatsApp' : 'Smart Reply') + ' の入力欄へ入れています…';
     /* ★2026-10-30 03 営業部：3秒→10秒（WA 1.4.62〜 は貼った後に入ったかを最大5.5秒確かめ、1.4.66〜 は相手の確かめも0.5〜0.75秒）。切れた後も60秒は遅れた返事を待って表示を書き換える */
     setTimeout(() => { setTimeout(() => window.removeEventListener('message', onAck), 60000); }, 10000);
@@ -10261,7 +10281,7 @@
         await new Promise(z => setTimeout(z, 3000));
         const gm = await gasCall({ action: 'get_models', shop_id: pick.c.shop_id, item_id: pick.c.item_id }, 60000);
         const tm = (((gm || {}).data || {}).models || []).find(m => String(m.name || '').trim().toLowerCase() === 'test');
-        if (tm) { const dr = await gasSerial(() => gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, mids: String(tm.model_id) }, 300000)); if (!dr || dr.ok === false) throw new Error('仮の明細 test を消せませんでした: ' + String((dr && dr.error) || '').slice(0, 80)); await new Promise(z => setTimeout(z, 3000)); }
+        if (tm) { const dr = await gasSerial(() => gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, mids: String(tm.model_id), vnames: String(tm.name || 'test') }, 300000)); if (!dr || dr.ok === false) throw new Error('仮の明細 test を消せませんでした: ' + String((dr && dr.error) || '').slice(0, 80)); await new Promise(z => setTimeout(z, 3000)); }
         const ik = 'reqimg_' + pick.c.item_id + '_' + Date.now().toString(36);
         await sbUpsert('app_kv', [{ k: ik, v: { items: [{ option: nm, url: rImg }] }, updated_at: new Date().toISOString() }]);
         const ir = await gasSerial(() => gasCall({ action: 'set_variation_images_bulk', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, kv: ik }, 300000));
@@ -29454,7 +29474,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const col = h.score >= 95 ? '#c0392b' : (h.score >= 85 ? '#e8770a' : '#8a8f98');
       const sideBox = (mid, itemId2, shopId2, no, img, name, sub, tag) => `
         <label style="display:flex;gap:7px;align-items:center;flex:1;min-width:0;cursor:${mid ? 'pointer' : 'default'};padding:4px 6px;border-radius:8px;border:1px solid transparent" class="dc-side">
-          <input type="checkbox" class="dc-pick" data-mid="${mid != null ? mid : ''}" data-item="${itemId2}" data-shop="${shopId2 || ''}" data-label="${av((no ? no + '番 ' : '') + name)}"${mid ? '' : ' disabled'} style="cursor:pointer;flex:none">
+          <input type="checkbox" class="dc-pick" data-mid="${mid != null ? mid : ''}" data-item="${itemId2}" data-shop="${shopId2 || ''}" data-label="${av((no ? no + '番 ' : '') + name)}" data-name="${av(name)}"${mid ? '' : ' disabled'} style="cursor:pointer;flex:none">
           ${imgTag2(img, 46)}
           <span style="min-width:0">
             <span style="display:block;font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(name)}">${esc(name)}</span>
@@ -29538,8 +29558,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const byItem = new Map();
       picked.forEach(c => {
         const k = String(c.dataset.item);
-        if (!byItem.has(k)) byItem.set(k, { item_id: c.dataset.item, shop_id: c.dataset.shop || shopId, mids: new Set(), labels: [] });
-        const g2 = byItem.get(k); g2.mids.add(String(c.dataset.mid)); g2.labels.push(c.dataset.label || '');
+        if (!byItem.has(k)) byItem.set(k, { item_id: c.dataset.item, shop_id: c.dataset.shop || shopId, mids: new Set(), labels: [], names: [] });
+        const g2 = byItem.get(k); if (!g2.mids.has(String(c.dataset.mid))) { g2.mids.add(String(c.dataset.mid)); g2.names.push(String(c.dataset.name || '')); } g2.labels.push(c.dataset.label || '');
       });
       const groups = [...byItem.values()];
       const total = groups.reduce((a2, g2) => a2 + g2.mids.size, 0);
@@ -29552,7 +29572,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       for (const g2 of groups) {
         b2.textContent = '⏳ 削除中… ' + (ok + ng.length + 1) + '/' + groups.length + 'カタログ';
         try {
-          const r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: g2.shop_id, item_id: g2.item_id, mids: [...g2.mids].join(',') }, 300000);
+          const r = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: g2.shop_id, item_id: g2.item_id, mids: [...g2.mids].join(','), vnames: g2.names.join('\u0001') }, 300000);
           if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
           ok += g2.mids.size;
         } catch (e) { ng.push('item ' + g2.item_id + ': ' + apiErrJa((e && e.message) || e)); }
@@ -30505,7 +30525,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             + '📦出品一覧でこの商品を一度開いてから消すのが確実です。\n\nそれでも進みますか？')) { if (btn) { btn.disabled = false; btn.textContent = org; } return false; }
           const _unlockVD = varDelLock(sidCat, itemId);
           let r;
-          try { r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sidCat, item_id: itemId, mids: targets.map(x => x.id).join(',') }, 300000); }
+          try { r = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sidCat, item_id: itemId, mids: targets.map(x => x.id).join(','), vnames: targets.map(x => String(x.n || '')).join('\u0001') }, 300000); }
           finally { _unlockVD(); }
           if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
           try { logAct('出品', '明細削除', repName || '', cc + ' ' + itemId + ' ' + targets.length + '件'); } catch (_) {}
@@ -30535,7 +30555,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             try { await soldBaseSnapshot(cc, itemId, allTi, noImgList.map(x => String(x.id))); } catch (_) {}
             const _unlockVD = varDelLock(sidCat, itemId);
           let r;
-          try { r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sidCat, item_id: itemId, mids: noImgList.map(x => x.id).join(',') }, 300000); }
+          try { r = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sidCat, item_id: itemId, mids: noImgList.map(x => x.id).join(','), vnames: noImgList.map(x => String(x.n || '')).join('\u0001') }, 300000); }
           finally { _unlockVD(); }
             if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
             try { logAct('出品', '明細削除(画像なし)', repName || '', cc + ' ' + itemId + ' ' + noImgList.length + '件'); } catch (_) {}
@@ -43768,9 +43788,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           else {
             const me = ms.find(m => String(m.id) === String(e.model_id)), maxTi = Math.max(...ms.map(m => Number(m.ti) || 0));
             if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 120000);
-            else dr = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
-            if (dr && !dr.ok && /途中/.test(String(dr.error || ''))) dr = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
-            try { pidRekeyAfterShift(e.item_id, dr); } catch (_) {}   /* ★2026-10-24 全体レビュー（出品管理 #9） */
+            else dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
+            if (dr && !dr.ok && /途中/.test(String(dr.error || ''))) dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
+            /* ★2026-11-03 付け替えは gasCallShift の中で行う（2回やると1つずれる） */
             try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(e.item_id) }, 120000); } catch (_) {}
           }
         }
@@ -43811,6 +43831,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             const say = (h) => { st2.innerHTML = h; };
             try {
               const gw = await guardWriteCountries([e.cc]); if (!gw.ok) { alert(gw.msg); bt.disabled = false; return; }
+              const live = await paLiveSrc(sid, e);   /* ★2026-11-03 高-5：作る前に元の明細の今の名前と在庫を確かめる */
               say('<span class="smd-dim"><span class="smd-spin"></span>' + esc(mark) + 'を作っています…</span>');
               const cr = await gasCall({ action: 'clone_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id, name: newName }, 300000);   /* 作る時は非公開（仮の明細 test が買えてしまうので）→ 本物を入れて test を消したら最後に公開する */
               const nid = cr && cr.item_id; if (!nid) throw new Error('カタログを作れませんでした（元はそのまま）：' + paErrJa(String((cr && cr.error) || '失敗')) + (/duplicat/i.test(String((cr && cr.error) || '')) ? '（同じ店に同じ中身と判断された＝表紙を変える必要があります）' : ''));
@@ -43821,9 +43842,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
                  選択肢を足した直後は「Model tier_index error」で弾かれることがある＝少し待って最大3回 */
               try { const g0 = await openapiGetModels(sid, nid); const t0 = ((g0 && g0.models) || []).find(m => String(m.name || '').trim().toLowerCase() === 'test'); if (t0) await openapiUpdatePriceList(sid, nid, [{ model_id: t0.model_id, price: want }]); } catch (_) {}
               let ar = null;
-              for (let tr = 0; tr < 3; tr++) { if (tr) await new Promise(r => setTimeout(r, 8000)); ar = await openapiAddVariation(sid, nid, { option: e.vari || e.name, price: want, stock: Math.max(0, Number(e.stock) || 0), sku: e.sku || '' }); if (ar && ar.ok) break; if (!/tier_index/i.test(String((ar && ar.error) || ''))) break; }
+              for (let tr = 0; tr < 3; tr++) { if (tr) await new Promise(r => setTimeout(r, 8000)); ar = await openapiAddVariation(sid, nid, { option: e.vari || e.name, price: want, stock: live.stock, sku: e.sku || '' }); if (ar && ar.ok) break; if (!/tier_index/i.test(String((ar && ar.error) || ''))) break; }
               if (!ar || !ar.ok) throw new Error(esc(mark) + '（' + nid + '）は作れましたが、明細を入れられませんでした（元はそのまま）：' + paErrJa(String((ar && ar.error) || '失敗')));
-              try { const gm = await openapiGetModels(sid, nid); const t = ((gm && gm.models) || []).find(m => String(m.name || '').trim().toLowerCase() === 'test'); if (t) await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: nid, mids: String(t.model_id), vnames: 'test' }, 300000); } catch (_) {}   // 複製の仮の明細「test」を消す
+              try { const gm = await openapiGetModels(sid, nid); const t = ((gm && gm.models) || []).find(m => String(m.name || '').trim().toLowerCase() === 'test'); if (t) await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: nid, mids: String(t.model_id), vnames: 'test' }, 300000); } catch (_) {}   // 複製の仮の明細「test」を消す
               let imgOk = !img; if (img) { try { const ir = await openapiSetVariationImage(sid, nid, e.vari || e.name, img); imgOk = !!(ir && ir.ok); } catch (_) {} }
               /* ★2026-10-22 本人「非公開じゃなくて公開」：本物の明細を入れて test を消した後に公開する */
               /* ★2026-10-22 レビュー：test を消すのに失敗しても公開へ進むと、在庫1の「test」が買える＝Shopee を読み直して test が無い時だけ公開する */
@@ -43835,8 +43856,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               const ms = ((fr && fr[0] && fr[0].models) || []).filter(m => m && m.id && !m.ghost);
               const me = ms.find(m => String(m.id) === String(e.model_id)), maxTi = Math.max(...ms.map(m => Number(m.ti) || 0));
               if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 120000);
-              else dr = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
-              try { pidRekeyAfterShift(e.item_id, dr); } catch (_) {}   /* ★2026-10-24 全体レビュー（出品管理 #9） */
+              else dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
+              /* ★2026-11-03 付け替えは gasCallShift の中で行う（2回やると1つずれる） */
               try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: e.item_id + ',' + nid }, 120000); } catch (_) {}
               try { logAct('価格調整', '値段の差で' + mark + 'を作って移した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), `${e.item_id}→${nid}（${newName}・公開） ${paLoc(e.cc, want)} 元から消す:${dr && dr.ok ? 'OK' : '失敗 ' + ((dr && dr.error) || '')}`); } catch (_) {}
               if (!dr || !dr.ok) { say('<b style="color:#b06000">⚠ ' + esc(mark) + 'に入れましたが、元から消せませんでした（' + esc(String((dr && dr.error) || '').slice(0, 120)) + '）。元の明細は在庫0にするか、もう一度消してください</b>'); return; }
@@ -43853,16 +43874,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const st = box.querySelector('.pa-move-st');
           try {
             const img = e.img ? (/^https?:/.test(e.img) ? e.img : IMG_CDN + e.img) : '';
-            const ar = await openapiAddVariation(sid, tgt, { option: e.vari || e.name, price: want, stock: Math.max(0, Number(e.stock) || 0), sku: e.sku || '', image: img });
+            const live = await paLiveSrc(sid, e);   /* ★2026-11-03 高-5：足す前に元の明細の今の名前と在庫を確かめる */
+            const ar = await openapiAddVariation(sid, tgt, { option: e.vari || e.name, price: want, stock: live.stock, sku: e.sku || '', image: img });
             if (!ar || !ar.ok) throw new Error('移し先に足せませんでした（元はそのまま）：' + paErrJa(String((ar && ar.error) || '失敗')));
             // 元から消す：末尾かどうかは最新の明細で決める（途中なら詰め直し）
             let dr; const fr = await sbGetAll('listings', 'select=models&item_id=eq.' + e.item_id);
             const ms = ((fr && fr[0] && fr[0].models) || []).filter(m => m && m.id && !m.ghost);
             const me = ms.find(m => String(m.id) === String(e.model_id)), maxTi = Math.max(...ms.map(m => Number(m.ti) || 0));
             if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 120000);
-            else dr = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
-            if (dr && !dr.ok && /途中/.test(String(dr.error || ''))) dr = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
-            try { pidRekeyAfterShift(e.item_id, dr); } catch (_) {}   /* ★2026-10-24 全体レビュー（出品管理 #9） */   // DB が古くて末尾と見誤った時は詰め直しで
+            else dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
+            if (dr && !dr.ok && /途中/.test(String(dr.error || ''))) dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
+            /* ★2026-11-03 付け替えは gasCallShift の中で行う（2回やると1つずれる） */
             try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: e.item_id + ',' + tgt }, 120000); } catch (_) {}
             try { logAct('価格調整', '値段の差が合うカタログへ移した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), `${e.item_id}→${tgt} ${paLoc(e.cc, want)} 元から消す:${dr && dr.ok ? 'OK' : '失敗 ' + ((dr && dr.error) || '')}`); } catch (_) {}
             if (!dr || !dr.ok) { st.innerHTML = ` <b style="color:#b06000">⚠ 移し先には入りましたが、元から消せませんでした（${esc(String((dr && dr.error) || '').slice(0, 120))}）。元の明細は在庫0にするか、Seller Center で消してください</b>`; return; }
@@ -44898,7 +44920,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   /* ★2026-10-24 全体レビュー（出品管理 #9）：詰め直し削除の後は【枠の model_id はそのままで中身だけ1つ上へ】動く。
      JAN・型番・状態（product_ids の id:<item>#<model>）と在庫0固定（listing_meta の keep0m）を、中身と一緒に引っ越す。GAS の戻り値 moves（[元, 先]）・gone（消えた末尾の枠）を使う */
   function pidRekeyAfterShift(itemId, r) {
-    if (!r || !Array.isArray(r.moves) || (!r.moves.length && !(r.gone || []).length)) return 0;   /* 古い GAS（moves を返さない）・末尾だけの削除は何もしない */
+    if (!r || !Array.isArray(r.moves) || (!r.moves.length && !(r.gone || []).length)) return 0;
+    if (r.__rekeyed) return 0; r.__rekeyed = true;   /* ★2026-11-03 同じ返事で2回付け替えない（2回目で1つずれる） */
+    /* ★2026-11-03 全体レビュー 10/31 高-2：JAN の台帳をまだ読んでいない画面（値付けの見直し等）では黙って0件だった → 読んでから付け替える */
+    if (!productIds && typeof ensureProductIds === 'function' && !r.__pidWait) { r.__pidWait = true; r.__rekeyed = false;
+      ensureProductIds().then(() => { pidRekeyAfterShift(itemId, r); if (!productIds) try { toast('⚠ 明細の番号が入れ替わりましたが、JAN の台帳を読めず付け替えていません（出品一覧を開き直してください）', 8000); } catch (_) {} }).catch(() => { try { pidRekeyAfterShift(itemId, r); toast('⚠ 明細の番号が入れ替わりましたが、JAN の台帳を読めず付け替えていません', 8000); } catch (_) {} });
+      return 0; }   /* 古い GAS（moves を返さない）・末尾だけの削除は何もしない */
     const id = String(itemId), K = mid => 'id:' + id + '#' + mid; let n = 0;
     if (productIds) {
       const snap = {}; r.moves.forEach(mv => { snap[mv[0]] = productIds[K(mv[0])]; });   /* 先に全部控えてから書く（連鎖で1つずつずれない） */
@@ -48259,9 +48286,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         await soldBaseSnapshot(cc, itemId, withTi, targets.map(x => String(x.id)));
         const _unlockVD = varDelLock(sid, itemId);
           let r;
-          try { r = await gasCall({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: itemId, mids: mids, vnames: targets.map(x => String(x.n || '')).join('\u0001') }, 300000); }   /* ★#7 名前も送る（今の名前と違えば GAS が消さない） */
+          try { r = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: itemId, mids: mids, vnames: targets.map(x => String(x.n || '')).join('\u0001') }, 300000); }   /* ★#7 名前も送る（今の名前と違えば GAS が消さない） */
           finally { _unlockVD(); }
-        try { pidRekeyAfterShift(itemId, r); } catch (_) {}   /* ★2026-10-24 全体レビュー（出品管理 #9）：JAN・型番・状態・在庫0固定を中身と一緒に引っ越す（ok:false でも中身は動いている） */
+        /* ★2026-11-03 付け替えは gasCallShift の中で行う（2回やると1つずれる） */
         if (!r || !r.ok) throw new Error((r && r.error) || '削除に失敗');
         try { logAct('出品', '明細削除', targets.map(x => x.n).join(' / ').slice(0, 60), cc + ' ' + itemId + ' ' + targets.length + '件 #' + mids); } catch (_) {}
         // ★✎カタログ編集は3分キャッシュ。消したのに古い一覧が出て「消えてない」と見える（2026-08-22 本人指摘）。
