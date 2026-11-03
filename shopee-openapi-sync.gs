@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0500';
+var SRC_VER = '20261104-0530';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2153,6 +2153,9 @@ function doPostInner_(e) {
     /* ★2026-10-29 取り込みの口（userscript が POST・前は鍵なし）：鍵 INGEST_KEY を ik で受け取る。INGEST_REQ='1' の時だけ必須（userscript に鍵が行き渡ったのを ingest_cfg の数で確かめてから必須にする）。
        書き込みと Lock より前で見る＝鍵なしで perf_d_* を書き換えたり、Lock で🤖の巡回を飛ばしたりできないようにする */
     if (/^(traffic_ingest|ai_actual_ingest|product_perf_ingest|perf_daily_ingest)$/.test(String(body.action || ''))) { var _ign = ingestGate_(body); if (_ign) return ContentService.createTextOutput(JSON.stringify({ ok: false, error: _ign })).setMimeType(ContentService.MimeType.JSON); }
+    /* ★2026-11-04 01 商品部：ポケカの弾の記号を公式カード検索で確かめた一覧（カードごと）から、駿河屋の区分（tcg_sets の鍵）ごとに記号を入れる。
+       区分とカードの結び付きは駿河屋の控え sg_pokeca（大きい＝GAS の中で読む）。区分の中の確かめたカードが全部同じ記号の時だけ src:'manual' で入れる。dry=1 は数えるだけ */
+    if (body.action === 'tcg_sets_fix') { var _fwt = P_().getProperty('WRITE_TOKEN'); if (!_fwt || body.token !== _fwt) out = { ok: false, error: 'WRITE_TOKEN不正' }; else out = tcgSetsFix_(body.rows || [], body.dry === 1 || body.dry === '1', String(body.why || '')); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     if (body.action === 'traffic_ingest') { out = trafficIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     if (body.action === 'ai_actual_ingest') { out = aiActualIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }   /* ★2026-10-11 Claude Console のコスト（本当の請求）を userscript が横取りして送る＝鍵なし。書けるのは app_kv ai_actual だけ */
     if (body.action === 'product_perf_ingest') { out = productPerfIngest_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
@@ -11772,6 +11775,24 @@ function tcgOfficialSet_(pr, setName, st) {
     out.why = 'ambiguous:' + order.join(','); return out;
   } catch (e) { out.why = 'err:' + String(e).slice(0, 60); return out; }
 }
+function tcgSetsFix_(rows, dry, why) {
+  var sg = baKvFresh_('sg_pokeca'); if (!sg || BA_KV_FAIL['sg_pokeca']) return { ok: false, error: '駿河屋の控え sg_pokeca を読めない' };
+  var byNum = {}; (sg.rows || []).forEach(function (r) { var pr = r && tcgParsePokeca_(r.t); if (!pr || !r.k) return; (byNum[pr.num] = byNum[pr.num] || []).push({ nm: String(pr.name).replace(/\s+/g, ''), cat: String(r.k).split('/').pop() }); });
+  var votes = {}, unmatched = 0, matched = 0;
+  rows.forEach(function (x) {
+    var code = String((x && x.official) || '').trim(); if (!code || !/^[A-Za-z0-9\-]{1,10}$/.test(code)) return;
+    var num = (x.num && x.den) ? String(x.num) + '/' + String(x.den) : String(x.ja || '').trim().split(/\s+/).pop();
+    var ja = String(x.ja || '').normalize('NFKC').replace(/\s+/g, ''); if (!ja) return;
+    var hits = (byNum[num] || []).filter(function (c) { return c.nm && ja.indexOf(c.nm.normalize('NFKC')) >= 0; });
+    if (!hits.length) { unmatched++; return; } matched++;
+    hits.forEach(function (c) { var v = votes[c.cat] = votes[c.cat] || {}; v[code] = (v[code] || 0) + 1; });
+  });
+  var cur = baKvFresh_('tcg_sets'); if (!cur || BA_KV_FAIL['tcg_sets']) return { ok: false, error: 'tcg_sets を読めない' };
+  var set = [], mixed = [], now = Date.now();
+  Object.keys(votes).forEach(function (cat) { var cs = Object.keys(votes[cat]); if (cs.length === 1) { var old = cur[cat] || {}; set.push({ cat: cat, code: cs[0], n: votes[cat][cs[0]], was: old.code || '', wasSrc: old.src || '' }); if (!dry) cur[cat] = { code: cs[0], src: 'manual', why: why || '公式カード検索で番号と分母を確かめた 11/4', n: votes[cat][cs[0]], at: now, officialTried: 1 }; } else mixed.push({ cat: cat, codes: votes[cat] }); });
+  if (!dry && set.length) baKvSet_('tcg_sets', cur);
+  return { ok: true, dry: !!dry, matched: matched, unmatched: unmatched, set: set.length, changed: set.filter(function (x) { return x.was !== x.code; }).length, mixed: mixed, list: set.slice(0, 200) };
+}
 function tcgSetCode_(hw, setName, ai, pr) {
   setName = String(setName || '').trim(); if (!setName || !ai || !ai.sets) return '';
   var c = ai.sets[setName]; if (c && (c.src === 'official' || (c.code && c.src === 'manual'))) return String(c.code || '');
@@ -12129,7 +12150,7 @@ function tcgTick(manual) {
     cands.list.sort(function (a, b) { return _sup(a) - _sup(b) || (Number(a.cost) || 0) - (Number(b.cost) || 0) || ((a.noname ? 1 : 0) - (b.noname ? 1 : 0)); });
     var _seenRun = {}; cands.list.forEach(function (x) { if (x.en) _seenRun[String(x.en).toLowerCase()] = 1; });   /* 名付け後に同じ題名が2つ入ると束ごと拒否される＝この回の題名を先に覚えておく */
     if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN) {} }
-    if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS) {} }
+    if (ai.setsDirty) { try { var _fs = baKvFresh_('tcg_sets'); if (_fs && !BA_KV_FAIL['tcg_sets']) Object.keys(_fs).forEach(function (k9) { if (_fs[k9] && _fs[k9].src === 'manual') ai.sets[k9] = _fs[k9]; }); baKvSet_('tcg_sets', ai.sets); } catch (eS) {} }   /* ★2026-11-04 手で決めた区分（manual・01 が公式で確かめた）は🤖の書き戻しで消さない */
     st.stat = Object.assign({ hw: hw, at: new Date().toISOString() }, cands.stat);
     if (!cands.list.length) { _zeroBump(hw); return finish_(hw + '：出せる候補が無い（' + JSON.stringify(cands.stat) + '）'); }
     var perTick = Math.max(1, Math.min(10, Number(tc.perTick) || 5));
