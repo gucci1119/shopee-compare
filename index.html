@@ -10203,7 +10203,7 @@
         if (r && r.se) {
           const se = r.se, w5 = []; out.shop2Input = window._pcShop2 ? window._pcShop2.v : null;
           if (se.below) w5.push('Shopee に載せる額（' + se.s2 + '）が③の最低額（' + se.min + '）より安いので、Shopee 側が赤字になります（打ち替えの案は返しません）');
-          else if (se.over) w5.push('Shopee に載せる額（' + se.s2 + '）が今の②の合計（' + se.tot + '）を超えるので、打ち替えの案は返しません（PayPal が 0 以下になる）');
+          else if (se.over) w5.push('Shopee に載せる額（' + se.s2 + '）が今の②の合計（' + se.tot + '）以上なので、打ち替えの案は返しません（PayPal が 0 以下になる）');
           else {
             const KS = ['lowLocal', 'lowPf', 'ppAsk', 'ppFee', 'ppNet'], keepR = {}; KS.forEach(k => { keepR[k] = r[k]; });
             const p2 = out.plans['2'] || {};
@@ -10211,6 +10211,9 @@
               out.shopEdit = {};
               Object.assign(r, se.kp); { const a = mkPlan('2'); a.profitPlus = Math.round(a.profit - (Number(p2.profit) || 0)); out.shopEdit.keepProfit = a; }
               Object.assign(r, se.kt); { const b = mkPlan('2'); b.profitPlus = Math.round(b.profit - (Number(p2.profit) || 0)); out.shopEdit.keepTotal = b; }
+              /* ★2026-11-04 レビュー 10/31 中-16：PayPal が 0 の案は返さない（文面が「+ 0 BRL via PayPal」「Step 1 Amount: 0」になる） */
+              ['keepProfit', 'keepTotal'].forEach(k5 => { const o5 = out.shopEdit[k5]; if (o5 && !(Number(o5.pp) > 0)) { delete out.shopEdit[k5]; w5.push((k5 === 'keepProfit' ? '「粗利そのまま」' : '「合計そのまま」') + 'の案は PayPal が 0 になるので返しません（Shopee だけの①を使ってください）'); } });
+              if (!Object.keys(out.shopEdit).length) delete out.shopEdit;
             } catch (eE) { delete out.shopEdit; } finally { Object.assign(r, keepR); }
           }
           if (w5.length) out.warn = [out.warn].concat(w5).filter(Boolean).join(' ／ ');
@@ -10433,7 +10436,7 @@
       if (shop2P) {
         const s2 = roundLocal(shop2P, unit), s2Pf = priceProfitFor(cc, cost, s2, opt), tot2 = saleTot ? saleTot : (lowLocal + pcPPLocal(ppAsk, rg));
         const ppOf = (a) => ({ ppAsk: a, ppFee: a > 0 ? Math.round(a * ppRate + ppFix) : 0, ppNet: Math.max(0, Math.round(a - (a * ppRate + ppFix))) });
-        se = { s2: s2, min: minLocal, tot: tot2, below: s2 < minLocal, over: s2 > tot2 };
+        se = { s2: s2, min: minLocal, tot: tot2, below: s2 < minLocal, over: s2 >= tot2 };   /* ★2026-11-04 レビュー 10/31 中-16：合計と同じ額も「超えた」扱い（同じだと PayPal 0 の案になる） */
         if (!se.below && !se.over) {
           const needK = Math.max(0, pf.profit - s2Pf.profit);
           se.kp = Object.assign({ lowLocal: s2, lowPf: s2Pf }, ppOf(needK > 0 ? Math.round((needK + ppFix) / (1 - ppRate)) : 0));
@@ -29344,7 +29347,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     Object.values(lst.byCc).forEach(rows => (rows || []).forEach(l => { const names = (l.models || []).map(m => m.n).join(' '); l._fr = classifyFranchise((l.name || '') + ' ' + names); }));
     lst.covCatData = {}; if (lst.bulkSel) lst.bulkSel.clear();
     try { localStorage.setItem('smdListSync', String(Date.now())); } catch (_) {}
-    lst.syncing = false; lst.loaded = true; lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP') + (skippedEmpty.length ? `（${skippedEmpty.join('/')}は0件のため既存保持）` : ''); drawListingStatus();
+    lst.syncing = false; lst.loaded = true; lst.loadedAt = Date.now(); lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP') + (skippedEmpty.length ? `（${skippedEmpty.join('/')}は0件のため既存保持）` : ''); drawListingStatus();
   }
   // 出品データの最終同期時刻（ポータル表示は前回同期時点。編集はShopeeへ即時反映）
   function listSyncStr() {
@@ -33690,7 +33693,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         //   読まずに数えると必ず0になり、「JANを埋めたのに増えない」と誤解する（実際に0が出た・2026-09-04）。
         if (productIds === null || _pidsLoading) {   /* ★2026-10-29 読む道は ensureProductIds の1本に（読み込み中の仮の {} で数えない） */
           try { await ensureProductIds(); } catch (_) {}
-          if (productIds === null) { productIds = {}; try { kvOk.product_ids = false; } catch (_2) {} }   /* ★#5 読めなかった空で保存させない */
+          if (productIds === null) { productIds = {}; try { kvOk.product_ids = false; window._pidsFailAt = Date.now(); } catch (_2) {} }   /* ★#5 読めなかった空で保存させない */
         }
         const my = myJanSet();
         if (my.size) {
@@ -34057,7 +34060,9 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     // ★読み込み中に2回目が来たら同じ約束を待つ（先に {} を返すと「JAN 0件」で描かれる・2026-09-12 レビュー）
     //   ★2026-10-29 レビュー（改善 中-1）：出品一覧が先に仮の {} を入れて読み始めた時も、ここで待つ（前は {} を「読めた」と見て返していた）
     if (_pidsLoading) return _pidsLoading;
-    if (productIds !== null && productIds !== undefined) return productIds;
+    /* ★2026-11-04 レビュー 10/31 中-10：読めなかった時の仮の {} が残ると、その回ずっと読み直さず「JAN が一致」が0のまま。
+       読めなかった印（kvOk.product_ids===false）の時は読み直す。台帳は大きい（約4.5MB）ので5分に1回まで */
+    if (productIds !== null && productIds !== undefined && !(kvOk.product_ids === false && Date.now() - (window._pidsFailAt || 0) > 5 * 60000)) return productIds;
     _pidsLoading = (async () => {
       try {
         const pr = settings.sbKey ? await sbGetAll('app_kv', 'select=v,updated_at&k=eq.product_ids') : [];
@@ -40400,9 +40405,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const cm = (c && c.m && typeof c.m === 'object') ? c.m : {};
       const need = meta.filter(x => !(x.updated_at && cm[x.k] && cm[x.k].u === x.updated_at && cm[x.k].v));
       /* ★2026-10-29 本人「値付けの見直し、なんでこんなに表示遅いの？」（01 が数えた：46本を1本ずつ＝46往復）→ 3本ずつ並べて読む（DB の負担を見て同時は3本まで） */
-      const got = {}; let i = 0;
-      const worker = async () => { while (i < need.length) { const j = i++; const r = await sbGet('app_kv', 'select=k,v,updated_at&k=eq.' + encodeURIComponent(need[j].k)); if (r && r[0]) got[r[0].k] = { u: r[0].updated_at || '', v: r[0].v }; } };
+      const got = {}; let i = 0, fail = null;
+      /* ★2026-11-04 レビュー 10/31 低-2：1本失敗したら残りの2本も次を読まずに止める（すぐ🔄で大きな読みが重ならない）・全部止まってから失敗を返す */
+      const worker = async () => { while (!fail && i < need.length) { const j = i++; try { const r = await sbGet('app_kv', 'select=k,v,updated_at&k=eq.' + encodeURIComponent(need[j].k)); if (r && r[0]) got[r[0].k] = { u: r[0].updated_at || '', v: r[0].v }; } catch (e) { fail = fail || e; } } };
       await Promise.all([worker(), worker(), worker()]);
+      if (fail) { if (useC && Object.keys(got).length) { const keep = Object.assign({}, cm); Object.keys(got).forEach(k => { keep[k] = got[k]; }); idbSet('llog_cost_kv', { m: keep, at: Date.now() }); } throw fail; }   /* 読めた分は控えに残す（次は残りだけ読む） */
       const nm = {}, out = [];
       meta.forEach(x => { const e = got[x.k] || (cm[x.k] && cm[x.k].u === x.updated_at ? cm[x.k] : null); if (!e) return; nm[x.k] = e; out.push({ k: x.k, v: e.v }); });
       _llogAll.stat = { keys: meta.length, read: need.length, cached: out.length - Object.keys(got).length };
@@ -42481,7 +42488,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     Object.values(lst.byCc).forEach(rows => (rows || []).forEach(l => {
       if (l._fr === undefined) { const names = (l.models || []).map(m => m.n).join(' '); l._fr = classifyFranchise((l.name || '') + ' ' + names); }
     }));
-    lst.loaded = true;
+    lst.loaded = true; lst.loadedAt = Date.now();   /* ★2026-11-04 レビュー 10/31 低-3：値付けの見直しに出品データの古さを出す */
   }
   // シリーズ(フランチャイズ)分類。タイトルが国ごとに微妙に違うため完全一致では束ねられない→シリーズで粗く束ねる。[表示名, 判定regex, 出品状況検索用kw(英語substr)]
   const FRANCHISES = [
@@ -42935,7 +42942,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     try { await ensureListings(); } catch (e) { host.innerHTML = errBox(e); return; }
     try { await shopLimLoad(); } catch (_) {}   /* 出品枠は GAS が取り直した実物（shop_item_limit）を先に使う */
-    if (productIds === null || _pidsLoading) { try { await ensureProductIds(); } catch (_) {} if (productIds === null) { productIds = {}; kvOk.product_ids = false; } }   /* ★2026-10-29 レビュー（改善 中-1）：出品一覧が読み始めた途中の仮の {} で「まだ無い商品」を作って控えに残していた → 読み終わりを待つ */
+    if (productIds === null || _pidsLoading) { try { await ensureProductIds(); } catch (_) {} if (productIds === null) { productIds = {}; kvOk.product_ids = false; window._pidsFailAt = Date.now(); } }   /* ★2026-10-29 レビュー（改善 中-1）：出品一覧が読み始めた途中の仮の {} で「まだ無い商品」を作って控えに残していた → 読み終わりを待つ */
     try { renderCoverageInner(host); } catch (e) { host.innerHTML = '<div style="color:#d93025;padding:12px">カバレッジ描画エラー: ' + esc(e.message) + '<br><span class="smd-dim">🔄Shopeeから更新でデータを取り直すと直る場合があります。</span></div>'; console.error('renderCoverage', e); }
   }
   // 国別 出品数リミット パネル。Shopeeの出品枠は「Live(公開中)」だけを数える。
@@ -43456,7 +43463,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         sbGetAll('costs', 'select=cc,sn,cost'),
         sbGetAll('inventory', 'select=shopee_sn,price&shopee_sn=not.is.null'),
         /* ★2026-10-29 本人「なんでこんなに表示遅いの？」：出品（7,890行・明細付き 約30MB・推測）はポータルの起動時にも全件読んでいる（lst.byCc）＝🔄 の時だけ読み直し、普段は使い回す */
-        ((!force && lst.loaded && lst.byCc) ? Promise.resolve([].concat(...Object.values(lst.byCc))) : (!force && lst._ensureP && !lst.loaded) ? lst._ensureP.then(() => (lst.byCc ? [].concat(...Object.values(lst.byCc)) : sbGetAll('listings', 'select=cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku'))) : sbGetAll('listings', 'select=cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku')),   /* ★2026-10-25 親SKU＝トレカのフロントの見分け（列が1つ増えるだけ） */
+        ((!force && lst.loaded && lst.byCc) ? Promise.resolve([].concat(...Object.values(lst.byCc))) : (!force && lst._ensureP && !lst.loaded) ? lst._ensureP.then(() => ((lst.loaded && lst.byCc && Object.keys(lst.byCc).length) ? [].concat(...Object.values(lst.byCc)) : sbGetAll('listings', 'select=cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku')))   /* ★2026-11-04 レビュー 10/31 中-9：口座の切り替えで lst.byCc＝{}・前の済んだ約束のまま＝空の一覧で「赤字0件」。読み終わっていなければ DB から読む */ : sbGetAll('listings', 'select=cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku')),   /* ★2026-10-25 親SKU＝トレカのフロントの見分け（列が1つ増えるだけ） */
         sbGetAll('app_kv', 'select=v&k=eq.price_adj_log').catch(() => null),
         sbGetAll('app_kv', 'select=v&k=eq.profit_sheet'),   // 📗利益計算表（仕入の3番目の控え・PayPal分）＝利益明細と同じ材料
         sbGetAll('app_kv', 'select=v&k=eq.front_items').catch(() => null),
@@ -43625,6 +43632,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       let log = []; try { log = (logKv && logKv[0] && logKv[0].v && logKv[0].v.rows) || []; } catch (_) {}
       PA.data = { rows, unmatched, log, logOk: logKv !== null, at: Date.now() };
       PA.at = Date.now();
+      PA.lisAt = (!force && lst.loaded && lst.loadedAt) ? lst.loadedAt : Date.now();
       PA.ms = { read: _tRead, calc: Date.now() - _t0 - _tRead, each: Object.assign({}, PA.ld), llog: _llogAll.stat || null, rows: rows.length, at: new Date().toISOString() };
       try { (window.__paMs = window.__paMs || []).push(PA.ms); if (window.__paMs.length > 10) window.__paMs.shift(); } catch (_) {}
       return PA.data;
@@ -43735,7 +43743,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           ${chip('cc', '', 'すべて', !PA.cc, null)}${ccs.map(cc => chip('cc', cc, cc, PA.cc === cc, null, (regionByCc(cc) || {}).color)).join('')}
           <input id="pa-q" type="search" placeholder="商品名・明細名で絞り込み" value="${esc(PA.q)}" style="margin-left:8px;font-size:12px;padding:3px 8px;width:220px">
           <button class="smd-btn" id="pa-reload" style="font-size:11.5px" title="利益管理表の仕入れ値をその場で取り込んでから、注文・入金・出品を読み直す（転記した分の赤字もまとめて出ます）">🔄 読み直す</button>
-          <span class="smd-dim" style="font-size:11px">読込 ${new Date(D.at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}${D.unmatched ? `・出品が見つからない注文 ${D.unmatched.toLocaleString()}明細（名前を変えた・削除した出品）は除外` : ''}</span>
+          <span class="smd-dim" style="font-size:11px">読込 ${new Date(D.at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}${PA.lisAt && D.at - PA.lisAt > 10 * 60000 ? `（出品は ${new Date(PA.lisAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })} に読んだ物・🔄で読み直し）` : ''}${D.unmatched ? `・出品が見つからない注文 ${D.unmatched.toLocaleString()}明細（名前を変えた・削除した出品）は除外` : ''}</span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px;padding:6px 8px;background:#f5f3ff;border-radius:6px">
           <button class="smd-btn" id="pa-selall" style="font-size:11.5px">☑ 表示中の提案をすべて選ぶ</button>
@@ -44059,6 +44067,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   async function paDigestDaily() {
     try {
       if (typeof pcIsOwner === 'function' && !pcIsOwner()) return;
+      if (state.acct && state.acct !== 'all') return;   /* ★2026-11-04 レビュー 10/31 中-9：口座を1つに絞った画面の材料で共有の数え（price_adj_digest）を書かない */
       const jst = new Date(Date.now() + 9 * 3600000), ymd = jst.toISOString().slice(0, 10);
       if (jst.getUTCHours() < 19) return;   /* 17時台の統計の取り直しと重ねない（Supabase の負荷） */
       if (localStorage.getItem('smdPaDigestAt') === ymd) return;
@@ -47455,7 +47464,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 仕入元ソース状態(dropship_status)を初回のみ裏で取得→完了後に再描画
     if (lstDropStatus === null) { lstDropStatus = {}; sbGetAll('app_kv', 'select=v&k=eq.dropship_status').then(rows => { lstDropStatus = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; lstRedrawSoon(); }).catch(() => { lstDropStatus = {}; }); }
     if (lstMeta === null) { lstMeta = {}; sbGetAll('app_kv', 'select=v,updated_at&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.listing_meta = true; kvBaseSet('listing_meta', lstMeta, rows && rows[0] && rows[0].updated_at); lstRedrawSoon(); }).catch(() => { lstMeta = {}; }); }
-    if (productIds === null && !_pidsLoading) { _pidsLoading = sbGetAll('app_kv', 'select=v,updated_at&k=eq.product_ids').then(rows => { productIds = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.product_ids = true; kvBaseSet('product_ids', productIds, rows && rows[0] && rows[0].updated_at); try { lst._na = null; } catch (_) {} lstRedrawSoon(); return productIds; }).catch(() => { productIds = {}; kvOk.product_ids = false; return productIds; }).finally(() => { _pidsLoading = null; }); productIds = {}; }   /* ★2026-10-29 読み終わったら「まだ無い商品」の控えも捨てる */ // ★#5・#6 読めなければ保存させない 🔖JAN/型番（出品一覧・各国そろえる共通）
+    if (productIds === null && !_pidsLoading) { _pidsLoading = sbGetAll('app_kv', 'select=v,updated_at&k=eq.product_ids').then(rows => { productIds = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.product_ids = true; kvBaseSet('product_ids', productIds, rows && rows[0] && rows[0].updated_at); try { lst._na = null; } catch (_) {} lstRedrawSoon(); return productIds; }).catch(() => { productIds = {}; kvOk.product_ids = false; window._pidsFailAt = Date.now(); return productIds; }).finally(() => { _pidsLoading = null; }); productIds = {}; }   /* ★2026-10-29 読み終わったら「まだ無い商品」の控えも捨てる */ // ★#5・#6 読めなければ保存させない 🔖JAN/型番（出品一覧・各国そろえる共通）
     if (lstSpecs === null) { lstSpecs = {}; sbGetAll('app_kv', 'select=v&k=like.listing_specs_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstSpecs = m; lstRedrawSoon(); }).catch(() => { lstSpecs = {}; }); }
     /* ★2026-09-26 本人「いいねとか販売とか閲覧数はもう出てない？」：期間（直近30日など）は保存して開き直しても戻るのに、差分の取得はボタンを押した時だけ＝開き直すと全行が ⋯ のまま（1ページ180個）。期間が戻っていて差分が未取得なら1回だけ取りに行く（描画の外で） */
     if ((lst.statsPeriod || 0) && lstStatsDelta === null) { lstStatsDelta = {}; Promise.resolve().then(loadStatsDelta); }
@@ -55319,6 +55328,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         // アカウント別に読み直すためキャッシュ破棄
         lst.loaded = false; lst.byCc = {}; lst.covCatData = {}; if (lst.bulkSel) lst.bulkSel.clear();
         state.orders.started = false;
+        try { PA.data = null; PA.at = 0; } catch (_) {}   /* ★2026-11-04 レビュー 10/31 中-9：値付けの見直しの控え（前の口座の出品で作った表）も捨てる */
         // ★口座別キャッシュも全破棄（切替後に別アカウントの金額/注文が残る不具合の修正）
         try { pf.ym = null; pf._invAt = 0; } catch (_) {}
         try { renderDash._cache = null; } catch (_) {}
@@ -55362,6 +55372,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       state.acctInit = true;
       if (state.acctReady && state.acct && state.acct !== 'all') {
         lst.loaded = false; lst.byCc = {}; lst.covCatData = {}; state.orders.started = false;
+        try { PA.data = null; PA.at = 0; } catch (_) {}
         showPage(state.page);
       }
     }
