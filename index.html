@@ -49543,7 +49543,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!kvOk.product_ids) return { ok: false, error: '台帳をまだ読めていません' };
       productIds = productIds || {};
       const isTcg = (r) => /CARD_SERIES|_TCG|TCG_|MEDAL|MONCOLLE|MEZASTAR|FRIENDA|AMIIBO_CARD/i.test(String(r.parent_sku || '')) || ARC_SKU_ANY_RE.test(String(r.parent_sku || '')) || /\bTCG\b|Single Card|Trading Card|amiibo\+? Card|Moncolle|Mezastar|Frienda|Yo-?kai Watch[^\n]{0,20}Medal/i.test(String(r.name || '')) || ARC_NAME_RE.test(String(r.name || ''));
-      let hit = 0, rows = 0;
+      let hit = 0, rows = 0; const cnt = { models: 0, mpn: 0, jan: 0, none: 0 }, noneKeys = [];
       Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => {
         if (!r || !isTcg(r) || !(r.models || []).length) return; rows++;
         r.models.forEach(m => {
@@ -49556,14 +49556,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           let tok = _tw.pop() || '';
           if (!/\d/.test(tok) || !/^[A-Za-z0-9][A-Za-z0-9\-\/\.]{0,20}$/.test(tok)) tok = '';
           if (tok && nm0.length >= 28 && !/\d{3,}$/.test(tok)) tok = '';
+          /* ★2026-11-04 事業本部：明細名から番号が取れない（30字で切れた等）時は明細SKU（機種_弾_番号_レア度…）から「弾-番号」を作る。駿河屋の番号（SG…）・賞（PRIZE）の SKU からは作らない */
+          if (!tok) { const sp = String(m.sku || '').toUpperCase().split('_'); const st0 = sp[1] || '', nu0 = sp[2] || '';
+            if (/^[A-Z0-9]{1,8}$/.test(st0) && /[A-Z]/.test(st0) && !/^SG\d*$/.test(st0) && st0 !== 'PRIZE' && /^[A-Z]{0,3}\d{2,4}[A-Z]?$/.test(nu0)) tok = st0 + '-' + nu0; }
           if (mine) { if (String(prev.mpn || '').trim() === tok) return; productIds[k] = Object.assign({}, prev, { mpn: tok, mpnSrc: tok ? prev.mpnSrc : undefined, at: Date.now() }); hit++; return; }
           if (!tok) return;
           productIds[k] = Object.assign({}, prev, { mpn: tok, mpnSrc: '明細名の番号（トレカ）', at: Date.now() });
           hit++;
         });
       }));
+      /* 数え：トレカの明細のうち型番がある・JAN がある・どちらも無い（入れた後の中身で数える） */
+      Object.keys(lst.byCc || {}).forEach(cc => (lst.byCc[cc] || []).forEach(r => { if (!r || !isTcg(r)) return; (r.models || []).forEach(m => { if (!m || m.ghost || !m.id) return;
+        const e = productIds['id:' + r.item_id + '#' + m.id] || {}; cnt.models++; const hm = !!String(e.mpn || '').trim(), hj = !!String(e.jan || '').trim(); if (hm) cnt.mpn++; if (hj) cnt.jan++; if (!hm && !hj) { cnt.none++; if (noneKeys.length < 3000) noneKeys.push('id:' + r.item_id + '#' + m.id); } }); }));
+      window.__smdTcgNone = noneKeys;
       if (hit) { _pidDupCache = null; saveProductIds(); try { logAct('出品', 'トレカの型番を台帳に入れた', 'all', hit + '明細'); } catch (_) {} }
-      return { ok: true, catalogs: rows, models: hit };
+      return { ok: true, catalogs: rows, models: hit, count: cnt };
     };
     window.__smdJanManualImport = async () => {
       if (!kvOk.product_ids) return { ok: false, error: 'JANの台帳をまだ読めていません' };
