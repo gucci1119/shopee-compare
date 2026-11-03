@@ -2806,7 +2806,7 @@
                 if (!m2) break;
                 const res2 = JSON.parse(m2[1]); if (res2 && res2.ok) { ufQuotaDraw(); return res2; }
                 if (res2 && /1\s*日に|for one day|接続枠が尽きている/i.test(String(res2.error || ''))) { ufMarkBlocked(alt, res2.error); continue; }
-                if (res2) lastErr = String(res2.error || lastErr);   /* 相方の断り文句を本人に見せる（本体の枠切れ文のままにしない） */
+                if (res2) { lastErr = String(res2.error || lastErr); lastRes = res2; }   /* 相方の断り文句を本人に見せる（本体の枠切れ文のままにしない）。★2026-11-04 全体レビュー 新-6：相方の返事（moves 入り）を e.res に載せる＝付け替えが0件にならない */
                 break;
               }
             }
@@ -4896,6 +4896,7 @@
     "📮 リクエスト品": "📮 Request item",
     "見積もりに「まとめ買い」の口を足しました": "Added bundle quotes",
     "全体レビュー（10/31・11/4）の直し": "Fixes from the full reviews (10/31, 11/4)",
+    "全体レビューの残りを直しました": "Fixed the rest of the full-review items",
     "⚠ リクエスト品の印を読めませんでした（印の付いた品も表に出ています）。🔄で読み直してください": "⚠ Couldn’t read the request-item marks (marked items are still shown). Press 🔄 to reload",
     "売れた数": "Units sold",
     "今の値段で売れたら（1個）": "If sold at today's price (per unit)",
@@ -20797,13 +20798,14 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         [inv, orders, rs] = await Promise.all([
           ensureInv(),
           sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
-          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen,stock_restore_state,stock_restore_manual,amz_class,price_adj_digest)').catch(e => ({ __kvErr: e })),   /* ★2026-10-24 レビュー #1：失敗を空にしない（印を立てて画面とバッジに出す・キャッシュしない） */   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
+          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen,stock_restore_state,stock_restore_manual,amz_class,price_adj_digest,cancel_stock_skip)').catch(e => ({ __kvErr: e })),   /* ★2026-10-24 レビュー #1：失敗を空にしない（印を立てて画面とバッジに出す・キャッシュしない） */   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
         ]);
         const kvErr0 = rs && rs.__kvErr ? rs.__kvErr : null; if (kvErr0) rs = [];
         renderAlerts._cache = { orders, at: Date.now(), kvErr: kvErr0 ? String((kvErr0 && kvErr0.message) || kvErr0) : '', rowsync: ((rs || []).find(x => x.k === 'rowsync_last') || {}).v || null, eli: ((rs || []).find(x => x.k === 'eli_cases') || {}).v || null, ba: ((rs || []).find(x => x.k === 'boshu_auto_status') || {}).v || null, baSeen: ((rs || []).find(x => x.k === 'boshu_auto_seen') || {}).v || null , rs: { st: ((rs || []).find(x => x.k === 'stock_restore_state') || {}).v || null, man: ((rs || []).find(x => x.k === 'stock_restore_manual') || {}).v || {} } };
         rowsync = renderAlerts._cache.rowsync;
         renderAlerts._cache.amz = ((rs || []).find(x => x.k === 'amz_class') || {}).v || {};
-        renderAlerts._cache.paDigest = ((rs || []).find(x => x.k === 'price_adj_digest') || {}).v || null;   /* 🏷 値付けの提案（毎日19時以降の数え） */
+        renderAlerts._cache.paDigest = ((rs || []).find(x => x.k === 'price_adj_digest') || {}).v || null;
+        renderAlerts._cache.cancelSkip = ((rs || []).find(x => x.k === 'cancel_stock_skip') || {}).v || null;   /* ★2026-11-04 全体レビュー 新-7：キャンセルの引き戻しで名前が合わず触らなかった件 */   /* 🏷 値付けの提案（毎日19時以降の数え） */
       } catch (e) { body.innerHTML = errBox(e); return; }
     }
     /* ★2026-10-06 本人「ポータルで何か課題があれば潰して」：入庫待ち223件のうち Amazon 80件の多くが段ボール・OPP袋・ルーター・椅子などの備品で、
@@ -21011,7 +21013,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     ];
     const chipBar = `<div style="margin:0 4px 10px"><div style="font-size:12px;margin-bottom:5px">要対応 <b>${totalAll}</b>件${dead.length ? `（＋滞留在庫 ${dead.length}件・寝ている仕入 ${fmtJpy(deadVal)}）` : ''} <span class="smd-dim" style="font-size:10.5px">— チップをクリックでその項目へ</span></div><div style="display:flex;gap:6px;flex-wrap:wrap">${cats.filter(c => c[1] > 0).map(([lbl, n, col, id]) => `<button class="al-chip" data-go="${id}" style="border:1px solid ${col};background:#fff;color:${col};border-radius:12px;padding:3px 11px;font-size:12px;font-weight:700;cursor:pointer">${lbl} ${n}</button>`).join('') || (kvErr ? '<span class="smd-dim">（一部未確認）</span>' : '<span class="smd-dim">なし🎉</span>')}</div></div>`;
     const kvBanner = kvErr ? `<div style="margin:0 4px 10px;padding:8px 12px;border:1px solid #d93025;background:#fff5f5;border-radius:8px;color:#b71c1c;font-size:12.5px;font-weight:700">⚠ 一部の記録を読めませんでした。🔋ELI・📄転記停止・🤖自動出品・🔔在庫0・🏷値付けは数えていません（0件ではありません） <button class="smd-btn al-retry" style="font-size:11px;padding:1px 8px;margin-left:6px">🔄 読み直す</button><div class="smd-dim" style="font-weight:400;font-size:10.5px;margin-top:3px">${esc(kvErr)}</div></div>` : '';
-    body.innerHTML = kvBanner + ((totalAll + dead.length + paRecN) === 0 && !kvErr
+    /* ★2026-11-04 全体レビュー 新-7：キャンセルで Shopee が戻した在庫を、名前が合わず引き戻せなかった件（直近7日）＝その明細はまた買える。Seller Center で在庫を確かめる */
+    const csk = (((renderAlerts._cache || {}).cancelSkip || {}).items || []).filter(x => x && Date.now() - Date.parse(x.at || 0) < 7 * 86400000);
+    const cancelSkipBox = csk.length ? `<div style="margin:0 4px 10px;padding:8px 12px;border:1px solid #f9ab00;background:#fff8e1;border-radius:8px;font-size:12.5px"><b>↩ キャンセルで戻った在庫を引き戻せなかった ${csk.length}件</b>（明細名が注文の時と違う・明細が無い＝触っていません。その明細はまた買える状態かもしれません。Seller Center で在庫を確かめてください）${csk.slice(0, 8).map(x => `<div class="smd-dim" style="font-size:11.5px;margin-top:3px">${esc(x.cc)} ${esc(x.sn)}：${esc(String(x.r || '').slice(0, 160))}</div>`).join('')}</div>` : '';
+    body.innerHTML = kvBanner + cancelSkipBox + ((totalAll + dead.length + paRecN) === 0 && !kvErr
       ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>'
       : chipBar + html);
     { const rt = body.querySelector('.al-retry'); if (rt) rt.addEventListener('click', () => { rt.disabled = true; rt.textContent = '⏳ 読み直し中'; renderAlerts(true).catch(e => { body.innerHTML = errBox(e); }); }); }
@@ -24635,6 +24640,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-04', items: [
+      '🧯 <b>全体レビューの残りを直しました</b>：①キャンセルで戻った在庫を、明細名が変わっていて引き戻せなかった件を ⚠️自動検知に出します（その明細はまた買える状態かもしれません）②詰め直し削除の「動いている」印を GAS の台をまたいで見ます（🤖が名前を元に戻さない）③相場の見直し：写真集めと同時に叩かない・3回続けて読めなければ6時間休む・止めた時は集めない・10/4 より前の注文も明細名で「売れた」と数える ④一番くじは JAN も型番も無ければ出しません（本人の決まり 10/16）',
       '🧯 <b>全体レビュー（10/31・11/4）の直し</b>：①詰め直し削除の返事が300秒で来なかった時も、GAS が残した結果を後から読んで JAN・在庫0固定を付け替えます ②出品一覧の読み込み中に付け替えて捨てない ③Smart Reply が PayPal で断った文は、コピーも「貼って」も出しません ④⚠️自動検知は、見ていない時は中身を作りません（バッジの数だけ） ⑤口座を切り替えた後の値付けの見直しが0件になる・前の口座の提案が出る、を直しました ⑥「Shopee の額＝合計」で PayPal 0 の案を返しません ⑦JAN の台帳が読めなかった後は5分あけて読み直します',
       '🧺 <b>見積もりに「まとめ買い」の口を足しました</b>（03 営業部・本人「これ２つなの？画像１個しかないけど」「タイトル何かぐちゃぐちゃになってない？」）：WhatsApp・Smart Reply から N点まとめて頼むと、仕入れは合計、粗利は1件ずつの線の合計で計算し、英語名は品物ごとの名前をそのまま使います（混ぜて作り直しません）。文面は「We found N items: A and B」で、品物ごとの写真を返します。VN で上限（909,090）を超える時は、分け方の案を出します',
       '📮 <b>値付けの見直しに「📮 リクエスト品」の印を足しました</b>（事業本部・本人「リクエスト商品は1回限り」）：BR の Pokéwalker Case back のように、カタログ名にも SKU にも印が無いリクエスト品があります。行のボタンで印を付けると、値付けの見直しと在庫の自動の戻しから外れます。外した数は表の上に出し、✕で印を外せます',
@@ -36009,9 +36015,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     let last = 0; try { last = Number(localStorage.getItem('smdRvAt') || 0); } catch (_) {}
     if (Date.now() - last < 10 * 60000) return;
     if (rvCollect.busy) { RV_SKIP.busy++; return; }
-    if (lst._baCollecting) { RV_SKIP.collecting++; return; }
+    if (lst._baCollecting || lst._baCollectBusy) { RV_SKIP.collecting++; return; }   /* ★2026-11-04 全体レビュー 10/31 中-5：トレカの写真集め（_baCollectBusy）の間も同時に叩かない */
     try { if (_buyBusyAny()) { RV_SKIP.buy++; return; } } catch (_) {}
     if (bridgeTimeoutStreak >= 3) { RV_SKIP.bridge++; return; }
+    /* ★2026-11-04 全体レビュー 10/31 中-6：①3回続けて全部読めなかったら6時間休む（メルカリにも休みを）②🤖の設定で相場の見直しを止めた（revalue.on=false）時は集めない */
+    let rest = 0; try { rest = Number(localStorage.getItem('smdRvRestUntil') || 0); } catch (_) {}
+    if (rest && Date.now() < rest) { RV_SKIP.rest = (RV_SKIP.rest || 0) + 1; return; }
+    try { const cr = await sbGet('app_kv', 'select=on:v->revalue->on&k=eq.boshu_auto_cfg'); if (cr && cr[0] && cr[0].on === false) { RV_SKIP.off = (RV_SKIP.off || 0) + 1; return; } } catch (_) { return; }   /* 読めなければ集めない */
     try { localStorage.setItem('smdRvAt', String(Date.now())); } catch (_) {}
     await rvCollect();
   }
@@ -36047,9 +36057,11 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         mine[key] = { n: mH.length + yH.length, mc: mi === null ? -1 : mH.length, yfm: yOk ? yH.length : -1, p, at: new Date().toISOString() };
         await new Promise(rs => setTimeout(rs, 2500));
       }
-      if (!Object.keys(mine).length) { stat.why = stat.tried ? '探したが書ける物が無い（メルカリも Yahoo!フリマも読めなかった）' : '待ち行列の作品は全部集め済み'; return; }
+      /* ★2026-11-04 中-6：全部読めなかった回を数える（3回続いたら6時間休む）・1件でも読めたら数え直し */
+      try { if (stat.tried && stat.mcFail >= stat.tried && stat.yfmFail >= stat.tried) { const n0 = Number(localStorage.getItem('smdRvFailStreak') || 0) + 1; localStorage.setItem('smdRvFailStreak', String(n0)); if (n0 >= 3) { localStorage.setItem('smdRvRestUntil', String(Date.now() + 6 * 3600000)); localStorage.setItem('smdRvFailStreak', '0'); stat.why = 'メルカリも Yahoo!フリマも3回続けて読めなかったので6時間休む'; } } else if (stat.tried) localStorage.setItem('smdRvFailStreak', '0'); } catch (_) {}
+      if (!Object.keys(mine).length) { stat.why = stat.why || (stat.tried ? '探したが書ける物が無い（メルカリも Yahoo!フリマも読めなかった）' : '待ち行列の作品は全部集め済み'); return; }
       /* 書く直前に読み直して、自分の分だけ重ねる（7日より古い分は捨てる） */
-      const cur2 = await sbGet('app_kv', 'select=v&k=eq.boshu_revalue_mc').catch(() => null); if (cur2 === null) return;
+      const cur2 = await sbGet('app_kv', 'select=v&k=eq.boshu_revalue_mc').catch(() => null); if (cur2 === null) { stat.why = '書く直前に相場の控えを読み直せなかった（書いていない）'; return; }   /* ★2026-11-04 中-6：理由を空のまま抜けない */
       const base = Object.assign({}, ((((cur2 || [])[0] || {}).v || {}).items) || {});
       Object.keys(mine).forEach(k => { base[k] = mine[k]; });
       Object.keys(base).forEach(k => { if (now - Date.parse((base[k] || {}).at || 0) > 7 * 86400000) delete base[k]; });
@@ -36440,7 +36452,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     /* ★2026-09-25 真因：別タブに譲る守りが「25分以内に始まった」だけを見ていたので、途中で消えた回（push のたびの自動リロード）にも効き、次の25分を丸ごと止めていた
        （実測 4日で12回・今日は1回）。集めている間は心拍（smdBaCollectHb）を打ち、譲るのは【心拍が10分以内＝本当にいま集めている】時だけ（候補出しの1回は GAS の順番待ちで最大6分かかるので、3分では途中で横取りする） */
     try { const o = Number(localStorage.getItem('smdBaCollectAt') || 0), hb = Number(localStorage.getItem('smdBaCollectHb') || 0); if (!force && hb && Date.now() - hb < 10 * 60000) {   /* ★心拍だけで見る（開始から25分を超えた長い回の後半に、別のタブが重ねて始めていた） */ lst._baCollectAt = o; _why('other-tab (hb ' + Math.round((Date.now() - hb) / 1000) + 's)'); return; } } catch (_) {}
-    if (lst._baCollecting || lst._baCollectBusy) { _why('busy'); return; }
+    if (lst._baCollecting || lst._baCollectBusy || (typeof rvCollect === 'function' && rvCollect.busy)) { _why('busy'); return; }   /* ★2026-11-04 中-5：相場集めの最中は同時に叩かない */
     /* ★2026-09-21 【🤖の画面を開いていなくても担当先を確かめる】（Codex指摘・裏取り済み）。
        担当（本体 / 2台目）の写しは 🤖の画面を描いた時にしか更新していなかったので、
        もう1台のPCで2台目に切り替えても、この裏の収集は**古い写しのまま本体へ送り続ける**。
@@ -36643,7 +36655,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
          10/29 にポータルから呼んだ回は 2台目65・3台目112・4台目112＝出品できたのは14回（8%）だけ・4台目は112回とも「担当でない」で即終了。
          ①「担当でない（not_runner）」と返した台は6時間呼ばない ②0件で終わった回が続いたら、その台の間隔を 1回ごとに伸ばす（最長30分）。1件でも出せたら元の間隔に戻す */
       let _nr = 0, _zs = 0; try { _nr = Number(localStorage.getItem('smdBaWebTickNR_' + sl.key) || 0); _zs = Number(localStorage.getItem('smdBaWebTickZero_' + sl.key) || 0); } catch (_) {}
-      if (_nr && nowMs - _nr < 6 * 3600000) continue;
+      if (_nr && nowMs - _nr < 3600000) continue;   /* ★2026-11-04 全体レビュー 新-8：6時間→1時間（担当を付け替えた時に最大6時間呼ばれなかった。断りの返事は軽い） */
       const _every = Math.min(30, sl.every * (1 + Math.min(3, _zs)));
       if (nowMs - last < _every * 60000 - 20000) continue;
       const other = slots.find(o => o !== sl); const ol = Number(localStorage.getItem('smdBaWebTick_' + other.key) || 0); if (nowMs - ol < 90000) continue;

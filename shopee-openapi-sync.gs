@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0300';
+var SRC_VER = '20261104-0400';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -451,7 +451,8 @@ function doGetInner_(e) {
           baKvSet_(BA_CFG, _fc); _rcfg = _fc;
         }
         var _trg = ''; try { _trg = rvEnsureTrigger_(_rcfg); } catch (eT) { _trg = 'err ' + String(eT).slice(0, 60); }
-        var _run = (p.run === '1') ? rvRun_(true) : null;
+        /* ★2026-11-04 全体レビュー 10/31 低-7：担当の台でなければ回さない（2台が boshu_revalue を丸ごと書き、後の方が勝つ）。force=1 の時だけ担当外でも回す */
+        var _rvR = rvCfg_(_rcfg).runner, _run = (p.run === '1') ? ((_rvR && baRunnerId_() !== _rvR && p.force !== '1') ? { skipped: 'not_runner', runner: _rvR, me: baRunnerId_() } : rvRun_(true)) : null;
         var _S = baKvFresh_(RV_KEY) || {};
         _ro = { ok: true, runner: baRunnerId_(), cfg: rvCfg_(_rcfg), trigger: _trg, run: _run, at: _S.at, since: _S.since, cnt: _S.cnt, pos: _S.pos, hwi: _S.hwi, blockedUntil: _S.blockedUntil, res: (_S.res || []).slice(0, Math.min(50, Number(p.n) || 20)), src: SRC_VER };
       } catch (err) { _ro = { ok: false, error: String((err && err.message) || err) }; }
@@ -1887,10 +1888,12 @@ function doGetInner_(e) {
            呼び出し側が返事を待てずに送り直し→2本目は入口の名前の確かめで止まったが、1本目は後から末尾を消して終わった）。
            カタログごとに「動いている」の印を6分置き、印がある間は2本目を断る（この台の中だけ。印は終わったら外す） */
         var dsC = CacheService.getScriptCache(), dsK = 'vshift_' + String(p.item_id || '').replace(/\D/g, ''), dsBusy = dsC.get(dsK);
+        if (!dsBusy) { var _bz2 = vshiftBusyAt_(p.item_id); if (_bz2 && Date.now() - _bz2 < 6 * 60000) dsBusy = String(_bz2); }   /* ★2026-11-04 中-1：別の台で動いている印も見る */
         if (dsBusy) throw new Error('同じカタログの詰め直し削除がまだ動いています（' + Math.round((Date.now() - (parseInt(dsBusy, 10) || Date.now())) / 1000) + '秒前に始まった）。何もしていません。数分待って名前を読み直してから、要るならもう一度');
         dsC.put(dsK, String(Date.now()), 360);
+        var _vsId = String(p.item_id || '').replace(/\D/g, ''); VSHIFT_SELF[_vsId] = 1; vshiftBusySet_(_vsId, true);
         try { dsout = removeVariationShift_(dsshop, p.item_id, String(p.mids || ''), String(p.vnames || '').split('\u0001')); }
-        finally { try { dsC.remove(dsK); } catch (eDsC) {} }
+        finally { try { dsC.remove(dsK); } catch (eDsC) {} delete VSHIFT_SELF[_vsId]; vshiftBusySet_(_vsId, false); }
         /* ★2026-11-04 全体レビュー 新-1：ポータルは300秒で打ち切るが GAS は最大360秒動く＝返事が届かないと JAN・在庫0固定が古い番号に残る。
            付け替えの元（moves・gone）を app_kv shift_result_<shop>_<item> に残す（小さい・上書き）。ポータルは時間切れの時これを読んで当てる */
         try { if (dsout && Array.isArray(dsout.moves) && (dsout.moves.length || (dsout.gone || []).length)) sbUpsert_('app_kv', [{ k: 'shift_result_' + dsshop + '_' + String(p.item_id || '').replace(/\D/g, ''), v: { at: Date.now(), rid: String(p.rid || '').slice(0, 40), ok: !!dsout.ok, moves: dsout.moves, gone: dsout.gone || [], llog: dsout.llog ? { n: dsout.llog.n || 0 } : null }, updated_at: new Date().toISOString() }], 'k'); } catch (eSr) {}
@@ -2808,7 +2811,13 @@ function remapEntry_(m, newIdx) {
   if (m.sku) e.model_sku = String(m.sku);
   return e;
 }
+/* ★2026-11-04 全体レビュー 10/31 中-1：詰め直し削除の「動いている」の印は台ごと（CacheService）で、🤖の台の明細追加・名前の直しからは見えなかった
+   （古い一覧で並べ替えを送ると名前が元に戻る）。印を app_kv vshift_busy_<品番> にも置き、並びを書き換える入口（updateTierVariation_）で全部の書き手が見る */
+var VSHIFT_SELF = {};
+function vshiftBusyAt_(itemId) { try { var r = sbSelect_('app_kv', 'select=v&k=eq.vshift_busy_' + String(itemId).replace(/\D/g, '')); var v = r && r[0] && r[0].v; return v && Number(v.at) > 0 ? Number(v.at) : 0; } catch (e) { return 0; } }
+function vshiftBusySet_(itemId, on) { var k = 'vshift_busy_' + String(itemId).replace(/\D/g, ''); try { if (on) sbUpsert_('app_kv', [{ k: k, v: { at: Date.now(), by: SB_RUNNER_V || '' }, updated_at: new Date().toISOString() }], 'k'); else sbDelete_('app_kv', 'k=eq.' + k); } catch (e) {} }
 function updateTierVariation_(shopId, itemId, tierVariation, model) {
+  if (!VSHIFT_SELF[String(itemId)]) { var _bz = vshiftBusyAt_(itemId); if (_bz && Date.now() - _bz < 6 * 60000) throw new Error('同じカタログで詰め直し削除が動いています（' + Math.round((Date.now() - _bz) / 1000) + '秒前から・別の台）。並びを書き換えると名前が元に戻るので、この回は書き換えません'); }
   /* ★2026-10-26 01 商品部（TW 2店舗目 FC ③）：この店は差し替えた写真が Shopee に出るまで数分〜十数分かかる。その間に同じカタログへ別の書き換え（続けての写真差し替え・明細の追加・並べ替え等）が
      get_model_list の古い一覧で option_list を作ると、差し替える前の写真で書き戻してしまう（Zanac・Tennis は時間をおいて直り、Space Invaders は戻ったまま）。
      → 差し替えた写真を2時間だけ控え（app_kv tv_img_pending・小さい）、送る一覧の写真が【差し替える前の写真のまま】の明細だけ控えの写真に置き換える。ほかの写真に変えている時は触らない */
@@ -3889,7 +3898,8 @@ function shiftPendCheck_(onlyKey, maxN) {
     if (!err.length) { delete it[key]; ch = true; }
     try { var lg = baKvFresh_('shift_pending_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), key: key, isNew: isNew, price: pr.length, stock: st.length, sku: sk.length, err: err.slice(0, 3) }); lg.items = a.slice(0, 60); baKvSet_('shift_pending_log', lg); } catch (eL) {}
   });
-  if (ch) { try { cur.items = it; cur.at = new Date().toISOString(); baKvSet_('shift_pending', cur); } catch (eS) {} }
+  /* ★2026-11-04 全体レビュー 新-4①：読んでから書くまでに数十秒あり、その間に本体が控えた分を丸ごと上書きで消していた＝書く直前に読み直し、この回で触った鍵だけ重ねる */
+  if (ch) { try { var fr = baKvFresh_('shift_pending'); if (fr && fr.items && !BA_KV_FAIL['shift_pending']) { keys.forEach(function (k5) { if (it[k5]) fr.items[k5] = it[k5]; else delete fr.items[k5]; }); fr.at = new Date().toISOString(); baKvSet_('shift_pending', fr); } } catch (eS) {} }
   return out;
 }
 function removeVariationShift_(shopId, itemId, midCsv, vnames) {
@@ -4506,6 +4516,8 @@ function setVariationImage_(shopId, itemId, optionName, imageUrl) {
 // バリエ名→model_id を公式get_model_listで解決（listingsにmodel_idが無いため）
 /* ★2026-10-24 全体レビュー（出品管理 #7・#10）：明細名の比べ方（空白の違い・大文字小文字を無視）。 */
 function vnNorm_(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase(); }
+/* ★2026-11-04 全体レビュー 新-7：注文の後に明細名の頭へ印（VN の在庫ゼロ・【…】・[…]・記号）を付けた明細を「名前が違う」と見なしていた＝頭の札と記号を外して比べる */
+function vnBare_(s) { var t = vnNorm_(s); for (var i = 0; i < 3; i++) t = t.replace(/^[\s\-_*#・•⛔🚫❌✖️⚠️❗️!?]+/, '').replace(/^[\[【(（<＜][^\]】)）>＞]{0,24}[\]】)）>＞]\s*/, ''); return t.trim(); }
 /* ★2026-10-24 全体レビュー（出品管理 #10）：🤖の控え（st.added・partials 等）の model_id は、詰め直し削除の後に【別の作品】へ移る。
    在庫・値段を書く前に、今の Shopee の明細を読んで名前で引き直す。名前で見つからなければ null（＝書かない）。get_model_list 1回 */
 function baMidByName_(shopId, itemId, mid, en) {
@@ -5765,7 +5777,7 @@ function cancelStockGuard_() {
           /* ★2026-11-03 全体レビュー 10/22 高：番号（model_id）だけで照らすと、詰め直し削除で同じ番号に入った別の作品の在庫を0にする（BR NieR の取り消し→Elden Ring を 1→0）。
              注文に残っている明細名でも照らす。名前が違えば同じカタログの中で名前が1つだけ合う明細に当て、無い・2つ以上なら触らない */
           if (x.mid) { if (!g) g = getModels_(shop, iid); var m = (g.models || []).filter(function (mm) { return Number(mm.model_id) === x.mid; })[0];
-            if (x.vn && (!m || vnNorm_(m.name) !== vnNorm_(x.vn))) { var byNm = (g.models || []).filter(function (mm) { return vnNorm_(mm.name) === vnNorm_(x.vn); });
+            if (x.vn && (!m || vnBare_(m.name) !== vnBare_(x.vn))) { var byNm = (g.models || []).filter(function (mm) { return vnBare_(mm.name) === vnBare_(x.vn); });
               if (byNm.length === 1) { res.push(iid + '#' + x.mid + ' 番号が入れ替わっていた→名前で ' + byNm[0].model_id + ' に当てた'); m = byNm[0]; x.mid = Number(m.model_id); }
               else { res.push(iid + '#' + x.mid + ' 今の名前「' + String((m && m.name) || 'なし').slice(0, 30) + '」が注文の「' + x.vn.slice(0, 30) + '」と違う＝触らない'); return; } }
             if (!m) { res.push(iid + '#' + x.mid + ' 明細がもう無い'); return; } now = Number(m.stock) || 0; keep = (isReqModel_(x.cn, m.sku) || isReqItem_(srBy.req_items, o.cc, iid)) ? 0 : keepOf(m.name, m.sku); }   /* ★2026-11-03 リクエスト品は0まで引き戻す */
@@ -5778,6 +5790,8 @@ function cancelStockGuard_() {
       } catch (e) { res.push(iid + ' 失敗 ' + String((e && e.message) || e).slice(0, 80)); out.errors.push(o.cc + ' ' + o.sn + ' ' + iid); }
     });
     cur.items[String(o.sn)] = { at: nowIso, r: res.join(' / ').slice(0, 300) };   // 一部失敗でも「済み」＝引いた分を二重に引かない（失敗は r と errors に残す）
+    /* ★2026-11-04 全体レビュー 新-7：名前が合わず触らなかった（＝Shopee が戻した在庫がそのまま残る）件は、ポータルの⚠️自動検知に出す控え cancel_stock_skip に残す */
+    { var skp = res.filter(function (t) { return /触らない|もう無い/.test(t); }); if (skp.length) { try { var cs0 = baKvFresh_('cancel_stock_skip') || {}; var arr = Array.isArray(cs0.items) ? cs0.items : []; arr.unshift({ at: nowIso, cc: o.cc, sn: String(o.sn), r: skp.join(' / ').slice(0, 240) }); baKvSet_('cancel_stock_skip', { items: arr.slice(0, 30), at: nowIso }); } catch (eSk) {} } }
     out.fixed.push(o.cc + ' ' + o.sn + '：' + res.join(' / ').slice(0, 120));
   });
   if (todo.length) {
@@ -8274,6 +8288,9 @@ function baSeqFit_(out, tok) {
   out = String(out || ''); if (!tok) return out;
   var esc = tok.replace(/\./g, '\\.');
   if (new RegExp('(^|[\\s:.\\-])' + esc + '(\\b|$)', 'i').test(out)) return out;
+  /* ★2026-11-04 全体レビュー 10/31 低-9：続編の番号を数字とローマ数字で揃えて比べる（「Dragon Quest VII」に「7」を足して「Dragon Quest VII 7」にしない） */
+  { var RN = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX'], tN = parseInt(tok, 10), alt = (tN >= 2 && tN <= 9 && String(tN) === String(tok).trim()) ? RN[tN] : (RN.indexOf(String(tok).trim().toUpperCase()) >= 2 ? String(RN.indexOf(String(tok).trim().toUpperCase())) : '');
+    if (alt && new RegExp('(^|[\\s:.\\-])' + alt + '(\\b|$)', 'i').test(out)) return out; }
   var room = 30 - tok.length - 1, base = out.replace(/^the\s+/i, '');
   if (base.length > room) { var c = base.slice(0, room + 1), sp = c.lastIndexOf(' '); base = (sp >= 4 ? c.slice(0, sp) : base.slice(0, room)); }
   base = base.replace(/(\s+(of|the|and|a|an|to|in|for|with|vs\.?)|[\s:\-–&,]+)+$/i, '').trim();
@@ -9004,7 +9021,12 @@ function rvSoldMap_(places) {
       (rows || []).forEach(function (r) { (r.items || []).forEach(function (it) { var k = cc + '|' + String(it.item_id || ''); if (out[k]) out[k].push({ m: String(it.model_id || ''), n: baTmKey_(String(it.variation || '')) }); }); });
     }
   });
-  return function (p, name) { var a = out[p.cc + '|' + p.item]; if (a === null || a === undefined) return -1; var nk = baTmKey_(name || ''); return a.some(function (x) { return x.m === String(p.model) || (nk && x.n === nk); }) ? 1 : 0; };
+  /* ★2026-11-04 全体レビュー 10/31 中-7：注文の items に item_id を入れ始めたのは 10/4＝それより前の注文（11/4 に数えて 654件）は番号で当たらず「売れていない」になっていた。
+     item_id の無い古い注文を国ごとに1回だけ読み、明細名が合えば売れたと数える（名前だけで合う時は売れた側＝消す方に倒さない）。読めなければ -1（分からない） */
+  var oldByCc = {};
+  var oldSet = function (cc) { if (oldByCc[cc] !== undefined) return oldByCc[cc]; var st = {}; try { (sbSelectAll_('orders', 'select=items&cc=eq.' + cc + '&order_date=lt.2026-10-05&items->0->>item_id=is.null') || []).forEach(function (r) { (r.items || []).forEach(function (it) { var k1 = baTmKey_(String(it.variation || it.model_name || '')); if (k1) st[k1] = 1; }); }); } catch (eOld) { st = null; } oldByCc[cc] = st; return st; };
+  return function (p, name) { var a = out[p.cc + '|' + p.item]; if (a === null || a === undefined) return -1; var nk = baTmKey_(name || ''); if (a.some(function (x) { return x.m === String(p.model) || (nk && x.n === nk); })) return 1;
+    if (!nk) return 0; var os = oldSet(p.cc); if (os === null) return -1; return os[nk] ? 1 : 0; };
 }
 function rvRun_(manual) {
   var cfg = baKv_(BA_CFG) || {}; if (BA_KV_ERR) return { ok: false, error: '設定を読めない' };
@@ -11503,7 +11525,7 @@ function tcgPhotoVarNg_(hw, c, title, price, copies, cfg) {
   if (cost > 0 && p > 0 && p >= cost * X && p - cost >= GAP) return 'tcgsrcprice:写真の出品 ¥' + Math.round(p) + '・仕入れ目安 ¥' + Math.round(cost);
   return '';
 }
-function tcgPhotoVarSkip_(st, hw, c, why) { try { baSkipRec_(st, hw, '', c, String(why).split(':')[0]); var k = String(c.key || ''); st._vng = st._vng || {}; if (!st._vng[k]) { st._vng[k] = 1; baLog_(st, hw + '：' + (c.en || c.ja) + ' の写真を使わない（' + String(why).split(':').slice(1).join(':') + '）'); } } catch (e) {} }
+function tcgPhotoVarSkip_(st, hw, c, why) { try { baSkipRec_(st, hw, '', c, String(why).split(':')[0]); var k = String(c.key || ''); st._vng = st._vng || {}; if (!st._vng[k]) { st._vng[k] = 1; baLog_(st, hw + '：' + (c.en || c.ja) + ' の写真を使わない（' + String(why).split(':').slice(1).join(':') + '）'); } } catch (e) { try { st.vskipErr = (Number(st.vskipErr) || 0) + 1; st.vskipErrMsg = String((e && e.message) || e).slice(0, 120); Logger.log('⚠ 版の見送りの記録に失敗: ' + st.vskipErrMsg); } catch (e2) {} } }   /* ★2026-11-04 全体レビュー 10/31 低-13：黙って消さない（状態に数と最後の理由を残す） */
 /* 汎用の題名パーサー：「番号[レアリティ]：名前」（遊戯王 BETB-JP027[UL]：…／ワンピ OP17-118[SEC]：(パラレル)…／デュエマ 33/100[VR]：…＜フレーバー＞／ヴァイス GA04/S131-100[RR]：…／ヴァンガ DZ-BT16/045[RR]：…）
    ポケカは専用（tcgParsePokeca_）。番号が無い題名（遊戯王「[UR]：青眼の白龍(MANGA-STYLE)」）は出さない＝同じ名前の別カードを取り違えるより出さない */
 /* 🎰 2026-10-29 一番くじ（本人「一番くじ系出品してほしい」「フィギュアもでかいのは出さないで」・01 商品部の依頼）。
@@ -11641,9 +11663,9 @@ var ARCADE_KINDS = /*ARC_KINDS_BEGIN*/[
 ]/*ARC_KINDS_END*/;
 var BA_ARC = {}, BA_ARC_SKU_OR = '';
 (function () {
-  var alt = [], sk = [];
+  var alt = [], sk = [], altLoose = [];
   ARCADE_KINDS.forEach(function (a) {
-    BA_ARC[a.hw] = a; alt.push(a.hw); sk.push('parent_sku.ilike.*' + String(a.sku).toLowerCase() + '*');
+    BA_ARC[a.hw] = a; alt.push(a.hw); if (a.pz !== 'kuji') altLoose.push(a.hw); sk.push('parent_sku.ilike.*' + String(a.sku).toLowerCase() + '*');
     if (!BA_HW_LABEL[a.hw]) BA_HW_LABEL[a.hw] = a.sku;
     if (!TCG_EN[a.hw]) TCG_EN[a.hw] = a.en;
     if (!TCG_HW_JA[a.hw]) TCG_HW_JA[a.hw] = a.ja;
@@ -11653,10 +11675,13 @@ var BA_ARC = {}, BA_ARC_SKU_OR = '';
     if (!TCG_ITEM_KIND[a.hw]) TCG_ITEM_KIND[a.hw] = a.kind;
   });
   BA_ARC_SKU_OR = sk.join(',');
-  var j = alt.join('|');
-  BA_LOOSE_HW = new RegExp('^(yokai|acnh|' + j + ')$');
+  var j = alt.join('|'), jL = altLoose.join('|') || '__none__';
+  /* ★2026-11-04 全体レビュー 10/31 低-12（事業本部：本人の決まり 10/16「出品には JAN〈無ければ型番〉を必ず付ける・無い物は出さない」）：
+     一番くじはばら売りの小物（10/17 の例外）に入れない＝JAN も型番も無ければ出さない。賞と弾を型番の代わりにするかは 01 と決める（決まるまでは出さない）。
+     JAN の調べ待ち（jan_todo_auto）には積まない＝くじの賞品は JAN が無いことが多く、待ちが埋まるだけ */
+  BA_LOOSE_HW = new RegExp('^(yokai|acnh|' + jL + ')$');
   BA_JAN_TODO_LOOSE = new RegExp('^(yokai|acnh|' + j + ')$');
-  BA_GAME_JAN_EXEMPT = new RegExp('^goods_|^moncolle$|^(yokai|acnh|' + j + ')$');
+  BA_GAME_JAN_EXEMPT = new RegExp('^goods_|^moncolle$|^(yokai|acnh|' + jL + ')$');
 })();
 function baArc_(hw) { return !!BA_ARC[String(hw || '')]; }
 function tcgNamesKey_(hw) { hw = String(hw || ''); if (hw === 'moncolle') return 'pokeca'; var a = BA_ARC[hw]; return (a && a.names) || hw; }   /* 名前の辞書（モンコレ・ポケモンのアーケードはポケカの辞書） */
@@ -12132,7 +12157,7 @@ function tcgTick(manual) {
         if (!_janG && !_mpnG) {
           /* グッズ（amiibo・妖怪メダル等）は型番が無く、駿河屋の商品ページは Cloudflare に止められることがある（10/16 実測「Just a moment...」）。
              既定＝出した上で夜の JAN 調べ（ポータルの「駿河屋のJANを埋める」＝ブラウザ経由）に回す。cfg.tcg.requireIdGoods=true なら出さない（本人の判断で切替） */
-          var _strict = !(/^goods_|^yokai$|^moncolle$|^acnh$/.test(String(hw)) || baArc_(hw)) || !!(tc && tc.requireIdGoods);
+          var _strict = !(/^goods_|^yokai$|^moncolle$|^acnh$/.test(String(hw)) || baArc_(hw)) || !!(tc && tc.requireIdGoods) || !!(BA_ARC[hw] && BA_ARC[hw].pz === 'kuji');   /* ★2026-11-04 低-12：一番くじは JAN も型番も無ければ出さない（型番の形は 01 と決めるまで無し） */
           tcgJanTodoPush_(hw, c);
           if (_strict) { baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN も型番も無いので出さない（夜の JAN 調べに回す）'); baSkipRec_(st, hw, '', c, 'nojan'); continue; }
           baLog_(st, hw + '：' + (c.en || c.ja) + ' は JAN が未取得のまま出す（夜の JAN 調べに積んだ）');
