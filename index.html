@@ -2834,10 +2834,27 @@
   }
   /* ★2026-11-03 全体レビュー 10/31 高-2：詰め直し削除は ok:false でも中身が動いていることがある＝返事を必ず受け取って JAN・在庫0固定を付け替える。
      失敗は今までどおり例外にする（付け替えてから投げ直す） */
+  /* ★2026-11-04 全体レビュー 新-1：ポータルは300秒で打ち切るが GAS は最大360秒動いて最後まで済ませる＝返事（moves）が届かず JAN・在庫0固定が古い番号に残っていた。
+     GAS が残す結果（app_kv shift_result_<shop>_<item>）を、時間切れの後に4回（30秒・90秒・3分・5分）読みに行き、呼んだ時より後の物なら1回だけ当てる */
+  function shiftResultPoll(params, t0) {
+    const key = 'shift_result_' + String(parseInt(params.shop_id, 10) || '') + '_' + String(params.item_id || '').replace(/\D/g, ''); if (/_$/.test(key)) return;
+    const doneK = 'smdShiftApplied|' + key;
+    [30, 90, 180, 300].forEach(sec => setTimeout(async () => {
+      try {
+        let applied = ''; try { applied = localStorage.getItem(doneK) || ''; } catch (_) {}
+        const rows = await sbGet('app_kv', 'select=v&k=eq.' + encodeURIComponent(key)); const v = rows && rows[0] && rows[0].v;
+        if (!v || !(Number(v.at) >= t0 - 5000) || applied === String(v.at)) return;
+        try { localStorage.setItem(doneK, String(v.at)); } catch (_) {}
+        const n = pidRekeyAfterShift(params.item_id, { moves: v.moves || [], gone: v.gone || [], llog: v.llog || null });
+        try { toast('🔁 返事が来なかった詰め直し削除の結果を後から読み、JAN・在庫0固定を付け替えました（' + (v.moves || []).length + '件の移動）', 8000); } catch (_) {}
+        try { logAct('出品', '詰め直しの付け替え（後から）', String(params.item_id), '移動 ' + (v.moves || []).length + '・消えた ' + (v.gone || []).length + '・JAN ' + n); } catch (_) {}
+      } catch (e) { console.warn('[詰め直しの結果] 読めませんでした', e && e.message); }
+    }, sec * 1000));
+  }
   async function gasCallShift(params, timeoutMs) {
-    let r = null;
+    let r = null; const t0 = Date.now();
     try { r = await gasCall(params, timeoutMs); }
-    catch (e) { if (e && e.res) { try { pidRekeyAfterShift(params.item_id, e.res); } catch (_) {} } throw e; }
+    catch (e) { if (e && e.res) { try { pidRekeyAfterShift(params.item_id, e.res); } catch (_) {} } else if (/__DISCONNECTED__/.test(String((e && e.message) || ''))) { try { shiftResultPoll(params, t0); } catch (_) {} } throw e; }
     try { pidRekeyAfterShift(params.item_id, r); } catch (_) {}
     return r;
   }
@@ -4878,6 +4895,7 @@
     "値付けの見直しに「📮 リクエスト品」の印を足しました": "Added a “📮 Request item” mark to the pricing review",
     "📮 リクエスト品": "📮 Request item",
     "見積もりに「まとめ買い」の口を足しました": "Added bundle quotes",
+    "全体レビュー（10/31・11/4）の直し": "Fixes from the full reviews (10/31, 11/4)",
     "⚠ リクエスト品の印を読めませんでした（印の付いた品も表に出ています）。🔄で読み直してください": "⚠ Couldn’t read the request-item marks (marked items are still shown). Press 🔄 to reload",
     "売れた数": "Units sold",
     "今の値段で売れたら（1個）": "If sold at today's price (per unit)",
@@ -9978,6 +9996,9 @@
     if (!t) { msg.textContent = '文面が空です（先に仕入額を入れてください）'; return; }
     const buyer = String((document.getElementById('pc-q-buyer') || {}).value || '').trim(), cc = (document.getElementById('pc-q-cc') || {}).value || '';
     const fallback = (why) => { try { navigator.clipboard.writeText(t); } catch (_) {} msg.textContent = '⚠ ' + why + '。文面はコピーしたので、チャットに貼ってください'; };
+    /* ★2026-11-04 全体レビュー 10/31 中-11：決まり「Shopee のチャットでは PayPal・WhatsApp を案内しない」。Smart Reply（Shopee）へは PayPal 入りの文を送らない・断られた時もコピーと「貼って」を出さない */
+    const PP_OFF = /pay\s*pal|whats\s*app/i, offMsg = '⛔ Shopee のチャットでは PayPal・WhatsApp を案内しないので、入力欄に入れていません（コピーもしていません）。①（Shopee だけ）の文を使ってください';
+    if (pcQuote.src === 'sr' && PP_OFF.test(t)) { msg.textContent = offMsg; return; }
     if (!buyer) { fallback('相手のユーザー名が空なので入れていません'); return; }
     let op = null; try { op = window.opener; } catch (_) {}
     if (!op || op.closed) { fallback('開いた元の webchat が見つかりません（ポータルを直接開いた・webchat を閉じた）'); return; }
@@ -9986,6 +10007,7 @@
       /* ★2026-10-30 03 営業部：待ちが切れた後に遅れて入った＝コピーした文を貼ると二重になる（10/29 Rodrigo さんに二重で届いた） */
       if (late) { if (d.ok) { msg.textContent = '💬 ' + (d.buyer || buyer) + ' さんの入力欄に後から入りました（コピーした文は貼らないでください。貼ると二重になります）'; try { toast('💬 後から入りました。コピーした文は貼らないでください', 8000); } catch (_) {} } return; }
       if (d.ok) { const app = pcQuote.src === 'wa' ? 'WhatsApp' : 'webchat'; msg.textContent = '💬 ' + (d.buyer || buyer) + ' さんの入力欄に入れました。' + app + ' で中身を見て、写真も付けて自分で送信してください'; try { toast('💬 ' + app + ' の入力欄に入れました（送信はしていません）'); } catch (_) {} }
+      else if (d.reason === 'paypal' || PP_OFF.test(String(d.err || ''))) msg.textContent = offMsg;   /* ★2026-11-04 中-11：断りの返事の文はコピーしない */
       else fallback(String(d.err || '入れられませんでした')); };
     window.addEventListener('message', onAck);
     const to = pcChatOrigin(pcQuote.o);   /* ★2026-10-24 価格計算レビュー3：決まった相手でなければ渡さない（前は '*'＝誰にでも） */
@@ -20967,6 +20989,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const totalAll = total + lateArranged;
     renderAlerts._badge = { rest: totalAll - shipRows.length - lateArranged, eli: eliRows.length, rowsync: rowsyncRows.length, brake: !!baBrake, kvErr: !!kvErr };   // 10分ごとの数え直し（alertBadgeTick_）用
     alertBadgeSet_(renderAlerts._badge, shipRows.length, lateArranged);
+    /* ★2026-11-04 全体レビュー 新-C：起動時の先読み・値付けの後の描き直しで、見ていない欄に部品 約1万・画像 約700 を作っていた（11/3 の中身を捨てる直しの効きが半分）。
+       バッジの数だけ出して、⚠️自動検知の欄を見ていない時は中身を描かない（開いた時に renderTodo→renderAlerts で描く） */
+    if (state.page !== 'todo' || (todoState.tab || 'today') !== 'alerts') { body.textContent = ''; return; }
     // 内訳チップバー（443の中身を一目で＋クリックでその項目へジャンプ）
     const cats = [
       ['📥 到着済未反映', arrivedNotRecv.length, '#1a7f37', 'al-arrived'],
@@ -24610,6 +24635,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-04', items: [
+      '🧯 <b>全体レビュー（10/31・11/4）の直し</b>：①詰め直し削除の返事が300秒で来なかった時も、GAS が残した結果を後から読んで JAN・在庫0固定を付け替えます ②出品一覧の読み込み中に付け替えて捨てない ③Smart Reply が PayPal で断った文は、コピーも「貼って」も出しません ④⚠️自動検知は、見ていない時は中身を作りません（バッジの数だけ） ⑤口座を切り替えた後の値付けの見直しが0件になる・前の口座の提案が出る、を直しました ⑥「Shopee の額＝合計」で PayPal 0 の案を返しません ⑦JAN の台帳が読めなかった後は5分あけて読み直します',
       '🧺 <b>見積もりに「まとめ買い」の口を足しました</b>（03 営業部・本人「これ２つなの？画像１個しかないけど」「タイトル何かぐちゃぐちゃになってない？」）：WhatsApp・Smart Reply から N点まとめて頼むと、仕入れは合計、粗利は1件ずつの線の合計で計算し、英語名は品物ごとの名前をそのまま使います（混ぜて作り直しません）。文面は「We found N items: A and B」で、品物ごとの写真を返します。VN で上限（909,090）を超える時は、分け方の案を出します',
       '📮 <b>値付けの見直しに「📮 リクエスト品」の印を足しました</b>（事業本部・本人「リクエスト商品は1回限り」）：BR の Pokéwalker Case back のように、カタログ名にも SKU にも印が無いリクエスト品があります。行のボタンで印を付けると、値付けの見直しと在庫の自動の戻しから外れます。外した数は表の上に出し、✕で印を外せます',
       '🏷 <b>値付けの見直しを開くのを速くしました</b>（事業本部「（33秒）のまま表が出ない」）：🤖の仕入れ目安（機種ごとに59本）を開くたびに全部読んでいました。更新時刻が変わった本だけ読み、残りはこの端末の控えを使います。読み込み中は「待っている物：出品・🤖の仕入れ目安」のように、何を待っているかを出します',
@@ -36012,7 +36038,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         let mi = null; try { mi = await mercariSearch(kw, { relevance: true }); } catch (_) { mi = null; }
         await new Promise(rs => setTimeout(rs, 2500));
         let y = null; try { y = await yfmSearch(kw); } catch (_) { y = null; }
-        const yOk = !!(y && !y.blocked);
+        const yOk = !!(y && !y.blocked && !y.err);   /* ★2026-11-04 全体レビュー 10/31 中-4：時間切れ・中継の失敗（err）も「読めなかった」＝0件と数えない */
         if (mi === null) stat.mcFail++; if (!yOk) stat.yfmFail++;
         if (mi === null && !yOk) { await new Promise(rs => setTimeout(rs, 2500)); continue; }
         const mH = (mi || []).filter(x => Number(x.cid) !== 1 && !/未使用|新品/.test(String(x.cond || '')) && kit.matchOk(x.name, core, e.ja, e.en));
@@ -45030,7 +45056,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!r || !Array.isArray(r.moves) || (!r.moves.length && !(r.gone || []).length)) return 0;
     if (r.__rekeyed) return 0; r.__rekeyed = true;   /* ★2026-11-03 同じ返事で2回付け替えない（2回目で1つずれる） */
     /* ★2026-11-03 全体レビュー 10/31 高-2：JAN の台帳をまだ読んでいない画面（値付けの見直し等）では黙って0件だった → 読んでから付け替える */
-    if (!productIds && typeof ensureProductIds === 'function' && !r.__pidWait) { r.__pidWait = true; r.__rekeyed = false;
+    if ((!productIds || _pidsLoading) && typeof ensureProductIds === 'function' && !r.__pidWait) { r.__pidWait = true; r.__rekeyed = false;   /* ★2026-11-04 全体レビュー 新-2：出品一覧の読み始めの仮の {} に当てて捨てない */
       ensureProductIds().then(() => { pidRekeyAfterShift(itemId, r); if (!productIds) try { toast('⚠ 明細の番号が入れ替わりましたが、JAN の台帳を読めず付け替えていません（出品一覧を開き直してください）', 8000); } catch (_) {} }).catch(() => { try { pidRekeyAfterShift(itemId, r); toast('⚠ 明細の番号が入れ替わりましたが、JAN の台帳を読めず付け替えていません', 8000); } catch (_) {} });
       return 0; }   /* 古い GAS（moves を返さない）・末尾だけの削除は何もしない */
     const id = String(itemId), K = mid => 'id:' + id + '#' + mid; let n = 0;
@@ -45041,7 +45067,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       try { _pidDupCache = null; } catch (_) {}
       saveProductIds();
     }
-    const mt = lstMeta && lstMeta[id];
+    /* ★2026-11-04 全体レビュー 新-2：在庫0固定（listing_meta）がまだ読めていない・読み込み中なら、読み終わるまで待ってから付け替える（最大2分） */
+    if ((lstMeta === null || window._lstMetaLoading) && !r.__metaWait) { r.__metaWait = true; let tries = 0;
+      const again = () => { tries++; if ((lstMeta === null || window._lstMetaLoading) && tries < 24) { if (lstMeta === null && typeof lstLoadMeta === 'function' && tries === 1) { try { lstLoadMeta(); } catch (_) {} } setTimeout(again, 5000); return; }
+        const mt2 = lstMeta && lstMeta[id]; if (mt2 && mt2.keep0m && kvOk.listing_meta) { const k0 = Object.assign({}, mt2.keep0m), nk0 = Object.assign({}, mt2.keep0m); r.moves.forEach(mv => { if (k0[mv[0]]) nk0[mv[1]] = true; else delete nk0[mv[1]]; }); (r.gone || []).forEach(t => { delete nk0[t]; }); mt2.keep0m = nk0; saveListingMeta(); } };
+      setTimeout(again, 3000); }
+    const mt = (lstMeta && !window._lstMetaLoading) ? lstMeta[id] : null;
     if (mt && mt.keep0m) { const k0 = Object.assign({}, mt.keep0m), nk0 = Object.assign({}, mt.keep0m); r.moves.forEach(mv => { if (k0[mv[0]]) nk0[mv[1]] = true; else delete nk0[mv[1]]; }); (r.gone || []).forEach(t => { delete nk0[t]; }); mt.keep0m = nk0; saveListingMeta(); }
     try { if (r.llog && r.llog.n && typeof logState !== 'undefined') logState.costMap = null; } catch (_) {}   /* ★2026-10-25 GAS が仕入れ目安の控えも付け替えた＝次に出品ログを開いた時に読み直す */
     if (n && !kvOk.product_ids) { try { toast('⚠ 明細の番号が入れ替わりましたが、JAN の台帳を読めていないので付け替えを保存できませんでした（出品一覧を開き直してください）', true); } catch (_) {} }
@@ -47463,7 +47494,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { let mx = 0; all.forEach(r => { const t = Date.parse(r.synced_at || r.updated_at || 0) || 0; if (t > mx) mx = t; }); lst._dataFreshMs = mx; } // GASの実自動同期の新しさ（最終同期ラベル用）
     // 仕入元ソース状態(dropship_status)を初回のみ裏で取得→完了後に再描画
     if (lstDropStatus === null) { lstDropStatus = {}; sbGetAll('app_kv', 'select=v&k=eq.dropship_status').then(rows => { lstDropStatus = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; lstRedrawSoon(); }).catch(() => { lstDropStatus = {}; }); }
-    if (lstMeta === null) { lstMeta = {}; sbGetAll('app_kv', 'select=v,updated_at&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.listing_meta = true; kvBaseSet('listing_meta', lstMeta, rows && rows[0] && rows[0].updated_at); lstRedrawSoon(); }).catch(() => { lstMeta = {}; }); }
+    if (lstMeta === null) { lstMeta = {}; window._lstMetaLoading = true; sbGetAll('app_kv', 'select=v,updated_at&k=eq.listing_meta').then(rows => { lstMeta = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.listing_meta = true; kvBaseSet('listing_meta', lstMeta, rows && rows[0] && rows[0].updated_at); lstRedrawSoon(); }).catch(() => { lstMeta = {}; }).finally(() => { window._lstMetaLoading = false; }); }
     if (productIds === null && !_pidsLoading) { _pidsLoading = sbGetAll('app_kv', 'select=v,updated_at&k=eq.product_ids').then(rows => { productIds = (rows && rows[0] && rows[0].v && rows[0].v.items) || {}; kvOk.product_ids = true; kvBaseSet('product_ids', productIds, rows && rows[0] && rows[0].updated_at); try { lst._na = null; } catch (_) {} lstRedrawSoon(); return productIds; }).catch(() => { productIds = {}; kvOk.product_ids = false; window._pidsFailAt = Date.now(); return productIds; }).finally(() => { _pidsLoading = null; }); productIds = {}; }   /* ★2026-10-29 読み終わったら「まだ無い商品」の控えも捨てる */ // ★#5・#6 読めなければ保存させない 🔖JAN/型番（出品一覧・各国そろえる共通）
     if (lstSpecs === null) { lstSpecs = {}; sbGetAll('app_kv', 'select=v&k=like.listing_specs_*').then(rows => { const m = {}; (rows || []).forEach(r => { const it = (r.v && r.v.items) || {}; Object.keys(it).forEach(id => { m[id] = it[id]; }); }); lstSpecs = m; lstRedrawSoon(); }).catch(() => { lstSpecs = {}; }); }
     /* ★2026-09-26 本人「いいねとか販売とか閲覧数はもう出てない？」：期間（直近30日など）は保存して開き直しても戻るのに、差分の取得はボタンを押した時だけ＝開き直すと全行が ⋯ のまま（1ページ180個）。期間が戻っていて差分が未取得なら1回だけ取りに行く（描画の外で） */
