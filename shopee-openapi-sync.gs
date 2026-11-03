@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0430';
+var SRC_VER = '20261104-0500';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -11882,6 +11882,9 @@ function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenE
     if (full.length > 30 && vtag) full = (en.slice(0, Math.max(6, 30 - vtag.length - String(pr.num).length - 2)).trim() + vtag + ' ' + pr.num).trim();   /* 変種の札は落とさない（落とすと別のカードが同じ名前になる） */
     /* ① amiibo：版（シリーズ）を名前に必ず入れる。30字に収まらなければ版の略を優先して名前側を詰める */
     if (hw === 'goods_amiibo' && pr.series) { var _sEn = tcgSeriesEn_(pr.series); if (_sEn) { var _sfx = ' (' + _sEn + ')'; var _base = full; if ((_base + _sfx).length > 30) _base = _base.slice(0, Math.max(6, 30 - _sfx.length)).trim(); full = (_base + _sfx).trim(); } }
+    /* ★2026-11-04 01 商品部（本人 10/16「全部被らないように」）：一番くじは英語名に賞を必ず入れる（「Luffy Prize A」）。明細名は30字まで＝シリーズ名はカタログ名（Ichiban Kuji <種類>）と SKU・型番で見分ける */
+    if (BA_ARC[hw] && BA_ARC[hw].pz === 'kuji' && pr.prize && !new RegExp('\\bprize\\s*' + pr.prize + '\\b|\\b' + pr.prize + '\\s*prize\\b', 'i').test(full)) {
+      var _pzT = ' Prize ' + pr.prize; full = (full.length + _pzT.length > 30 ? full.slice(0, 30 - _pzT.length).replace(/\s+\S*$/, '').trim() : full) + _pzT; }
     if (full.length > 30) { stat.long = (stat.long || 0) + 1; return null; }
     var key = hw + ':' + String(r.id || full);
     /* ② 同じ回に同じ英語名が【別の商品】で出たら、弾／シリーズ／駿河屋IDの末尾で必ず区別する（前は黙って飛ばしていた＝版違いが一生出なかった） */
