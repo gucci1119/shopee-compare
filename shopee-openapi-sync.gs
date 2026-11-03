@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261102-2040';
+var SRC_VER = '20261103-1930';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -413,6 +413,7 @@ function doGet(e) {
 }
 function doGetInner_(e) {
   var p = (e && e.parameter) || {};
+  try { SB_CALLER = 'web:' + String(p.action || '-').replace(/[^\w.-]/g, '').slice(0, 40); } catch (_c) {}
   /* ★2026-09-28 レビュー（脆弱性）：公開URLから鍵なしで叩ける読み取りの口（外部URLの取得＝1回で最大20回ぶん枠を使う・明細/在庫の読み取り・ZIP作成）に鍵を要求する。
      叩かれ続けると接続枠（2万/日）が尽きて出品・発送手配まで止まる。ポータルは rk に WRITE_TOKEN を付けて呼ぶ（token だと書き込み扱いになり再試行しないため別名）。
      WRITE_TOKEN が未設定の台では止めない（止めすぎて写真集めを壊さない） */
@@ -2120,6 +2121,7 @@ function doPost(e) {
   try { return doPostInner_(e); } finally { try { ufPersist_(); } catch (_uf) {} }
 }
 function doPostInner_(e) {
+  try { SB_CALLER = 'post'; } catch (_c) {}
   var out = { ok: false };
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
@@ -6922,13 +6924,20 @@ function jobCancelled_(key) { if (!key) return false; var v = jobGet_(key); retu
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
   ufBump_(1, 'Supabase読み(' + table + ')');
-  var _hd = { apikey: key, Authorization: 'Bearer ' + key }; if (sbGzipOn_()) _hd['Accept-Encoding'] = 'gzip';   /* ★2026-10-29 Supabase の通信量（egress）を減らす試し：SB_GZIP=1 の台だけ圧縮を頼む（事業本部「1台で試して確かめてから」） */
+  var _hd = { apikey: key, Authorization: 'Bearer ' + key, 'X-Client-Info': sbClientInfo_() }; if (sbGzipOn_()) _hd['Accept-Encoding'] = 'gzip';   /* ★2026-10-29 Supabase の通信量（egress）を減らす試し：SB_GZIP=1 の台だけ圧縮を頼む（事業本部「1台で試して確かめてから」） */
   var res; try { res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: _hd }); } catch (e) { ufNoteErr_(e); throw e; }
   if (res.getResponseCode() >= 300) throw new Error('Supabase select ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   var _txt = res.getContentText(); SB_LAST_LEN = _txt.length;   /* ★2026-10-24 返事の長さ（文字数）を控える＝どの鍵が太ったかを、読む量を増やさずに数える（BA_KV_SZ） */
   return JSON.parse(_txt);
 }
 var SB_LAST_LEN = 0, BA_KV_SZ = {};
+/* ★2026-11-03 事業本部：Supabase の通信の記録（edge_logs）では、GAS 4台の名乗りがどれも同じで、どの台・どの処理の読みか分けられなかった（10/29 の丸ごと読み 200→413回の調べ）。
+   読みの見出し X-Client-Info に「gas/台/呼ばれ方」を入れる（例 gas/child2/web:boshu_auto_tick_bg・時間トリガーは trig）。記録の x_client_info で数えられる。中身は何も変わらない */
+var SB_CALLER = '', SB_RUNNER_V = null;
+function sbClientInfo_() {
+  if (SB_RUNNER_V === null) { try { SB_RUNNER_V = baRunnerId_(); } catch (e) { SB_RUNNER_V = '?'; } }
+  return 'gas/' + SB_RUNNER_V + '/' + (SB_CALLER || 'trig');
+}
 /* ★2026-10-29 Supabase の通信量（egress）を減らす（事業本部の依頼・案2）。🤖の巡回は1回で約16〜35MB を毎回丸ごと読み直していた（kvSz で実測）。
    大きな控え（10万字超）を、この台の CacheService に圧縮して置き、次の回は「更新時刻（updated_at）が同じなら」そこから使う。
    守り（事業本部の3つ）：①更新時刻が読めない・控えが欠けた・長さが合わない時は今までどおり丸ごと読む ②スクリプト プロパティ BKC_ON='1' の台だけ（1台で1日見てから広げる）
