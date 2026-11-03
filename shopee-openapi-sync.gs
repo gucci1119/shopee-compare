@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261103-1930';
+var SRC_VER = '20261103-2045';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -93,21 +93,28 @@ function tcgAiSpendPublish_(rid) {
 }
 function baAiYenToday_() {
   var day = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
-  var mine = baAiYenOfDay_((aiSpendLoad_().days || {})[day]), other = 0, partial = false;
+  return baAiYenDays_([day])[day];
+}
+/* ★2026-11-03 事業本部：AI の実績（ai_actual）が 10/29 から入らず、月の額が「実績のある日＋今日の見積もり」だけ＝11/1・11/2 が0円になり、月 ¥30,000 の上限が効かなくなっていた。
+   日付の一覧ぶんの見積もり（全台の合計）を1回の読みで出す＝実績の無い日を見積もりで埋める（baAiYenMonth_） */
+function baAiYenDays_(dayList) {
+  var out = {}, sp = aiSpendLoad_().days || {};
+  dayList.forEach(function (day) { out[day] = { d: day, yen: baAiYenOfDay_(sp[day]), mine: 0, other: 0, partial: false }; out[day].mine = Math.round(out[day].yen); });
+  var other = {}, partial = false;
   try {
-    /* ★2026-10-12 ①状態の控え（1つ400KB）を丸ごと読んでいた→ uf だけ読む ②トレカの台の分（ai_spend_<台>）も足す。同じ台が両方にあれば新しい方だけ。自分の台は除く */
     var _me = baRunnerId_(), byRid = {};
-    (sbSelect_('app_kv', 'select=k,u:v-%3Euf&k=like.boshu_auto_status*') || [])   /* ★2026-10-30「>」を符号化（素のままだと UrlFetchApp が無効な引数で落ちる・baLlogRekey_ で実測） */.forEach(function (r) {
+    (sbSelect_('app_kv', 'select=k,u:v-%3Euf&k=like.boshu_auto_status*') || []).forEach(function (r) {
       if (!r || r.k === BA_ST) return; var u = r.u; if (!u || !u.aiSpend || !u.aiSpend.days) return;
-      var id = String(u.runner || r.k); if (id === _me) return; byRid[id] = { at: String(u.at || ''), y: baAiYenOfDay_(u.aiSpend.days[day]) };
+      var id = String(u.runner || r.k); if (id === _me) return; byRid[id] = { at: String(u.at || ''), days: u.aiSpend.days };
     });
     (sbSelect_('app_kv', 'select=k,v&k=like.ai_spend_*') || []).forEach(function (r) {
       if (!r || !r.v || !r.v.days) return; var id = String(r.k).replace(/^ai_spend_/, ''); if (id === _me) return;
-      var y2 = baAiYenOfDay_(r.v.days[day]); if (!byRid[id] || String(r.v.at || '') >= byRid[id].at) byRid[id] = { at: String(r.v.at || ''), y: y2 };
+      if (!byRid[id] || String(r.v.at || '') >= byRid[id].at) byRid[id] = { at: String(r.v.at || ''), days: r.v.days };
     });
-    Object.keys(byRid).forEach(function (id) { other += byRid[id].y; });
+    dayList.forEach(function (day) { var o = 0; Object.keys(byRid).forEach(function (id) { o += baAiYenOfDay_(byRid[id].days[day]); }); other[day] = o; });
   } catch (e) { partial = true; }
-  return { d: day, yen: mine + other, mine: Math.round(mine), other: Math.round(other), partial: partial };
+  dayList.forEach(function (day) { var o = other[day] || 0; out[day].other = Math.round(o); out[day].yen = out[day].yen + o; out[day].partial = partial; });
+  return out;
 }
 /* 💴 ★2026-10-11【決めごと】本人「月に30000円までってのは守って」「超えるなら許可が必ず必要」「その時の利益によって考える」
    今月の AI 料金＝Console の実績（app_kv ai_actual・本当の請求・UTC日×モデル×種別 USD）の当月分 ×150円 ＋ 実績にまだ無い日の見積もり（今日）。
@@ -117,9 +124,15 @@ function baAiYenMonth_() {
   var usd = 0, days = 0, hasToday = false, unreadable = false;
   try { var rows = sbSelect_('app_kv', 'select=v&k=eq.ai_actual') || []; var dd = (rows[0] && rows[0].v && rows[0].v.days) || {};
     Object.keys(dd).forEach(function (d) { if (String(d).slice(0, 7) !== mon) return; days++; if (d === todayU) hasToday = true; var o = dd[d] || {}; Object.keys(o).forEach(function (m) { Object.keys(o[m] || {}).forEach(function (t) { usd += Number(o[m][t]) || 0; }); }); }); } catch (e) { unreadable = true; }   /* ★2026-10-24 全体レビュー（出品管理 #15）：読めない＝0円ではない */
-  var est = 0; try { if (!hasToday) est = (baAiYenToday_() || {}).yen || 0; } catch (e2) {}
+  /* ★2026-11-03 実績の無い日は今日だけでなく全部、見積もりで埋める（実績の取り込みが止まっても上限が効くように）。日付は JST の日で見る（実績は UTC の日・1日ずれは見積もりの側で吸う） */
+  var est = 0, estDays = [];
+  try {
+    var _miss = [], _t = new Date(), _d0 = mon + '-01', _today = Utilities.formatDate(_t, 'Asia/Tokyo', 'yyyy-MM-dd');
+    for (var _i = 0; _i < 31; _i++) { var _dd = Utilities.formatDate(new Date(Date.parse(_d0 + 'T12:00:00+09:00') + _i * 86400000), 'Asia/Tokyo', 'yyyy-MM-dd'); if (_dd.slice(0, 7) !== mon || _dd > _today) break; if (!Object.prototype.hasOwnProperty.call(dd || {}, _dd) || (_dd === _today && !hasToday)) _miss.push(_dd); }
+    if (_miss.length) { var _ey = baAiYenDays_(_miss); _miss.forEach(function (d) { est += (_ey[d] || {}).yen || 0; }); estDays = _miss; }
+  } catch (e2) {}
   if (unreadable) return { mon: mon, yen: Number.MAX_SAFE_INTEGER, actual: '読めず', est: Math.round(est), days: days, unreadable: true };   /* 上限を超えていないか確かめられない＝超えている扱い（門で止まる） */
-  return { mon: mon, yen: Math.round(usd * 150 + est), actual: Math.round(usd * 150), est: Math.round(est), days: days };
+  return { mon: mon, yen: Math.round(usd * 150 + est), actual: Math.round(usd * 150), est: Math.round(est), days: days, estDays: estDays.length, estFrom: estDays[0] || undefined };
 }
 function baAiMonthCap_(cfg) { var c = cfg && cfg.aiYenCapMonth; return (c === undefined || c === null || c === '') ? 30000 : Number(c); }
 function aiSpendLoad_() { var o = null; try { var s = P_().getProperty('aiSpend'); o = s ? JSON.parse(s) : null; } catch (e) {} if (!o || !o.days) o = { days: {} }; return o; }
