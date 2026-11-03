@@ -40150,14 +40150,15 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const have = new Set(logState.rows.map(r => r.id));
       const fresh = nr.filter(r => !have.has(r.id) && !(logState.drafts && logState.drafts.has(r.cc + '|' + r.item_id))); if (!fresh.length) return;
       try {
-        const st = await sbGetAll('app_kv', 'select=v&k=like.boshu_auto_status*');
+        const st = (await sbGetAll('app_kv', 'select=k,a:v->added&k=like.boshu_auto_status*')).map(x => ({ v: { added: x.a } }));   /* ★2026-11-04 状態の鍵は1つ約400KB＝足した明細の控え（added）だけ読む */
         const am = logState.autoMap = logState.autoMap || {};
         const mids = logState.autoMid = logState.autoMid || new Set();
         (st || []).forEach(x => (((x && x.v) || {}).added || []).forEach(a => { if (a && a.cc && a.item_id && a.en) am[a.cc + '|' + a.item_id + '|' + String(a.en).toLowerCase().trim()] = jstDate(new Date(a.at).getTime()); if (a && a.cc && a.model_id) mids.add(a.cc + '|' + a.model_id); }));
       } catch (_) {}
       logState.rows = fresh.concat(logState.rows);
       try { llogSaveCache(logState.rows); } catch (_) {}   /* ★2026-10-14 読み足した分も控え（IndexedDB）へ */
-      if (fresh.some(r => String(r.ymd || '').slice(0, 10) === (logState.day || jstDate(Date.now())))) logState._detailDay = null;   // 選んでいる日の名前・写真を取り直す
+      /* ★2026-11-04 全体レビュー 10/16 高-2：ここで _detailDay を消すと、毎回その日の全件（約2,700行＋出品データ）を読み直していた（10/14 の「増えた分だけ」が効かない）。
+         消さない＝描き直しの側が「件数が増えて5分たったら新しい行だけ」読む（名前・写真は最大5分遅れ） */
       renderListingLog();
     } catch (_) {} finally { logState._pollBusy = false; }
   }

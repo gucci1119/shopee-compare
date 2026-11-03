@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0030';
+var SRC_VER = '20261104-0100';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -11981,7 +11981,11 @@ function tcgTick(manual) {
     /* ★2026-10-15 03:2x 「写真OKで未出品の候補 68 件」と数えても、候補づくり（名前なし・長すぎ・帯）で全部落ちて「0枚を試して」が1時間半続いた（3台目 yugioh）。
        同じシリーズで【2回続けて0枚】なら今日はそのシリーズを飛ばす（成功したら戻す） */
     if (!st.zeroD || st.zeroD.d !== todayJ) st.zeroD = { d: todayJ, h: {} };
-    var _zero = function (h) { return (Number((st.zeroD.h || {})[h]) || 0) >= 2; };
+    /* ★2026-11-04 全体レビュー 10/16 高-7・10/19 高-新4：0枚が2回で【0時まで】止めていた＝英語名が入った後や、満杯の国だけが残っていた時もその日は戻らなかった。
+       止めるのは最後の0枚から3時間だけにする（st.zeroD.t に時刻）。英語名待ちだけの0枚は数えない（下） */
+    st.zeroD.t = st.zeroD.t || {};
+    var _zero = function (h) { if ((Number((st.zeroD.h || {})[h]) || 0) < 2) return false; var t0 = Number((st.zeroD.t || {})[h]) || 0; if (t0 && Date.now() - t0 > 3 * 3600000) { st.zeroD.h[h] = 0; return false; } return true; };
+    var _zeroBump = function (h) { st.zeroD.h[h] = (Number(st.zeroD.h[h]) || 0) + 1; st.zeroD.t[h] = Date.now(); };
     /* ★2026-10-15 本人「少しでも無料で多く、そして早く出品をしたい」：Claude だけモードでは、写真OK（boshu_auto_judged_manual の ok）でまだ出していない候補が
        1つも無いシリーズを選ぶと、1回（最長5分）が「0枚を試して」で空回りする（10/15 00:33 実測：3台目が遊戯王104件を抱えたまま yugioh_rush／zx／mtg で空回り）。
        選ぶ前に【OK写真あり ＆ 台帳に無い】候補の数をシリーズごとに数え、0 のシリーズは飛ばす。読む物は tcg_pre と判定の控え（どちらもこの回で後で読む＝通信は増えない）＋台帳（小） */
@@ -11993,7 +11997,10 @@ function tcgTick(manual) {
         var _tp0 = baKv_('tcg_pre') || {}; baManualOf_('', { key: '_' }); var _mn0 = BA_MANUAL || {}, _okKeys = {};
         Object.keys(_mn0).forEach(function (k) { if (String(_mn0[k]).indexOf('ok') !== 0) return; var ck = k.split('||')[1]; if (!ck || !_tp0[ck]) return; var h0 = (_tp0[ck] && _tp0[ck].hw) || ck.split(':')[0]; (_okKeys[h0] = _okKeys[h0] || {})[ck] = 1; });
         _okHw = {};
-        hws.forEach(function (h) { var ks = Object.keys(_okKeys[h] || {}); if (!ks.length) { _okHw[h] = 0; return; } var dn = baKv_('boshu_auto_done_' + h) || {}; _okHw[h] = ks.filter(function (k) { return !dn[k]; }).length; });
+        /* ★2026-11-04 全体レビュー 10/16 高-6：1か国でも出せば「済み」に数えていた＝残りの国が出ていなくてもシリーズを飛ばした。出す国が全部済んだ時だけ済み */
+        hws.forEach(function (h) { var ks = Object.keys(_okKeys[h] || {}); if (!ks.length) { _okHw[h] = 0; return; } var dn = baKv_('boshu_auto_done_' + h) || {};
+          var fm = (cfg.family && cfg.family[h]) || {}, ccH = (fm.ccs && fm.ccs.length) ? fm.ccs : ((tc.ccs && tc.ccs.length) ? tc.ccs : (cfg.ccs || []));
+          _okHw[h] = ks.filter(function (k) { var d = dn[k]; if (!d) return true; if (typeof d !== 'object' || !ccH.length) return false; return ccH.some(function (cc) { return !d[cc]; }); }).length; });
         /* ★2026-10-15 20:4x 新しいシリーズ（dbs/gundam/fftcg/fecipher/smt）は「OK候補が無い＝飛ばす」で写真集めすら始まらず永久に出ない（鶏と卵）。
            写真の控え（tcg_pre）に1件も無いシリーズを『冷えたシリーズ』として覚え、下で3回に1回・1日1回まで写真集めに使う */
         var _hasPre = {}; Object.keys(_tp0).forEach(function (k0) { var h1 = (_tp0[k0] && _tp0[k0].hw) || String(k0).split(':')[0]; _hasPre[h1] = 1; });
@@ -12056,11 +12063,11 @@ function tcgTick(manual) {
     if (ai.dirty) { try { baKvSet_('tcg_names_ai', ai.cache); } catch (eN) {} }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS) {} }
     st.stat = Object.assign({ hw: hw, at: new Date().toISOString() }, cands.stat);
-    if (!cands.list.length) { st.zeroD.h[hw] = (Number(st.zeroD.h[hw]) || 0) + 1; return finish_(hw + '：出せる候補が無い（' + JSON.stringify(cands.stat) + '）'); }
+    if (!cands.list.length) { _zeroBump(hw); return finish_(hw + '：出せる候補が無い（' + JSON.stringify(cands.stat) + '）'); }
     var perTick = Math.max(1, Math.min(10, Number(tc.perTick) || 5));
     var judged = baKv_('tcg_judged') || {}; var capN = Number(tc.aiCap) || 40;
     var _jN0 = Object.keys(judged).length;   /* ★2026-10-12 判定が増えた時だけ書く（前は毎回丸ごと書き戻していた＝Supabase 総点検） */
-    var picks = [], tried = 0, miss = 0, blocked = false;
+    var picks = [], tried = 0, miss = 0, blocked = false, _nameWaitN = 0;
     /* ★2026-10-12 使った写真の印（ゲームの used[pm.img]=baUsedTag_ 7734行）を付けていなかった＝同じ写真が変種違いの別カードに付きうる。baKv_ の控えと同じ物を触るので、この回の後のカードにもすぐ効く */
     var usedT = baKv_(BA_IMGS) || {}, usedDirty = false;
     var yahooOk = !(st.blockedUntil && Date.now() < st.blockedUntil);
@@ -12081,7 +12088,7 @@ function tcgTick(manual) {
       if (c.noname) {   /* 写真が通ったので、ここで初めて英語名を聞く（1枚1回・控え tcg_names_ai に残る） */
         if (!(_nameBudget > 0) && !CLAUDE_ONLY) { baLog_(st, '英語名のAIがこの回の枠を使い切った→残りは次の回'); break; }
         ai.budget = CLAUDE_ONLY ? 0 : 1; var _enN = tcgEnName_(hw, c._pr, names, ai); _nameBudget -= ((CLAUDE_ONLY ? 0 : 1) - ai.budget); ai.budget = 0;
-        if (!_enN && CLAUDE_ONLY) { st.tried[c.key] = tr; continue; }   /* 名前は Claude が付けるまで待つ（noname の印を付けない＝付いたら出る） */
+        if (!_enN && CLAUDE_ONLY) { st.tried[c.key] = tr; _nameWaitN++; continue; }   /* 名前は Claude が付けるまで待つ（noname の印を付けない＝付いたら出る）。★2026-11-04 名前待ちだけの0枚は0枚に数えない */
         var _fc = _enN ? tcgFinishCand_(hw, c._r, c._pr, _enN, c.cost, ccs, ctx.listedByCc, ctx.ledger, ai, _seenRun, {}) : null;
         if (!_fc) { baSkipRec_(st, hw, '', c, _enN ? 'listed_or_long' : 'noname'); continue; }
         c = _fc;
@@ -12120,7 +12127,7 @@ function tcgTick(manual) {
     if (ai.dirty) { try { baKvSetMerged_('tcg_names_ai', ai.cache, baKvFreshMany_(['tcg_names_ai']), 0); } catch (eN2) {} ai.dirty = 0; }   /* ★2026-10-12 複数の台で回すので読み直して足す */   /* ★2026-10-29 ここが閉じておらず、次の3行（使った写真の印・tcg_sets の保存・候補0件で抜ける）が 10/12 から動いていなかった */
     if (usedDirty) { try { baKvSetMerged_(BA_IMGS, usedT, baKvFreshMany_([BA_IMGS]), 0); } catch (eUi) { baLog_(st, '使った写真の印の保存に失敗: ' + String(eUi).slice(0, 120)); } usedDirty = false; }
     if (ai.setsDirty) { try { baKvSet_('tcg_sets', ai.sets); } catch (eS2) {} ai.setsDirty = 0; }
-    if (!picks.length) { st.zeroD.h[hw] = (Number(st.zeroD.h[hw]) || 0) + 1; try { if (Object.keys(judged).length !== _jN0) baKvSetMerged_('tcg_judged', judged, baKvFreshMany_(['tcg_judged']), 0); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
+    if (!picks.length) { if (!(_nameWaitN > 0 && _nameWaitN >= tried)) _zeroBump(hw); try { if (Object.keys(judged).length !== _jN0) baKvSetMerged_('tcg_judged', judged, baKvFreshMany_(['tcg_judged']), 0); } catch (eJ) {} return finish_(hw + '：写真の揃ったカードが無かった（候補 ' + cands.list.length + '・試した ' + tried + '・見つからず ' + miss + (nosrc ? '・控え無しで飛ばした ' + nosrc : '') + (blocked || !yahooOk ? '・Yahoo!フリマは休み中' : '') + '）'); }
     /* ★2026-10-15 大シリーズで入れ先を分ける（cfg.tcg.seriesSplit に入っている区分だけ・弾記号の頭） */
     if (Array.isArray(tc.seriesSplit) && tc.seriesSplit.indexOf(hw) >= 0) picks.forEach(function (p) { p.ser = tcgSeriesOf_(p.setCode); });
     /* ★2026-10-12 国の順番が毎回同じ（PH→SG→BR→VN→TH→MY→TW）で、時間切れになると後ろの国がずっと後回しだった → 前の回で届かなかった国から始める */
@@ -12132,7 +12139,7 @@ function tcgTick(manual) {
         out.ccs[cc] = r; out.added += r.added || 0; out.skipped += r.skipped || 0;
       } catch (eC) { out.ccs[cc] = { error: String(eC).slice(0, 160) }; baLog_(st, cc + '：' + String(eC).slice(0, 160)); }
     }
-    st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length; if (out.added > 0) st.zeroD.h[hw] = 0; else if (!/販促中で足せない/.test(JSON.stringify(out.ccs || {}))) st.zeroD.h[hw] = (Number(st.zeroD.h[hw]) || 0) + 1;   /* ★2026-10-18 候補はあるのに1件も足せない回（複製の上限・全部見送り）も「0枚」に数える＝2回続いたらそのシリーズは今日飛ばして他へ回る。10/18 午後、ポケカが TH/TW の複製上限で止まったまま一番多いシリーズとして毎回選ばれ、他のシリーズが7時間回らなかった */ if (st.okHw && st.okHw[hw] != null) st.okHw[hw] = Math.max(0, Number(st.okHw[hw]) - picks.length);
+    st.today.added = (st.today.added || 0) + out.added; st.today.n = (st.today.n || 0) + picks.length; if (out.added > 0) st.zeroD.h[hw] = 0; else if (!/販促中で足せない|満杯/.test(JSON.stringify(out.ccs || {}))) _zeroBump(hw);   /* ★2026-10-18 候補はあるのに1件も足せない回（複製の上限・全部見送り）も「0枚」に数える＝2回続いたらそのシリーズは今日飛ばして他へ回る。10/18 午後、ポケカが TH/TW の複製上限で止まったまま一番多いシリーズとして毎回選ばれ、他のシリーズが7時間回らなかった */ if (st.okHw && st.okHw[hw] != null) st.okHw[hw] = Math.max(0, Number(st.okHw[hw]) - picks.length);
     /* ★2026-10-12 ゲーム（7798・7834行）と同じく、入れたその場で出品ログ（listing_log）・仕入れ目安（llog_cost_<hw>）・🤖の印（listlog_auto）を書く */
     /* ★2026-10-12 型番は product_ids（約4.5MB）に書かない＝30分ごとに大物を読み書きすると DB が落ちる（10/10・10/12 10:31）。出品ログは SKU からカード番号を読んで出す */
     if (out.added > 0) {
