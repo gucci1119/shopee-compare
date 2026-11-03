@@ -24535,6 +24535,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-03', items: [
+      '📶 <b>ポータルが🤖を呼ぶ回数を減らしました（Supabase の通信量）</b>（事業本部の依頼）：🤖の1回は出品表を明細つきで丸ごと読みます。10/29 はポータルから 289回呼び、出品できたのは14回だけでした。①「担当でない」と返す台（ゲームの4台目）は6時間呼びません ②0件で終わる回が続いた台は、呼ぶ間隔を1回ごとに伸ばします（最長30分）。1件でも出せたら元の間隔に戻ります',
+    ] },
     { date: '2026-10-30', items: [
       '💴 <b>見積もり（WhatsApp の 💴）で、②の Shopee に載せる額を打ち替えられるようにしました</b>（本人「shopee+paypal の時に、shopee の額修正できたりする？」「ケースバイケースです」・03 営業部の依頼）：打った額で「粗利そのまま（PayPal を計算し直す）」と「合計そのまま（PayPal＝合計−Shopee の額）」の2つの案を返します。③の最低額より安い時・合計を超える時は知らせて、その案は返しません。カードの欄は営業部が作ります。',
       '⏱ <b>見積もりの文をチャットの入力欄へ入れた後、返事を待つ時間を3秒から10秒に延ばしました</b>（03 営業部の依頼・10/29 に文が二重でお客さんに届いた件の続き）：WhatsApp は入ったかを確かめてから返事をするので、3秒では「返事がありません」と出てコピーした文を貼ると二重になりえました。待ちが切れた後に遅れて入った時は「後から入りました（コピーした文は貼らないでください）」と出します。',
@@ -36528,7 +36531,13 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     for (const sl of slots) {
       const url = settings[sl.key]; if (!url || !settings.writeToken) continue;
       const stamp = 'smdBaWebTick_' + sl.key; const last = Number(localStorage.getItem(stamp) || 0);
-      if (nowMs - last < sl.every * 60000 - 20000) continue;
+      /* ★2026-11-03 事業本部（Supabase の通信量・10/29 の丸ごと読み 200→413回の調べ）：🤖の1回は出品表を明細つきで丸ごと読む（約8ページ）。
+         10/29 にポータルから呼んだ回は 2台目65・3台目112・4台目112＝出品できたのは14回（8%）だけ・4台目は112回とも「担当でない」で即終了。
+         ①「担当でない（not_runner）」と返した台は6時間呼ばない ②0件で終わった回が続いたら、その台の間隔を 1回ごとに伸ばす（最長30分）。1件でも出せたら元の間隔に戻す */
+      let _nr = 0, _zs = 0; try { _nr = Number(localStorage.getItem('smdBaWebTickNR_' + sl.key) || 0); _zs = Number(localStorage.getItem('smdBaWebTickZero_' + sl.key) || 0); } catch (_) {}
+      if (_nr && nowMs - _nr < 6 * 3600000) continue;
+      const _every = Math.min(30, sl.every * (1 + Math.min(3, _zs)));
+      if (nowMs - last < _every * 60000 - 20000) continue;
       const other = slots.find(o => o !== sl); const ol = Number(localStorage.getItem('smdBaWebTick_' + other.key) || 0); if (nowMs - ol < 90000) continue;
       try { localStorage.setItem(stamp, String(Date.now())); } catch (_) {}
       const bz = await baBizReserveOk(url);
@@ -36536,6 +36545,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       try {
         const r = await fetch(url + '?action=boshu_auto_tick_bg&token=' + encodeURIComponent(settings.writeToken) + '&callback=cb&cb=' + Date.now());
         const txt = await r.text(); const ok = /"ok":true/.test(txt);
+        try {
+          if (/"skipped":"not_runner"/.test(txt)) localStorage.setItem('smdBaWebTickNR_' + sl.key, String(Date.now()));
+          else if (ok) { const mA = /"added":(\d+)/.exec(txt); if (mA) localStorage.setItem('smdBaWebTickZero_' + sl.key, Number(mA[1]) > 0 ? '0' : String(Math.min(9, _zs + 1))); }
+        } catch (_) {}
         try { logAct('出品', '🤖巡回（ポータルから）', sl.name, (ok ? 'OK ' : 'NG ') + txt.replace(/^cb\(/, '').slice(0, 80)); } catch (_) {}
       } catch (e) { try { logAct('出品', '🤖巡回（ポータルから）', sl.name, '失敗 ' + String(e).slice(0, 80)); } catch (_) {} }
       break;   /* 1回の目覚めで叩くのは1台だけ（同時に走らせない） */
