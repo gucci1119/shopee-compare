@@ -1197,7 +1197,7 @@
      chat_messages に「Unread」さんの行が入っていた（📮 の相手が Unread）。札を飛ばし、名前の形（英数字と . _）をした最初の行を名前にする。
      （SKIP_CHIP は後ろで作るので、ここでは使わない＝作る前に呼ばれて止まらないように） */
   function rowBuyerOf(lines) {
-    const chip = /^(Closed|Overdue|Pinned|Unread|Auto-?Reply|Muted|New|Read|Sent|Delivered)$/i;
+    const chip = /^(Closed|Overdue|Pinned|Unread|Auto-?Reply|Auto-?reply|Muted)$/;   /* ★大文字小文字を区別＝ユーザー名 new・read 等を飛ばさない（レビュー 11/4） */
     const ls = (lines || []).map(s => String(s || '').trim()).filter(Boolean);
     for (const s of ls) { if (chip.test(s)) continue; if (/^[\w.]{2,}$/.test(s)) return s; break; }
     return '';

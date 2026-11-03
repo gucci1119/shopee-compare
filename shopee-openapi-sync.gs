@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261103-2350';
+var SRC_VER = '20261104-0030';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3791,6 +3791,9 @@ function baLlogRekey_(shopId, itemId, moves, gone, nameOf) {
   Object.keys(keys).forEach(function (kk) {
     var cur = baKvFresh_(kk); if (BA_KV_FAIL[kk] || !cur || typeof cur !== 'object' || !cur.m) return;   /* 読めなければ書かない */
     var m = cur.m, snap = {}, ch = 0;
+    /* ★2026-11-04 レビュー：同じ付け替えを2回当てると1つずれる＝もう当たっている（移した先の控えの英名が、移す元の作品の名前）なら、この鍵は触らない */
+    var _ap = 0, _nm = 0; moves.forEach(function (mv) { var nmS = nameOf[mv[0]]; var d = m[K(mv[1])]; if (nmS && d && typeof d === 'object' && d.en) { _nm++; if (vnNorm_(d.en) === vnNorm_(nmS)) _ap++; } });
+    if (_ap > 0) { out.skipped = (out.skipped || 0) + 1; out.skipWhy = 'もう付け替え済み（' + _ap + '/' + _nm + '）'; return; }
     moves.forEach(function (mv) { snap[mv[0]] = m[K(mv[0])]; });   /* 先に全部控えてから書く（連鎖で1つずつずれない） */
     moves.forEach(function (mv) {
       var e = snap[mv[0]];
@@ -3826,16 +3829,23 @@ function shiftPendSave_(shopId, itemId, rec) {
     return true;
   } catch (e) { return false; }
 }
+function shiftPendDrop_(shopId, itemId) {
+  var cur = baKvFresh_('shift_pending'); if (!cur || !cur.items || BA_KV_FAIL['shift_pending']) return false;
+  var k = shiftPendKey_(shopId, itemId); if (!cur.items[k]) return false;
+  delete cur.items[k]; cur.at = new Date().toISOString(); baKvSet_('shift_pending', cur); return true;
+}
 function shiftPendCheck_(onlyKey, maxN) {
   var out = { checked: 0, fixed: 0, dropped: 0, notes: [] };
   var cur; try { cur = baKvFresh_('shift_pending'); } catch (e0) { return out; }
   if (!cur || !cur.items || BA_KV_FAIL['shift_pending']) return out;
   var it = cur.items, ch = false, now = Date.now();
-  var keys = Object.keys(it).filter(function (k) { return !onlyKey || k === onlyKey; }).slice(0, maxN || 2);
+  var keys = Object.keys(it).filter(function (k) { return !onlyKey || k === onlyKey; }).sort(function (a, b) { return Number((it[a] || {}).lastTry || 0) - Number((it[b] || {}).lastTry || 0); }).slice(0, maxN || 2);   /* ★2026-11-04 レビュー：失敗し続ける控えが先頭に居座らないよう、見ていない順に */
   keys.forEach(function (key) {
     var rec = it[key]; if (!rec) return;
     if (now - Number(rec.at || 0) > 24 * 3600000) { delete it[key]; ch = true; out.dropped++; return; }
     var sid = parseInt(String(key).split('|')[0], 10), iid = parseInt(String(key).split('|')[1], 10);
+    rec.lastTry = now; rec.tries = (Number(rec.tries) || 0) + 1; ch = true;
+    if (rec.tries > 4) { delete it[key]; out.dropped++; out.notes.push(key + ' 4回直せなかったので控えを捨てた'); return; }   /* ★2026-11-04 レビュー：断られ続ける控えで毎回在庫を戻さない */
     var jj; try { jj = callShop_(sid, '/api/v2/product/get_model_list', { item_id: iid }, 'get'); } catch (eR) { out.notes.push(key + ' 読めない'); return; }
     out.checked++;
     var rr = jj.response || {}, tt = rr.tier_variation || [], mm = rr.model || []; if (tt.length !== 1) { delete it[key]; ch = true; return; }
@@ -3843,6 +3853,9 @@ function shiftPendCheck_(onlyKey, maxN) {
     var isNew = (function () { var w = rec.newNames || [], k = Number(rec.k) || 0; if (nmNow.length < k) return false; for (var q = 0; q < k; q++) if (nmNow[q] !== w[q]) return false; for (var q2 = k; q2 < nmNow.length; q2++) if (String(nmNow[q2]).indexOf('__del') !== 0) return false; return true; })();
     var isOld = (function () { var w = rec.oldNames || []; if (nmNow.length < w.length) return false; for (var q = 0; q < w.length; q++) if (nmNow[q] !== w[q]) return false; return true; })();   /* 末尾に足された明細は見ない（元の件数ぶんだけ比べる） */
     if (isOld) { if (now - Number(rec.at || 0) > 30 * 60000) { delete it[key]; ch = true; out.dropped++; } return; }   /* まだ効いていない（30分たったら効かなかったと見て捨てる） */
+    /* ★2026-11-04 レビュー：旧でも新でもない並び（本人が名前を直した・🧹掃除・別の削除）では書かずに捨てる。「途中まで」と扱うのは、元の件数ぶんの各位置が旧か新のどちらかと同じ時だけ */
+    if (!isNew) { var w0 = rec.oldNames || [], w1 = rec.newNames || [], ok2 = nmNow.length >= w0.length; for (var q3 = 0; ok2 && q3 < w0.length; q3++) if (nmNow[q3] !== w0[q3] && nmNow[q3] !== w1[q3]) ok2 = false;
+      if (!ok2) { delete it[key]; ch = true; out.dropped++; out.notes.push(key + ' 並びが別の形に変わっていたので触らず控えを捨てた'); return; } }
     /* 新しい並び（または途中まで）＝名前で付け直す */
     var pr = [], st = [], sk = [];
     mm.forEach(function (m) {
@@ -3851,15 +3864,17 @@ function shiftPendCheck_(onlyKey, maxN) {
       var sv = m.stock_info_v2 || {}, ss = (sv.seller_stock || [])[0] || {}, sNow = parseInt(ss.stock != null ? ss.stock : ((sv.summary_info || {}).total_available_stock || 0), 10);
       if (nn.indexOf('__del') === 0) { if (sNow > 0) st.push({ model_id: m.model_id, stock: 0 }); return; }
       var ex = (rec.snap || {})[nn]; if (!ex) return;
+      if (ex.id && String(ex.id) === String(m.model_id)) return;   /* ★2026-11-04 レビュー：同じ明細（中身が動いていない）は書かない＝その後に変えた値段・在庫を戻さない */
       if (ex.p > 0 && Math.abs(pNow - ex.p) > 0.001) pr.push({ model_id: m.model_id, price: ex.p });
-      if (!isNaN(ex.s) && sNow !== ex.s) st.push({ model_id: m.model_id, stock: ex.s });
+      if (!rec.stockDone && !isNaN(ex.s) && sNow !== ex.s) st.push({ model_id: m.model_id, stock: ex.s });   /* ★2026-11-04 在庫は1回だけ（毎回戻すと売れた分がまた買える） */
       if (String(m.model_sku || '') !== String(ex.k || '')) sk.push({ model_id: m.model_id, sku: String(ex.k || '') });
     });
     var err = [];
     try { if (pr.length) updatePriceList_(sid, iid, pr); } catch (e1) { err.push('価格 ' + String(e1.message || e1).slice(0, 80)); }
     try { if (st.length) updateStockList_(sid, iid, st); } catch (e2) { err.push('在庫 ' + String(e2.message || e2).slice(0, 80)); }
+    rec.stockDone = true;
     try { for (var f = 0; f < sk.length; f += 50) updateModelSku_(sid, iid, sk.slice(f, f + 50)); } catch (e3) { err.push('SKU ' + String(e3.message || e3).slice(0, 80)); }
-    if (isNew && rec.moves && rec.moves.length) { try { baLlogRekey_(sid, iid, rec.moves, rec.gone || [], rec.nameOf || {}); } catch (e4) { err.push('控え ' + String(e4).slice(0, 60)); } }
+    if (isNew && rec.moves && rec.moves.length && !rec.llogDone) { try { baLlogRekey_(sid, iid, rec.moves, rec.gone || [], rec.nameOf || {}); rec.llogDone = true; } catch (e4) { err.push('控え ' + String(e4).slice(0, 60)); } }
     out.fixed += pr.length + st.length + sk.length; out.notes.push(key + (isNew ? ' 後から効いていた' : ' 途中まで') + '：値段' + pr.length + '・在庫' + st.length + '・SKU' + sk.length + (err.length ? '（失敗 ' + err.join(' / ') + '）' : ''));
     if (!err.length) { delete it[key]; ch = true; }
     try { var lg = baKvFresh_('shift_pending_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), key: key, isNew: isNew, price: pr.length, stock: st.length, sku: sk.length, err: err.slice(0, 3) }); lg.items = a.slice(0, 60); baKvSet_('shift_pending_log', lg); } catch (eL) {}
@@ -3954,7 +3969,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
   if (!_isNew(_nmNow)) {
     /* ★2026-11-03 高-3：後から効いた時に付け直せるよう、消す前の中身と期待する並びを控える */
     try {
-      var _snap = {}; for (var xs = 0; xs < n; xs++) { var _nx = String((optList[xs] || {}).option || ''); if (_nx && bySlot[xs]) { var _bm = bySlot[xs]; _snap[vnNorm_(_nx)] = { p: parseFloat(priceOf(_bm)) || 0, s: parseInt(stockOf(_bm), 10), k: String(_bm.model_sku || '') }; } }
+      var _snap = {}; for (var xs = 0; xs < n; xs++) { var _nx = String((optList[xs] || {}).option || ''); if (_nx && bySlot[xs]) { var _bm = bySlot[xs]; _snap[vnNorm_(_nx)] = { id: String(_bm.model_id), p: parseFloat(priceOf(_bm)) || 0, s: parseInt(stockOf(_bm), 10), k: String(_bm.model_sku || '') }; } }
       var _mvP = [], _gnP = [], _noP = {}; for (var smP = 0; smP < k; smP++) if (keep[smP] !== smP) _mvP.push([String(bySlot[keep[smP]].model_id), String(bySlot[smP].model_id)]);
       for (var snP = 0; snP < n; snP++) if (bySlot[snP]) _noP[String(bySlot[snP].model_id)] = String((optList[snP] || {}).option || '');
       _pendSaved = shiftPendSave_(shopId, itemId, { k: k, newNames: _nmNew, oldNames: _nmOld, snap: _snap, moves: _mvP, gone: _gnP, nameOf: _noP });
@@ -3979,6 +3994,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
             if (String(m.model_sku || '') !== String(src.model_sku || '')) _k2.push({ model_id: m.model_id, sku: String(src.model_sku || '') }); });
           if (_p2.length) updatePriceList_(shopId, itemId, _p2); if (_s2.length) updateStockList_(shopId, itemId, _s2); for (var f2 = 0; f2 < _k2.length; f2 += 50) updateModelSku_(shopId, itemId, _k2.slice(f2, f2 + 50));
           _fx.fixed = { price: _p2.length, stock: _s2.length, sku: _k2.length };
+          if (!_p2.length && !_s2.length && !_k2.length) _fx.error = '⚠ 明細の並べ替えが' + (_tvErr ? '「' + _tvMsg + '」で' : '（成功の返事でしたが）') + '途中まで動いた形でした。名前で照らすと値段・在庫・SKU のずれは0件でした（書き戻しは要りませんでした）。何も消していません。画面で確かめてください';
         }
       } catch (eFx) { _fx.fix_error = String((eFx && eFx.message) || eFx).slice(0, 160); }
       /* ★2026-11-03 高-4：読めなかった・書き戻しが0件・失敗した時は「書き戻しました」と言わない */
@@ -3989,6 +4005,8 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
     }
   }
   /* 名前は新しい並び＝効いていた（失敗の返事だった時も）。下へ続ける（戻り値の note に残す） */
+  /* ★2026-11-04 レビュー：前の回の控え（shift_pending）が残っていると、次の🤖の回で同じ付け替えをもう一度当てて1つずれる＝効いたらこのカタログの控えを消す */
+  try { shiftPendDrop_(shopId, itemId); } catch (eDp) {}
 
   // ①-b ★2026-10-13 update_tier_variation は既にある枠の SKU・価格・在庫を受け付けない（名前と画像だけ上へ動き、
   //   SKU・価格・在庫は枠に残る＝1つ上の作品の値になる。10/6 の削除で 13カタログ・238明細がずれた）。
