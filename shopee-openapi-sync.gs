@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0100';
+var SRC_VER = '20261104-0130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5627,8 +5627,10 @@ function srRuleKey_(title, model, sku) { var sk = String(sku || '').trim().toUpp
    在庫を自動で戻さない・値付けの見直しに出さない。キャンセルで Shopee が戻した在庫は0まで引き戻す（自動で戻す決めがあっても残さない） */
 function isReqCatalog_(name) { return /request\s*page|solicitar/i.test(String(name || '')); }
 function isReqModel_(catName, sku) { return isReqCatalog_(catName) || /^REQ_/i.test(String(sku || '').trim()); }
+/* ★2026-11-04 名前にも SKU にも印が無いリクエスト品（BR Pokéwalker Case back）＝ポータルの「📮 リクエスト品」で付ける印 app_kv req_items {keys: {国|item_id: …}} */
+function isReqItem_(reqV, cc, iid) { return !!(reqV && reqV.keys && reqV.keys[String(cc) + '|' + String(iid)]); }
 function stockRestoreRun_() {
-  var rows = sbSelect_('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules,stock_restore_state,stock_restore_manual)');   /* 読めなければ投げる＝何も書かない */
+  var rows = sbSelect_('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules,stock_restore_state,stock_restore_manual,req_items)');   /* 読めなければ投げる＝何も書かない */
   var by = {}; (rows || []).forEach(function (r) { by[r.k] = r.v; });
   var cfg = by.stock_restore_cfg || {}; if (cfg.on === false) return { skipped: 'off' };   /* ★2026-09-28 本人「毎日売れた商品を目で判定」→ 決めていない商品は戻さず確認待ちに並べる＝既定 ON でも勝手には戻らない */   /* 最初は OFF：商品ごとの決め（様子見・数）を本人が見てから ON（高いたまごっち・年に数回しか仕入れられないゲームがある） */
   var qty = Math.max(1, parseInt(cfg.qty, 10) || 1), days = Math.max(1, Math.min(14, parseInt(cfg.days, 10) || 3));
@@ -5651,7 +5653,7 @@ function stockRestoreRun_() {
     var mark = function (res, extra) { done[c.k] = { at: nowIso, r: res }; var e = { at: nowIso, cc: c.cc, sn: c.sn, item_id: c.item_id, name: c.variation || c.name, r: res }; if (extra) Object.keys(extra).forEach(function (x) { e[x] = extra[x]; }); log.unshift(e); };
     if (!li) { out.skip++; mark('no_listing'); return; }
     if (Number(li.status) !== 1) { out.skip++; mark('not_live'); return; }
-    if (isReqCatalog_(li.name)) { out.skip++; mark('request'); return; }   /* ★2026-11-03 リクエスト品は戻さない */
+    if (isReqCatalog_(li.name) || isReqItem_(by.req_items, c.cc, c.item_id)) { out.skip++; mark('request'); return; }   /* ★2026-11-03 リクエスト品は戻さない（11/4 出品ごとの印も） */
     /* ★2026-09-29 本人「在庫に戻すのはカタログごとじゃなくて明細ごと。バリエーションもある」：getModels_ は {models:[…]} を返す。
        前は箱のまま .length を見ていて、全部の明細を「単品（model 0）」扱いにしていた（確認待ち22件がカタログ単位になった） */
     var gm; try { gm = cache[c.item_id] || (cache[c.item_id] = getModels_(li.shop_id, c.item_id)); } catch (e) { out.err++; return; }   /* 読めなければ控えずに次回 */
@@ -5707,7 +5709,7 @@ function cancelStockGuard_() {
      ②「自動で戻す」に決めた商品は、戻す前にキャンセルされると 0 まで引いていた（自動復活は発送待ち以降の注文しか見ない＝誰も戻さない）
        → 決めた数より下げない。限定版（Limited・限定・特装…）は決めがあっても引き戻す */
   if (!syncGate_('cancelStockGuard', 900)) return { skip: 'gate' };
-  var srBy = {}; try { (sbSelect_('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules)') || []).forEach(function (r) { srBy[r.k] = r.v; }); } catch (eSr) { return { skip: '自動で戻す決めが読めない' }; }
+  var srBy = {}; try { (sbSelect_('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules,req_items)') || []).forEach(function (r) { srBy[r.k] = r.v; }); } catch (eSr) { return { skip: '自動で戻す決めが読めない' }; }
   var srRules = srBy.stock_restore_rules || {}, srQ = Math.max(1, parseInt((srBy.stock_restore_cfg || {}).qty, 10) || 1);
   var keepOf = function (name, sku) { if (/\blimited\b|限定|特装|豪華|collector|black\s*box|premium\s*box/i.test(String(name || ''))) return 0; var sk = String(sku || '').trim(); if (!sk) return 0; var r = srRules[srRuleKey_('', '', sk)]; if (!r) return 0; if (parseInt(r.q, 10) > 0) return Math.min(99, parseInt(r.q, 10)); return r.m === 'auto' ? srQ : 0; };
   var rows = sbSelect_('app_kv', 'select=v&k=eq.cancel_stock_done');
@@ -5741,7 +5743,7 @@ function cancelStockGuard_() {
             if (x.vn && (!m || vnNorm_(m.name) !== vnNorm_(x.vn))) { var byNm = (g.models || []).filter(function (mm) { return vnNorm_(mm.name) === vnNorm_(x.vn); });
               if (byNm.length === 1) { res.push(iid + '#' + x.mid + ' 番号が入れ替わっていた→名前で ' + byNm[0].model_id + ' に当てた'); m = byNm[0]; x.mid = Number(m.model_id); }
               else { res.push(iid + '#' + x.mid + ' 今の名前「' + String((m && m.name) || 'なし').slice(0, 30) + '」が注文の「' + x.vn.slice(0, 30) + '」と違う＝触らない'); return; } }
-            if (!m) { res.push(iid + '#' + x.mid + ' 明細がもう無い'); return; } now = Number(m.stock) || 0; keep = isReqModel_(x.cn, m.sku) ? 0 : keepOf(m.name, m.sku); }   /* ★2026-11-03 リクエスト品は0まで引き戻す */
+            if (!m) { res.push(iid + '#' + x.mid + ' 明細がもう無い'); return; } now = Number(m.stock) || 0; keep = (isReqModel_(x.cn, m.sku) || isReqItem_(srBy.req_items, o.cc, iid)) ? 0 : keepOf(m.name, m.sku); }   /* ★2026-11-03 リクエスト品は0まで引き戻す */
           else { var b = callShop_(shop, '/api/v2/product/get_item_base_info', { item_id_list: iid }, 'get'); var it0 = (((b.response || {}).item_list) || [])[0]; if (!it0) { res.push(iid + ' 出品がもう無い'); return; } now = stockOfV2_(it0.stock_info_v2); }
           var nv = Math.max(0, now - x.q);
           if (keep > 0) nv = Math.min(now, Math.max(nv, keep));   /* 自動で戻す決めの数は残す */

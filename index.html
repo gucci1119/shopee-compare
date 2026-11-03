@@ -4874,6 +4874,10 @@
     "🤖が出した明細の相場の見直し（見るだけ）の相場集めを、担当の PC のポータルでするようにしました": "Market data for the 🤖 listing re-check (dry run) is now collected by the owner PC's portal",
     "値付けの見直しの表示を速くしました": "Made the pricing review load faster",
     "値付けの見直しの表を見やすくしました": "Made the pricing review table easier to read",
+    "値付けの見直しを開くのを速くしました": "Made the pricing review open faster",
+    "値付けの見直しに「📮 リクエスト品」の印を足しました": "Added a “📮 Request item” mark to the pricing review",
+    "📮 リクエスト品": "📮 Request item",
+    "⚠ リクエスト品の印を読めませんでした（印の付いた品も表に出ています）。🔄で読み直してください": "⚠ Couldn’t read the request-item marks (marked items are still shown). Press 🔄 to reload",
     "売れた数": "Units sold",
     "今の値段で売れたら（1個）": "If sold at today's price (per unit)",
     "基準の利益（1個）": "Target profit (per unit)",
@@ -24560,6 +24564,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-04', items: [
+      '📮 <b>値付けの見直しに「📮 リクエスト品」の印を足しました</b>（事業本部・本人「リクエスト商品は1回限り」）：BR の Pokéwalker Case back のように、カタログ名にも SKU にも印が無いリクエスト品があります。行のボタンで印を付けると、値付けの見直しと在庫の自動の戻しから外れます。外した数は表の上に出し、✕で印を外せます',
+      '🏷 <b>値付けの見直しを開くのを速くしました</b>（事業本部「（33秒）のまま表が出ない」）：🤖の仕入れ目安（機種ごとに59本）を開くたびに全部読んでいました。更新時刻が変わった本だけ読み、残りはこの端末の控えを使います。読み込み中は「待っている物：出品・🤖の仕入れ目安」のように、何を待っているかを出します',
+    ] },
     { date: '2026-11-03', items: [
       '🪶 <b>ポータルを軽くしました</b>（事業本部の依頼・本人「ポータル重い」）：「やること」の⚠️自動検知の欄が、閉じた後も部品 約1万個・画像 約700枚を抱えたままでした（ポータル全体の約7割）。見ていない時は中身を空にし、開いた時に今までどおり描き直します',
       '📶 <b>ポータルが🤖を呼ぶ回数を減らしました（Supabase の通信量）</b>（事業本部の依頼）：🤖の1回は出品表を明細つきで丸ごと読みます。10/29 はポータルから 289回呼び、出品できたのは14回だけでした。①「担当でない」と返す台（ゲームの4台目）は6時間呼びません ②0件で終わる回が続いた台は、呼ぶ間隔を1回ごとに伸ばします（最長30分）。1件でも出せたら元の間隔に戻ります',
@@ -40340,13 +40348,24 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     if (!force && _llogAll.v && Date.now() - _llogAll.at < (maxAgeMs || 5 * 60000)) return Promise.resolve(_llogAll.v);
     if (_llogAll.p) return _llogAll.p;
     _llogAll.p = (async () => {
-      const ks = (await sbGet('app_kv', 'select=k&k=like.llog_cost_*') || []).filter(x => x && x.k).map(x => x.k);
+      /* ★2026-11-03 事業本部「値付けの見直しが（33秒）のまま表が出ない」：機種ごとの控え59本（約11MB・推測）を開くたびに全部読んでいた。
+         多くは何日も変わらない（WS・ZX は 10/24 のまま）→ 鍵と更新時刻だけ先に読み（約4KB）、更新時刻が変わった本だけ読む。残りはこの端末の控え（IndexedDB）。
+         更新時刻は 10/29 から DB のトリガー（app_kv_touch_updated_at）が書き手の付け忘れも埋める。デモ表示の時は控えを使わず・書かない（伏せた名前を控えに残さない） */
+      const meta = (await sbGet('app_kv', 'select=k,updated_at&k=like.llog_cost_*') || []).filter(x => x && x.k);
+      const useC = !demoOn();
+      let c = null; if (useC) { try { c = await idbGet('llog_cost_kv'); } catch (_) { c = null; } }
+      const cm = (c && c.m && typeof c.m === 'object') ? c.m : {};
+      const need = meta.filter(x => !(x.updated_at && cm[x.k] && cm[x.k].u === x.updated_at && cm[x.k].v));
       /* ★2026-10-29 本人「値付けの見直し、なんでこんなに表示遅いの？」（01 が数えた：46本を1本ずつ＝46往復）→ 3本ずつ並べて読む（DB の負担を見て同時は3本まで） */
-      const out = new Array(ks.length); let i = 0;
-      const worker = async () => { while (i < ks.length) { const j = i++; const r = await sbGet('app_kv', 'select=k,v&k=eq.' + encodeURIComponent(ks[j])); if (r && r[0]) out[j] = r[0]; } };
+      const got = {}; let i = 0;
+      const worker = async () => { while (i < need.length) { const j = i++; const r = await sbGet('app_kv', 'select=k,v,updated_at&k=eq.' + encodeURIComponent(need[j].k)); if (r && r[0]) got[r[0].k] = { u: r[0].updated_at || '', v: r[0].v }; } };
       await Promise.all([worker(), worker(), worker()]);
-      return out.filter(Boolean);
-    })().then(v => { _llogAll = { at: Date.now(), v, p: null }; return v; }, err => { _llogAll.p = null; throw err; });
+      const nm = {}, out = [];
+      meta.forEach(x => { const e = got[x.k] || (cm[x.k] && cm[x.k].u === x.updated_at ? cm[x.k] : null); if (!e) return; nm[x.k] = e; out.push({ k: x.k, v: e.v }); });
+      _llogAll.stat = { keys: meta.length, read: need.length, cached: out.length - Object.keys(got).length };
+      if (useC && Object.keys(got).length) idbSet('llog_cost_kv', { m: nm, at: Date.now() });
+      return out;
+    })().then(v => { _llogAll = { at: Date.now(), v, p: null, stat: _llogAll.stat }; return v; }, err => { _llogAll.p = null; throw err; });
     return _llogAll.p;
   }
   function llogLoadCostMap(force) {
@@ -43374,7 +43393,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const paYen = n => (n == null || !isFinite(n)) ? '—' : ((n < 0 ? '−¥' : '¥') + Math.abs(Math.round(n)).toLocaleString());
   const paLoc = (cc, n) => { if (n == null || !isFinite(n)) return '—'; const rg = regionByCc(cc) || {}; return (rg.cur || '') + (Number(n) >= 1000 ? Math.round(n).toLocaleString() : String(Math.round(n * 100) / 100)); };
 
-  function paIsReq(e) { return /request\s*page|solicitar/i.test(String((e && e.name) || '')) || /^REQ_/i.test(String((e && e.sku) || '').trim()); }
+  /* ★2026-11-04 事業本部「BR Pokéwalker Case back が消えたか確かめて」：Request page 経由で作った出品でも、カタログ名・SKU に印が無い物がある（この品は名前も SKU も普通）。
+     → 出品ごとの印 app_kv req_items（keys＝国|item_id）を足した。GAS の在庫の戻し・キャンセルの引き戻しも同じ鍵を見る */
+  function paIsReq(e) { return /request\s*page|solicitar/i.test(String((e && e.name) || '')) || /^REQ_/i.test(String((e && e.sku) || '').trim()) || !!(e && PA.reqKeys && PA.reqKeys[e.cc + '|' + e.item_id]); }
   async function paLoad(force) {
     if (!force && PA.data && Date.now() - PA.at < 10 * 60000) return PA.data;
     if (PA.busy) return PA.busy;
@@ -43382,7 +43403,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       try { if (!FXD.days) await applyFxRates(); } catch (_) {}
       const since = new Date(Date.now() - 200 * 86400000).toISOString().slice(0, 10);
       // ★読めなかった表を空として進めると「赤字0件」と言ってしまう＝どれか1つでも読めなければ止める（数えられない時に0件と言わない）
-      const [orders, inc, costs, inv, lis, logKv, sheetKv, frontKv, handInv, llogKv] = await Promise.all([
+      /* ★2026-11-03 事業本部「（33秒）のまま表が出ない」：どの読みを待っているかを読み込み中の所に出す（PA.ld）・かかった時間を PA.ms に残す（window.__paMs で見られる） */
+      const _t0 = Date.now(), _nm = ['注文', '入金', '仕入', '在庫台帳', '出品', '値付けの記録', '利益計算表', 'フロントの印', '手元の在庫', '🤖の仕入れ目安', 'リクエスト品の印'];
+      PA.ld = {}; _nm.forEach(n => { PA.ld[n] = null; });
+      const _tr = arr => arr.map((p0, ix) => Promise.resolve(p0).then(v => { PA.ld[_nm[ix]] = (Date.now() - _t0) / 1000; return v; }, e => { PA.ld[_nm[ix]] = -1; throw e; }));
+      const [orders, inc, costs, inv, lis, logKv, sheetKv, frontKv, handInv, llogKv, reqKv] = await Promise.all(_tr([
         sbGetAll('orders', `select=cc,sn,status,items,order_date,order_ts,shop_id&order_date=gte.${since}`),
         sbGetAll('income', 'select=cc,sn,amount,fees'),
         sbGetAll('costs', 'select=cc,sn,cost'),
@@ -43393,10 +43418,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         sbGetAll('app_kv', 'select=v&k=eq.profit_sheet'),   // 📗利益計算表（仕入の3番目の控え・PayPal分）＝利益明細と同じ材料
         sbGetAll('app_kv', 'select=v&k=eq.front_items').catch(() => null),
         sbGetAll('inventory', 'select=name,name_supplier,price&status=eq.' + encodeURIComponent('在庫保管中') + '&shopee_sn=is.null').catch(() => null),   /* ★2026-10-25 手元の在庫の目安（約1,500行・3列）。読めなければ「読めませんでした」と出す */
-        llogFetchAll(!!force, 30 * 60000).catch(() => null),   /* 値付けの見直しでは30分使い回す（🔄で読み直し） */   /* ★2026-10-25 🤖の仕入れ目安（46本・埋め戻し後 約11MB）。出品ログと5分は使い回す・1本ずつ順番に読む。名前か SKU が今の明細と合う物だけ使う */
-      ]);
+        llogFetchAll(!!force, 30 * 60000).catch(() => null),
+        sbGet('app_kv', 'select=v&k=eq.req_items').catch(() => null),   /* リクエスト品の印（小さい鍵・国|item_id） */   /* 値付けの見直しでは30分使い回す（🔄で読み直し） */   /* ★2026-10-25 🤖の仕入れ目安（46本・埋め戻し後 約11MB）。出品ログと5分は使い回す・1本ずつ順番に読む。名前か SKU が今の明細と合う物だけ使う */
+      ]));
+      const _tRead = Date.now() - _t0;
       PA.llog = {}; PA.llogOk = Array.isArray(llogKv); (llogKv || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(k0 => { const v0 = m[k0]; if (v0 && typeof v0 === 'object' && Number(v0.c) > 0) PA.llog[k0] = v0; }); });
       PA.handInv = Array.isArray(handInv) ? handInv : null; PA.handMemo = {};
+      PA.reqOk = Array.isArray(reqKv); PA.reqKeys = (reqKv && reqKv[0] && reqKv[0].v && reqKv[0].v.keys) || {}; PA.reqList = [];
       PA.frontOk = frontKv !== null; PA.front = (frontKv && frontKv[0] && frontKv[0].v) || {}; PA.front.keys = PA.front.keys || {}; PA.front.skus = PA.front.skus || {};
       const sheet = (sheetKv && sheetKv[0] && sheetKv[0].v && sheetKv[0].v.items) || {};
       const incM = new Map((inc || []).map(r => [r.cc + '|' + r.sn, r]));
@@ -43461,10 +43489,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const kCc = {}; g.forEach(e => e.prof.forEach(p => { if (p.k > 0 && p.k < 1.5) (kCc[e.cc] = kCc[e.cc] || []).push(p.k); }));
       Object.keys(kCc).forEach(cc => { kCc[cc] = paMed(kCc[cc]); });
       /* ★2026-10-03 区分けは関数にして、フロントの印を付け外しした時に読み直さずその場で区分けし直す（押した瞬間に変わる） */
-      const classify = () => { const rows = [];
+      const classify = () => { const rows = []; PA.reqSkipped = 0; PA.reqList = [];
       g.forEach(e => {
         /* ★2026-11-03 本人「リクエスト商品は1回限りなので、価格改定とか在庫復活とか不要です」：Request page（BR は Solicitar）のカタログ・SKU が REQ_ の明細は見直しに出さない */
-        if (paIsReq(e)) { PA.reqSkipped = (PA.reqSkipped || 0) + 1; return; }
+        if (paIsReq(e)) { PA.reqSkipped++; PA.reqList.push(e); return; }
         const rg = regionByCc(e.cc) || {}, unit = rg.priceUnit || 1;
         const inWin = (a, b) => e.sales.filter(s => s.t >= now - b * DAY && s.t < now - a * DAY).reduce((x, s) => x + s.q, 0);
         e.u30 = inWin(0, 30); e.uPrev = inWin(30, 120) / 3; e.u90 = inWin(0, 90); e.mo = Math.round(inWin(0, 90) / 3 * 10) / 10;
@@ -43550,11 +43578,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         rows.push(e);
       }); return rows; };
       PA.reclass = classify;
-      PA.reqSkipped = 0;
       const rows = classify();
       let log = []; try { log = (logKv && logKv[0] && logKv[0].v && logKv[0].v.rows) || []; } catch (_) {}
       PA.data = { rows, unmatched, log, logOk: logKv !== null, at: Date.now() };
       PA.at = Date.now();
+      PA.ms = { read: _tRead, calc: Date.now() - _t0 - _tRead, each: Object.assign({}, PA.ld), llog: _llogAll.stat || null, rows: rows.length, at: new Date().toISOString() };
+      try { (window.__paMs = window.__paMs || []).push(PA.ms); if (window.__paMs.length > 10) window.__paMs.shift(); } catch (_) {}
       return PA.data;
     })();
     try { return await PA.busy; } finally { PA.busy = null; }
@@ -43578,7 +43607,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!PA.data || force) {
       root.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>売れた注文・入金・仕入・出品を読み込み中…<span id="pa-ld-t" style="margin-left:6px"></span></div>';
       /* ★2026-10-25 本人「このページ、全然表示されへん」：経過秒を出す。読み込みは1本90秒で打ち切るので、最長でも数分で表か失敗が出る */
-      const t0 = Date.now(), iv = setInterval(() => { const el = document.getElementById('pa-ld-t'); if (!el) { clearInterval(iv); return; } const sec = Math.round((Date.now() - t0) / 1000); el.textContent = sec >= 5 ? '（' + sec + '秒）' + (sec >= 60 ? ' 時間がかかっています。読めない時は失敗として表示します' : '') : ''; }, 1000);
+      const t0 = Date.now(), iv = setInterval(() => { const el = document.getElementById('pa-ld-t'); if (!el) { clearInterval(iv); return; } const sec = Math.round((Date.now() - t0) / 1000); const wt = PA.ld ? Object.keys(PA.ld).filter(k => PA.ld[k] == null) : []; el.textContent = (sec >= 5 ? '（' + sec + '秒）' : '') + (sec >= 3 && wt.length ? ' 待っている物：' + wt.join('・') : '') + (sec >= 60 ? ' 時間がかかっています。読めない時は失敗として表示します' : ''); }, 1000);
     }
     let D; try { D = await paLoad(force); } catch (e) { root.innerHTML = `<div class="tool-card" style="max-width:none;color:#d93025">⚠️ 読み込めませんでした（${esc((e && e.message) || e)}）。<b>読めないまま「赤字0件」とは出しません。</b>少し置いて 🔄 を押してください。</div>`; return; }
     if (!document.getElementById('pa-root') || PA.sub !== 'adj') return;
@@ -43608,7 +43637,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const url = `https://${rg.buyer || ''}/product/${e.shop_id || ''}/${e.item_id}`;
       return `<tr data-k="${esc(e.key)}" style="border-top:1px solid #eef0f3">
         <td>${e.sug != null && !e.blocked ? `<input type="checkbox" class="pa-ck" data-k="${esc(e.key)}"${PA.sel.has(e.key) ? ' checked' : ''}>` : (e.blocked ? '<span title="この値段はこのカタログ（国）では Shopee が断る＝右の「移す」「消す」で" style="font-size:11px">🚫</span>' : '')}</td>
-        <td style="white-space:nowrap;color:${c[2]};font-weight:700;font-size:11px">${c[1]}<div style="margin-top:3px">${e.front ? '<span style="display:inline-block;background:#e6f4ea;color:#1e8e3e;border:1px solid #81c995;border-radius:8px;padding:0 6px;font-size:10.5px">🟢 フロント</span> ' : ''}${e.frontRule ? '<span class="smd-dim" style="font-size:11px;font-weight:400" title="親SKU が POKECA_FRONT_／OPCG_FRONT_ のカタログ＝トレカのフロント（1カード1出品）。印ではなく決まりでフロントにしているので、ここでは外せません">トレカ（親SKU）</span>' : `<button class="smd-btn pa-front" data-k="${esc(e.key)}" style="font-size:11px;padding:0 6px;font-weight:400${!e.front && e.frontCand ? ';border-color:#1e8e3e;color:#1e8e3e' : ''}" title="${e.front ? 'フロントの印を外す（同じ明細SKUの明細は全国まとめて外れます）' : 'フロントにする＝値上げ候補に出さず、下限1個¥250で見る（同じ明細SKUの明細は全国まとめて）'}">${e.front ? 'フロントを外す' : (e.frontCand ? '🟢 フロントにする（候補）' : 'フロントにする')}</button>`}${''/* ★2026-10-25 本人「手元の在庫はデタラメです」＝在庫台帳の「在庫保管中」の数は実物と合わない。手元の目安の表示は外した（04 の依頼） */}${e.fromList ? '<div class="smd-dim" style="font-size:11px;font-weight:400;margin-top:2px">直近200日 売れていない</div>' : ''}${(() => { const lim = paFrontCfg().candCost; return (e.front && e.cost != null && e.cost > lim) ? '<div style="font-size:11px;color:#c5221f;font-weight:700;margin-top:2px" title="フロントかバックかは明細（容量・色・版）ごとの仕入れで決める（本人 10/25）。この明細の仕入れがフロントの線を超えている＝値付けの基準（10/25 確定）ではフロント以外＝相場で粗利¥1,500以上（仕入れ¥3,000超は仕入れの50%以上）。印を外すかは人が決める">⚠ 仕入れ' + paYen(e.cost) + '＝¥' + lim.toLocaleString() + '超＝フロントではない（粗利¥1,500以上の線）</div>' : ''; })()}</div></td>
+        <td style="white-space:nowrap;color:${c[2]};font-weight:700;font-size:11px">${c[1]}<div style="margin-top:3px">${e.front ? '<span style="display:inline-block;background:#e6f4ea;color:#1e8e3e;border:1px solid #81c995;border-radius:8px;padding:0 6px;font-size:10.5px">🟢 フロント</span> ' : ''}${e.frontRule ? '<span class="smd-dim" style="font-size:11px;font-weight:400" title="親SKU が POKECA_FRONT_／OPCG_FRONT_ のカタログ＝トレカのフロント（1カード1出品）。印ではなく決まりでフロントにしているので、ここでは外せません">トレカ（親SKU）</span>' : `<button class="smd-btn pa-front" data-k="${esc(e.key)}" style="font-size:11px;padding:0 6px;font-weight:400${!e.front && e.frontCand ? ';border-color:#1e8e3e;color:#1e8e3e' : ''}" title="${e.front ? 'フロントの印を外す（同じ明細SKUの明細は全国まとめて外れます）' : 'フロントにする＝値上げ候補に出さず、下限1個¥250で見る（同じ明細SKUの明細は全国まとめて）'}">${e.front ? 'フロントを外す' : (e.frontCand ? '🟢 フロントにする（候補）' : 'フロントにする')}</button>`} <button class="smd-btn pa-req" data-k="${esc(e.key)}" style="font-size:11px;padding:0 6px;font-weight:400" title="Request page 経由で作った1回限りの出品＝値付けの見直しと在庫の自動の戻しから外す（印は国＋出品ごと）">📮 リクエスト品</button>${''/* ★2026-10-25 本人「手元の在庫はデタラメです」＝在庫台帳の「在庫保管中」の数は実物と合わない。手元の目安の表示は外した（04 の依頼） */}${e.fromList ? '<div class="smd-dim" style="font-size:11px;font-weight:400;margin-top:2px">直近200日 売れていない</div>' : ''}${(() => { const lim = paFrontCfg().candCost; return (e.front && e.cost != null && e.cost > lim) ? '<div style="font-size:11px;color:#c5221f;font-weight:700;margin-top:2px" title="フロントかバックかは明細（容量・色・版）ごとの仕入れで決める（本人 10/25）。この明細の仕入れがフロントの線を超えている＝値付けの基準（10/25 確定）ではフロント以外＝相場で粗利¥1,500以上（仕入れ¥3,000超は仕入れの50%以上）。印を外すかは人が決める">⚠ 仕入れ' + paYen(e.cost) + '＝¥' + lim.toLocaleString() + '超＝フロントではない（粗利¥1,500以上の線）</div>' : ''; })()}</div></td>
         <td><span style="background:${rg.color || '#888'};color:#fff;border-radius:4px;padding:0 5px;font-size:10.5px">${e.cc}</span></td>
         <td style="width:200px;max-width:200px;min-width:150px" title="${esc(e.name + (e.vari ? ' ▸ ' + e.vari : ''))}">${img ? `<img src="${esc(img)}" loading="lazy" style="width:30px;height:30px;object-fit:cover;border-radius:4px;float:left;margin-right:6px" onerror="this.style.display='none'">` : ''}<a href="${hrefOk(url)}" target="_blank" rel="noopener" style="color:inherit;font-size:11.5px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(e.name)}</a>${e.vari ? `<div style="color:#5b3fd6;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;clear:both">▸ ${esc(e.vari)}</div>` : ''}</td>
         <td style="text-align:right;white-space:nowrap"><b style="font-size:13.5px">${e.u30}</b><span style="font-size:11px;color:#6b7280">個</span><div class="smd-dim" style="font-size:11px">直近30日（前は月${Math.round(e.uPrev * 10) / 10}個）</div></td>
@@ -43654,6 +43683,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             return '<span style="font-size:11px;color:#6b7280;padding:2px 6px" title="判断材料が足りない明細の理由ごとの件数。仕入れ待ちは転記して🔄読み直すと判定されます">⚪ ' + L_PA('内訳') + '：' + Object.entries(m).sort((x, y) => y[1] - x[1]).map(([k, v]) => k + ' ' + v).join('・') + '</span>';
           })()}
           ${PA.frontMiss && PA.frontMiss.length ? `<span style="color:#b06000;font-size:11px" title="${esc(PA.frontMiss.slice(0, 30).join('\n'))}">⚠ フロントの印のうち、出品に見つからない ${PA.frontMiss.length}件（明細を消した・出品の読み込みが古い）</span>` : ''}
+          ${PA.reqSkipped ? `<span style="font-size:11px;color:#6b7280">📮 リクエスト品 ${PA.reqSkipped}明細は見直しに出していません${(PA.reqList || []).filter(x => PA.reqKeys && PA.reqKeys[x.cc + '|' + x.item_id]).slice(0, 20).map(x => ` <button class="smd-btn pa-unreq" data-ci="${esc(x.cc + '|' + x.item_id)}" style="font-size:10.5px;padding:0 5px" title="リクエスト品の印を外す（見直しに戻す）">${esc(x.cc)} ${esc(String(x.name || '').slice(0, 40))} ✕</button>`).filter((v, i, a) => a.indexOf(v) === i).join('')}</span>` : ''}
+          ${PA.reqOk === false ? '<span style="color:#d93025;font-size:11px;font-weight:700">⚠ リクエスト品の印を読めませんでした（印の付いた品も表に出ています）。🔄で読み直してください</span>' : ''}
           ${PA.frontOk === false ? '<span style="color:#d93025;font-size:11px;font-weight:700">⚠ フロントの印を読めませんでした（印が無いのではなく読めていません）。🔄で読み直してください</span>' : ''}
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
@@ -43899,6 +43930,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         }));
       } catch (err) { box.innerHTML = '<span style="color:#d93025">候補を読めませんでした：' + esc(String((err && err.message) || err).slice(0, 120)) + '</span>'; }
     }));
+    /* ★2026-11-04 リクエスト品の印（国|item_id）：押した瞬間に表から外す→裏で保存。失敗したら戻して出す */
+    const paReqSet = (ci, on, meta) => {
+      if (PA.reqOk === false) { alert('リクエスト品の印を読めていないので、付け外しできません（今の印を消してしまうため）。🔄で読み直してください'); return; }
+      const R = PA.reqKeys = PA.reqKeys || {}, prev = R[ci];
+      const apply = cur => { cur.keys = cur.keys || {}; if (on) cur.keys[ci] = meta; else delete cur.keys[ci]; };
+      if (on) R[ci] = meta; else delete R[ci];
+      PA.data.rows = PA.reclass(); paRender();
+      toast(on ? '📮 リクエスト品にしました（値付けの見直しと在庫の自動の戻しから外します）' : 'リクエスト品の印を外しました');
+      rsSaveKey('req_items', cur => apply(cur), 'リクエスト品の印').catch(err0 => {
+        if (prev === undefined) delete R[ci]; else R[ci] = prev;
+        PA.data.rows = PA.reclass(); paRender();
+        alert('リクエスト品の印を保存できませんでした（元に戻しました）：' + ((err0 && err0.message) || err0));
+      });
+    };
+    root.querySelectorAll('.pa-req').forEach(b => b.addEventListener('click', () => {
+      const e = byKey.get(b.dataset.k); if (!e || !PA.reclass) return;
+      paReqSet(e.cc + '|' + e.item_id, true, { at: new Date().toISOString(), cc: e.cc, name: String(e.name || '').slice(0, 80) });
+    }));
+    root.querySelectorAll('.pa-unreq').forEach(b => b.addEventListener('click', () => { if (PA.reclass) paReqSet(b.dataset.ci, false); }));
     /* ★2026-10-03 フロントの印：押した瞬間に区分けし直して描き直す→裏で保存。保存に失敗したら戻して画面に出す */
     root.querySelectorAll('.pa-front').forEach(b => b.addEventListener('click', () => {
       const e = byKey.get(b.dataset.k); if (!e || !PA.reclass || e.frontRule) return;
