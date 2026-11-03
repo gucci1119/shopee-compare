@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0600';
+var SRC_VER = '20261104-0630';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3835,7 +3835,20 @@ function baLlogRekey_(shopId, itemId, moves, gone, nameOf) {
      元の並びのまま30分たったら効かなかった＝控えを捨てる。24時間で捨てる。末尾の __del は消さない（在庫0で買えない・🧹か詰め直しで消える） */
 /* ★2026-11-04 全体レビュー 2回目 新2-1・新2-2：詰め直しの結果（付け替えの元）を app_kv shift_result_<shop>_<item> に残す。rid＝ポータルが呼ぶたびに付ける番号（どの削除の結果か） */
 var SHIFT_RID = '';
-function shiftResultPut_(shopId, itemId, v) { try { if (!v || !Array.isArray(v.moves) || !(v.moves.length || (v.gone || []).length)) return false; sbUpsert_('app_kv', [{ k: 'shift_result_' + parseInt(shopId, 10) + '_' + String(itemId).replace(/\D/g, ''), v: v, updated_at: new Date().toISOString() }], 'k'); return true; } catch (e) { return false; } }
+/* ★2026-11-04 2回目の続き：同じカタログを続けて消す（Mac の道具など）と最新の1件で上書きされ、途中の付け替えが失われる＝品番ごとに履歴（hist・7日・40件）で残す。
+   上の階の値（at・rid・src・moves・gone）は最新の1件（ポータルの時間切れ後の読みが見る） */
+function shiftResultPut_(shopId, itemId, v) {
+  try {
+    if (!v || !Array.isArray(v.moves) || !(v.moves.length || (v.gone || []).length)) return false;
+    var k = 'shift_result_' + parseInt(shopId, 10) + '_' + String(itemId).replace(/\D/g, '');
+    var cur = null; try { var r0 = sbSelect_('app_kv', 'select=v&k=eq.' + k); cur = r0 && r0[0] && r0[0].v; } catch (eR) { cur = null; }
+    var hist = (cur && Array.isArray(cur.hist)) ? cur.hist : [], now = Date.now();
+    hist = hist.filter(function (e) { return e && now - Number(e.at || 0) < 7 * 86400000; });
+    hist.push({ at: v.at || now, rid: v.rid || '', src: v.src || '', moves: v.moves, gone: v.gone || [] });
+    var out = {}; Object.keys(v).forEach(function (x) { out[x] = v[x]; }); out.hist = hist.slice(-40);
+    sbUpsert_('app_kv', [{ k: k, v: out, updated_at: new Date().toISOString() }], 'k'); return true;
+  } catch (e) { return false; }
+}
 function shiftPendKey_(shopId, itemId) { return String(parseInt(shopId, 10)) + '|' + String(parseInt(itemId, 10)); }
 function shiftPendSave_(shopId, itemId, rec) {
   try {

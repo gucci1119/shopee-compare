@@ -2861,15 +2861,22 @@
       if (!settings.sbSecret || demoOn() || (typeof pcIsOwner === 'function' && !pcIsOwner())) return;
       const since = new Date(Date.now() - 2 * 86400000).toISOString();
       const rows = await sbGet('app_kv', 'select=k,v&k=like.shift_result_*&updated_at=gte.' + encodeURIComponent(since));
+      /* 当てる物＝履歴（hist）の中で、まだ当てていない「後から効いた（pending）」か「ポータル以外から呼んだ（rid なし＝Mac の道具など）」の物。古い順に1つずつ。
+         ポータルから呼んで返事が来た物（rid あり・direct）は呼んだ PC が当てている＝当てない。履歴の無い前の形（11/4 05:30 以前）は途中が失われているので当てない */
       for (const row of (rows || [])) {
-        const v = row && row.v; if (!v || v.src !== 'pending' || v.appliedAt || !Array.isArray(v.moves)) continue;
+        const v = row && row.v; if (!v || !Array.isArray(v.hist)) continue;
         const m = /^shift_result_\d+_(\d+)$/.exec(String(row.k || '')); if (!m) continue;
-        if (v.rid && shiftApplied(v.rid)) continue;
-        await sbUpsert('app_kv', [{ k: row.k, v: Object.assign({}, v, { appliedAt: Date.now(), appliedBy: (typeof pcName === 'function' ? pcName() : '') }), updated_at: new Date().toISOString() }], 'k');   /* 先に印（2台で2回当てない） */
-        if (v.rid) shiftMarkApplied(v.rid);
-        const n = pidRekeyAfterShift(m[1], { moves: v.moves, gone: v.gone || [] });
-        try { logAct('出品', '詰め直しの付け替え（後から効いた）', m[1], '移動 ' + v.moves.length + '・消えた ' + (v.gone || []).length + '・JAN ' + n); } catch (_) {}
-        try { toast('🔁 後から効いた詰め直し削除の付け替えを当てました（' + m[1] + '・' + v.moves.length + '件の移動）', 6000); } catch (_) {}
+        const todo = v.hist.filter(e => e && !e.appliedAt && Array.isArray(e.moves) && (e.src === 'pending' || !e.rid) && !(e.rid && shiftApplied(e.rid))).sort((a, b) => Number(a.at) - Number(b.at));
+        if (!todo.length) continue;
+        /* 先に印（2台で2回当てない）＝読み直して、当てる at に appliedAt を付けて書く */
+        const fr = await sbGet('app_kv', 'select=v&k=eq.' + encodeURIComponent(row.k)); const fv = fr && fr[0] && fr[0].v; if (!fv || !Array.isArray(fv.hist)) continue;
+        const ats = new Set(todo.map(e => String(e.at))), nowA = Date.now(); let gone = false;
+        fv.hist.forEach(e => { if (e && ats.has(String(e.at))) { if (e.appliedAt) gone = true; e.appliedAt = nowA; } });
+        if (gone) continue;   /* 別の PC が当て始めていた */
+        await sbUpsert('app_kv', [{ k: row.k, v: fv, updated_at: new Date().toISOString() }], 'k');
+        let nAll = 0; for (const e of todo) { if (e.rid) shiftMarkApplied(e.rid); nAll += pidRekeyAfterShift(m[1], { moves: e.moves, gone: e.gone || [] }) || 0; }
+        try { logAct('出品', '詰め直しの付け替え（後から・ポータル以外）', m[1], todo.length + '回分・JAN ' + nAll); } catch (_) {}
+        try { toast('🔁 ポータルの外・後から効いた詰め直し削除の付け替えを当てました（' + m[1] + '・' + todo.length + '回分）', 6000); } catch (_) {}
       }
     } catch (e) { console.warn('[詰め直しの後から効いた分] 読めませんでした', e && e.message); }
   }
@@ -24666,7 +24673,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-04', items: [
-      '🔁 <b>詰め直し削除の付け替えの残りを直しました</b>（全体レビュー2回目）：①並べ替えが後から効いた時も、担当の PC が10分ごとに結果を読み、JAN・在庫0固定を1回だけ付け替えます ②時間切れの後に読む結果は、その削除の番号が合う物だけ当てます（別の削除の結果で2回ずらさない）③出品一覧を開いていなくても在庫0固定の台帳を読んでから付け替えます',
+      '🔁 <b>詰め直し削除の付け替えの残りを直しました</b>（全体レビュー2回目）：①並べ替えが後から効いた時と、ポータルの外（Mac の道具など）から消した時も、担当の PC が10分ごとに結果の履歴を読み、JAN・在庫0固定を古い順に1回だけ付け替えます ②時間切れの後に読む結果は、その削除の番号が合う物だけ当てます（別の削除の結果で2回ずらさない）③出品一覧を開いていなくても在庫0固定の台帳を読んでから付け替えます',
       '🧯 <b>全体レビューの残りを直しました</b>：①キャンセルで戻った在庫を、明細名が変わっていて引き戻せなかった件を ⚠️自動検知に出します（その明細はまた買える状態かもしれません）②詰め直し削除の「動いている」印を GAS の台をまたいで見ます（🤖が名前を元に戻さない）③相場の見直し：写真集めと同時に叩かない・3回続けて読めなければ6時間休む・止めた時は集めない・10/4 より前の注文も明細名で「売れた」と数える ④一番くじに型番「一番くじ ＜シリーズ＞ ＜X＞賞 ＜キャラ名＞」を付け、SKU に賞と駿河屋の番号を入れて被らないようにしました（JAN が無ければ「JAN 未取得」で出して夜に調べます）',
       '🧯 <b>全体レビュー（10/31・11/4）の直し</b>：①詰め直し削除の返事が300秒で来なかった時も、GAS が残した結果を後から読んで JAN・在庫0固定を付け替えます ②出品一覧の読み込み中に付け替えて捨てない ③Smart Reply が PayPal で断った文は、コピーも「貼って」も出しません ④⚠️自動検知は、見ていない時は中身を作りません（バッジの数だけ） ⑤口座を切り替えた後の値付けの見直しが0件になる・前の口座の提案が出る、を直しました ⑥「Shopee の額＝合計」で PayPal 0 の案を返しません ⑦JAN の台帳が読めなかった後は5分あけて読み直します',
       '🧺 <b>見積もりに「まとめ買い」の口を足しました</b>（03 営業部・本人「これ２つなの？画像１個しかないけど」「タイトル何かぐちゃぐちゃになってない？」）：WhatsApp・Smart Reply から N点まとめて頼むと、仕入れは合計、粗利は1件ずつの線の合計で計算し、英語名は品物ごとの名前をそのまま使います（混ぜて作り直しません）。文面は「We found N items: A and B」で、品物ごとの写真を返します。VN で上限（909,090）を超える時は、分け方の案を出します',
