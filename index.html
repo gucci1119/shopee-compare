@@ -2932,6 +2932,51 @@
     out.detail = out.detail.slice(0, 300);
     return out;
   };
+  /* ★2026-11-04 事業本部：付け直しで外した明細（JAN 未取得に戻った分）を、同じ明細名（機種つき）で JAN が確かな明細から写す。
+     写す元は「仕入れ目安の控え（llog_cost_*）で、今の明細名＝控えの英語名・台帳の和名＝控えの和名」と確かめられた物だけ（まだずれている元から写さない）。
+     確かめた元どうしで JAN が食い違う名前は写さない。空いている欄だけ入れる。orphans=true の時は、出品の表に今は無い番号の鍵も消す（DB の明細で読み直して確かめ・48時間以内に書いた鍵は残す）。
+     控え（元の中身）は IndexedDB smd_fill_undo_<時刻>。担当の PC で Claude が呼ぶ（ボタンは無い） */
+  window.__smdJanFillSameName = async function (undoKey, dry, orphans) {
+    const nrm = t => String(t || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+    const st = (t) => { window.__rkStep = t + ' ' + new Date().toLocaleTimeString('ja-JP'); };
+    st('JAN 台帳'); await ensureProductIds(); if (!productIds || kvOk.product_ids === false) throw new Error('JAN 台帳を読めない');
+    if (!lst.loaded || !lst.byCc) throw new Error('出品の表をまだ読めていない');
+    const u = await idbGet(undoKey); if (!u || !Array.isArray(u.detail)) throw new Error('付け直しの控えが無い: ' + undoKey);
+    st('仕入れ目安'); const ll = await llogFetchAll(false, 30 * 60000); const llOf = {};
+    (ll || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(k => { const q = k.split('|'); if (q.length === 3) llOf[q[1] + '#' + q[2]] = { ja: nrm(m[k].ja), en: nrm(m[k].en) }; }); });
+    st('索引');
+    const jok = j => /^\d{8}$|^\d{13}$/.test(String(j || '').trim());
+    const where = {}, idx = new Map();   /* where＝鍵→{name キー・名前・機種}。idx＝name キー→{jans:Map(jan→数), mpns:Set} */
+    Object.keys(lst.byCc).forEach(cc => (lst.byCc[cc] || []).forEach(r => { if (!r || !r.item_id) return; const hw = janHwOf(r);
+      (r.models || []).forEach(x => { if (!x || x.ghost || !x.id || !x.n) return;
+        const k = 'id:' + r.item_id + '#' + x.id, nk = pidNameKey(x.n, pidMHw(x, hw)); where[k] = { nk, n: x.n, hw: pidMHw(x, hw), cc };
+        const p = productIds[k]; if (!p || !jok(p.jan) || !p.jp) return;
+        const l = llOf[r.item_id + '#' + x.id]; if (!l || !l.ja || l.en !== nrm(x.n) || l.ja !== nrm(p.jp)) return;   /* 控えで確かめられた元だけ */
+        if (!idx.has(nk)) idx.set(nk, { jans: new Map(), mpns: new Set() }); const g = idx.get(nk);
+        g.jans.set(String(p.jan).trim(), (g.jans.get(String(p.jan).trim()) || 0) + 1); if (String(p.mpn || '').trim()) g.mpns.add(String(p.mpn).trim()); }); }));
+    const out = { dry: !!dry, targets: 0, already: 0, filled: 0, conflict: 0, noSource: 0, gone: 0, left: [], orphanDel: 0, orphanKeep48h: 0 }, undo = {};
+    const tk = [...new Set(u.detail.filter(d => /^外す/.test(String(d.to || ''))).map(d => 'id:' + d.id + '#' + d.from))];
+    tk.forEach(k => { out.targets++; const w = where[k]; if (!w) { out.gone++; return; }
+      const prev = productIds[k] || {}; if (jok(prev.jan)) { out.already++; return; }
+      const g = idx.get(w.nk); if (!g || !g.jans.size) { out.noSource++; out.left.push({ k, n: w.n, hw: w.hw, cc: w.cc }); return; }
+      if (g.jans.size > 1) { out.conflict++; out.left.push({ k, n: w.n, hw: w.hw, cc: w.cc, why: 'JAN が2つ以上' }); return; }
+      const jan = [...g.jans.keys()][0], mpn = g.mpns.size === 1 ? [...g.mpns][0] : '';
+      out.filled++; if (dry) return; undo[k] = productIds[k] === undefined ? null : productIds[k];
+      productIds[k] = Object.assign({}, prev, { jan, mpn: String(prev.mpn || '').trim() || mpn, src: '同じ明細名から複製（付け直しの後・控えで確かめた元 ' + g.jans.get(jan) + '件）', at: Date.now(), noJan: undefined, noJanAt: undefined }); });
+    if (orphans) { st('消えた番号');
+      const byItem = {}; Object.keys(productIds).forEach(k => { const m = /^id:(\d+)#(\d+)$/.exec(k); if (!m || where[k]) return; (byItem[m[1]] = byItem[m[1]] || []).push(k); });
+      const known = new Set(); Object.keys(lst.byCc).forEach(cc => (lst.byCc[cc] || []).forEach(r => { if (r && r.item_id) known.add(String(r.item_id)); }));
+      const ids = Object.keys(byItem).filter(id => known.has(id)), live = {};   /* 出品の表に無いカタログ（止めた・別の店）は触らない */
+      for (let i = 0; i < ids.length; i += 40) { const rows = await sbGetAll('listings', 'select=item_id,models&item_id=in.(' + ids.slice(i, i + 40).join(',') + ')'); (rows || []).forEach(r => { live[String(r.item_id)] = new Set((r.models || []).filter(m => m && m.id).map(m => String(m.id))); }); }
+      ids.forEach(id => { const s = live[id]; if (!s) return; byItem[id].forEach(k => { const mid = k.split('#')[1]; if (s.has(mid)) return; const e = productIds[k] || {};
+        if (e.at && Date.now() - Number(e.at) < 48 * 3600000) { out.orphanKeep48h++; return; }
+        out.orphanDel++; if (dry) return; undo[k] = e; delete productIds[k]; }); }); }
+    if (!dry && Object.keys(undo).length) { const bk = 'smd_fill_undo_' + Date.now(); await idbSet(bk, { at: new Date().toISOString(), pid: undo }); out.undoKey = bk;
+      window.__smdFillUndo = async (key) => { const v = await idbGet(key || bk); if (!v) throw new Error('控えが無い'); Object.keys(v.pid || {}).forEach(k => { if (v.pid[k] === null) delete productIds[k]; else productIds[k] = v.pid[k]; }); try { _pidDupCache = null; } catch (_) {} saveProductIds(); return Object.keys(v.pid || {}).length; };
+      try { _pidDupCache = null; } catch (_) {} saveProductIds(); try { logAct('出品', 'JANを同じ明細名から複製（付け直しの後）', String(out.targets) + '明細', '入れた ' + out.filled + '・食い違い ' + out.conflict + '・元なし ' + out.noSource + '／消えた番号を消した ' + out.orphanDel); } catch (_) {} }
+    out.sources = idx.size; out.leftN = out.left.length; window.__smdFillLeft = out.left; out.left = out.left.slice(0, 50);
+    return out;
+  };
   async function gasCallShift(params, timeoutMs) {
     let r = null; const t0 = Date.now();
     if (!params.rid) params.rid = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);   /* ★2026-11-04 新2-2：どの削除の結果かの番号（GAS が結果の控えに残す） */
