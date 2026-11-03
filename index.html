@@ -2900,6 +2900,7 @@
     const need = ids.filter(id => !cur[id]);
     st('出品の明細'); for (let i = 0; i < need.length; i += 40) { const ids = need; const rows = await sbGetAll('listings', 'select=item_id,models&item_id=in.(' + ids.slice(i, i + 40).join(',') + ')'); (rows || []).forEach(r => { cur[String(r.item_id)] = (r.models || []).filter(m => m && m.id && !m.ghost).map(m => ({ mid: String(m.id), n: nrm(m.n), na: an(m.n), sa: an(m.sku) })); }); }
     st('照らす');
+    const undo = {}, undoK0 = {};   /* 元に戻すための控え（触ったカタログの元の中身） */
     const out = { dry: !!dry, items: 0, kept: 0, moved: 0, dropped: 0, empty: 0, orphan: 0, noListing: 0, k0moved: 0, k0dropped: 0, k0kept: 0, detail: [] };
     for (const id of ids) {
       out.items++; const ms = cur[id]; if (!ms) { out.noListing++; continue; }
@@ -2921,9 +2922,13 @@
         out.dropped++; moveOf[om] = null; out.detail.push({ id, from: om, to: cand.length > 1 ? '外す（候補が2つ以上）' : '外す（合う明細が無い）', mpn: e.mpn || '', jp: e.jp || '', jan: e.jan || '' }); });
       const mt = lstMeta && lstMeta[id], k0 = (mt && mt.keep0m) ? Object.assign({}, mt.keep0m) : null, nk0 = {};
       if (k0) Object.keys(k0).forEach(om => { if (!k0[om]) return; const to = moveOf[om]; if (to === undefined || to === om) { out.k0kept++; nk0[om] = k0[om]; } else if (to === null) out.k0dropped++; else { nk0[to] = k0[om]; out.k0moved++; } });
-      if (!dry) { keys.forEach(k => { delete productIds[k]; }); Object.keys(plan).forEach(k => { productIds[k] = plan[k]; }); if (k0) mt.keep0m = nk0; }
+      if (!dry) { const chg = keys.some(k => plan[k] !== snap[k]) || Object.keys(plan).some(k => plan[k] !== snap[k]);
+        if (chg) { keys.forEach(k => { undo[k] = snap[k]; }); Object.keys(plan).forEach(k => { if (!(k in undo)) undo[k] = null; }); if (k0) undoK0[id] = k0;
+          keys.forEach(k => { delete productIds[k]; }); Object.keys(plan).forEach(k => { productIds[k] = plan[k]; }); if (k0) mt.keep0m = nk0; } }
     }
-    if (!dry) { try { _pidDupCache = null; } catch (_) {} saveProductIds(); saveListingMeta(); try { logAct('出品', 'JAN・在庫0固定の名前での付け直し', String(out.items) + 'カタログ', '移した ' + out.moved + '・外した ' + out.dropped + '・そのまま ' + out.kept + '・空 ' + out.empty + '／在庫0固定 移した ' + out.k0moved + '・外した ' + out.k0dropped); } catch (_) {} }
+    if (!dry) { const bk = 'smd_rekey_undo_' + Date.now(); await idbSet(bk, { at: new Date().toISOString(), pid: undo, keep0m: undoK0 }); out.undoKey = bk; out.undoN = Object.keys(undo).length;
+      window.__smdRekeyUndo = async (key) => { const u = await idbGet(key || bk); if (!u) throw new Error('控えが無い'); Object.keys(u.pid || {}).forEach(k => { if (u.pid[k] === null) delete productIds[k]; else productIds[k] = u.pid[k]; }); Object.keys(u.keep0m || {}).forEach(id => { if (lstMeta && lstMeta[id]) lstMeta[id].keep0m = u.keep0m[id]; }); try { _pidDupCache = null; } catch (_) {} saveProductIds(); saveListingMeta(); return Object.keys(u.pid || {}).length; };
+      try { _pidDupCache = null; } catch (_) {} saveProductIds(); saveListingMeta(); try { logAct('出品', 'JAN・在庫0固定の名前での付け直し', String(out.items) + 'カタログ', '移した ' + out.moved + '・外した ' + out.dropped + '・そのまま ' + out.kept + '・空 ' + out.empty + '／在庫0固定 移した ' + out.k0moved + '・外した ' + out.k0dropped); } catch (_) {} }
     out.detail = out.detail.slice(0, 300);
     return out;
   };
