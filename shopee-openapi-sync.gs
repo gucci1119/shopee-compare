@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0930';
+var SRC_VER = '20261104-0945';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9959,8 +9959,15 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
   var _buried = 0, _buriedItems = {};
   var _slotFree = {}; try { _slotFree = (baKv_('slot_free_unlisted') || {}).items || {}; } catch (eSf) {}
   var _madeIds = {}, _madeNk = {}; try { var _fm = baKv_('boshu_fam_made') || {}; Object.keys(_fm).forEach(function (kk) { if (kk.indexOf(hw + '|') === 0 && _fm[kk] && _fm[kk].item_id && String(_fm[kk].role || 'fam') === 'fam') { _madeIds[String(_fm[kk].item_id)] = 1; var _kcc = kk.split('|')[1]; if (_fm[kk].name) _madeNk[_kcc + '|' + baNameKey_(_fm[kk].name)] = 1; } }); } catch (eFm) {}   /* ★Codex指摘：シリーズ（role=series）の複製は家族に数えない */
+  /* ★2026-11-04 事業本部（TW 2店舗目の重複）：満杯の店の非公開カタログの明細を「出していない」と数えると、その国のどの店にも空きが無い時に、次の回にまた新しいカタログを作っていた。
+     → その国の店（1店舗目・2店舗目）が【全部】満杯なら、非公開カタログの明細も「出している」に数える（入れ先には使わない）。空きのある店があれば今までどおり出し直す */
+  var _ccShops = {}; rows.forEach(function (r) { if (r && r.cc && r.shop_id) (_ccShops[r.cc] = _ccShops[r.cc] || {})[String(r.shop_id)] = 1; });
+  var _noRoomC = {}, _noRoom = function (cc) { if (_noRoomC[cc] !== undefined) return _noRoomC[cc]; var ss = Object.keys(_ccShops[cc] || {}); var any = ss[0]; var sub = 0; try { sub = any ? baSubShop_(cc, any) : 0; } catch (eNs) {} if (sub && ss.indexOf(String(sub)) < 0) ss.push(String(sub)); return (_noRoomC[cc] = ss.length > 0 && ss.every(function (s) { return _isFull(cc, s); })); };
   rows.forEach(function (r) {
-    if (r.status !== 1 && _isFull(r.cc, r.shop_id)) { _buried++; _buriedItems[String(r.item_id)] = 1; return; }   // 満杯の店の非公開カタログは無かったことにする
+    if (r.status !== 1 && _isFull(r.cc, r.shop_id)) { _buried++; _buriedItems[String(r.item_id)] = 1;
+      if (_noRoom(r.cc)) { var setB = listedByCc[r.cc] = listedByCc[r.cc] || {}; var msB = r.models; if (typeof msB === 'string') { try { msB = JSON.parse(msB); } catch (eB) { msB = []; } } var chB = baHwsOf_((r.name || '') + ' ' + (r.parent_sku || ''));
+        (msB || []).forEach(function (m) { if (!m || m.ghost || !m.n || String(m.n).toLowerCase() === 'test') return; var mh = baHwsOf_(m.n); var hs = mh.length ? mh : chB; if (hs.length && hs.indexOf(hw) < 0) return; var k1 = baTmKey_(m.n), k2 = baKey_(m.n); if (k1) setB[k1] = 1; if (k2) setB[k2] = 1; }); }
+      return; }   // 満杯の店の非公開カタログは入れ先にしない（その国の店が全部満杯なら、中の明細は「出している」に数える）
     itemCc[String(r.item_id)] = r.cc;
     var set = listedByCc[r.cc] = listedByCc[r.cc] || {};
     var ms = r.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e) { ms = []; } }
