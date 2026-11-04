@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261105-2355';
+var SRC_VER = '20261106-0100';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3088,8 +3088,9 @@ function promoTickBody_() {
     var Ag0 = baKv_('promo_assets') || {}, curGal = {}, retired = {};
     Object.keys(DIMG_KEY).forEach(function (c) { var g = (Ag0.gal || {})[DIMG_KEY[c]]; if (g) curGal[g] = 1; });
     Object.keys(Ag0.gal || {}).forEach(function (k) { var g = Ag0.gal[k]; if (g && !curGal[g]) retired[g] = 1; });
+    var _pSkip = editSkip_();
     for (var ci = 0; ci < PROMO_CCS.length; ci++) {
-      var cc = PROMO_CCS[ci];
+      var cc = PROMO_CCS[ci]; if (_pSkip[cc]) continue;   /* ★2026-11-05 VN ほか外した国は写真も書き換えない */
       /* ★2026-09-26 読めなかった時に {} で進むと、下の baKvSet_ が promo_done を丸ごと上書きし【戻す控え from】が全部消える＝止める */
       var dmR = baKvFreshMany_(['promo_done_' + cc]);
       if (!dmR) { job.msg = cc + ' の控え（promo_done）を読めないので止めました（次の回へ）'; return promoSaveJob_(job); }
@@ -3168,6 +3169,7 @@ function promoStart_(limit) {
   return job;
 }
 function promoApply_(shopId, cc, itemIds, dry, noVideo) {
+  if (!dry && editSkip_()[cc]) return { ok: false, stop: 'skip', error: cc + ' は書き換えから外しています（edit_skip_cc）', n: 0, items: [] };
   if (!dry && ufTotal_() > ufStopLine_() - 3000) return { ok: false, stop: 'quota', error: '接続枠が残り少ないので止めました（' + ufTotal_() + '）' };
   var A = baKv_('promo_assets') || {}; A.imgs = A.imgs || {};
   var bids = promoBids_(A, cc);
@@ -3180,7 +3182,7 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
   if (b.error && b.error !== '') throw new Error('get_item_base_info ' + b.error + ' ' + (b.message || ''));
   var list = ((b.response || {}).item_list) || [], out = [], found = {};
-  var keepSL = dry ? {} : soldLikedMap_(shopId, ids);   /* ★2026-11-04 本人「soldとかいいねついてるのは触らないで」＝写真・動画も書かない */
+  var keepSL = dry ? {} : soldLikedMap_(shopId, ids), _pBefore = {};   /* ★2026-11-04 本人「soldとかいいねついてるのは触らないで」＝写真・動画も書かない */
   list.forEach(function (it) {
     if (halt) return;
     if (keepSL[it.item_id]) { found[it.item_id] = 1; out.push({ item_id: it.item_id, ok: true, skip: 'sold', why: keepSL[it.item_id] }); return; }   /* 枠切れ・通信の失敗・動画の上げ直し失敗で止めた後は触らない（記録もしない＝次の回にやり直す） */
@@ -3209,12 +3211,13 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
       body.video_upload_id = [v]; err = upd();
       if (halt) return;
     }
-    rec.ok = !err; if (err) rec.err = err.slice(0, 200);
+    rec.ok = !err; if (err) rec.err = err.slice(0, 200); else _pBefore[it.item_id] = String(it.item_status || '');
     out.push(rec);
   });
-  if (halt) return { ok: false, stop: /^video:/.test(halt) ? 'video' : 'halt', error: '途中で止めました（次の回に続き）: ' + halt.slice(0, 160), n: out.length, items: out, video: v, uf: ufTotal_() };
+  var _prl = []; try { _prl = editRelist_(shopId, cc, _pBefore); } catch (eRl) {}   /* ★2026-11-05 ② 書いた後に非公開にされていたら戻す */
+  if (halt) return { ok: false, stop: /^video:/.test(halt) ? 'video' : 'halt', error: '途中で止めました（次の回に続き）: ' + halt.slice(0, 160), n: out.length, items: out, video: v, relisted: _prl, uf: ufTotal_() };
   ids.forEach(function (id) { if (!found[id]) out.push({ item_id: id, ok: false, err: 'Shopeeに見つからない（削除済み等）' }); });
-  return { ok: true, n: out.length, items: out, video: v, uf: ufTotal_() };
+  return { ok: true, n: out.length, items: out, video: v, relisted: _prl, uf: ufTotal_() };
 }
 /* ★2026-09-26 本人「案1：出品ページに届くまでの目安（約1か月半）を書いておく。これ必要ですね」。
    BR の返金の44%が「届いていない」・22%が「気が変わった」で、申請は注文から中央値21日（届くのは約45日後）＝遅さが理由。
@@ -3266,13 +3269,47 @@ function soldLikedMap_(shopId, ids) {
   }
   return out;
 }
+/* ★2026-11-05 事業本部の決め（VN が毎日 18:12 に非公開になる件）：
+   ① 書き換え（説明文の dnote・写真の promo）から外す国＝VN（既定）＋ app_kv edit_skip_cc に入った国
+   ② 書き換えた後に、書く前に公開中だった出品を読み直す。非公開になっていたら公開に戻して印を残す（app_kv edit_relist_log）。
+      戻したのがその国で1日5件を超えたら、その国も書き換えから外す（edit_skip_cc）＝🔔で事業本部へ */
+function editSkip_() { var o = { VN: 1 }; try { var k = baKvFresh_('edit_skip_cc') || {}; Object.keys(k).forEach(function (c) { if (k[c]) o[c] = 1; }); } catch (e) {} return o; }
+function editRelist_(shopId, cc, before) {
+  var ids = Object.keys(before || {}).filter(function (k) { return before[k] === 'NORMAL'; }); if (!ids.length) return [];
+  Utilities.sleep(4000);
+  var back = [];
+  try {
+    var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
+    (((b.response || {}).item_list) || []).forEach(function (it) {
+      if (String(it.item_status || '') !== 'UNLIST') return;
+      var r = { cc: cc, shop: String(shopId), item: String(it.item_id), at: new Date().toISOString() };
+      try { unlistItem_(shopId, it.item_id, false); r.ok = 1; } catch (eU) { r.ok = 0; r.err = String((eU && eU.message) || eU).slice(0, 100); }
+      back.push(r);
+    });
+  } catch (eR) { back.push({ cc: cc, shop: String(shopId), err: '読み直せない: ' + String((eR && eR.message) || eR).slice(0, 100), at: new Date().toISOString() }); }
+  if (!back.length) return back;
+  try {
+    var lg = baKvFresh_('edit_relist_log'); if (BA_KV_FAIL['edit_relist_log']) return back; lg = lg || {};
+    var day = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+    lg.items = (lg.items || []).concat(back).slice(-300); lg.day = lg.day || {}; lg.day[day] = lg.day[day] || {};
+    var nOk = back.filter(function (x) { return x.item; }).length; lg.day[day][cc] = (lg.day[day][cc] || 0) + nOk;
+    Object.keys(lg.day).sort().slice(0, -7).forEach(function (d) { delete lg.day[d]; });
+    if (lg.day[day][cc] > 5) {
+      var sk = baKvFresh_('edit_skip_cc');
+      if (!BA_KV_FAIL['edit_skip_cc']) { sk = sk || {}; if (!sk[cc]) { sk[cc] = { at: new Date().toISOString(), why: '書き換えの後に非公開にされたのが1日 ' + lg.day[day][cc] + '件' }; baKvSet_('edit_skip_cc', sk); } lg.alert = { cc: cc, at: new Date().toISOString(), n: lg.day[day][cc] }; }
+    }
+    lg.at = new Date().toISOString(); baKvSet_('edit_relist_log', lg);
+  } catch (eL) {}
+  return back;
+}
 function dnoteApply_(shopId, cc, itemIds, dry, bodyOn) {
+  if (!dry && editSkip_()[cc]) return { ok: false, stop: 'skip', error: cc + ' は書き換えから外しています（edit_skip_cc）', n: 0, items: [] };
   var add = DNOTE_TEXT[cc]; var doBody = cc === 'BR' && !!bodyOn; if (!add) throw new Error('この国の文面がない: ' + cc);
   var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 50);
   if (!ids.length) return { ok: true, n: 0, items: [] };
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
   var keepSL = soldLikedMap_(shopId, ids);   /* ★2026-11-04 sold・いいねが付いた出品は触らない */
-  var out = [], head = add.replace(/\n+$/, '');
+  var out = [], head = add.replace(/\n+$/, ''), _dnBefore = {};
   /* 済み＝先頭が今の文そのもので、残りに古い文（現地語・前の版）が無い */
   var isCur = function (t) { t = String(t || ''); return t.indexOf(head) === 0 && !DNOTE_OLD_MARK.test(t.slice(head.length)); };
   /* 先頭の ⏰ の行（別の国のカタログを写した時に入ってくる他国の文面）を外す */
@@ -3318,11 +3355,12 @@ function dnoteApply_(shopId, cc, itemIds, dry, bodyOn) {
       rec.len = nd.length; body = { item_id: it.item_id, description: nd };
     }
     if (dry) { rec.ok = true; rec.dry = 1; out.push(rec); return; }
-    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', body); rec.ok = true; }
+    try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', body); rec.ok = true; _dnBefore[it.item_id] = String(it.item_status || ''); }
     catch (e) { var m = String((e && e.message) || e); rec.ok = false; rec.err = m.slice(0, 160); if (ufDead_() || /fetch失敗/.test(m)) rec.halt = 1; }
     out.push(rec);
   });
-  return { ok: true, n: out.length, items: out, uf: ufTotal_() };
+  var _rl = dry ? [] : editRelist_(shopId, cc, _dnBefore);
+  return { ok: true, n: out.length, items: out, relisted: _rl, uf: ufTotal_() };
 }
 function dnotePeek_(shopId, itemIds) {
   var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 10);
@@ -3390,7 +3428,7 @@ function dnoteTickBody_(budgetMs) {
     if (dayCount_(job, 'day', 0) >= dCap) { job.msg = '今日の上限 ' + dCap + ' 件（明日続き）'; baKvSet_('dnote_job', job); return; }
     var fr = baKvFreshMany_(['dnote_done']); if (!fr) { job.msg = 'dnote_done を読めない＝次の回へ'; baKvSet_('dnote_job', job); return; }
     var done = fr.dnote_done || {};
-    var ccs = Object.keys(DNOTE_TEXT);
+    var _skip = editSkip_(), ccs = Object.keys(DNOTE_TEXT).filter(function (c) { return !_skip[c]; });   /* ★2026-11-05 VN ほか外した国は回さない */
     for (var ci = 0; ci < ccs.length; ci++) {
       var cc = ccs[ci];
       var rows = sbSelectAll_('listings', 'select=item_id,shop_id&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
