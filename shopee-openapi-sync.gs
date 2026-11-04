@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0100';
+var SRC_VER = '20261106-0200';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -295,7 +295,22 @@ function ufSpillTotal_() {
   } catch (e) {}
   return n;
 }
+/* ★2026-11-05 事業本部：記録の無い値上げ（VN の21明細・BR ゼルダ 298→301.97）の書き手が分からない＝GAS で値段を書いたら必ず activity_log に残す。
+   1回の実行の分を貯めて、最後（ufPersist_＝doGet/doPost/各 tick の finally）に1回でまとめて書く＝接続枠は1実行1回だけ増える */
+var _priceLog = [];
+function priceLogPush_(shopId, itemId, list, kind) {
+  try {
+    var via = ''; try { via = String(new Error().stack || '').split('\n').map(function (l) { var m = /at (\w+)/.exec(l); return m ? m[1] : ''; }).filter(function (x) { return x && !/^(priceLogPush_|updatePriceList_|updatePrice_|Error)$/.test(x); }).slice(0, 4).join('<'); } catch (eS) {}
+    _priceLog.push({ page: 'GAS', action: '値段を書いた（' + kind + '）', target: String(shopId) + '|' + String(itemId), detail: JSON.stringify({ via: via, list: (list || []).slice(0, 40), cc: (function () { try { var t = getToken_(parseInt(shopId, 10)); return t && t.cc ? String(t.cc).toUpperCase() : ''; } catch (eT) { return ''; } })() }).slice(0, 1800) });
+  } catch (e) {}
+}
+function priceLogFlush_() {
+  if (!_priceLog.length) return;
+  var rows = _priceLog; _priceLog = [];
+  try { sbUpsert_('activity_log', rows); } catch (e) { Logger.log('price log: ' + e); }
+}
 function ufPersist_() {
+  try { priceLogFlush_(); } catch (ePl) {}
   if (!_ufRun && !Object.keys(_ufTag).length) return;
   var lock = null, got = false;
   try { lock = LockService.getScriptLock(); got = lock.tryLock(2000); } catch (e) { got = false; }
@@ -819,6 +834,14 @@ function doGetInner_(e) {
       try { var lwwt = P_().getProperty('WRITE_TOKEN'); if (!lwwt || p.token !== lwwt) throw new Error('WRITE_TOKEN不正'); lwo = llogShiftWatch_(200000, p.dry === '1'); }
       catch (eLw2) { lwo = { ok: false, error: String((eLw2 && eLw2.message) || eLw2).slice(0, 200) }; }
       return ContentService.createTextOutput(lwcb + '(' + JSON.stringify(lwo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'comment_probe') {   /* ★2026-11-05 事業本部：product/get_comment が今の権限で通るかを1回だけ（読むだけ・1ページ） */
+      var cpcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), cpo;
+      try { var cpwt = P_().getProperty('WRITE_TOKEN'); if (!cpwt || p.token !== cpwt) throw new Error('WRITE_TOKEN不正');
+        var cj = callShop_(parseInt(p.shop_id, 10), '/api/v2/product/get_comment', { page_size: 20, cursor: '' }, 'get');
+        var cl = ((cj.response || {}).item_comment_list) || []; cpo = { ok: true, error: cj.error || '', message: String(cj.message || '').slice(0, 200), n: cl.length, more: !!((cj.response || {}).more), sample: cl.slice(0, 3).map(function (c) { return { rating: c.rating_star, at: c.create_time, item: c.item_id, len: String(c.comment || '').length }; }) };
+      } catch (eCp) { cpo = { ok: false, error: String((eCp && eCp.message) || eCp).slice(0, 300) }; }
+      return ContentService.createTextOutput(cpcb + '(' + JSON.stringify(cpo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'dup_watch') {   /* ★2026-11-05 重複の見張りを今すぐ回す（dry=1＝数えるだけ・止めない） */
       var dwcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), dwo;
@@ -2604,6 +2627,7 @@ function updateStock_(shopId, itemId, modelId, stock) {
 function updatePrice_(shopId, itemId, modelId, price) {
   var body = { item_id: parseInt(itemId, 10), price_list: [{ model_id: parseInt(modelId, 10) || 0, original_price: parseFloat(price) }] };
   var j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body);
+  priceLogPush_(shopId, itemId, [{ m: parseInt(modelId, 10) || 0, p: parseFloat(price) }], '1明細');
   return (j && j.response) || j;
 }
 // ★モデル(明細)一覧を公式APIで読む（ブリッジのproductRead代替）：model_id/価格/在庫/SKU/バリエ名。
@@ -2729,6 +2753,7 @@ function updatePriceList_(shopId, itemId, list) {
   /* ★2026-09-28 Codex：明細ごとの失敗（failure_list）を見ずに全部成功扱いしていた → 1つでも失敗があれば理由つきで失敗にする（価格・在庫は同じ値を送り直しても害がない） */
   var fl = ((j && j.response) || {}).failure_list || [];
   if (fl.length) throw new Error('一部の明細を変えられませんでした（' + fl.length + '/' + pl.length + '）: ' + fl.slice(0, 3).map(function (f) { return (f.model_id || '') + ' ' + String(f.failed_reason || f.reason || ''); }).join(' / ').slice(0, 200));
+  priceLogPush_(shopId, itemId, pl.map(function (x) { return { m: x.model_id, p: x.original_price }; }), pl.length + '明細' + (promo ? '・販促を外して書いた' : ''));
   return { updated: pl.length, response: (j && j.response) || j, promo: promo };
 }
 /* 価格を書く前に販促から外す（get_item_promotion で今入っている販促を読む）。戻り＝{bundleOut:[id], discountOut:[id], other:[種類], bundleBack:[], bundleBackErr:[]} */
