@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-2030';
+var SRC_VER = '20261104-2110';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2171,6 +2171,7 @@ function doPostInner_(e) {
     else if (body.action === 'list_meta') out = listMeta_(body);      // 公式API出品：category/logistic解決（出品前の確認用）
     else if (body.action === 'add_item') out = addItem_(body);        // 公式API出品：指定shop_idにadd_item（アカウント/国を明示）
     else if (body.action === 'upload_image') out = uploadImageData_(body);
+    else if (body.action === 'undo_backup') out = undoBackup_(body);   /* ★2026-11-04 ポータルの戻す控え（IndexedDB の smd_*_undo_）を Drive にも置く（作った時に1回だけ・接続枠を使わない） */
     else if (body.action === 'desc_block') out = descBlockSet_(body.shop_id, body.item_id, String(body.block || ''), String(body.tag || '中文說明'), !!body.dry);   /* ★2026-10-04 段落が長くGETのURLに入らない（HTTP 404）のでPOSTでも受ける */  // ★PCのファイルをShopeeへアップ→image_idを返す（D&D/ファイル選択用）
     else throw new Error('unknown action: ' + body.action);
   } catch (err) { out = { ok: false, error: String((err && err.message) || err).slice(0, 200) }; }
@@ -3301,6 +3302,20 @@ function dnotePeek_(shopId, itemIds) {
     var m = t.match(new RegExp(DNOTE_OLD_MARK.source, 'g')) || [];
     return { item_id: it.item_id, type: it.description_type, head: t.slice(0, 420), marks: m.length, local: /PRAZO|สำคัญ|QUAN TRỌNG|到貨/.test(t), pt: DBODY_PT_RE.test(dbodyNorm_(t)), en: (dbodyNorm_(t).split(dbodyNorm_(DBODY_EN)).length - 1), len: t.length };
   }) };
+}
+/* ★2026-11-04 事業本部：ポータルの戻す控えはブラウザの中（IndexedDB）にしか無かった＝ブラウザのデータが消えると戻せない。もう1台の PC の分も残るよう Google Drive「Shopee 戻す控え」に置く。
+   名前は smd_(fill|jandup|rekey)_undo_<13桁> だけ・鍵らしい文字が入っていたら置かない・UrlFetch を使わない（接続枠を食わない） */
+function undoBackup_(body) {
+  var name = String(body.name || '');
+  if (!/^smd_(fill|jandup|rekey)_undo_\d{13}$/.test(name)) throw new Error('控えの名前が違う');
+  var txt = typeof body.data === 'string' ? body.data : JSON.stringify(body.data || null);
+  if (!txt || txt === 'null') throw new Error('中身が空');
+  if (/eyJ[A-Za-z0-9_-]{20,}|access_token|refresh_token|writeToken|WRITE_TOKEN|service_role/.test(txt)) throw new Error('鍵らしい文字が入っている＝置かない');
+  var fs = DriveApp.getFoldersByName('Shopee 戻す控え'), folder = fs.hasNext() ? fs.next() : DriveApp.createFolder('Shopee 戻す控え');
+  var fn = name + '_' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd_HHmm') + (body.pc ? '_' + String(body.pc).replace(/[^\w-]/g, '').slice(0, 20) : '') + '.json';
+  if (folder.getFilesByName(fn).hasNext()) return { ok: true, file: fn, dup: 1 };
+  folder.createFile(fn, txt, 'application/json');
+  return { ok: true, file: fn, size: txt.length };
 }
 /* ★2026-11-04 BR の全出品の説明文を読んで分ける（書かない）。save=1 なら読んだままの説明文を Drive の「Shopee 説明文の控え」に JSON で置く（戻す時の元） */
 function dbodyScan_(offset, n, save) {
