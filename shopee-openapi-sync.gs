@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0200';
+var SRC_VER = '20261106-0230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4576,6 +4576,21 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey, preOld) {
         try { addModel_(shopId, itemId, newModels); okRetry = true; tierRetry += ' →成功'; } catch (eAdd2) { eMsg = String((eAdd2 && eAdd2.message) || eAdd2); tierRetry += ' →失敗'; }
       }
     }
+    /* ★2026-11-05 03 営業部（BR Keller さん）：add_model が断り文（Please add image for all options…）を返したのに、Shopee には明細が入っていた。
+       失敗と返す・巻き戻す前に1回読み直し、足すはずの名前の明細が全部入っていれば成功として進む（入っている明細を消さない＝二重出品と事故を防ぐ）。
+       一部だけ入っていたら巻き戻さずに、入った分と入らなかった分を返す。1つも入っていない時だけ今までどおり巻き戻す */
+    var _vfNote = '';
+    if (!okRetry) {
+      try {
+        Utilities.sleep(2500);
+        var jvf = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get'), rvf = jvf.response || {};
+        var olf = (((rvf.tier_variation || [])[0] || {}).option_list || []).map(function (o) { return String(o.option || '').trim(); });
+        var have = {}; (rvf.model || []).forEach(function (m) { var ix = (m.tier_index || [])[0]; if (ix != null && olf[ix] != null) have[olf[ix].toLowerCase()] = 1; });
+        var inN = newNames.filter(function (nm) { return have[nm]; });
+        if (inN.length === newNames.length) { okRetry = true; _vfNote = 'Shopee の返事は断り文でしたが、明細は入っていました（' + eMsg.slice(0, 80) + '）'; tierRetry += (tierRetry ? ' / ' : '') + '読み直し→全部入っていた'; }
+        else if (inN.length > 0) { throw new Error(eMsg + '（読み直すと ' + inN.length + '/' + newNames.length + ' 件は入っていた＝巻き戻していません: 入った ' + inN.slice(0, 5).join(' / ') + '）'); }
+      } catch (eVf) { if (/巻き戻していません/.test(String((eVf && eVf.message) || eVf))) throw eVf; tierRetry += (tierRetry ? ' / ' : '') + '読み直し失敗'; }
+    }
     if (!okRetry) {
       try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs.slice(0, baseLen) }], remap); } catch (e2) {}
       throw new Error(eMsg + (tierRetry ? '（再送: ' + tierRetry + '）' : ''));
@@ -4619,7 +4634,7 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey, preOld) {
   } catch (e5) {}
   var sentN = newModels.length, gotN = (addResp && Array.isArray(addResp.model)) ? addResp.model.length : -1;   /* add_model の返事の明細数（一部だけ通ったかの手がかり・-1＝返事に無い） */
   return { ok: true, models: newList, mismatch: mismatch.slice(0, 20), oldIds: _oldList.slice(), addSent: sentN, addGot: gotN, middleGhost: (finalOpt !== finalModel) ? (finalOpt - finalModel) : 0, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40), noImgSkipped: noImgSkipped.slice(0, 40),
-           healed: healed, opt_count: finalOpt, model_count: finalModel };
+           healed: healed, opt_count: finalOpt, model_count: finalModel , verifyNote: _vfNote || ''};
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
 function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) {

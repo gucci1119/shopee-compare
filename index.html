@@ -5118,6 +5118,7 @@
     "為替を読めず既定のレートで計算しています。為替を読み直してから押してください": "Calculated with the default exchange rate (the rate could not be read). Reload the exchange rate before pressing",
     "見積もりで為替が読めず既定のレートの時は、入力欄へ・🛒 を押せなくしました": "When the quote uses the default exchange rate, “To chat box” and 🛒 are now disabled",
     "Request page に足す時に、新しいカタログを作らないようにしました": "Adding to a Request page no longer creates a new catalog",
+    "Request page に足した時に Shopee が断り文を返しても、明細が入っていれば「足しました」と返すようにしました": "If Shopee returns an error but the variation was actually added to the Request page, it is now reported as added",
     "値付けの見直しの「まとめて書く」（2明細以上）と「上限超えの削除」を、本人の OK が無いと書けないようにしました": "Bulk price writes (2+ variations) and over-cap deletions in the pricing review now require the owner’s OK",
     "Request page の結果に、入れ先のカタログ・明細の名前と写真・予約出品の日数・公開中かを返すようにしました": "Request page results now include the catalog, variation name and photo, pre-order days and whether it is live",
     "PayPal リンクの商品名・説明に「(used, Japanese ver.)」を決め打ちで入れないようにしました": "PayPal link title and description no longer always say “(used, Japanese ver.)”",
@@ -10172,7 +10173,7 @@
   function pcNewItem(keepDeal) {
     pcOv = {}; pcOvShop = { '2': {}, '3': {} }; pcRatioRestore();
     if (!keepDeal) pcQuote.deal = null;
-    pcQuote.link = ''; pcQuote.req = null; pcQuote.pick = null; pcQuote.optName = ''; pcQuote.ref = ''; pcQuote.refKey = ''; pcQuote.refFixed = false;
+    pcQuote.link = ''; pcQuote.req = null; pcQuote.pick = null; pcQuote.verifyNote = ''; pcQuote.optName = ''; pcQuote.ref = ''; pcQuote.refKey = ''; pcQuote.refFixed = false;
     { const pl0 = document.getElementById('pc-q-pplink'); if (pl0) pl0.value = ''; } pcQuote.ppFor = null;   /* ★2026-10-24 価格計算レビュー2：前の人の PayPal リンクを次の人の文面に入れない */
     const ta = document.getElementById('pc-q-text'); if (ta) delete ta.dataset.edited;
   }
@@ -10729,6 +10730,7 @@
       await sbUpsert('app_kv', [{ k: kv, v: { items: [{ option: nm, price: price, stock: 1, sku: ('REQ_' + (L.ref || L.buyer)).slice(0, 40), image: madeNew ? '' : rImg }] }, updated_at: new Date().toISOString() }]);
       const res = await gasSerial(() => gasCall({ action: 'add_variations_bulk', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, kv: kv }, 300000));
       if (!res || res.ok === false || !(Number(res.added) > 0)) throw new Error((res && (res.error || JSON.stringify(res).slice(0, 120))) || '返事がありません');
+      pcQuote.verifyNote = String((res && res.verifyNote) || '');   /* ★2026-11-05 Shopee の返事は断り文だったが明細は入っていた（GAS が読み直して確かめた） */
       if (madeNew) {   /* ★複製に付いてくる仮の明細 test を消す（位置を動かさない消し方）→ 写真を付け直す（test に画像が無いので足す時は画像なしで入る） */
         msg.textContent = '仮の明細（test）を消して、写真を付けています…';
         await new Promise(z => setTimeout(z, 3000));
@@ -10751,7 +10753,7 @@
       const ta = document.getElementById('pc-q-text') || document.createElement('textarea');   /* 一瞬の処理（長く回さない） */
       if ((L.plan === '1' && ((document.getElementById('pc-q-stage') || {}).value === 'deal')) || ((document.getElementById('pc-q-stage') || {}).value === 'paid')) { delete ta.dataset.edited; try { pcQuoteRender(); } catch (_) {} }   /* ★2026-11-04 paid（PayPal の入金確認後）もリンクと明細名の入った文で描き直す */   /* ★2026-10-24 ①の案内文はリンク入りで描き直す */
       else { const add = '\n\nReady! Here is the link — please choose the option "' + nm + '":\n' + link; ta.value = ta.value + add; ta.dataset.edited = '1'; }
-      msg.innerHTML = '✅ 足しました（' + esc(String(pick.c.name).slice(0, 30)) + '・公開中・予約出品10日を読み直しで確かめました）。文面にリンクを入れました → 📋 コピーするか 💬 入力欄へ'
+      msg.innerHTML = '✅ 足しました（' + esc(String(pick.c.name).slice(0, 30)) + '・公開中・予約出品10日を読み直しで確かめました）。文面にリンクを入れました → 📋 コピーするか 💬 入力欄へ' + (pcQuote.verifyNote ? '<br><span class="smd-dim">' + esc(pcQuote.verifyNote) + '</span>' : '')
         + (madeNew ? '<br><b style="color:#b45309">🆕 新しい Request page を作りました（非公開）。お客さんが買えるように公開してください →</b> <button type="button" class="smd-btn" id="pc-q-reqpub" style="font-size:11px;padding:2px 9px">▶ 公開する</button>' : '');
       if (madeNew) { const pb2 = document.getElementById('pc-q-reqpub'); if (pb2) pb2.onclick = () => { pb2.disabled = true; pb2.textContent = '⏳ 公開しています…'; gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, unlist: 0 }, 60000).then(ur => { if (ur && ur.ok === false) throw new Error(ur.error || ''); pb2.textContent = '✅ 公開しました'; }).catch(eP => { pb2.disabled = false; pb2.textContent = '❌ 公開できませんでした（もう一度）'; try { toast('公開できませんでした: ' + String((eP && eP.message) || eP).slice(0, 80)); } catch (_) {} }); }; }
       try { refreshOneListing(L.cc, pick.c.item_id, pick.c.shop_id); } catch (_) {}
@@ -11549,6 +11551,7 @@
                   if (shopAmt0 > 0) { const L9 = pcQuote.last || {}, u9 = ((regionByCc(cc) || {}).priceUnit || 1); if (L9.plan !== planP || Math.abs((Number(L9.shopL) || 0) - shopAmt0) > (u9 < 1 ? 0.005 : 0.5)) { const t9b = 'Shopee の額が ' + shopAmt0 + ' になりません（計算は ' + (L9.shopL || '') + '・払い方 ' + (L9.plan || '') + '）。この画面で確かめて 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t9b; tell(false, t9b); return; } }
                   await pcQuoteAddReq();
                   if (!pcQuote.link) { const t3 = (mm && mm.textContent) || 'Request page に足せませんでした'; tell(false, t3); return; }
+                  if (p.get('noins') === '1') { tell(true, '足しました（英文は呼び出し元の段から入れます）' + (pcQuote.verifyNote ? '／' + pcQuote.verifyNote : '')); return; }   /* ★2026-11-05 03 営業部：一本道（WA・SR）は英文を後の段で入れる＝入力欄へ入れ込まない */
                   pcQuoteToChat();
                   setTimeout(() => { const t4 = (mm && mm.textContent) || ''; const ok4 = /入れました/.test(t4); tell(ok4, ok4 ? ('Request page に足して、案内文を入力欄に入れました' + (shopAmt0 > 0 ? '（Shopee の額 ' + ((pcQuote.last || {}).shopL || '') + ' ' + ((pcQuote.last || {}).ISO || '') + '）' : priceAuto ? '（値段は計算の ' + ((pcQuote.last || {}).shopL || '') + ' ' + ((pcQuote.last || {}).ISO || '') + '）' : '')) : ('Request page には足しました（' + pcQuote.link + '）。' + t4)); if (ok4) setTimeout(() => { try { window.close(); } catch (_) {} }, 1500); }, 3600);
                 } catch (eA) { const t5 = '自動で進められませんでした: ' + String((eA && eA.message) || eA).slice(0, 120); if (mm) mm.textContent = '❌ ' + t5; tell(false, t5); }
@@ -25064,6 +25067,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-05', items: [
+      '🛒 <b>Request page に足した時に Shopee が断り文を返しても、明細が入っていれば「足しました」と返すようにしました</b>（03 営業部・BR Keller さん）：GAS が読み直して確かめます。入っている明細は巻き戻しで消しません。一本道（WA・SR）から &noins=1 で開いた時は、入力欄への入れ込みを試さずに「足しました」で返します。',
       '⛔ <b>値付けの見直しの「まとめて書く」（2明細以上）と「上限超えの削除」を、本人の OK が無いと書けないようにしました</b>（事業本部）：本人の OK の後に事業本部が印（2時間・明細の数の上限つき）を書いた時だけ書きます。書いた時は操作ログに残します。見直しの一覧を作って見せるのはそのままです。',
       '🛒 <b>Request page に足す時に、新しいカタログを作らないようにしました</b>（本人「今のカタログを修正すればいいのでは？」「10日にしておいて」）：その国の今ある Request page（値段の幅が合う物・非公開も）に足し、足す前に予約出品10日・公開に直して、足した後に Shopee から読み直して確かめます。入る所が無い時は止めて理由を出します。開いた元（Smart Reply・WA）への返事には毎回、英文とリンクを入れ、「公開して」「今の英文をちょうだい」の頼みも受けます（相手と照合番号が同じ時だけ）。',
       '🛒 <b>Request page の結果に、入れ先のカタログ・明細の名前と写真・予約出品の日数・公開中かを返すようにしました</b>（03 営業部・本人「画像も一緒に送りたいな」）：sold・いいねの付いた非公開の Request page は自動で公開せず止めて、その国の Request page の一覧（公開か・sold・いいね・値段の幅）を出します。明細の名前が30字を超える時は、相手の名前と最後の語（機種）を残します。',
