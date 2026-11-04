@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-1930';
+var SRC_VER = '20261104-2000';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1301,18 +1301,19 @@ function doGetInner_(e) {
         var pjwt = P_().getProperty('WRITE_TOKEN');
         if (!pjwt || p.token !== pjwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         if (p.action === 'promo_start') pjout = { ok: true, job: promoStart_(p.limit) };
-        else if (p.action === 'promo_gal_setup') pjout = promoGalSetup_(p.ver);
+        else if (p.action === 'promo_gal_setup') pjout = promoGalSetup_(p.ver, String(p.keys || '').split(',').filter(Boolean));
         else if (p.action === 'promo_stop') { var j0 = baKv_('promo_job') || {}; j0.on = false; j0.msg = '止めました（手動）'; promoTriggerOff_(); pjout = { ok: true, job: promoSaveJob_(j0) }; }
         else pjout = { ok: true, job: baKv_('promo_job') || {}, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) };
       } catch (err) { pjout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(pjcb + '(' + JSON.stringify(pjout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
-    if (p.action === 'dnote_start' || p.action === 'dnote_stop' || p.action === 'dnote_status' || p.action === 'dnote_apply') {   /* ★2026-09-26 BR 説明文の先頭に到着目安 */
+    if (p.action === 'dnote_start' || p.action === 'dnote_stop' || p.action === 'dnote_status' || p.action === 'dnote_apply' || p.action === 'dnote_peek') {   /* ★2026-09-26 BR 説明文の先頭に到着目安 */
       var dncb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), dno;
       try {
         var dnwt = P_().getProperty('WRITE_TOKEN'); if (!dnwt || p.token !== dnwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         if (p.action === 'dnote_start') { var dj = baKv_('dnote_job') || {}; dj.on = true; dj.startAt = new Date().toISOString(); dj.msg = '開始'; baKvSet_('dnote_job', dj); dnoteTriggerOff_(); ScriptApp.newTrigger('dnoteTick').timeBased().everyMinutes(10).create(); dno = { ok: true, job: dj }; }
         else if (p.action === 'dnote_stop') { var dj2 = baKv_('dnote_job') || {}; dj2.on = false; dj2.msg = '止めました（手動）'; baKvSet_('dnote_job', dj2); dnoteTriggerOff_(); dno = { ok: true, job: dj2 }; }
+        else if (p.action === 'dnote_peek') { dno = dnotePeek_(parseInt(p.shop_id, 10), String(p.items || '').split(',')); }   /* ★2026-11-04 確かめ用（読むだけ） */
         else if (p.action === 'dnote_apply') { dno = dnoteApply_(parseInt(p.shop_id, 10), String(p.cc || 'BR').toUpperCase(), String(p.items || '').split(','), p.dry === '1'); }
         else dno = { ok: true, job: baKv_('dnote_job') || {} };
       } catch (err) { dno = { ok: false, error: String((err && err.message) || err) }; }
@@ -2973,14 +2974,19 @@ var PROMO_GAL_VER = 1;
    ①その日すでに断られていたら何もしない ②こちらの数えが BULK_USED_MAX を超えたらその日は降りる ③1日の件数上限（配送画像・説明文それぞれ）
    ④🤖が直近に触ったカタログ（listings.update_time が2時間以内）は後回し（明細追加と重ならないように） */
 var BULK_USED_MAX = 3000, PROMO_GAL_DAILY = 300, DNOTE_DAILY = 300, BULK_SKIP_RECENT_SEC = 2 * 3600;
+var GFIX_DAILY = 150;   /* ★2026-11-04 前の国別（現地語）の配送の絵が残っている出品を英語の絵に入れ直す・1日の件数 */
 function bulkOk_() { return !ufDead_() && ufTotal_() < BULK_USED_MAX; }
 function dayCount_(job, key, add) { var d = ufToday_(); if (job[key + 'Day'] !== d) { job[key + 'Day'] = d; job[key + 'N'] = 0; } job[key + 'N'] = Number(job[key + 'N'] || 0) + (add || 0); return job[key + 'N']; }
-function promoGalSetup_(ver) {
+function promoGalSetup_(ver, keys) {
+  /* ★2026-11-04 上げるのは今使う絵だけ（既定 br_en・en）。前の絵の番号は gal に残し（外す印になる）、同じ鍵を上げ直した時の古い番号は strip へ */
+  keys = (keys && keys.length ? keys : ['br_en', 'en']).filter(function (k) { return /^[a-z_]{2,8}$/.test(k); });
   var ids = {};
-  ['br', 'th', 'vn', 'tw', 'en'].forEach(function (k) { ids[k] = uploadImageUrl_(PROMO_BASE + 'gal_delivery_' + k + '.png?v=' + encodeURIComponent(String(ver || Date.now()))); if (!ids[k]) throw new Error('画像を上げられません: ' + k); });
+  keys.forEach(function (k) { ids[k] = uploadImageUrl_(PROMO_BASE + 'gal_delivery_' + k + '.png?v=' + encodeURIComponent(String(ver || Date.now()))); if (!ids[k]) throw new Error('画像を上げられません: ' + k); });
   var FR = baKvFreshMany_(['promo_assets']); if (!FR) throw new Error('promo_assets を読めない');
-  var A = FR.promo_assets || {}; A.gal = ids; A.galAt = new Date().toISOString(); baKvSet_('promo_assets', A);
-  return { ok: true, gal: ids };
+  var A = FR.promo_assets || {}; var G = A.gal || {}; A.strip = A.strip || [];
+  Object.keys(ids).forEach(function (k) { if (G[k] && G[k] !== ids[k] && A.strip.indexOf(G[k]) < 0) A.strip.push(G[k]); G[k] = ids[k]; });
+  A.gal = G; A.galAt = new Date().toISOString(); baKvSet_('promo_assets', A);
+  return { ok: true, gal: G, up: ids };
 }
 function promoBids_(A, cc) {
   var bids = PROMO_IMGS.map(function (f) { return (A.imgs || {})[f]; });
@@ -3063,6 +3069,10 @@ function promoTickBody_() {
     if (job.pauseUntil && Date.now() < Number(job.pauseUntil)) return;   /* ★2026-09-26 動画を用意できなかった＝3時間おく（10分ごとに上げ直して枠を燃やさない） */
     var t0 = Date.now(), done0 = Number(job.n || 0);
     var pnMap = ((baKvFresh_('promo_new') || {}).map) || {};   /* ★2026-09-26 作成時に入れ終わった新しい出品（promoAfterCreate_）＝やり直さない */
+    /* ★2026-11-04 今どの国でも使っていない配送の絵（前の現地語の BR・TH・VN・TW）＝残っている出品は入れ直す */
+    var Ag0 = baKv_('promo_assets') || {}, curGal = {}, retired = {};
+    Object.keys(DIMG_KEY).forEach(function (c) { var g = (Ag0.gal || {})[DIMG_KEY[c]]; if (g) curGal[g] = 1; });
+    Object.keys(Ag0.gal || {}).forEach(function (k) { var g = Ag0.gal[k]; if (g && !curGal[g]) retired[g] = 1; });
     for (var ci = 0; ci < PROMO_CCS.length; ci++) {
       var cc = PROMO_CCS[ci];
       /* ★2026-09-26 読めなかった時に {} で進むと、下の baKvSet_ が promo_done を丸ごと上書きし【戻す控え from】が全部消える＝止める */
@@ -3084,7 +3094,9 @@ function promoTickBody_() {
       var nowSec = Math.floor(Date.now() / 1000);
       var needsGal = function (d, r) { return galOn && galLeft > 0 && d && d.ok && Number(d.galv || 0) < PROMO_GAL_VER && !(Number(r.update_time || 0) > nowSec - BULK_SKIP_RECENT_SEC); };   /* ★配送日数の画像に差し替える（入れ終わった出品も1回やり直す・1日の上限・🤖が直近に触ったものは後回し） */
       var galPick = 0;
-      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; if (!d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d)) return true; if (needsGal(d, r) && galPick < galLeft) { galPick++; return true; } return false; });
+      var gfixLeft = Math.max(0, GFIX_DAILY - dayCount_(job, 'gfix', 0)), gfixPick = 0, hadRet = {}, gfixOnly = {};
+      var needsGfix = function (r, d) { if (!(r.images || []).some(function (x) { return retired[x]; })) return false; hadRet[r.item_id] = 1; if (d && d.gfixAt && !(Date.parse(r.synced_at || '') > Number(d.gfixAt))) return false; if (Number((d && d.gfixN) || 0) >= 3) return false; return !(Number(r.update_time || 0) > nowSec - BULK_SKIP_RECENT_SEC); };   /* 入れ直した後、同期で写真の並びが新しくなるまでは選ばない */
+      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; var gf = needsGfix(r, d); if (!d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d)) return true; if (gf && gfixPick < gfixLeft) { gfixPick++; gfixOnly[r.item_id] = 1; return true; } if (needsGal(d, r) && galPick < galLeft) { galPick++; return true; } return false; });
       var redoIds = {}; todo.forEach(function (r) { var d = doneMap[r.item_id]; if (d && d.ok) redoIds[r.item_id] = 1; });
       if (!todo.length) continue;
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
@@ -3106,7 +3118,9 @@ function promoTickBody_() {
             if (x.err) { d.err = String(x.err).slice(0, 120); d.tries = Number(d0.tries || 0) + 1; if (/duplicates another|category is prohibited|exceeds 2 ?MB|price ratio|error_price_ratio/i.test(String(x.err))) { d.tries = 3; d.fixed = 'shopee'; } }   /* ★2026-09-26 Shopee が出品そのものを止めている（店内重複・禁止カテゴリ）＝何を送っても通らない→やり直さない（カタログの質の一覧に出す） */
             if (d0.from) d.from = d0.from;   /* 最初に書く前の並び（戻す時の控え）は、やり直しで上書きしない */
             else if (x.from && x.to && JSON.stringify(x.from) !== JSON.stringify(x.to)) d.from = x.from;
-            if (redoIds[x.item_id]) d.redo = d0.redo || (needsGal(d0, { update_time: 0 }) ? undefined : 1);   /* ★2026-09-28 Codex：第2引数なしで r.update_time が例外になり、完了記録が保存されなかった */   /* 入れ直しは1回だけ（配送画像の差し替えは別に数える） */
+            if (gfixOnly[x.item_id]) { if (d0.redo) d.redo = d0.redo; }   /* ★2026-11-04 絵の入れ直しだけの回は、古いお店画像の入れ直し（redo）の印を変えない */
+            else if (redoIds[x.item_id]) d.redo = d0.redo || (needsGal(d0, { update_time: 0 }) ? undefined : 1);
+            if (hadRet[x.item_id]) { d.gfixAt = Date.now(); d.gfixN = Number(d0.gfixN || 0) + 1; if (x.ok) dayCount_(job, 'gfix', 1); } else { if (d0.gfixAt) d.gfixAt = d0.gfixAt; if (d0.gfixN) d.gfixN = d0.gfixN; }   /* ★2026-09-28 Codex：第2引数なしで r.update_time が例外になり、完了記録が保存されなかった */   /* 入れ直しは1回だけ（配送画像の差し替えは別に数える） */
             if (x.ok && galOn) { if (needsGal(d0, { update_time: 0 })) dayCount_(job, 'gal', 1); d.galv = PROMO_GAL_VER; } else if (d0.galv) d.galv = d0.galv;
             doneMap[x.item_id] = d;
             job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1;
@@ -3190,17 +3204,16 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
    説明文の【一番上】に到着目安（ポルトガル語＋英語）を足す。印（DNOTE_MARK）が既にあれば何もしない。書く直前に読み直す・
    拡張形式（extended）の説明文は触らない（形が違う）・文字数の上限を超えるなら足さない。 */
 var DNOTE_MARK = '【IMPORTANT – DELIVERY TIME】';
-var DNOTE_OLD_MARK = /⏰ Delivery time:|【IMPORTANT – DELIVERY TIME】/;   /* 前の版の文面も見分ける＝入れ替える */
+var DNOTE_OLD_MARK = /⏰ Delivery time:|【IMPORTANT – DELIVERY TIME】|【IMPORTANTE – PRAZO DE ENTREGA】|【สำคัญ – ระยะเวลาจัดส่ง】|【QUAN TRỌNG – THỜI GIAN GIAO HÀNG】|【重要－到貨時間】/;   /* 前の版の文面（英語・★2026-11-04 現地語の見出しも）を見分ける＝入れ替える */
+/* ★2026-11-04 本人「英語でいいと思う」「全部英語って、いつも言ってるよね？」「勝手にポルトガル語とか、ベトナム語やめてくれる？」＝全部の国で英語だけ。
+   版 DNOTE_VER を上げた＝済みの印（dnote_done）が前の版の出品は、もう1回読んで、英語だけの文が先頭に1回だけになるよう入れ替える */
+var DNOTE_VER = 2;
 /* ★2026-09-26 本人「BRは早い時もあるので2週間〜1.5ヶ月」「1週間で着くことはなさそう」「3週間〜1ヶ月かかることが多いを※で」「期間のところは強調できる？必ず確認してくれと」
    説明文は太字にできない＝⚠️・【】・大文字・「購入前に必ず確認」で強調 */
 var DNOTE_EN = '⚠️【IMPORTANT – DELIVERY TIME】⚠️\n📦 Ships from JAPAN. Delivery takes about 14–21 DAYS (2–3 weeks) after shipping.\n👉 PLEASE CHECK THIS BEFORE PURCHASING. Track your parcel with the tracking number. Thank you for your patience! 🙏\n\n';
-var DNOTE_TEXT = {
-  BR: '⚠️【IMPORTANTE – PRAZO DE ENTREGA】⚠️\n📦 Enviamos do JAPÃO. A entrega leva de 14 a 45 DIAS (de 2 semanas a 1 mês e meio) após o envio.\n※ Na maioria dos casos, leva de 3 SEMANAS a 1 MÊS.\n👉 POR FAVOR, CONFIRME O PRAZO ANTES DE COMPRAR. Acompanhe pelo código de rastreio. Obrigado pela paciência! 🙏\n⚠️【IMPORTANT – DELIVERY TIME】 Ships from JAPAN. Delivery takes 14–45 DAYS (2 weeks to 1.5 months) after shipping. ※ In most cases it takes 3 WEEKS to 1 MONTH. PLEASE CHECK THIS BEFORE PURCHASING.\n\n',
-  PH: DNOTE_EN, SG: DNOTE_EN, MY: DNOTE_EN,
-  TH: '⚠️【สำคัญ – ระยะเวลาจัดส่ง】⚠️\n📦 สินค้าส่งจากญี่ปุ่น ใช้เวลาประมาณ 14–21 วัน (2–3 สัปดาห์) หลังจัดส่ง\n👉 กรุณาตรวจสอบก่อนสั่งซื้อ ติดตามพัสดุได้ด้วยเลขพัสดุ ขอบคุณสำหรับความอดทนรอ 🙏\n' + DNOTE_EN,
-  VN: '⚠️【QUAN TRỌNG – THỜI GIAN GIAO HÀNG】⚠️\n📦 Hàng gửi từ NHẬT BẢN, mất khoảng 14–21 NGÀY (2–3 tuần) sau khi gửi.\n👉 VUI LÒNG KIỂM TRA TRƯỚC KHI MUA. Theo dõi đơn hàng bằng mã vận đơn. Cảm ơn bạn đã kiên nhẫn chờ đợi! 🙏\n' + DNOTE_EN,
-  TW: '⚠️【重要－到貨時間】⚠️\n📦 商品從日本寄出，寄出後約 14–21 天（2–3 週）送達。\n👉 購買前請務必確認。可使用物流追蹤碼查詢包裹。感謝您的耐心等候！🙏\n' + DNOTE_EN
-};
+var DNOTE_BR_EN = '⚠️【IMPORTANT – DELIVERY TIME】⚠️\n📦 Ships from JAPAN. Delivery takes 14–45 DAYS (2 weeks to 1.5 months) after shipping.\n※ In most cases it takes 3 WEEKS to 1 MONTH.\n👉 PLEASE CHECK THIS BEFORE PURCHASING. Track your parcel with the tracking number. Thank you for your patience! 🙏\n\n';
+/* 並び＝入れ替えの順（現地語が入っている BR・TH・VN・TW を先に） */
+var DNOTE_TEXT = { BR: DNOTE_BR_EN, TH: DNOTE_EN, VN: DNOTE_EN, TW: DNOTE_EN, PH: DNOTE_EN, SG: DNOTE_EN, MY: DNOTE_EN };
 var DNOTE_MAXLEN = 2900;
 function dnoteTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'dnoteTick') ScriptApp.deleteTrigger(t); }); }
 function dnoteApply_(shopId, cc, itemIds, dry) {
@@ -3208,7 +3221,9 @@ function dnoteApply_(shopId, cc, itemIds, dry) {
   var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 50);
   if (!ids.length) return { ok: true, n: 0, items: [] };
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
-  var out = [], first = add.split('\n')[0];
+  var out = [], head = add.replace(/\n+$/, '');
+  /* 済み＝先頭が今の文そのもので、残りに古い文（現地語・前の版）が無い */
+  var isCur = function (t) { t = String(t || ''); return t.indexOf(head) === 0 && !DNOTE_OLD_MARK.test(t.slice(head.length)); };
   /* 先頭の ⏰ の行（別の国のカタログを写した時に入ってくる他国の文面）を外す */
   var stripNote = function (t) { var ls = String(t || '').split('\n'); while (ls.length && /^(⏰|⚠️|📦|※|👉)/.test(ls[0])) ls.shift(); while (ls.length && ls[0] === '') ls.shift(); return ls.join('\n'); };
   (((b.response || {}).item_list) || []).forEach(function (it) {
@@ -3221,10 +3236,12 @@ function dnoteApply_(shopId, cc, itemIds, dry) {
         return { field_type: 'text', text: String(f.text || '') };
       });
       var allText = fl.filter(function (f) { return f.field_type === 'text'; }).map(function (f) { return f.text; }).join('\n');
-      if (allText.indexOf(first) >= 0) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
       /* 先頭が画像（配送日数の画像など）でも、最初の【文章の欄】に足す。文章の欄が無ければ先頭の画像の並びの直後に作る */
       var ti = -1; for (var q = 0; q < fl.length; q++) { if (fl[q].field_type === 'text') { ti = q; break; } }
+      var restOld = function () { return fl.some(function (f, k) { return f.field_type === 'text' && (k !== ti ? DNOTE_OLD_MARK.test(f.text) : false); }); };
+      if (ti >= 0 && isCur(fl[ti].text) && !restOld()) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
       if (DNOTE_OLD_MARK.test(allText) && ti >= 0) { fl[ti].text = stripNote(fl[ti].text); rec.fixed = 1; }
+      if ((ti >= 0 && DNOTE_OLD_MARK.test(fl[ti].text)) || restOld()) { rec.ok = false; rec.err = '古い文が先頭以外にある＝書かない（手で直す）'; rec.tries3 = 1; out.push(rec); return; }   /* ★2026-11-04 重ねて足さない */
       if (ti >= 0) fl[ti].text = add + fl[ti].text;
       else { var lead = 0; while (lead < fl.length && fl[lead].field_type === 'image') lead++; fl.splice(lead, 0, { field_type: 'text', text: add.replace(/\n+$/, '') }); }
       if ((allText.length + add.length) > DNOTE_MAXLEN) { rec.ok = false; rec.err = '長すぎる（' + (allText.length + add.length) + '字）'; out.push(rec); return; }
@@ -3232,8 +3249,9 @@ function dnoteApply_(shopId, cc, itemIds, dry) {
       body = { item_id: it.item_id, description_type: 'extended', description_info: { extended_description: { field_list: fl } } };
     } else {
       var d = String(it.description || '');
-      if (d.indexOf(first) >= 0) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
-      if (DNOTE_OLD_MARK.test(d)) { d = stripNote(d); rec.fixed = 1; }   /* 他国の文面が入っていた＝入れ替える */
+      if (isCur(d)) { rec.ok = true; rec.skip = 'already'; out.push(rec); return; }
+      if (DNOTE_OLD_MARK.test(d)) { d = stripNote(d); rec.fixed = 1; }   /* 他国・前の版・現地語の文面が入っていた＝入れ替える */
+      if (DNOTE_OLD_MARK.test(d)) { rec.ok = false; rec.err = '古い文が先頭以外にある＝書かない（手で直す）'; rec.tries3 = 1; out.push(rec); return; }   /* ★2026-11-04 重ねて足さない */
       var nd = add + d;
       if (nd.length > DNOTE_MAXLEN) { rec.ok = false; rec.err = '長すぎる（' + nd.length + '字）'; out.push(rec); return; }
       rec.len = nd.length; body = { item_id: it.item_id, description: nd };
@@ -3244,6 +3262,16 @@ function dnoteApply_(shopId, cc, itemIds, dry) {
     out.push(rec);
   });
   return { ok: true, n: out.length, items: out, uf: ufTotal_() };
+}
+function dnotePeek_(shopId, itemIds) {
+  var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 10);
+  if (!ids.length) return { ok: true, items: [] };
+  var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
+  return { ok: true, items: (((b.response || {}).item_list) || []).map(function (it) {
+    var t = String(it.description_type || 'normal') === 'extended' ? ((((it.description_info || {}).extended_description) || {}).field_list || []).filter(function (f) { return f.field_type === 'text'; }).map(function (f) { return f.text || ''; }).join('\n') : String(it.description || '');
+    var m = t.match(new RegExp(DNOTE_OLD_MARK.source, 'g')) || [];
+    return { item_id: it.item_id, type: it.description_type, head: t.slice(0, 420), marks: m.length, local: /PRAZO|สำคัญ|QUAN TRỌNG|到貨/.test(t) };
+  }) };
 }
 /* ★2026-09-28 Codex：直接トリガーは doGet/doPost の ufPersist_ を通らない＝数えた回数が保存されずに消えていた → 必ず最後に保存 */
 function dnoteTick(budgetMs) { try { return dnoteTickBody_.apply(this, arguments); } finally { try { ufPersist_(); } catch (eUf) {} } }
@@ -3261,7 +3289,7 @@ function dnoteTickBody_(budgetMs) {
     for (var ci = 0; ci < ccs.length; ci++) {
       var cc = ccs[ci];
       var rows = sbSelectAll_('listings', 'select=item_id,shop_id&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
-      var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && (!d || (!d.ok && Number(d.tries || 1) < 3)); });
+      var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && (!d || Number(d.v || 1) < DNOTE_VER || (!d.ok && Number(d.tries || 1) < 3)); });   /* ★2026-11-04 前の版の済み（v が無い／1）もやり直す */
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
       var shops = Object.keys(byShop);
       for (var si = 0; si < shops.length; si++) {
@@ -3272,7 +3300,7 @@ function dnoteTickBody_(budgetMs) {
           if (dayCount_(job, 'day', 0) >= dCap) { job.msg = '今日の上限 ' + dCap + ' 件（明日続き）'; job.at = new Date().toISOString(); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
           var res; try { res = dnoteApply_(parseInt(shops[si], 10), cc, ids.slice(bi, bi + 25), false); } catch (e) { job.msg = cc + ': ' + String((e && e.message) || e).slice(0, 120); baKvSet_('dnote_done', done); baKvSet_('dnote_job', job); return; }
           var halt = false;
-          (res.items || []).forEach(function (x) { if (x.halt) { halt = true; return; } var d0 = done[x.item_id] || {}; done[x.item_id] = { at: Date.now(), ok: x.ok ? 1 : 0, skip: x.skip || undefined, err: x.err || undefined, tries: x.ok ? undefined : Number(d0.tries || 0) + 1 }; job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1; if (!x.skip) dayCount_(job, 'day', 1); });
+          (res.items || []).forEach(function (x) { if (x.halt) { halt = true; return; } var d0 = done[x.item_id] || {}; var t0r = Number(d0.v || 1) < DNOTE_VER ? 0 : Number(d0.tries || 0); done[x.item_id] = { at: Date.now(), v: DNOTE_VER, ok: x.ok ? 1 : 0, skip: x.skip || undefined, err: x.err || undefined, tries: x.ok ? undefined : (x.tries3 ? 3 : t0r + 1) }; job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1; if (!x.skip) dayCount_(job, 'day', 1); });
           baKvSet_('dnote_done', done);
           if (halt) { job.msg = '枠切れ・通信の失敗で止めた（次の回へ）'; baKvSet_('dnote_job', job); return; }
           job.at = new Date().toISOString(); job.msg = cc + ' 進行中'; baKvSet_('dnote_job', job);
@@ -3286,7 +3314,7 @@ function dnoteTickBody_(budgetMs) {
    説明文の【一番上】に配送日数の画像（国別：BR=ポルトガル語／TH／VN／TW／PH・SG・MY=英語）を1枚入れる。
    画像は説明文用に scene=desc で上げる（normal だと正方形に加工される）。通常の説明文は「画像＋元の文章」の拡張形式に変える（文章は一字も変えない）。
    もう入っていれば何もしない・前の版の画像なら差し替える・書く直前に読み直す・書く前の形を dimg_log に控える（戻せるように） */
-var DIMG_KEY = { BR: 'br', TH: 'th', VN: 'vn', TW: 'tw', PH: 'en', SG: 'en', MY: 'en' };
+var DIMG_KEY = { BR: 'br_en', TH: 'en', VN: 'en', TW: 'en', PH: 'en', SG: 'en', MY: 'en' };   /* ★2026-11-04 英語だけ（本人）。前の br/th/vn/tw の絵は promo_assets.gal に残す＝今の国の絵でないので出品から外される。BR の説明文用の絵（dimg）は br_en が無い＝入れない */
 var DIMG_BASE = 'https://gucci1119.github.io/shopee-compare/img/desc_delivery_';
 function dimgTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'dimgTick') ScriptApp.deleteTrigger(t); }); }
 function dimgUpload_(url) {
