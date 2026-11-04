@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261105-0430';
+var SRC_VER = '20261105-2310';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -813,6 +813,12 @@ function doGetInner_(e) {
         baout = p.action === 'pre_h_migrate' ? baPreHMigrate_(p) : p.action === 'pre_h_check' ? baPreHCheck_(p) : p.action === 'pre_h_compare' ? baPreHCompare_(p) : p.action === 'limited_fix' ? baLimitedFix_(p) : p.action === 'limited_audit' ? baLimitedAudit_(p) : p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'game_judge_cands' ? gameJudgeCands_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'llog_watch') {   /* ★2026-11-05 仕入れ目安の控えの照らし合わせ（読むだけ・dry=1 なら記録もしない） */
+      var lwcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), lwo;
+      try { var lwwt = P_().getProperty('WRITE_TOKEN'); if (!lwwt || p.token !== lwwt) throw new Error('WRITE_TOKEN不正'); lwo = llogShiftWatch_(200000, p.dry === '1'); }
+      catch (eLw2) { lwo = { ok: false, error: String((eLw2 && eLw2.message) || eLw2).slice(0, 200) }; }
+      return ContentService.createTextOutput(lwcb + '(' + JSON.stringify(lwo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'dup_watch') {   /* ★2026-11-05 重複の見張りを今すぐ回す（dry=1＝数えるだけ・止めない） */
       var dwcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), dwo;
@@ -7449,6 +7455,8 @@ function dailyAdjustmentsCheck() {
   var r = dailyAdjustmentsCheckBody_();
   /* ★2026-11-05 毎朝：🤖が新しく足した明細の同じ国の重複の見張り。補償の取り込みの【後】に、残り時間の中だけで（6分の上限で取り込みを潰さない） */
   try { if (!isChild_()) { var left = 300000 - (Date.now() - t0); if (left > 30000) boshuDupWatch_(26, false, Math.min(left, 240000)); else Logger.log('dup watch: 時間が残っていない＝明日'); } } catch (eDw) { Logger.log('dup watch: ' + eDw); }
+  /* ★2026-11-05 仕入れ目安の控えの照らし合わせ（読むだけ・🔔）＝重複の見張りの後の残り時間で */
+  try { if (!isChild_()) { var left2 = 300000 - (Date.now() - t0); if (left2 > 30000) llogShiftWatch_(Math.min(left2 - 15000, 120000), false); else Logger.log('llog watch: 時間が残っていない＝明日'); } } catch (eLw) { Logger.log('llog watch: ' + eLw); }
   return r;
 }
 function dailyAdjustmentsCheckBody_() {
@@ -10655,6 +10663,68 @@ function boshuDupWatch_(hours, dry, budgetMs) {
     }
   }
   if (!dry) baKvSet_('boshu_dup_watch', out);
+  return out;
+}
+/* ★2026-11-05 事業本部「再発よけの②」：仕入れ目安の控え（llog_cost_*）が今の明細と合っているかを、詰め直した7日分のカタログ（shift_result_*）だけ照らす。
+   読むだけ・控えは書き換えない（付け直しは本人の OK の後）。結果は app_kv llog_shift_watch（ポータルの🔔が読む）。
+   照らし方は 11/4 の一覧（_llog_shift_20261104）と同じ：SKU が両方あれば SKU、無ければ名前・カードの型番・語の重なり */
+function llogNz_(s) { return String(s == null ? '' : s).normalize('NFKC').toLowerCase().replace(/[^0-9a-z぀-ヿ一-鿿]+/g, ''); }
+function llogCodes_(s) {
+  var t = String(s == null ? '' : s).normalize('NFKC').toUpperCase(), out = {}, m, re = /[A-Z0-9][A-Z0-9\/\-]{3,}[0-9][A-Z0-9]*/g;
+  while ((m = re.exec(t))) { var c = m[0].replace(/[^A-Z0-9]/g, ''); if (c.length >= 5 && /\d/.test(c) && /[A-Z]/.test(c)) out[c] = 1; }
+  return out;
+}
+function llogToks_(s) { var o = {}; String(s == null ? '' : s).normalize('NFKC').toLowerCase().split(/[^0-9a-z]+/).forEach(function (w) { if (w.length >= 3) o[w] = 1; }); return o; }
+function llogMatch_(e, mn, msku) {
+  var es = String((e && e.sku) || '').toUpperCase().trim(), ms = String(msku || '').toUpperCase().trim();
+  if (es && ms && es === ms) return 1;
+  var names = [e && e.cur, e && e.en].filter(function (x) { return x; });
+  if (!names.length) return -1;   /* 名前の無い控え＝比べられない */
+  var nm = llogNz_(mn);
+  for (var i = 0; i < names.length; i++) if (nm && llogNz_(names[i]) === nm) return 1;
+  var ce = {}; names.forEach(function (x) { var c = llogCodes_(x); for (var k in c) ce[k] = 1; }); var cm = llogCodes_(mn);
+  if (Object.keys(ce).length && Object.keys(cm).length) { for (var k2 in ce) if (cm[k2]) return 1; return 0; }
+  var b = llogToks_(mn), bk = Object.keys(b);
+  for (var j = 0; j < names.length; j++) {
+    var a = llogToks_(names[j]), ak = Object.keys(a); if (!ak.length || !bk.length) continue;
+    var inter = ak.filter(function (w) { return b[w]; }), uni = {}; ak.concat(bk).forEach(function (w) { uni[w] = 1; });
+    if (inter.length / Object.keys(uni).length >= 0.6) return 1;
+    if (!ms && (inter.length === ak.length || inter.length === bk.length) && inter.some(function (w) { return w.length >= 5; })) return 1;
+  }
+  return 0;
+}
+function llogShiftWatch_(budgetMs, dry) {
+  var t0 = Date.now(), budget = budgetMs || 120000, since = new Date(Date.now() - 7 * 86400000).toISOString();
+  var out = { ok: true, at: new Date().toISOString(), cats: [], total: 0, checked: 0, cut: 0, errs: [] };
+  var sk = sbSelectAll_('app_kv', 'select=k&k=like.shift_result_*&updated_at=gte.' + since) || [];
+  var items = {}; sk.forEach(function (r) { var m = /^shift_result_(\d+)_(\d+)$/.exec(String(r.k || '')); if (m) items[m[2]] = m[1]; });
+  var ids = Object.keys(items), kvCache = {};
+  ids.forEach(function (it) {
+    if (Date.now() - t0 > budget) { out.cut++; return; }
+    try {
+      var L = (sbSelect_('listings', 'select=cc,item_id,name,models&item_id=eq.' + it) || [])[0]; if (!L) return;
+      var ms = L.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e0) { ms = []; } } ms = ms || [];
+      var cc = L.cc, K = function (mid) { return cc + '|' + it + '|' + mid; }, mids = ms.map(function (m) { return String(m.id); }), keys = {};
+      for (var i = 0; i < mids.length; i += 15) {
+        var q = mids.slice(i, i + 15).map(function (mid) { return 'v->m->>"' + K(mid) + '".not.is.null'; }).join(',');
+        (sbSelect_('app_kv', 'select=k&k=like.llog_cost_*&or=' + encodeURIComponent('(' + q + ')')) || []).forEach(function (r) { if (r && r.k) keys[r.k] = 1; });
+      }
+      var bad = 0, n = 0, sample = [];
+      Object.keys(keys).forEach(function (kk) {
+        if (!(kk in kvCache)) { kvCache[kk] = baKvFresh_(kk); if (BA_KV_FAIL[kk]) kvCache[kk] = null; }
+        var cur = kvCache[kk]; if (!cur || !cur.m) { out.errs.push(kk + ' 読めない'); return; }
+        ms.forEach(function (m) {
+          var e = cur.m[K(String(m.id))]; if (e == null) return; if (typeof e !== 'object') return;
+          var r = llogMatch_(e, m.n, m.sku); if (r < 0) return; n++;
+          if (r === 0) { bad++; if (sample.length < 3) sample.push({ n: String(m.n || '').slice(0, 60), en: String(e.en || e.cur || '').slice(0, 60), c: e.c }); }
+        });
+      });
+      out.checked++;
+      if (bad) { out.cats.push({ cc: cc, item: it, name: String(L.name || '').slice(0, 60), bad: bad, n: n, sample: sample }); out.total += bad; }
+    } catch (eI) { out.errs.push(it + ': ' + String((eI && eI.message) || eI).slice(0, 100)); }
+  });
+  out.cats.sort(function (a, b) { return b.bad - a.bad; }); out.cats = out.cats.slice(0, 60); out.errs = out.errs.slice(0, 10);
+  if (!dry) baKvSet_('llog_shift_watch', out);
   return out;
 }
 /* ★2026-11-05 出品枠の控え（shop_item_limit）が24時間より古ければ取り直す（1店1回＝13回の接続・失敗した店は前の値を残す・試すのは1時間に1回まで） */
