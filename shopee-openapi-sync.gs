@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261105-2310';
+var SRC_VER = '20261105-2330';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -10696,19 +10696,26 @@ function llogMatch_(e, mn, msku) {
 function llogShiftWatch_(budgetMs, dry) {
   var t0 = Date.now(), budget = budgetMs || 120000, since = new Date(Date.now() - 7 * 86400000).toISOString();
   var out = { ok: true, at: new Date().toISOString(), cats: [], total: 0, checked: 0, cut: 0, errs: [] };
-  var sk = sbSelectAll_('app_kv', 'select=k&k=like.shift_result_*&updated_at=gte.' + since) || [];
-  var items = {}; sk.forEach(function (r) { var m = /^shift_result_(\d+)_(\d+)$/.exec(String(r.k || '')); if (m) items[m[2]] = m[1]; });
-  var ids = Object.keys(items), kvCache = {};
+  var sk = sbSelectAll_('app_kv', 'select=k,updated_at&k=like.shift_result_*&updated_at=gte.' + since + '&order=updated_at.desc') || [];
+  var items = {}, ord = []; sk.forEach(function (r) { var m = /^shift_result_(\d+)_(\d+)$/.exec(String(r.k || '')); if (m && !items[m[2]]) { items[m[2]] = m[1]; ord.push(m[2]); } });
+  /* 前の回に時間切れで見られなかったカタログを先に・見られなかった分は前の回の結果を残す（0件と言わない） */
+  var prev = baKvFresh_('llog_shift_watch') || {}, prevTodo = {}; (prev.unchecked || []).forEach(function (x) { prevTodo[String(x)] = 1; });
+  var ids = ord.filter(function (x) { return prevTodo[x]; }).concat(ord.filter(function (x) { return !prevTodo[x]; })), kvCache = {}, seenIt = {};
+  out.unchecked = [];
   ids.forEach(function (it) {
-    if (Date.now() - t0 > budget) { out.cut++; return; }
+    if (Date.now() - t0 > budget) { out.cut++; out.unchecked.push(it); return; }
+    seenIt[it] = 1;
     try {
       var L = (sbSelect_('listings', 'select=cc,item_id,name,models&item_id=eq.' + it) || [])[0]; if (!L) return;
       var ms = L.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e0) { ms = []; } } ms = ms || [];
       var cc = L.cc, K = function (mid) { return cc + '|' + it + '|' + mid; }, mids = ms.map(function (m) { return String(m.id); }), keys = {};
-      for (var i = 0; i < mids.length; i += 15) {
-        var q = mids.slice(i, i + 15).map(function (mid) { return 'v->m->>"' + K(mid) + '".not.is.null'; }).join(',');
+      /* 控えは機種ごとの1本に入る＝頭と末尾の15件ずつで鍵が見つかる（全部の明細で探すと1カタログ7回になり時間が足りない） */
+      var findKeys = function (list) { for (var i = 0; i < list.length; i += 15) {
+        var q = list.slice(i, i + 15).map(function (mid) { return 'v->m->>"' + K(mid) + '".not.is.null'; }).join(',');
         (sbSelect_('app_kv', 'select=k&k=like.llog_cost_*&or=' + encodeURIComponent('(' + q + ')')) || []).forEach(function (r) { if (r && r.k) keys[r.k] = 1; });
-      }
+      } };
+      findKeys(mids.length > 30 ? mids.slice(0, 15).concat(mids.slice(-15)) : mids);
+      if (!Object.keys(keys).length && mids.length > 30) findKeys(mids.slice(15, -15));   /* 頭と末尾に控えが無いカタログは全部で探す */
       var bad = 0, n = 0, sample = [];
       Object.keys(keys).forEach(function (kk) {
         if (!(kk in kvCache)) { kvCache[kk] = baKvFresh_(kk); if (BA_KV_FAIL[kk]) kvCache[kk] = null; }
@@ -10723,7 +10730,8 @@ function llogShiftWatch_(budgetMs, dry) {
       if (bad) { out.cats.push({ cc: cc, item: it, name: String(L.name || '').slice(0, 60), bad: bad, n: n, sample: sample }); out.total += bad; }
     } catch (eI) { out.errs.push(it + ': ' + String((eI && eI.message) || eI).slice(0, 100)); }
   });
-  out.cats.sort(function (a, b) { return b.bad - a.bad; }); out.cats = out.cats.slice(0, 60); out.errs = out.errs.slice(0, 10);
+  (prev.cats || []).forEach(function (c) { if (c && !seenIt[String(c.item)] && items[String(c.item)]) { c.prevAt = prev.at; out.cats.push(c); out.total += Number(c.bad) || 0; } });   /* 今回見ていないカタログは前の回の結果（prevAt 付き） */
+  out.cats.sort(function (a, b) { return b.bad - a.bad; }); out.cats = out.cats.slice(0, 60); out.errs = out.errs.slice(0, 10); out.unchecked = out.unchecked.slice(0, 300);
   if (!dry) baKvSet_('llog_shift_watch', out);
   return out;
 }
