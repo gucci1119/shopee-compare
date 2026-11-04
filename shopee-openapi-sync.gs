@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0630';
+var SRC_VER = '20261104-0930';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -10300,6 +10300,10 @@ function baCloneToSub_(cc, base, newName, st, hw, role) {
     baLog_(st, cc + (_isSubBase ? '：2店舗目も出品枠が満杯です（' + base.shop_id + '）' : '：2店舗目が登録簿にありません'));   /* ★2026-10-18 元のカタログが2店舗目の時に「登録簿にありません」と出ていた＝実際は2店舗目も満杯 */
     return null;
   }
+  /* ★2026-11-04 事業本部（本人のスクショ・TW 2店舗目）：2店舗目も出品枠が満杯なのに作りに行っていた。作ったカタログは非公開のまま公開できず、
+     その明細は「出している」に数えない（満杯の店の非公開＝買えない）ので、次の回にまた別のカタログを作る＝同じ作品が 56 カタログ（明細1つずつ・全部非公開）に入った。
+     → 2店舗目も満杯（公開を断られた印・枠の数字）なら作らない（null＝呼び出し側が「この国は今日は足さない」にする） */
+  if (baShopFull_(cc, sub)) { baLog_(st, cc + '：2店舗目も出品枠が満杯です（' + sub + '）→ カタログを作りません'); return null; }
   var pr = 0;
   try { pr = (base.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (e) {}
   /* ★2026-09-23 2店舗目に同じ名前のカタログが既にあると `product duplicates an existing product` で弾かれる（実測 TH）。
@@ -10363,7 +10367,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
     if (other) {
       var dst = 0;
       try { dst = pool.length ? parseInt(pool[0].shop_id, 10) : baMainShop_(cc); } catch (eD) { dst = 0; }
-      if (dst && baShopFull_(cc, dst)) { var dSub = baSubShop_(cc, dst); if (!dSub) { baLog_(st, cc + '：' + hw + ' の汎用カタログは1店舗目が満杯・2店舗目が無いので作りません'); return null; } dst = dSub; }   /* ★2026-09-26 満杯の店に作ると公開できず毎日作り直す */
+      if (dst && baShopFull_(cc, dst)) { var dSub = baSubShop_(cc, dst); if (!dSub) { baLog_(st, cc + '：' + hw + ' の汎用カタログは1店舗目が満杯・2店舗目が無いので作りません'); return null; } if (baShopFull_(cc, dSub)) { baLog_(st, cc + '：' + hw + ' の汎用カタログは2店舗目も満杯なので作りません'); return null; } dst = dSub; }   /* ★2026-09-26 満杯の店に作ると公開できず毎日作り直す */
       if (!dst) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（この国の店が分かりません）'); return null; }
       var pr0 = 0;
       try { pr0 = (other.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (eP) {}
@@ -10396,7 +10400,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
     } catch (eA) { _any = null; }
     if (_any) {
       var dst2 = 0; try { dst2 = parseInt(_any.shop_id, 10) || baMainShop_(cc); } catch (eD2) { dst2 = 0; }
-      if (dst2 && baShopFull_(cc, dst2)) { var dSub2 = baSubShop_(cc, dst2); if (!dSub2) { baLog_(st, cc + '：' + hw + ' の汎用カタログは1店舗目が満杯・2店舗目が無いので作りません'); return null; } dst2 = dSub2; }
+      if (dst2 && baShopFull_(cc, dst2)) { var dSub2 = baSubShop_(cc, dst2); if (!dSub2) { baLog_(st, cc + '：' + hw + ' の汎用カタログは1店舗目が満杯・2店舗目が無いので作りません'); return null; } if (baShopFull_(cc, dSub2)) { baLog_(st, cc + '：' + hw + ' の汎用カタログは2店舗目も満杯なので作りません'); return null; } dst2 = dSub2; }
       if (!dst2) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れません（この国の店が分かりません）'); return null; }
       var cover = BA_COVER_BASE + encodeURIComponent(hw) + '.png';
       var _wKg = (Number(fam.weightG) > 0) ? Number(fam.weightG) / 1000 : 0;   /* ★家族の重さ（Switch2＝150g）。別機種から借りると 0.2 等になり送料が狂う（Codex/advisor指摘 2026-10-07） */
