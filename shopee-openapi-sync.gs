@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-0945';
+var SRC_VER = '20261104-1000';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -9966,7 +9966,8 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
   rows.forEach(function (r) {
     if (r.status !== 1 && _isFull(r.cc, r.shop_id)) { _buried++; _buriedItems[String(r.item_id)] = 1;
       if (_noRoom(r.cc)) { var setB = listedByCc[r.cc] = listedByCc[r.cc] || {}; var msB = r.models; if (typeof msB === 'string') { try { msB = JSON.parse(msB); } catch (eB) { msB = []; } } var chB = baHwsOf_((r.name || '') + ' ' + (r.parent_sku || ''));
-        (msB || []).forEach(function (m) { if (!m || m.ghost || !m.n || String(m.n).toLowerCase() === 'test') return; var mh = baHwsOf_(m.n); var hs = mh.length ? mh : chB; if (hs.length && hs.indexOf(hw) < 0) return; var k1 = baTmKey_(m.n), k2 = baKey_(m.n); if (k1) setB[k1] = 1; if (k2) setB[k2] = 1; }); }
+        itemCc[String(r.item_id)] = r.cc;   /* JAN の索引（jan_by_item）でも数える */
+        (msB || []).forEach(function (m) { if (!m || m.ghost || !m.n || String(m.n).toLowerCase() === 'test') return; if (m.sku) setB['sku:' + String(m.sku).trim().toUpperCase()] = 1; var mh = baHwsOf_(m.n); var hs = mh.length ? mh : chB; if (hs.length && hs.indexOf(hw) < 0) return; var k1 = baTmKey_(m.n), k2 = baKey_(m.n); if (k1) setB[k1] = 1; if (k2) setB[k2] = 1; }); }
       return; }   // 満杯の店の非公開カタログは入れ先にしない（その国の店が全部満杯なら、中の明細は「出している」に数える）
     itemCc[String(r.item_id)] = r.cc;
     var set = listedByCc[r.cc] = listedByCc[r.cc] || {};
@@ -9983,6 +9984,8 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
     var catHws = baHwsOf_((r.name || '') + ' ' + (r.parent_sku || ''));
     (ms || []).forEach(function (m) {
       if (!m || m.ghost || !m.n) return;
+      /* ★2026-11-04 事業本部：明細名の書き方が違っても止まるように、同じ国（本店・2店舗目）の明細SKUも「出している」の鍵に入れる（SKU＝機種_作品の鍵＝国が同じなら作らない決まり 9/21） */
+      if (m.sku && String(m.n).toLowerCase() !== 'test') set['sku:' + String(m.sku).trim().toUpperCase()] = 1;
       if (!inFam) { var mh = baHwsOf_(m.n); var hs = mh.length ? mh : catHws; if (hs.length && hs.indexOf(hw) < 0) return; }
       var k1 = baTmKey_(m.n), k2 = baKey_(m.n); if (k1) set[k1] = 1; if (k2) set[k2] = 1;
     });
@@ -10171,6 +10174,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
     /* ★2026-09-25 実測：Switch の巡回23回のうち13回が「全部の国に出品済み（対象なし）」で空振り。候補を選ぶ時は日本語名でしか照合せず、
        英題に訳した後で『もう出している』と分かって捨てていた（写真の判定・翻訳の手間も無駄）。英題の控え（boshu_auto_en）にある英題でも照合する */
     var _ec = enC[r.key] && enC[r.key].en ? String(enC[r.key].en) : '', k5 = _ec ? baTmKey_(_ec) : '', k6 = _ec ? baKey_(_ec) : '';
+    var _skC = ''; try { var _enS = _ec || r.en || ''; _skC = _enS ? String(baSkuOf_(hw, _enS) || '').toUpperCase() : ''; } catch (eSk) { _skC = ''; }   /* 足す時の明細SKUと同じ作り（機種_作品） */
     var need = ccs.filter(function (cc) {
       var d = (ledger[r.key] || {})[cc];
       /* ★2026-09-23 Codex指摘：満杯の店の非公開カタログに入った明細は「出している」に数えないのに、台帳の済みだけが残って2店舗目へ出し直されなかった → その明細が埋もれている時は済みと見ない */
@@ -10186,6 +10190,7 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
       { var cfx = ccFail[hw + '|' + cc]; if (cfx && Date.now() - Date.parse(cfx.at) < 6 * 3600 * 1000) return false; }   /* ★2026-09-23 作れない国は6時間外す（同じ作品の空回り止め） */
       var s = listedByCc[cc] || {}; if (s[k1] || s[k3] || (k2 && s[k2]) || (k4 && s[k4]) || (k5 && s[k5]) || (k6 && s[k6])) return false;
       if (r.jan && (janByCc[cc] || {})[r.jan]) return false;
+      if (_skC && s['sku:' + _skC]) return false;   /* ★2026-11-04 同じ国に同じ明細SKU（機種_作品）がある＝出している */
       return true;
     });
     if (!need.length) return;
