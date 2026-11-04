@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261105-2330';
+var SRC_VER = '20261105-2355';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3943,12 +3943,28 @@ function baLlogRekey_(shopId, itemId, moves, gone, nameOf) {
     var _ap = 0, _nm = 0; moves.forEach(function (mv) { var nmS = nameOf[mv[0]]; var d = m[K(mv[1])]; if (nmS && d && typeof d === 'object' && d.en) { _nm++; if (vnNorm_(d.en) === vnNorm_(nmS)) _ap++; } });
     if (_ap > 0) { out.skipped = (out.skipped || 0) + 1; out.skipWhy = 'もう付け替え済み（' + _ap + '/' + _nm + '）'; return; }
     moves.forEach(function (mv) { snap[mv[0]] = m[K(mv[0])]; });   /* 先に全部控えてから書く（連鎖で1つずつずれない） */
+    var _pre0 = cc + '|' + it + '|', _orig = {}; Object.keys(m).forEach(function (x) { if (x.indexOf(_pre0) === 0) _orig[x] = m[x]; });   /* ★2026-11-05 引っ越す前のこのカタログの控え（名前で照らし直す時の候補） */
     moves.forEach(function (mv) {
       var e = snap[mv[0]];
       if (e !== undefined) { var e2 = (e && typeof e === 'object') ? JSON.parse(JSON.stringify(e)) : { c: Number(e) || 0 }; if (!e2.en && nameOf[mv[0]]) e2.en = String(nameOf[mv[0]]).slice(0, 120); e2.rk = today; m[K(mv[1])] = e2; ch++; }
       else if (m[K(mv[1])] !== undefined) { delete m[K(mv[1])]; ch++; }
     });
     gone.forEach(function (g) { if (m[K(g)] !== undefined) { delete m[K(g)]; ch++; } });
+    /* ★2026-11-05 再発よけ①（本人「直して」・事業本部）：番号の引っ越しだけだと、前にずれていた控えはずれたまま運ばれる（11/4 に 2,607件）。
+       引っ越した後、移した先の控えを今その番号にある作品の名前（nameOf の元）で照らし、合わなければ同じカタログの控えから名前が1つだけ合う行を写す。
+       合う行が無い・2つ以上ある時は触らず out.review に残す（人が見る）。名前の無い控えは比べない */
+    try {
+      var ownKeys = Object.keys(_orig);
+      moves.forEach(function (mv) {
+        var nm = nameOf[mv[0]]; if (!nm) return;
+        var dk = K(mv[1]), de = m[dk]; if (!de || typeof de !== 'object') return;
+        var r0 = llogMatch_(de, nm, ''); if (r0 !== 0) return;   /* 合っている（1）・比べられない（-1）は触らない */
+        var hits = ownKeys.filter(function (x) { var e = _orig[x]; return e && typeof e === 'object' && llogMatch_(e, nm, '') === 1; });
+        if (hits.length === 1) { var ne = JSON.parse(JSON.stringify(_orig[hits[0]])); ne.fx = today; ne.fxPrev = { c: de.c, en: de.en || de.cur || '' }; ne.fxFrom = hits[0].split('|')[2]; m[dk] = ne; ch++; out.fixed = (out.fixed || 0) + 1; }
+        else { (out.review = out.review || []).push({ k: dk, name: String(nm).slice(0, 60), hits: hits.length }); }
+      });
+      if (out.review) out.review = out.review.slice(0, 40);
+    } catch (eFx) { out.fixErr = String(eFx).slice(0, 120); }
     if (ch) { cur.at = new Date().toISOString(); baKvSet_(kk, cur); out.n += ch; out.keys.push(kk); }
     /* 同じ機種の🤖の台帳：item#元 → item#先（動いた作品だけ）。消した作品の値はそのまま */
     try {

@@ -5117,6 +5117,8 @@
     "⛔ 為替を読めず既定のレートで計算した値段なので、Request page に足していません。為替を読み直してから押してください": "⛔ The price was calculated with the default exchange rate (the rate could not be read), so it was not added to the Request page. Reload the exchange rate and try again",
     "為替を読めず既定のレートで計算しています。為替を読み直してから押してください": "Calculated with the default exchange rate (the rate could not be read). Reload the exchange rate before pressing",
     "見積もりで為替が読めず既定のレートの時は、入力欄へ・🛒 を押せなくしました": "When the quote uses the default exchange rate, “To chat box” and 🛒 are now disabled",
+    "Request page に足す時に、新しいカタログを作らないようにしました": "Adding to a Request page no longer creates a new catalog",
+    "PayPal リンクの商品名・説明に「(used, Japanese ver.)」を決め打ちで入れないようにしました": "PayPal link title and description no longer always say “(used, Japanese ver.)”",
     "お知らせに「🤖 同じ国の重複の見張り」と「💴 仕入れ目安の控えが今の明細と合わない」を足しました": "Added “🤖 Same-country duplicate watch” and “💴 Cost estimates not matching current variations” to Alerts",
     /* ★2026-10-29 値付けの見直しの表の言い方 */
     "値付けの見直しの「商品・明細」の列を細くしました": "Narrowed the Item / Variation column in the pricing review",
@@ -10302,6 +10304,23 @@
      自動で進める入口（&auto=1・&mode=quote）は、src（sr／wa）と o の組が合い、開いた元の窓（window.opener）が残っている時だけ。
      Shopee Smart Reply・WA Smart Reply はどちらも名前つきの window.open で開く＝opener が残る（チャットで届いたリンクを押した時は残らない） */
   function pcChatOrigin(o) { o = String(o || ''); return /^https:\/\/(seller\.shopee\.(ph|tw|sg|co\.th|com\.my|com\.br)|banhang\.shopee\.vn|web\.whatsapp\.com)$/.test(o) ? o : ''; }
+  /* ★2026-11-05 03-22・03 営業部・03-11：開いた元（Smart Reply・WA）からの「公開して」（smdReqPublish）・「今の英文をちょうだい」（smdReqText）を受ける。
+     受けるのは、送り元が開いた元の窓（opener）で、その origin が決まった画面（webchat・WhatsApp）と同じ、かつ buyer と ref が今の見積もりと同じ時だけ＝別の人のページを公開しない。
+     返事は tell と同じ smdReqStatus（text・link 入り）。公開した時の msg に「非公開」の語を入れない（Smart Reply が /新しく作りました|非公開/ で非公開の印を立てる）。
+     Zalo の枠（iframe）からの頼みは、送り元（origin）を 03-32 に確かめてから足す */
+  window.addEventListener('message', async (e) => {
+    const d = e.data || {}; if (!d || !(d.smdReqPublish || d.smdReqText)) return;
+    const to = pcChatOrigin(e.origin); let op = null; try { op = window.opener; } catch (_) {}
+    if (!to || to !== pcChatOrigin(pcQuote.o) || !op || e.source !== op) return;
+    const reply = (ok, m) => { try { op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 300), buyer: (pcQuote.last || {}).buyer || '', ref: pcQuote.ref || '', price: Number((pcQuote.last || {}).shopL) || null, iso: (pcQuote.last || {}).ISO || '', text: String((document.getElementById('pc-q-text') || {}).value || '').slice(0, 4000), link: pcQuote.link || '', option: pcQuote.optName || '', reqPublish: !!d.smdReqPublish }, to); } catch (_) {} };
+    const pk = pcQuote.pick || null, buyer = String(d.buyer || ''), ref = String(d.ref || '');
+    const sameB = buyer && buyer === String((pcQuote.last || {}).buyer || ''), sameR = !ref || ref === String(pcQuote.ref || '') || (pk && ref === String(pk.ref || ''));
+    if (!sameB || !sameR) { reply(false, 'この窓の見積もりと相手（buyer・ref）が違うので受けませんでした'); return; }
+    if (d.smdReqText) { reply(!!pcQuote.link, pcQuote.link ? '今の英文とリンクです' : 'まだ Request page に足していません（リンクがありません）'); return; }
+    if (!pk || !pcQuote.link || String(pk.buyer || '') !== buyer) { reply(false, 'この窓ではまだ Request page に足していないので、公開できません'); return; }
+    try { await pcReqReady(pk, document.getElementById('pc-q-msg')); reply(true, 'Request page を公開しました（予約出品10日・読み直しで確かめました）'); }
+    catch (eP) { reply(false, '公開できませんでした: ' + String((eP && eP.message) || eP).slice(0, 160)); }
+  });
   function pcChatOpenerWhy(p) {
     const o = pcChatOrigin(p.get('o')), src = String(p.get('src') || '');
     if (!o) return '開いた元（&o=）が Shopee の webchat・WhatsApp ではありません';
@@ -10460,6 +10479,17 @@
     if (/(取扱)?説明書\s*(付|あり|有)/.test(n)) return '説明書あり';
     return '';
   }
+  /* ★2026-11-05 03 営業部：PayPal の明細に「(used, Japanese ver.)」を決め打ちしない（北米版の新品などがある）。
+     見積もりの仕入れ先（pcQuote.deal の名前・状態）と英語の商品名から、中古／新品と版が読めた時だけ付ける。読めなければ付けない */
+  function pcItemTag(title) {
+    const d = pcQuote.deal || {}, t = String(d.name || '') + ' ' + String(d.cond || '') + ' ' + String(title || '');
+    const isNew = /新品|未開封|未使用|シュリンク付|\bnew\b|sealed|brand new/i.test(t) && !/中古|used|pre-?owned/i.test(t);
+    const isUsed = !isNew && (/中古|used|pre-?owned/i.test(t) || !!pcCondOf(d));
+    const ver = /北米版|北米|US版|USA版|\b(?:US|NA|North American?)\b(?: ver| version)?/i.test(t) ? 'North American' : /欧州版|EU版|ヨーロッパ版|\bEU\b|PAL/i.test(t) ? 'European' : /アジア版|\bAsia(?:n)?\b/i.test(t) ? 'Asian' : /海外版|輸入版|import/i.test(t) ? 'overseas' : /日本版|国内版|国内正規|Japanese ver/i.test(t) ? 'Japanese' : '';
+    const c = isNew ? 'new' : isUsed ? 'used' : '';
+    const parts = [c, ver ? ver + ' ver.' : ''].filter(Boolean), partsL = [c, ver ? ver + ' version' : ''].filter(Boolean);
+    return { s: parts.length ? ' (' + parts.join(', ') + ')' : '', l: partsL.length ? ' (' + partsL.join(', ') + ')' : '' };
+  }
   function pcCondOf(d) {
     const c = String((d && d.cond) || ''); if (c && c !== '定額' && c !== '即決') return c;
     const n = String((d && d.name) || ''); const m = n.match(/美品|極美品|良品|動作確認済み?|動作未確認|傷あり|傷や汚れあり|やや傷|ジャンク/); return m ? m[0] : '';
@@ -10608,6 +10638,28 @@
     setTimeout(tick, 600);
   }
   /* ★2026-10-24 価格計算レビュー6：探している数秒の間に2回押すと、2本とも「同じ名前は無い」を通って同じ明細が2つ入った＝入口で止める（終わるまで押せない） */
+  /* ★2026-11-05 Request page は必ず予約出品・days_to_ship 10日・公開（本人「10日にしておいて」「忘れたの？」）。
+     verifyOnly=false：違えば直してから読み直す／true：読み直して確かめるだけ。直せない（Shopee が断る）時は投げる＝足さない */
+  async function pcReqReady(c, msg, verifyOnly) {
+    const rd = async () => { const gf = await gasCall({ action: 'get_item_full', shop_id: c.shop_id, item_id: c.item_id }, 60000); const b = ((gf || {}).data || {}).base; if (!b) throw new Error('Request page を Shopee から読めませんでした: ' + String((gf && gf.error) || '').slice(0, 80)); const po = b.pre_order || {}; return { pre: !!po.is_pre_order, dts: Number(po.days_to_ship) || 0, st: String(b.item_status || '') }; };
+    let r = await rd();
+    const why = x => [x.pre && x.dts === 10 ? '' : '予約出品10日になっていない（予約' + (x.pre ? 'あり' : 'なし') + '・' + x.dts + '日）', x.st === 'NORMAL' ? '' : '公開になっていない（' + x.st + '）'].filter(Boolean).join('・');
+    if (verifyOnly) { const w = why(r); return { ok: !w, why: w, r }; }
+    if (!(r.pre && r.dts === 10)) {
+      if (msg) msg.textContent = 'Request page を予約出品10日にしています…';
+      const ur = await gasCall({ action: 'update_item', token: settings.writeToken, shop_id: c.shop_id, item_id: c.item_id, preorder: JSON.stringify({ is_pre_order: true, days_to_ship: 10 }) }, 60000);
+      if (!ur || ur.ok === false) throw new Error('Request page を予約出品10日にできませんでした: ' + String((ur && ur.error) || '返事なし').slice(0, 120));
+    }
+    if (r.st !== 'NORMAL') {
+      if (msg) msg.textContent = 'Request page を公開しています…';
+      const pr = await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: c.shop_id, item_id: c.item_id, unlist: 0 }, 60000);
+      if (!pr || pr.ok === false) throw new Error('Request page を公開できませんでした: ' + String((pr && pr.error) || '返事なし').slice(0, 120));
+    }
+    await new Promise(z => setTimeout(z, 1500)); r = await rd(); const w2 = why(r);
+    if (w2) throw new Error('直した後の読み直しで ' + w2);
+    try { c.status = 1; } catch (_) {}
+    return { ok: true, r };
+  }
   async function pcQuoteAddReq() {
     const msg = document.getElementById('pc-q-msg'), btn = document.getElementById('pc-q-addreq');
     if (pcQuote.addBusy) { if (msg) msg.textContent = '⏳ いま Request page に足しているところです（終わるまで押せません）'; return; }
@@ -10634,14 +10686,13 @@
        どこにも入らない時だけ、値段の近いページを次の番号（①②…・国の全店で数える）で複製して作る（スキル catalog-create）。作ったページは非公開＝公開はボタンで本人が決める */
     const parseMs = (c) => { let ms = c.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (_) { ms = []; } } return (ms || []).filter(m => m && m.id); };
     const all = (cats || []).map(c => { const ms = parseMs(c); const ps = ms.map(m => Number(m.price) || 0).filter(v => v > 0); const b = pcReqBand(c.name); const lo = ps.length ? Math.min.apply(null, ps) : price, hi = ps.length ? Math.max.apply(null, ps) : price; const lo2 = Math.min(lo, price), hi2 = Math.max(hi, price); return { c, ms, b, inBand: price >= b[0] && price <= b[1], ratio: lo2 > 0 ? hi2 / lo2 : 99, mid: Math.sqrt(lo * hi) }; });
-    const cand = all.filter(x => x.c.status === 1 && x.ms.length < 100 && x.ratio <= lim)
-      .sort((a, b) => ((b.inBand ? 1 : 0) - (a.inBand ? 1 : 0)) || (Math.abs(Math.log(a.mid / price)) - Math.abs(Math.log(b.mid / price))));
-    let pick = cand[0] || null, madeNew = false;
-    if (!pick) {
-      if (!all.length) { msg.textContent = '⚠ ' + L.cc + ' に Request page が1つもありません（複製の元が無い）。Seller Center で1つ作ってください'; return; }
-      msg.textContent = '入る Request page が無いので（満杯・価格差 ' + lim + '倍）、新しく作っています…（2分ほど）';
-      try { pick = await pcReqNewPage(L, all, price); madeNew = true; } catch (eN) { msg.textContent = '❌ 新しい Request page を作れませんでした: ' + String((eN && eN.message) || eN).slice(0, 140); return; }
-    }
+    /* ★2026-11-05 本人「ん？今のカタログを修正すればいいのでは？」「リクエストページはバリエーションですよ」「10日にしておいて」（事業本部）：
+       新しいカタログは作らない。非公開の Request page も候補にし（公開中を先に）、足す前に予約出品10日・公開に直す（pcReqReady） */
+    const cand = all.filter(x => (x.c.status === 1 || x.c.status === 8) && x.ms.length < 100 && x.ratio <= lim)
+      .sort((a, b) => ((b.inBand ? 1 : 0) - (a.inBand ? 1 : 0)) || ((a.c.status === 1 ? 0 : 1) - (b.c.status === 1 ? 0 : 1)) || (Math.abs(Math.log(a.mid / price)) - Math.abs(Math.log(b.mid / price))));
+    let pick = cand[0] || null; const madeNew = false;
+    if (!pick) { msg.textContent = '⚠ ' + L.cc + ' に入る Request page がありません（' + (all.length ? '明細100個で満杯か、値段の差が ' + lim + '倍を超える' : '1つもありません') + '）。新しいカタログは作りません。事業本部に知らせてください'; return; }
+    try { await pcReqReady(pick.c, msg); } catch (eR) { msg.textContent = '❌ ' + String((eR && eR.message) || eR).slice(0, 200) + '（足していません）'; return; }
     const nm = (() => { const f = (L.buyer + ' ' + (L.title || pcQuote.q || '')).replace(/\s+/g, ' ').trim(); if (f.length <= 30) return f; const c = f.slice(0, 31), sp = c.lastIndexOf(' '); return (sp > L.buyer.length ? c.slice(0, sp) : f.slice(0, 30)).replace(/[\s:\-–&,]+$/, '').trim(); })();   /* ★2026-10-24 30字で語の途中を切らない */
     if (pick.ms.some(m => String(m.n || '').trim() === nm)) { msg.textContent = '⚠ 同じ名前の明細がもうあります: ' + nm; return; }
     /* ★2026-10-24 レビュー：DB の明細一覧は反映が遅れる＝成功の直後にもう一度押すと同じ明細が2つ入る。足す直前に Shopee の今の明細で確かめる */
@@ -10671,12 +10722,13 @@
       }
       /* 仕入れ目安を残す（依頼品の仕入値＝見積もりに使った中古の値段） */
       try { await sbUpsert('app_kv', [{ k: 'req_quote_' + L.cc + '_' + pick.c.item_id + '_' + Date.now().toString(36), v: { at: new Date().toISOString(), ref: L.ref, sku: 'REQ_' + (L.ref || L.buyer), cc: L.cc, item_id: pick.c.item_id, option: nm, price, pp: L.ppL, pp_cur: (L.cc === 'MY' || L.cc === 'VN') ? 'JPY' : L.ISO, pp_jpy: Math.ceil(L.ppJ || 0), iso: L.ISO, plan: L.plan, buyer: L.buyer, title: L.title, cost: Math.round(Number(d.eff || d.price)), src: d.url || '', site: d.site || '' }, updated_at: new Date().toISOString() }]); } catch (_) {}
+      { const v2 = await pcReqReady(pick.c, msg, true); if (!v2.ok) throw new Error('足した後の読み直しで ' + v2.why + '（明細は足してあります。Seller Center で確かめてください）'); }   /* ★2026-11-05 公開中・予約出品10日を Shopee から読み直して確かめる */
       const rg = regionByCc(L.cc) || {}; const link = 'https://' + (rg.buyer || 'shopee.com.br') + '/product/' + pick.c.shop_id + '/' + pick.c.item_id;   /* ★2026-10-24 レビュー：host はセラー用（seller.shopee…）＝お客さんは開けない→買い手用の buyer */
-      pcQuote.link = link; pcQuote.optName = nm; pcQuote.madeNew = madeNew; pcRefFix();
+      pcQuote.link = link; pcQuote.optName = nm; pcQuote.madeNew = madeNew; pcQuote.pick = { shop_id: pick.c.shop_id, item_id: pick.c.item_id, cc: L.cc, buyer: L.buyer, ref: L.ref || pcQuote.ref || '' }; pcRefFix();
       const ta = document.getElementById('pc-q-text') || document.createElement('textarea');   /* 一瞬の処理（長く回さない） */
       if ((L.plan === '1' && ((document.getElementById('pc-q-stage') || {}).value === 'deal')) || ((document.getElementById('pc-q-stage') || {}).value === 'paid')) { delete ta.dataset.edited; try { pcQuoteRender(); } catch (_) {} }   /* ★2026-11-04 paid（PayPal の入金確認後）もリンクと明細名の入った文で描き直す */   /* ★2026-10-24 ①の案内文はリンク入りで描き直す */
       else { const add = '\n\nReady! Here is the link — please choose the option "' + nm + '":\n' + link; ta.value = ta.value + add; ta.dataset.edited = '1'; }
-      msg.innerHTML = '✅ 足しました（' + esc(String(pick.c.name).slice(0, 30)) + '）。文面にリンクを入れました → 📋 コピーするか 💬 入力欄へ'
+      msg.innerHTML = '✅ 足しました（' + esc(String(pick.c.name).slice(0, 30)) + '・公開中・予約出品10日を読み直しで確かめました）。文面にリンクを入れました → 📋 コピーするか 💬 入力欄へ'
         + (madeNew ? '<br><b style="color:#b45309">🆕 新しい Request page を作りました（非公開）。お客さんが買えるように公開してください →</b> <button type="button" class="smd-btn" id="pc-q-reqpub" style="font-size:11px;padding:2px 9px">▶ 公開する</button>' : '');
       if (madeNew) { const pb2 = document.getElementById('pc-q-reqpub'); if (pb2) pb2.onclick = () => { pb2.disabled = true; pb2.textContent = '⏳ 公開しています…'; gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, unlist: 0 }, 60000).then(ur => { if (ur && ur.ok === false) throw new Error(ur.error || ''); pb2.textContent = '✅ 公開しました'; }).catch(eP => { pb2.disabled = false; pb2.textContent = '❌ 公開できませんでした（もう一度）'; try { toast('公開できませんでした: ' + String((eP && eP.message) || eP).slice(0, 80)); } catch (_) {} }); }; }
       try { refreshOneListing(L.cc, pick.c.item_id, pick.c.shop_id); } catch (_) {}
@@ -11352,8 +11404,9 @@
           const noCur = L.cc === 'MY' || L.cc === 'VN';
           /* ★2026-10-23 本人「商品名情報とかも欲しいね」：支払う画面で何の商品か分かるように＝商品名に版・状態、説明に商品・合計の内訳・照合番号・相手 */
           const ppAmtTxt = noCur ? Math.ceil(L.ppJ).toLocaleString('en-US') + ' JPY' : L.ppL.toLocaleString('en-US') + ' ' + L.ISO;
-          const job = { n: ((L.title || 'Item') + ' (used, Japanese ver.) - PayPal part #' + L.ref).slice(0, 127),
-            d: ['Item: ' + (L.title || 'the item') + ' (used, Japanese version)', 'This payment: ' + ppAmtTxt + ' via PayPal (pre-payment)', 'Remaining: ' + L.shopL.toLocaleString('en-US') + ' ' + L.ISO + ' via Shopee (we will send the Shopee link after this payment)', 'Reference: ' + L.ref + (L.buyer ? ' / Buyer: ' + L.buyer : ''), 'Shipped from Japan by GCS Online Store.'].join('\n'), a: noCur ? Math.ceil(L.ppJ) : L.ppL, c: noCur ? 'JPY' : L.ISO };
+          const tg = pcItemTag(L.title);
+          const job = { n: ((L.title || 'Item') + tg.s + ' - PayPal part #' + L.ref).slice(0, 127),
+            d: ['Item: ' + (L.title || 'the item') + tg.l, 'This payment: ' + ppAmtTxt + ' via PayPal (pre-payment)', 'Remaining: ' + L.shopL.toLocaleString('en-US') + ' ' + L.ISO + ' via Shopee (we will send the Shopee link after this payment)', 'Reference: ' + L.ref + (L.buyer ? ' / Buyer: ' + L.buyer : ''), 'Shipped from Japan by GCS Online Store.'].join('\n'), a: noCur ? Math.ceil(L.ppJ) : L.ppL, c: noCur ? 'JPY' : L.ISO };
           pcRefFix(); window.open('https://www.paypal.com/ncp/links/create#smd=' + encodeURIComponent(JSON.stringify(job)), '_blank');
           /* ★2026-10-23 Tampermonkey は既定で PayPal を「動かさないサイト」にしている（*paypal.tld/*）＝userscript が動かない時のために、商品名と金額をすぐ貼れるようにする */
           try { navigator.clipboard.writeText(job.n); } catch (_) {}
@@ -11453,7 +11506,8 @@
               if (why0) { const t9 = '⚠ 自動では進めません：' + why0 + '。中身を確かめて、要る時だけ下のボタンを手で押してください'; if (m0) m0.textContent = t9; try { toast(t9, 8000); } catch (_) {} return; } }
             if (p.get('mode') === 'quote') { pcQuoteApiReply(p); return; }   /* ★2026-10-24 チャットで完結 */
             if (p.get('auto') === '1') {
-              const tell = (ok, m) => { try { const op = window.opener; const to = pcChatOrigin(pcQuote.o); if (to && op && !op.closed) op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 300), buyer: p.get('buyer') || '', price: Number((pcQuote.last || {}).shopL) || null, iso: (pcQuote.last || {}).ISO || '', plan: (pcQuote.last || {}).plan || planP, stage: ((document.getElementById('pc-q-stage') || {}).value) || stageP, ref: pcQuote.ref || '' }, to); } catch (_) {} };   /* ★2026-11-04 WA が出した額と合っているか確かめるため price・stage を返す */
+              const tell = (ok, m) => { try { const op = window.opener; const to = pcChatOrigin(pcQuote.o); if (to && op && !op.closed) op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 300), buyer: p.get('buyer') || '', price: Number((pcQuote.last || {}).shopL) || null, iso: (pcQuote.last || {}).ISO || '', plan: (pcQuote.last || {}).plan || planP, stage: ((document.getElementById('pc-q-stage') || {}).value) || stageP, ref: pcQuote.ref || '', text: String((document.getElementById('pc-q-text') || {}).value || '').slice(0, 4000), link: pcQuote.link || '', option: pcQuote.optName || '' }, to); } catch (_) {} };   /* ★2026-11-04 WA が出した額と合っているか確かめるため price・stage を返す／★2026-11-05 03-22：英文（text）とリンク（link）を毎回返す */
+              pcQuote.tell = tell;
               const mm = document.getElementById('pc-q-msg') || document.createElement('div');   /* 一瞬（長く回さない） */
               /* ★2026-10-24 本人「目的は、リクエスト商品にかける時間を少なく効率化すること」：値段が来ていない時は止めずに、計算の値段（選んだ払い方の Shopee の額）で進める */
               const priceAuto = !(price0 > 0);
@@ -11472,7 +11526,6 @@
                   if (shopAmt0 > 0) { const L9 = pcQuote.last || {}, u9 = ((regionByCc(cc) || {}).priceUnit || 1); if (L9.plan !== planP || Math.abs((Number(L9.shopL) || 0) - shopAmt0) > (u9 < 1 ? 0.005 : 0.5)) { const t9b = 'Shopee の額が ' + shopAmt0 + ' になりません（計算は ' + (L9.shopL || '') + '・払い方 ' + (L9.plan || '') + '）。この画面で確かめて 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t9b; tell(false, t9b); return; } }
                   await pcQuoteAddReq();
                   if (!pcQuote.link) { const t3 = (mm && mm.textContent) || 'Request page に足せませんでした'; tell(false, t3); return; }
-                  if (pcQuote.madeNew) { const t6 = '入る Request page が無かったので新しく作りました（非公開）。ポータルの「▶ 公開する」を押してから、案内文を送ってください'; tell(false, t6); return; }   /* 公開は本人が決める＝閉じずに残す */
                   pcQuoteToChat();
                   setTimeout(() => { const t4 = (mm && mm.textContent) || ''; const ok4 = /入れました/.test(t4); tell(ok4, ok4 ? ('Request page に足して、案内文を入力欄に入れました' + (shopAmt0 > 0 ? '（Shopee の額 ' + ((pcQuote.last || {}).shopL || '') + ' ' + ((pcQuote.last || {}).ISO || '') + '）' : priceAuto ? '（値段は計算の ' + ((pcQuote.last || {}).shopL || '') + ' ' + ((pcQuote.last || {}).ISO || '') + '）' : '')) : ('Request page には足しました（' + pcQuote.link + '）。' + t4)); if (ok4) setTimeout(() => { try { window.close(); } catch (_) {} }, 1500); }, 3600);
                 } catch (eA) { const t5 = '自動で進められませんでした: ' + String((eA && eA.message) || eA).slice(0, 120); if (mm) mm.textContent = '❌ ' + t5; tell(false, t5); }
@@ -24988,6 +25041,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-05', items: [
+      '🛒 <b>Request page に足す時に、新しいカタログを作らないようにしました</b>（本人「今のカタログを修正すればいいのでは？」「10日にしておいて」）：その国の今ある Request page（値段の幅が合う物・非公開も）に足し、足す前に予約出品10日・公開に直して、足した後に Shopee から読み直して確かめます。入る所が無い時は止めて理由を出します。開いた元（Smart Reply・WA）への返事には毎回、英文とリンクを入れ、「公開して」「今の英文をちょうだい」の頼みも受けます（相手と照合番号が同じ時だけ）。',
+      '💳 <b>PayPal リンクの商品名・説明に「(used, Japanese ver.)」を決め打ちで入れないようにしました</b>（03 営業部）：仕入れ先の名前や状態から、中古／新品と版が読めた時だけ付けます。',
       '🔔 <b>お知らせに「🤖 同じ国の重複の見張り」と「💴 仕入れ目安の控えが今の明細と合わない」を足しました</b>（事業本部）：毎朝 GAS が数えた結果を出します。重複は新しく出て🤖を止めた時だけ、控えのずれは詰め直した7日分のカタログで食い違いがある時だけ出ます（どちらも読むだけ・付け直しは本人の OK の後）。',
       '💱 <b>見積もりで為替が読めず既定のレートの時は、入力欄へ・🛒 を押せなくしました</b>（03 営業部）：価格計算の「💬 入力欄へ」と「🛒 Request page に追加」（仕入れ予定の 🛒・自動で進む道も）は、為替を読めずコードの既定レートで計算した時は止まり、「為替を読み直してから」と出します。入力欄へ送る中身に rateSrc（daily／default）を付けたので、Smart Reply・WA・Zalo の受け口でも断れます。',
     ] },
