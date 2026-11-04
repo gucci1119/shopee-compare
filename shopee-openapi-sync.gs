@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261105-0400';
+var SRC_VER = '20261105-0430';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -816,7 +816,7 @@ function doGetInner_(e) {
     }
     if (p.action === 'dup_watch') {   /* ★2026-11-05 重複の見張りを今すぐ回す（dry=1＝数えるだけ・止めない） */
       var dwcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), dwo;
-      try { var dwwt = P_().getProperty('WRITE_TOKEN'); if (!dwwt || p.token !== dwwt) throw new Error('WRITE_TOKEN不正'); dwo = boshuDupWatch_(Number(p.hours) || 26, p.dry === '1'); }
+      try { var dwwt = P_().getProperty('WRITE_TOKEN'); if (!dwwt || p.token !== dwwt) throw new Error('WRITE_TOKEN不正'); dwo = boshuDupWatch_(Number(p.hours) || 26, p.dry === '1', 240000); }
       catch (err) { dwo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dwcb + '(' + JSON.stringify(dwo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -7443,9 +7443,15 @@ function addListingsTrigger() {
 // payout同期に相乗りしているだけだと取りこぼすため、直近30日を毎日引き直す（重複はadj_idで弾かれる）。
 var ADJ_MAIL_TO = 'gcsonlinestore631@gmail.com';
 function dailyAdjustmentsCheck() {
+  var t0 = Date.now();
   if (!bgAllowed_()) { Logger.log('dailyAdjustmentsCheck: urlfetch枠の予約線を超えているので実行しません'); return; }
   if (!syncGate_('dailyAdjustmentsCheck', 72000)) return;
-  try { if (!isChild_()) boshuDupWatch_(26, false); } catch (eDw) { Logger.log('dup watch: ' + eDw); }   /* ★2026-11-05 毎朝：🤖が新しく足した明細の同じ国の重複の見張り */   /* ★2026-09-22 本体と2台目で二重に動いていた（毎朝7時に両方）／2026-09-23 札は動ける時だけ */
+  var r = dailyAdjustmentsCheckBody_();
+  /* ★2026-11-05 毎朝：🤖が新しく足した明細の同じ国の重複の見張り。補償の取り込みの【後】に、残り時間の中だけで（6分の上限で取り込みを潰さない） */
+  try { if (!isChild_()) { var left = 300000 - (Date.now() - t0); if (left > 30000) boshuDupWatch_(26, false, Math.min(left, 240000)); else Logger.log('dup watch: 時間が残っていない＝明日'); } } catch (eDw) { Logger.log('dup watch: ' + eDw); }
+  return r;
+}
+function dailyAdjustmentsCheckBody_() {
   // 取り込み前に「今ある補償のキー」を控える → 差分＝今日入った分
   var before = {};
   try {
@@ -10611,7 +10617,8 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
 /* ★2026-11-05 見張り（本人「何回も言ってるけど」）：直近 hours 時間に足された明細（listing_log）について、同じ国で同じ明細SKU が
    【機種のまとめのカタログ2つ以上】か【シリーズのカタログ2つ以上】に入っていたら重複。1件でもあれば、その機種を受け持つ台の🤖の担当を空にして止める
    （2台目の古い版も cfg.runners は読む＝止まる。元の担当は cfg.runnersBak に残す・戻すのは本人の OK の後）。結果は app_kv boshu_dup_watch に残す（ポータルの🔔の元） */
-function boshuDupWatch_(hours, dry) {
+function boshuDupWatch_(hours, dry, budgetMs) {
+  var tStart = Date.now(), budget = budgetMs || 300000, cut = 0;
   var since = new Date(Date.now() - (hours || 26) * 3600000).toISOString();
   var logs = sbSelectAll_('listing_log', 'select=cc,item_id,model_id,model_name,created_at&created_at=gte.' + since + '&order=created_at.asc') || [];
   var ids = {}; logs.forEach(function (l) { if (l && l.item_id) ids[String(l.item_id)] = 1; });
@@ -10621,6 +10628,7 @@ function boshuDupWatch_(hours, dry) {
   var ack = baKvFresh_('boshu_dup_ack') || {};   /* ★対処を決めた組（国|SKU|種類|item_id の並び）＝止めない。並びが変わったら（3つ目が増えた等）また止める */
   logs.forEach(function (l) {
     var it = info[String(l.item_id)]; if (!it) return;
+    if (Date.now() - tStart > budget) { cut++; return; }   /* 時間切れ＝残りは見ていない（cut に数える・0件とは言わない） */
     var ms = it.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e) { ms = []; } }
     var m = (ms || []).filter(function (x) { return x && String(x.id) === String(l.model_id); })[0] || (ms || []).filter(function (x) { return x && x.n === l.model_name; })[0];
     var sku = String((m && m.sku) || '').trim(); if (!sku) return;
@@ -10631,7 +10639,7 @@ function boshuDupWatch_(hours, dry) {
     rows.forEach(function (r) { var tcg = /CARD|TCG|MEDAL|MONCOLLE/i.test(String(r.parent_sku || '') + ' ' + String(r.name || '')); by[baCatKind_(r, /^[A-Z0-9_]+$/.test(String(r.parent_sku || '')) && BA_GEN_NAME_RE.test(String(r.name || '')), tcg)].push(r); });
     ['gen', 'ser'].forEach(function (kd) { if (by[kd].length < 2) return; var ak = l.cc + '|' + sku.toUpperCase() + '|' + kd + '|' + by[kd].map(function (r) { return String(r.item_id); }).sort().join(','); if (ack[ak]) { acked.push(ak); return; } dups.push({ cc: l.cc, sku: sku, kind: kd, at: l.created_at, item: String(l.item_id), items: by[kd].map(function (r) { return { item_id: String(r.item_id), shop_id: String(r.shop_id), status: r.status, name: String(r.name || '').slice(0, 80) }; }) }); });
   });
-  var out = { ok: true, at: new Date().toISOString(), hours: hours, logs: logs.length, checked: checked, dups: dups, acked: acked, paused: [] };
+  var out = { ok: true, at: new Date().toISOString(), hours: hours, logs: logs.length, checked: checked, dups: dups, acked: acked, cut: cut, paused: [] };
   if (dups.length && !dry) {
     var cfg = baKvFresh_(BA_CFG); if (BA_KV_FAIL[BA_CFG] || !cfg) { out.err = '設定を読めない＝止められない'; }
     else {
