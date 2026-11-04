@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0315';
+var SRC_VER = '20261106-0430';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4450,7 +4450,7 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
   catch (e) {
     var _first = (BA_ADD_OLD_FIRST && BA_ADD_OLD_FIRST.k === parseInt(shopId, 10) + '|' + parseInt(itemId, 10)) ? BA_ADD_OLD_FIRST.ids : null;   /* 1回目の頭で取った「前からの番号」 */
     var em = String((e && e.message) || e);
-    if (!/in_promotion|has promotion/i.test(em)) throw e;
+    if (!/in_promotion|has promotion/i.test(em) || /巻き戻していません|状態が分かりません/.test(em)) throw e;   /* ★2026-11-05 洗い出し3：明細が入っていた知らせの中の断り文で、販促を外しに行かない */
     var promo = priceUnlockPromo_(shopId, itemId);
     var note = function (stage) { try { var lg = baKvFresh_('promo_unlock_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), shop: String(shopId), item: String(itemId), stage: stage, bundleOut: promo.bundleOut, bundleBack: promo.bundleBack, bundleBackErr: (promo.bundleBackErr || []).slice(0, 3), discountOut: promo.discountOut, other: promo.other.slice(0, 3) }); lg.items = a.slice(0, 80); baKvSet_('promo_unlock_log', lg); } catch (eN) {} };
     var backTxt = function () { var nb = (promo.bundleOut || []).length, bb = (promo.bundleBack || []).length; return (nb ? (bb === nb ? 'まとめ買い割引は戻しました' : '⚠まとめ買い割引を戻せませんでした（' + (nb - bb) + '件・promo_unlock_log）') : '') + ((promo.discountOut || []).length ? '・値下げ ' + promo.discountOut.length + '件は外したまま' : ''); };
@@ -4468,6 +4468,23 @@ function addVariationsBulk_(shopId, itemId, items, jobKey) {
 /* ★2026-10-25 05：「前からの番号」の控えは、割引から外して足し直す前ではなく【1回目の追加の前】に取る（1回目に途中まで作られた明細が「前から」に入り、正しい明細を在庫0にしていた＝MY GB ④ 13件・TH GB ⑤ 1件）。
    1回目の頭で取った番号の一覧を BA_ADD_OLD_FIRST に置き、足し直し（addVariationsBulk_ の2回目）はそれを引き継ぐ＝接続の回数は増えない */
 var BA_ADD_OLD_FIRST = null;
+/* ★2026-11-05 洗い出し（03 営業部・Keller さんと同じ型）：Shopee が断り文を返しても書けていることがある＝失敗と決める前に読み直す。読めなければ null */
+/* done(r) が true になったらそこで返す。false の間は次の待ちまで読み直す（遅れて効く時に備える）。最後に読めた物を返す。照らすのは【位置】と名前の両方（at[位置]＝その位置の明細） */
+function avReadNames_(shopId, itemId, waits, done) {
+  var last = null;
+  for (var w = 0; w < waits.length; w++) {
+    Utilities.sleep(waits[w]);
+    try {
+      var r = (callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get').response) || {};
+      var ol = (((r.tier_variation || [])[0] || {}).option_list || []).map(function (o) { return String(o.option || '').trim().toLowerCase(); });
+      var at = {}; (r.model || []).forEach(function (m) { var ix = (m.tier_index || [])[0]; if (ix != null) at[ix] = m; });
+      last = { opts: ol, at: at };
+      if (!done || done(last)) return last;
+    } catch (e) {}
+  }
+  return last;
+}
+var AV_PROMO_RE = /in_promotion|has promotion/i;
 function addVariationsBulk0_(shopId, itemId, items, jobKey, preOld) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   if (!items || !items.length) throw new Error('対象が空です');
@@ -4558,13 +4575,21 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey, preOld) {
       + lack.slice(0, 6).join(' / '));
   }
   var remap = models.map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
-  updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap);
+  var _tierNote = '';
+  try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs }], remap); }
+  catch (eT) {   /* ★2026-11-05 洗い出し1：枠を足す所も「busy」等の断り文で実は通っていることがある（BR 58220600159 の実測）。読み直して全部の枠が入っていれば先へ進む */
+    if (AV_PROMO_RE.test(String((eT && eT.message) || eT))) throw eT;   /* 販促中の断りは読み直しても変わらない＝接続を増やさない */
+    var _tierDone = function (r) { return r.opts.length === optObjs.length && newNames.every(function (nm, k) { return r.opts[baseLen + k] === nm; }); };
+    var _rt = avReadNames_(shopId, itemId, [2500, 4000], _tierDone);
+    if (!_rt || !_tierDone(_rt)) throw new Error(String((eT && eT.message) || eT) + (_rt ? '（読み直すと枠 ' + _rt.opts.length + '/' + optObjs.length + '）' : '（読み直せなかった＝状態が分かりません）'));
+    _tierNote = '枠の追加は断り文でしたが入っていました（' + String((eT && eT.message) || eT).slice(0, 60) + '）';
+  }
   // ③ 価格・在庫をまとめて登録。失敗したら足したオプションを巻き戻す（空の明細を残さない）
   if (jobKey) jobSet_(jobKey, { pct: 80, step: '価格・在庫を登録中 ' + newModels.length + '件' });
   /* ★2026-09-22 BRだけ add_model が「Model tier_index error」で落ちる（21件・全部BR・他の国は0件）。
      オプションを足した直後はまだ反映されていない形。すぐ巻き戻さず、待って読み直し→反映を確かめてから送り直す。
      失敗した時だけ通信が増える（成功時は今までどおり）。結果は tierRetry に残してログで裏を取る。 */
-  var tierRetry = '', addResp = null;
+  var tierRetry = '', addResp = null, _vfNote = '', _vfUnknown = false, _vfIn = 0;
   try {
     addResp = addModel_(shopId, itemId, newModels);
   } catch (eAdd) {
@@ -4586,18 +4611,22 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey, preOld) {
     /* ★2026-11-05 03 営業部（BR Keller さん）：add_model が断り文（Please add image for all options…）を返したのに、Shopee には明細が入っていた。
        失敗と返す・巻き戻す前に1回読み直し、足すはずの名前の明細が全部入っていれば成功として進む（入っている明細を消さない＝二重出品と事故を防ぐ）。
        一部だけ入っていたら巻き戻さずに、入った分と入らなかった分を返す。1つも入っていない時だけ今までどおり巻き戻す */
-    var _vfNote = '';
-    if (!okRetry) {
+    if (!okRetry && !AV_PROMO_RE.test(eMsg)) {   /* 販促中の断りは読み直さない（足し直しは addVariationsBulk_ が販促を外してやる） */
       try {
-        Utilities.sleep(2500);
-        var jvf = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get'), rvf = jvf.response || {};
-        var olf = (((rvf.tier_variation || [])[0] || {}).option_list || []).map(function (o) { return String(o.option || '').trim(); });
-        var have = {}; (rvf.model || []).forEach(function (m) { var ix = (m.tier_index || [])[0]; if (ix != null && olf[ix] != null) have[olf[ix].toLowerCase()] = 1; });
-        var inN = newNames.filter(function (nm) { return have[nm]; });
+        /* ★2026-11-05 洗い出し4・11：読み直しは 2.5秒後と6.5秒後の2回（遅れて効く・1回目が読めない時に備える） */
+        var _inOf = function (r) { return newNames.filter(function (nm, k) { var ix = baseLen + k; return r.opts[ix] === nm && !!r.at[ix]; }); };
+        var _rv = avReadNames_(shopId, itemId, [2500, 4000], function (r) { return _inOf(r).length === newNames.length; });
+        if (!_rv) throw new Error('読み直し失敗');
+        var inN = _inOf(_rv); _vfIn = inN.length;
+        var have = {}; inN.forEach(function (nm) { have[nm] = 1; });
         if (inN.length === newNames.length) { okRetry = true; _vfNote = 'Shopee の返事は断り文でしたが、明細は入っていました（' + eMsg.slice(0, 80) + '）'; tierRetry += (tierRetry ? ' / ' : '') + '読み直し→全部入っていた'; }
-        else if (inN.length > 0) { throw new Error(eMsg + '（読み直すと ' + inN.length + '/' + newNames.length + ' 件は入っていた＝巻き戻していません: 入った ' + inN.slice(0, 5).join(' / ') + '）'); }
-      } catch (eVf) { if (/巻き戻していません/.test(String((eVf && eVf.message) || eVf))) throw eVf; tierRetry += (tierRetry ? ' / ' : '') + '読み直し失敗'; }
+        else if (inN.length > 0) {   /* ★2026-11-05 洗い出し2：一部だけ入っていた＝失敗で返さず④の突き合わせへ進む（入らなかった分の空き枠は④の掃除が消す・入った分は models で返す＝台帳に残る） */
+          okRetry = true; _vfNote = '一部だけ入りました（' + inN.length + '/' + newNames.length + ' 件・入らなかった分: ' + newNames.filter(function (nm) { return !have[nm]; }).slice(0, 5).join(' / ') + '・' + eMsg.slice(0, 60) + '）';
+          tierRetry += (tierRetry ? ' / ' : '') + '読み直し→' + inN.length + '/' + newNames.length + ' 件入っていた';
+        }
+      } catch (eVf) { tierRetry += (tierRetry ? ' / ' : '') + '読み直し失敗'; _vfUnknown = true; }
     }
+    if (!okRetry && _vfUnknown) throw new Error(eMsg + '（読み直せなかったので巻き戻していません＝状態が分かりません' + (tierRetry ? '・' + tierRetry : '') + '）');   /* ★2026-11-05 洗い出し4：中身が分からないまま枠を削らない */
     if (!okRetry) {
       try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs.slice(0, baseLen) }], remap); } catch (e2) {}
       throw new Error(eMsg + (tierRetry ? '（再送: ' + tierRetry + '）' : ''));
@@ -4640,8 +4669,8 @@ function addVariationsBulk0_(shopId, itemId, items, jobKey, preOld) {
     if (mismatch.length) { try { updateStockList_(shopId, itemId, mismatch.map(function (x) { return { model_id: x.model_id, stock: 0 }; })); } catch (eMs) { mismatch.forEach(function (x) { x.stockErr = String((eMs && eMs.message) || eMs).slice(0, 80); }); } }
   } catch (e5) {}
   var sentN = newModels.length, gotN = (addResp && Array.isArray(addResp.model)) ? addResp.model.length : -1;   /* add_model の返事の明細数（一部だけ通ったかの手がかり・-1＝返事に無い） */
-  return { ok: true, models: newList, mismatch: mismatch.slice(0, 20), oldIds: _oldList.slice(), addSent: sentN, addGot: gotN, middleGhost: (finalOpt !== finalModel) ? (finalOpt - finalModel) : 0, added: newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40), noImgSkipped: noImgSkipped.slice(0, 40),
-           healed: healed, opt_count: finalOpt, model_count: finalModel , verifyNote: _vfNote || ''};
+  return { ok: true, models: newList, mismatch: mismatch.slice(0, 20), oldIds: _oldList.slice(), addSent: sentN, addGot: gotN, middleGhost: (finalOpt !== finalModel) ? (finalOpt - finalModel) : 0, added: /^一部だけ入りました/.test(_vfNote) ? Math.max(newList.length, _vfIn) : newModels.length, skipped: skipped.length, skipNames: skipped.slice(0, 10), imgAdjust: imgAdjust, imgBorrowed: imgBorrowed.slice(0, 40), noImgSkipped: noImgSkipped.slice(0, 40),
+           healed: healed, opt_count: finalOpt, model_count: finalModel , verifyNote: [_tierNote, _vfNote].filter(String).join('／'), partial: /^一部だけ入りました/.test(_vfNote) };
 }
 // ★出品に1バリエ(明細)を追加：現tierにオプション追記(既存model再マップ)→add_model。1層バリエ商品のみ対応。
 function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) {
@@ -4687,10 +4716,18 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) 
       am = addModel_(shopId, itemId, [model]);
     }
   } catch (eAdd) {
-    if (existIdx < 0) {
+    /* ★2026-11-05 洗い出し5（Keller さんと同じ型）：断り文でも明細が入っていることがある＝巻き戻す前に読み直す。入っていれば成功で返す */
+    var _isPromoErr = AV_PROMO_RE.test(String((eAdd && eAdd.message) || eAdd)) && !_promo;   /* 販促を外せずに止まった断りは読み直さない */
+    var _oneIn = function (r) { return r.opts[newIndex] === optionName.toLowerCase() && !!r.at[newIndex]; };
+    var _rs = _isPromoErr ? { opts: [], at: {} } : avReadNames_(shopId, itemId, [2500, 4000], _oneIn);
+    if (_rs && !_isPromoErr && _oneIn(_rs)) {
+      am = { model: [{ model_id: _rs.at[newIndex].model_id }] }; am._vfNote = 'Shopee の返事は断り文でしたが、明細は入っていました（' + String((eAdd && eAdd.message) || eAdd).slice(0, 80) + '）';
+    } else {
+    if (existIdx < 0 && _rs) {
       try { updateTierVariation_(shopId, itemId, [{ name: tier.name, option_list: optObjs.slice(0, optObjs.length - 1) }], remap); } catch (eRb) {}
     }
-    throw eAdd;
+    throw new Error(String((eAdd && eAdd.message) || eAdd) + (_rs ? '' : '（読み直せなかったので巻き戻していません＝状態が分かりません）'));
+    }
   } finally {
     if (_promo) {
       priceRelockPromo_(shopId, itemId, _promo);
@@ -4699,7 +4736,7 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) 
   }
   var nm = ((am && am.model) || [])[0] || {};
   var _pr = _promo ? { bundleOut: _promo.bundleOut.length, bundleBack: _promo.bundleBack.length, discountOut: _promo.discountOut.length, backErr: (_promo.bundleBackErr || []).slice(0, 2) } : undefined;
-  return { ok: true, item_id: itemId, option: optionName, model_id: nm.model_id, tier_index: newIndex, image_id: newImageId || undefined, promo: _pr };
+  return { ok: true, item_id: itemId, option: optionName, model_id: nm.model_id, tier_index: newIndex, image_id: newImageId || undefined, promo: _pr, verifyNote: (am && am._vfNote) || '' };
 }
 // ★明細名(バリエ名)を置換：tierのoption名に含まれる before→after を書き換え（既存model据え置き）。1層/2層どちらもOK。
 /* ★2026-09-25 本人「在庫ゼロのもの（VNの100万ドン超え）は明細の題名の最初に印」＝指定した明細名の頭に印を付ける。1カタログ＝読み1回＋書き1回。既に印があるものは触らない */
@@ -8214,6 +8251,25 @@ var BA_KV_ERR = false;
    GAS は【8つ全部そろっていれば】それを合わせて読み、そろっていなければ今までの1本（boshu_auto_pre）を読む（移行の途中でも壊れない） */
 var BA_PRE_SHARDS = 8;
 var BA_CTX_ROWS = null, BA_CTX_SOLD = null;
+var BA_SNAP_USE = false, BA_SNAP_HIT = 0;   /* ★2026-11-05 見るだけの口（game_judge_cands・boshu_auto_preview）だけ、出品の表の控えを使い回す */
+function baSnapName_(key) { return 'ba_ctx_rows_' + String(key).replace(/[^A-Za-z0-9]/g, '_') + '.b64gz'; }
+function baSnapFolder_() { var fs = DriveApp.getFoldersByName('Shopee 自動出品の控え（消してよい）'); return fs.hasNext() ? fs.next() : DriveApp.createFolder('Shopee 自動出品の控え（消してよい）'); }
+function baSnapGet_(key, maxAgeMs) {
+  try {
+    var it = baSnapFolder_().getFilesByName(baSnapName_(key)); if (!it.hasNext()) return null;
+    var f = it.next(); if (Date.now() - f.getLastUpdated().getTime() > maxAgeMs) return null;
+    var rows = JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(f.getBlob().getDataAsString()), 'application/x-gzip')).getDataAsString());
+    return (Array.isArray(rows) && rows.length) ? rows : null;
+  } catch (e) { return null; }
+}
+function baSnapPut_(key, rows) {
+  try {
+    if (!Array.isArray(rows) || !rows.length) return;
+    var txt = Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(JSON.stringify(rows), 'application/json')).getBytes());
+    var fo = baSnapFolder_(), it = fo.getFilesByName(baSnapName_(key));
+    if (it.hasNext()) it.next().setContent(txt); else fo.createFile(baSnapName_(key), txt, 'text/plain');
+  } catch (e) {}
+}
 /* ★2026-09-25 大きな控え（数百KB）を【変わった時だけ】書くための署名。長さや件数だけだと同じ長さの書き換えを見落とすので中身の MD5 */
 function baSig_(v) { try { return Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, JSON.stringify(v || {}), Utilities.Charset.UTF_8)); } catch (e) { return String(Math.random()); } }   /* ★2026-09-25 baLoadCtx_ の全件読みを1実行1回にする控え（GASは実行ごとに初期化される） */
 function baPreShardKeys_() { var a = []; for (var i = 0; i < BA_PRE_SHARDS; i++) a.push('boshu_auto_pre_s' + i); return a; }
@@ -9900,7 +9956,7 @@ function baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, 
    judged_manual に「写真|機種|作品の鍵」で入れる → 巡回の baJudge_ は AI の前にそれを見る（baManualOf_）＝その写真は AI を呼ばずに出品へ。
    p.hws＝'all'（cfg.hws 全部）か 'switch,ps2'、p.n＝1機種あたりの作品数（既定40・最大120）、p.start＝続きの機種の添字。250秒で切って next を返す */
 function gameJudgeCands_(p) {
-  var t0 = Date.now(), LIMIT_MS = 250000;
+  var t0 = Date.now(), LIMIT_MS = 250000; BA_SNAP_USE = true;
   var cfg = baKv_(BA_CFG) || {};
   var hwsReq = String((p && p.hws) || 'all');
   var hws = hwsReq === 'all' ? (cfg.hws || []).slice() : hwsReq.split(',').map(function (s) { return s.trim(); }).filter(String);
@@ -9938,7 +9994,7 @@ function gameJudgeCands_(p) {
     }
     out.skipped[hw] = sk; out.done.push(hw);
   }
-  out.ms = Date.now() - t0; out.n = out.list.length;
+  out.ms = Date.now() - t0; out.n = out.list.length; out.snapHit = BA_SNAP_HIT; BA_SNAP_USE = false;
   return out;
 }
 /* 🔍 まとめて先に判定する（ポータルのボタン／手動）。出品はしない。1回 最大 maxN 枚・4分まで */
@@ -10186,7 +10242,14 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
   /* ★2026-10-12 Supabase が繰り返し落ちた。トレカの巡回が30分ごとに出品全件（7,371カタログ・明細の中身つき）を読んでいた＝カードのカタログ（195件・約3%）だけで足りる */
   /* ★2026-10-13 本人「妖怪ウォッチメダルもモンコレもカードじゃないしな」「メダルとフィギュアだもん」：card/tcg だけで絞ると妖怪メダル（YOKAI_WATCH_MEDAL_SERIES）・モンコレ（POKEMON_MONCOLLE_SERIES）・メザスタの入れ先が見えず、
      作った回の1件目だけ入って以後は増えなかった（4か国の新カタログが全部 明細1）。親SKUの medal/moncolle/mezastar でも読む */
-  if (!BA_CTX_ROWS[_rowsKey]) BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*)' : ''));
+  /* ★2026-11-05 Supabase の通信量（11月の見込み 約305GB／枠250GB・事業本部「今すぐ進めて」）：11/4 は game_judge_cands（4台目 384ページ）・boshu_auto_preview（255ページ）が
+     呼ばれるたびにここで出品の表を明細つきで丸ごと読み直していた。この2つ（出品しない＝見るだけ）は、60分以内に読んだ控え（その台の Drive に圧縮して置く）を使い回す。
+     本番の巡回（出品する方）は今までどおり毎回 DB から読む。控えが読めない・古い時は DB から読む */
+  if (!BA_CTX_ROWS[_rowsKey]) {
+    var _snap = (BA_SNAP_USE && !_tcg) ? baSnapGet_(_rowsKey, 60 * 60000) : null;   /* 見るだけの口なので60分（game_judge_cands は1時間に数回＝15分では効かない・レビュー9） */
+    if (_snap) { BA_CTX_ROWS[_rowsKey] = _snap; BA_SNAP_HIT = (BA_SNAP_HIT || 0) + 1; }
+    else { BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*)' : '')); if (BA_SNAP_USE && !_tcg) baSnapPut_(_rowsKey, BA_CTX_ROWS[_rowsKey]); }
+  }
   var rows = BA_CTX_ROWS[_rowsKey];   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
   var itemCc = {}, modelNames = {};
   /* ★2026-09-23 本人「1アカウント目のところにリミット余ってれば出してもいいけど」「2アカウント目の方に出しちゃえばいい」。
@@ -10283,7 +10346,8 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
 function boshuAutoPreview_(hw, limit, noYahoo, needPhoto) {
   var lockP = LockService.getScriptLock();
   if (!lockP.tryLock(20000)) return { ok: false, error: 'いま自動出品（30分毎の実行）が走っています。数分後にもう一度' };   // ★tick と同じロック＝AI回数・控えの読み書きを競合させない（Codex指摘）
-  try { return boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto); } finally { try { lockP.releaseLock(); } catch (eL) {} }
+  BA_SNAP_USE = true;
+  try { return boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto); } finally { BA_SNAP_USE = false; try { lockP.releaseLock(); } catch (eL) {} }
 }
 function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   if (noYahoo && !bgAllowed_()) return { ok: false, error: 'urlfetch 予約枠を確保するため今回は見送り' };
