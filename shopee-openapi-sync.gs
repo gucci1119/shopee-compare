@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-1015';
+var SRC_VER = '20261104-1930';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1896,7 +1896,7 @@ function doGetInner_(e) {
         finally { try { dsC.remove(dsK); } catch (eDsC) {} delete VSHIFT_SELF[_vsId]; vshiftBusySet_(_vsId, false); }
         /* ★2026-11-04 全体レビュー 新-1：ポータルは300秒で打ち切るが GAS は最大360秒動く＝返事が届かないと JAN・在庫0固定が古い番号に残る。
            付け替えの元（moves・gone）を app_kv shift_result_<shop>_<item> に残す（小さい・上書き）。ポータルは時間切れの時これを読んで当てる */
-        try { if (dsout) shiftResultPut_(dsshop, p.item_id, { at: Date.now(), rid: String(p.rid || '').slice(0, 40), src: 'direct', ok: !!dsout.ok, moves: dsout.moves, gone: dsout.gone || [], llog: dsout.llog ? { n: dsout.llog.n || 0 } : null }); } catch (eSr) {}
+        try { if (dsout) shiftResultPut_(dsshop, p.item_id, { at: Date.now(), rid: String(p.rid || '').slice(0, 40), src: 'direct', via: String(p.via || '') === 'portal' ? 'portal' : '', ok: !!dsout.ok, moves: dsout.moves, gone: dsout.gone || [], llog: dsout.llog ? { n: dsout.llog.n || 0 } : null }); } catch (eSr) {}
       } catch (err) { dsout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dscb + '(' + JSON.stringify(dsout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -3841,10 +3841,12 @@ function shiftResultPut_(shopId, itemId, v) {
   try {
     if (!v || !Array.isArray(v.moves) || !(v.moves.length || (v.gone || []).length)) return false;
     var k = 'shift_result_' + parseInt(shopId, 10) + '_' + String(itemId).replace(/\D/g, '');
-    var cur = null; try { var r0 = sbSelect_('app_kv', 'select=v&k=eq.' + k); cur = r0 && r0[0] && r0[0].v; } catch (eR) { cur = null; }
+    /* ★2026-11-04 全体レビュー 3回目 新3-4：読めなかった時に履歴を空から作って書くと、まだ当てていない前の結果が消える＝読めなければ書かずに false（後から効いた分は shift_pending に残ってやり直す）。
+       当てた印（appliedAt）はポータルが別の鍵 shift_applied_* に書く＝ここで丸ごと書いても消えない */
+    var cur = null; try { var r0 = sbSelect_('app_kv', 'select=v&k=eq.' + k); if (!Array.isArray(r0)) return false; cur = r0[0] && r0[0].v; } catch (eR) { return false; }
     var hist = (cur && Array.isArray(cur.hist)) ? cur.hist : [], now = Date.now();
     hist = hist.filter(function (e) { return e && now - Number(e.at || 0) < 7 * 86400000; });
-    hist.push({ at: v.at || now, rid: v.rid || '', src: v.src || '', moves: v.moves, gone: v.gone || [] });
+    hist.push({ at: v.at || now, rid: v.rid || '', src: v.src || '', via: v.via || '', moves: v.moves, gone: v.gone || [] });   /* via＝portal（ポータルから呼んだ＝呼んだ PC が当てる）・空＝Mac の道具など（新3-6） */
     var out = {}; Object.keys(v).forEach(function (x) { out[x] = v[x]; }); out.hist = hist.slice(-40);
     sbUpsert_('app_kv', [{ k: k, v: out, updated_at: new Date().toISOString() }], 'k'); return true;
   } catch (e) { return false; }
