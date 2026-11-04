@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0530';
+var SRC_VER = '20261106-0600';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -541,6 +541,14 @@ function doGetInner_(e) {
         if (!getToken_(shopId)) throw new Error('未認可 shop_id=' + p.shop_id);
         var mid = (p.model_id != null && p.model_id !== '') ? parseInt(p.model_id, 10) : (p.model_name ? resolveModelId_(shopId, parseInt(p.item_id, 10), p.model_name) : 0);
         if (mid == null) throw new Error('model_id解決失敗: ' + (p.model_name || ''));
+        /* ★2026-11-05 03 営業部：model_id と一緒に明細名（model_name）か SKU（expect_sku）が来たら、今の明細と照らす。合わなければ書かない（消した後に番号が別の作品へ移っていることがある） */
+        if (p.model_id != null && p.model_id !== '' && (p.model_name || p.expect_sku)) {
+          var _ms = (getModels_(shopId, parseInt(p.item_id, 10)) || {}).models || [], _cur = null;
+          _ms.forEach(function (m) { if (String(m.model_id) === String(mid)) _cur = m; });
+          if (!_cur) throw new Error('その明細が今のカタログに無い（model_id ' + mid + '）');
+          if (p.model_name && vnNorm_(_cur.name) !== vnNorm_(p.model_name)) throw new Error('明細名が違う＝書いていません（今「' + String(_cur.name).slice(0, 40) + '」・渡された「' + String(p.model_name).slice(0, 40) + '」）');
+          if (p.expect_sku && String(_cur.sku || '').trim().toUpperCase() !== String(p.expect_sku).trim().toUpperCase()) throw new Error('SKU が違う＝書いていません（今「' + String(_cur.sku || '') + '」）');
+        }
         var r = p.action === 'update_stock' ? updateStock_(shopId, p.item_id, mid, p.stock) : updatePrice_(shopId, p.item_id, mid, p.price);
         avFailList_({ response: r }, p.action === 'update_stock' ? '在庫' : '値段');   /* ★2026-11-05 洗い出し6：明細ごとの断りは ok:false で返す */
         out = { ok: true, action: p.action, item_id: p.item_id, model_id: mid, result: r };
@@ -12871,7 +12879,7 @@ function baLimitedAudit_(p) {
   try { var aymA = baAiYenMonth_(); var capA = baAiMonthCap_(cfg); if (capA > 0 && aymA.yen >= capA) return { ok: false, error: '💴 今月のAI料金が上限 ¥' + capA + '（実績 ¥' + aymA.actual + '＋今日 ¥' + aymA.est + '）＝本人の許可が要る', note: 'AIが使えない（month_cap）' }; } catch (eMA) {}
   var res = baKv_('limited_audit') || {}; res.items = res.items || {}; res.runs = res.runs || [];
   var st = { log: [], today: { d: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), judged: 0 } };
-  var judged = {}; var out = { ok: true, dry: dry, hws: hws.length, targets: 0, judged: 0, flagged: [], skipped: 0, byHw: {} };
+  var judged = {}; var out = { ok: true, dry: dry, hws: hws.length, targets: 0, judged: 0, flagged: [], skipped: 0, byHw: {}, review: [] };
   var stripEd = function (t) { return String(t || '').replace(BA_EDITION_G, ' ').replace(/[\[［【][^\]］】]*[\]］】]/g, ' '); };
   var t0 = Date.now();
   for (var hi = 0; hi < hws.length; hi++) {
@@ -12904,11 +12912,16 @@ function baLimitedAudit_(p) {
       if (!jd.judged) { out.skipped++; if (jd.kind === 'budget' || jd.kind === 'aidown' || jd.kind === 'error') { out.note = 'AIが使えない（' + jd.kind + '）→ここで止める'; break; } continue; }   /* ★2026-10-11 判定できなかった明細は記録しない＝次の回に見直す */
       res.items[id2] = rec;
       /* ★2026-10-10 監査で【別機種の写真（wrongplatform）・別作品の写真（wrongtitle）】も見つかる（最初の109件で 11＋4）。これも写真が商品と違う＝同じ扱い（在庫0＋差し替え） */
-      if (jd.kind === 'limitedbox' || jd.kind === 'wrongplatform' || jd.kind === 'wrongtitle') {
+      /* ★2026-11-05 03 営業部（記憶 model-id-shifts-after-delete・10/23 実害）：明細を消すと model_id が別の作品へ移る。台帳の番号だけで在庫0・差し替えをすると別の作品を止める。
+         ①別作品の写真（wrongtitle）は番号のずれでも出る＝書かずに人が見る一覧（review）へ ②ほかは、写真を見た明細の名前で今の明細を引き直し、1つに決まった時だけ書く */
+      if (jd.kind === 'wrongtitle') { out.review.push({ cc: tg.cc, hw: hw, item_id: tg.item_id, model_id: tg.model_id, en: rec.en, key: tg.key, why: 'wrongtitle＝番号がずれている可能性＝書いていない' }); rec.review = 1; }
+      var _midA = null;
+      if (jd.kind === 'limitedbox' || jd.kind === 'wrongplatform') { try { _midA = baMidByName_(String(row.shop_id), tg.item_id, tg.model_id, String(md.n || '')); } catch (eM) { _midA = null; } if (!_midA) { out.review.push({ cc: tg.cc, hw: hw, item_id: tg.item_id, model_id: tg.model_id, en: rec.en, key: tg.key, why: '今の明細を名前で1つに決められない＝書いていない' }); rec.review = 1; } }
+      if (_midA && (jd.kind === 'limitedbox' || jd.kind === 'wrongplatform')) {
         var act = { stock: '', rephoto: '' };
-        try { act.stock = baStockOk_(updateStock_(String(row.shop_id), tg.item_id, tg.model_id, 0)) ? 'ok' : 'err 在庫0を断られた'; } catch (eS) { act.stock = 'err ' + String(eS).slice(0, 60); }
+        try { act.stock = baStockOk_(updateStock_(String(row.shop_id), tg.item_id, _midA, 0)) ? 'ok' : 'err 在庫0を断られた'; } catch (eS) { act.stock = 'err ' + String(eS).slice(0, 60); }
         try { var rp = baKvFresh_('boshu_auto_rephoto') || {}; rp.items = rp.items || {}; rp.items[tg.item_id + '#' + String(md.n || '')] = { s: 'retry', why: 'limitedbox 監査 ' + new Date().toISOString().slice(0, 10) }; baKvSet_('boshu_auto_rephoto', rp); act.rephoto = 'ok'; } catch (eP) { act.rephoto = 'err ' + String(eP).slice(0, 60); }
-        rec.act = act; out.flagged.push({ cc: tg.cc, hw: hw, item_id: tg.item_id, model_id: tg.model_id, en: rec.en, lim: tg.limTitle, act: act });
+        rec.act = act; out.flagged.push({ cc: tg.cc, hw: hw, item_id: tg.item_id, model_id: _midA, en: rec.en, lim: tg.limTitle, act: act });
       }
     }
   }
