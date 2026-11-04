@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-1000';
+var SRC_VER = '20261104-1015';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -11961,7 +11961,7 @@ function tcgFinishCand_(hw, r, pr, en, price, ccs, listedByCc, ledger, ai, seenE
     /* ★2026-11-04 事業本部（本人 10/16「全部被らないように」）：一番くじは番号が無く SKU が「区分_英語名」だけ＝英語名に賞が入らないと別の賞・絵柄と同じ SKU になる。賞と駿河屋の商品IDの末尾6桁を必ず付ける */
     if (BA_ARC[hw] && BA_ARC[hw].pz === 'kuji') sku = (sku + (pr.prize ? '_' + String(pr.prize).replace(/[^A-Za-z0-9]/g, '') : '') + (String(r.id || '').replace(/\D/g, '') ? '_SG' + String(r.id).replace(/\D/g, '').slice(-6) : '')).replace(/_+/g, '_').slice(0, 100);
     if (typeof _disSku !== 'undefined' && _disSku) sku = (sku + '_' + String(_disSku).replace(/[^A-Za-z0-9]+/g, '')).replace(/_+/g, '_').slice(0, 100);   /* 名前を区別したら SKU も同じ札で区別する */
-    var need = ccs.filter(function (cc) { var d = (ledger[key] || {})[cc]; if (d && (/^\d/.test(String(d)) || TCG_SKIP_DONE.test(String(d)))) return false; var set = listedByCc[cc] || {}; return !set[k1]; });
+    var need = ccs.filter(function (cc) { var d = (ledger[key] || {})[cc]; if (d && (/^\d/.test(String(d)) || TCG_SKIP_DONE.test(String(d)))) return false; var set = listedByCc[cc] || {}; return !set[k1] && !set['sku:' + String(sku || '').toUpperCase()]; });   /* ★2026-11-04 事業本部：同じ国（本店・2店舗目）に同じ明細SKU（区分_弾_番号_レア度）があれば出している（名前の書き方が違っても） */
     if (!need.length) { stat.listed = (stat.listed || 0) + 1; return null; }
     return { key: key, hw: hw, id: String(r.id || ''), ja: (pr.rar ? pr.rar + ' ' : '') + (pr.vars && pr.vars.length ? '(' + pr.vars.join(')(') + ')' : '') + pr.name + ' ' + pr.num, jaName: pr.name, num: pr.num, rar: pr.rar, en: full, cost: price, need: need, k: String(r.k || ''), mp: r.mp ? 1 : 0, setCode: setCode, sku: sku, kmpn: pr.kmpn || '' };
   }
