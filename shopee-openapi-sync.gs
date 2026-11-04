@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261104-2110';
+var SRC_VER = '20261104-2140';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -3117,13 +3117,13 @@ function promoTickBody_() {
           catch (e) { job.msg = cc + ' ' + shops[si] + ': ' + String((e && e.message) || e).slice(0, 160); if (ufDead_() || /fetch失敗/.test(String((e && e.message) || e))) return promoSaveJob_(job); /* ★2026-09-26 枠切れ・通信の失敗は商品の失敗に数えない（数えると全件を1回で掃いて3回で永久に外す） */ job.ng = Number(job.ng || 0) + take.length; take.forEach(function (id) { var d0 = doneMap[id] || {}; doneMap[id] = { at: Date.now(), ok: 0, tries: Number(d0.tries || 0) + 1, err: String((e && e.message) || e).slice(0, 120) }; }); baKvSet_('promo_done_' + cc, doneMap); continue; }
           if (!res.ok && res.stop && !(res.items || []).length) { if (res.stop === 'video') job.pauseUntil = Date.now() + 3 * 3600000; job.msg = res.error; return promoSaveJob_(job); }   /* 枠が少ない・動画が用意できない＝次の回に */
           (res.items || []).forEach(function (x) {
-            var d = { at: Date.now(), ok: x.ok ? 1 : 0 }, d0 = doneMap[x.item_id] || {};
+            var d = { at: Date.now(), ok: x.ok ? 1 : 0 }, d0 = doneMap[x.item_id] || {}; if (x.skip === 'sold') d.skip = 'sold';   /* ★2026-11-04 sold・いいねで飛ばした印 */
             if (x.err) { d.err = String(x.err).slice(0, 120); d.tries = Number(d0.tries || 0) + 1; if (/duplicates another|category is prohibited|exceeds 2 ?MB|price ratio|error_price_ratio/i.test(String(x.err))) { d.tries = 3; d.fixed = 'shopee'; } }   /* ★2026-09-26 Shopee が出品そのものを止めている（店内重複・禁止カテゴリ）＝何を送っても通らない→やり直さない（カタログの質の一覧に出す） */
             if (d0.from) d.from = d0.from;   /* 最初に書く前の並び（戻す時の控え）は、やり直しで上書きしない */
             else if (x.from && x.to && JSON.stringify(x.from) !== JSON.stringify(x.to)) d.from = x.from;
             if (gfixOnly[x.item_id]) { if (d0.redo) d.redo = d0.redo; }   /* ★2026-11-04 絵の入れ直しだけの回は、古いお店画像の入れ直し（redo）の印を変えない */
             else if (redoIds[x.item_id]) d.redo = d0.redo || (needsGal(d0, { update_time: 0 }) ? undefined : 1);
-            if (hadRet[x.item_id]) { d.gfixAt = Date.now(); d.gfixN = Number(d0.gfixN || 0) + 1; if (x.ok) dayCount_(job, 'gfix', 1); } else { if (d0.gfixAt) d.gfixAt = d0.gfixAt; if (d0.gfixN) d.gfixN = d0.gfixN; }   /* ★2026-09-28 Codex：第2引数なしで r.update_time が例外になり、完了記録が保存されなかった */   /* 入れ直しは1回だけ（配送画像の差し替えは別に数える） */
+            if (hadRet[x.item_id]) { d.gfixAt = Date.now(); d.gfixN = Number(d0.gfixN || 0) + 1; if (x.ok && !x.skip) dayCount_(job, 'gfix', 1); } else { if (d0.gfixAt) d.gfixAt = d0.gfixAt; if (d0.gfixN) d.gfixN = d0.gfixN; }   /* ★2026-09-28 Codex：第2引数なしで r.update_time が例外になり、完了記録が保存されなかった */   /* 入れ直しは1回だけ（配送画像の差し替えは別に数える） */
             if (x.ok && galOn) { if (needsGal(d0, { update_time: 0 })) dayCount_(job, 'gal', 1); d.galv = PROMO_GAL_VER; } else if (d0.galv) d.galv = d0.galv;
             doneMap[x.item_id] = d;
             job.n = Number(job.n || 0) + 1; if (x.ok) job.ok = Number(job.ok || 0) + 1; else job.ng = Number(job.ng || 0) + 1;
@@ -3168,8 +3168,10 @@ function promoApply_(shopId, cc, itemIds, dry, noVideo) {
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
   if (b.error && b.error !== '') throw new Error('get_item_base_info ' + b.error + ' ' + (b.message || ''));
   var list = ((b.response || {}).item_list) || [], out = [], found = {};
+  var keepSL = dry ? {} : soldLikedMap_(shopId, ids);   /* ★2026-11-04 本人「soldとかいいねついてるのは触らないで」＝写真・動画も書かない */
   list.forEach(function (it) {
-    if (halt) return;   /* 枠切れ・通信の失敗・動画の上げ直し失敗で止めた後は触らない（記録もしない＝次の回にやり直す） */
+    if (halt) return;
+    if (keepSL[it.item_id]) { found[it.item_id] = 1; out.push({ item_id: it.item_id, ok: true, skip: 'sold', why: keepSL[it.item_id] }); return; }   /* 枠切れ・通信の失敗・動画の上げ直し失敗で止めた後は触らない（記録もしない＝次の回にやり直す） */
     found[it.item_id] = 1;
     var cur0 = ((it.image || {}).image_id_list || []).slice();
     /* ★本人「古い版を手で入れた出品がある。見分けて工夫して」：多くの出品に共通して入っていた【お店の画像】（古い版＋同じ絵柄の別の番号）は
@@ -3237,11 +3239,27 @@ function dbodyClass_(body) {
 function dnoteStripNote_(t) { var ls = String(t || '').split('\n'); while (ls.length && /^(⏰|⚠️|📦|※|👉)/.test(ls[0])) ls.shift(); while (ls.length && ls[0] === '') ls.shift(); return ls.join('\n'); }
 var DNOTE_MAXLEN = 2900;
 function dnoteTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'dnoteTick') ScriptApp.deleteTrigger(t); }); }
+/* ★2026-11-04 本人「とにかく、soldとかいいねついてるのは触らないで」（事業本部経由・絶対）：一括の書き換え（説明文・写真の配送の絵・お店の画像）は、
+   sold（売れた数）かいいねが1つでも付いた出品を飛ばす。読めなかった時は「付いている」と見なして書かない（黙って書かない）。1回50件＝接続 1回 */
+function soldLikedMap_(shopId, ids) {
+  var out = {};
+  for (var i = 0; i < ids.length; i += 50) {
+    var part = ids.slice(i, i + 50);
+    try {
+      var b = callShop_(shopId, '/api/v2/product/get_item_extra_info', { item_id_list: part.join(',') }, 'get');
+      var seen = {};
+      (((b.response || {}).item_list) || []).forEach(function (x) { seen[x.item_id] = 1; out[x.item_id] = (Number(x.sale) || 0) > 0 || (Number(x.likes) || 0) > 0 ? ('sold ' + (Number(x.sale) || 0) + '・いいね ' + (Number(x.likes) || 0)) : ''; });
+      part.forEach(function (id) { if (!seen[id]) out[id] = '売れた数・いいねを読めなかった'; });
+    } catch (e) { part.forEach(function (id) { out[id] = '売れた数・いいねを読めなかった'; }); }
+  }
+  return out;
+}
 function dnoteApply_(shopId, cc, itemIds, dry, bodyOn) {
   var add = DNOTE_TEXT[cc]; var doBody = cc === 'BR' && !!bodyOn; if (!add) throw new Error('この国の文面がない: ' + cc);
   var ids = (itemIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; }).slice(0, 50);
   if (!ids.length) return { ok: true, n: 0, items: [] };
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: ids.join(',') }, 'get');
+  var keepSL = soldLikedMap_(shopId, ids);   /* ★2026-11-04 sold・いいねが付いた出品は触らない */
   var out = [], head = add.replace(/\n+$/, '');
   /* 済み＝先頭が今の文そのもので、残りに古い文（現地語・前の版）が無い */
   var isCur = function (t) { t = String(t || ''); return t.indexOf(head) === 0 && !DNOTE_OLD_MARK.test(t.slice(head.length)); };
@@ -3249,6 +3267,7 @@ function dnoteApply_(shopId, cc, itemIds, dry, bodyOn) {
   var stripNote = function (t) { var ls = String(t || '').split('\n'); while (ls.length && /^(⏰|⚠️|📦|※|👉)/.test(ls[0])) ls.shift(); while (ls.length && ls[0] === '') ls.shift(); return ls.join('\n'); };
   (((b.response || {}).item_list) || []).forEach(function (it) {
     var rec = { item_id: it.item_id };
+    if (keepSL[it.item_id]) { rec.ok = true; rec.skip = 'sold'; rec.why = keepSL[it.item_id]; out.push(rec); return; }   /* ★2026-11-04 本人「soldとかいいねついてるのは触らないで」 */
     var body;
     if (String(it.description_type || 'normal') === 'extended') {
       /* ★拡張形式（画像つきの説明文）：先頭の文章の欄に足す（無ければ文章の欄を1つ先頭に作る）。画像の欄は番号をそのまま戻す */
@@ -9082,6 +9101,9 @@ function boshuAutoRecheck() {
         var _midR = null; try { _midR = baMidByName_(sid, a.item_id, a.model_id, a.en); } catch (eMr) { _midR = null; }
         if (!_midR) { baLog_(st, '在庫0にできず: ' + a.cc + ' ' + a.en + '（今のカタログに同じ名前の明細が無い・読めない）'); continue; }
         a.model_id = _midR;
+        /* ★2026-11-04 本人「とにかく、soldとかいいねついてるのは触らないで」：sold かいいねが付いた出品は在庫0にしない＝一覧（st.zeroHold）に積んで本人が決める。読めない時も0にしない */
+        var _sl = ''; try { _sl = soldLikedMap_(sid, [a.item_id])[a.item_id] || ''; } catch (eSl) { _sl = '売れた数・いいねを読めなかった'; }
+        if (_sl) { st.zeroHold = (st.zeroHold || []).filter(function (z) { return !(z.item === a.item_id && z.model === a.model_id); }); st.zeroHold.push({ cc: a.cc, item: a.item_id, model: a.model_id, en: String(a.en || '').slice(0, 60), hits: hits, why: _sl, at: new Date().toISOString() }); if (st.zeroHold.length > 200) st.zeroHold = st.zeroHold.slice(-200); baLog_(st, '在庫0にせず（' + _sl + '＝本人が決める）: ' + a.cc + ' ' + a.en + '（ヤフオクの定額出品が ' + hits + '件に減った）'); continue; }
         try { updateStock_(sid, a.item_id, a.model_id, 0); a.stock = 0; a.zeroedAt = new Date().toISOString(); out.zeroed++; baLog_(st, '在庫0に: ' + a.cc + ' ' + a.en + '（ヤフオクの定額出品が ' + hits + '件に減った）'); }
         catch (e) { baLog_(st, '在庫0にできず: ' + a.cc + ' ' + a.en + ' ' + String(e).slice(0, 80)); }
       }
