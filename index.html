@@ -8731,6 +8731,10 @@
     'マスタを読み込めませんでした。通信を確かめて、もう一度開いてください。': 'Could not load the master list. Check your connection and open it again.',
   });
   const I18N_PAT = [
+    /* ★2026-11-05 注文の予約の印 */
+    [/^📅予約 (\d+)日$/, '📅Pre-order $1 days'], [/^📅予約 （期日まで(\d+)日）$/, '📅Pre-order ($1 days to deadline)'], [/^⚠予約なし (\d+)日$/, '⚠Not pre-order, $1 days'], [/^⚠予約の印なし$/, '⚠No pre-order mark'],
+    [/^予約注文：Shopee の届くまでの日数 (\d+)日$/, 'Pre-order: Shopee days to ship $1'], [/^予約注文（推定）：Shopee の日数はまだ取り込んでいません。注文から期日まで (\d+)日あるので予約と見ています$/, 'Pre-order (estimated): Shopee days-to-ship not imported yet; $1 days from order to deadline'],
+    [/^Request page（予約出品のはず）なのに、この注文は予約の印が無い（(\d+)日）$/, 'Request page (should be pre-order) but this order has no pre-order mark ($1 days)'], [/^予約でない（(\d+)日）のに、注文から期日まで (\d+)日ある$/, 'Not pre-order ($1 days) but $2 days from order to deadline'], [/^Request page（予約出品のはず）なのに、注文から期日まで (\d+)日しかない$/, 'Request page (should be pre-order) but only $1 days from order to deadline'],
     /* ★2026-11-04 打ちかけの欄を戻した知らせ */
     [/^打ちかけの (\d+) 欄を戻しました（まだ保存していません）$/, 'Restored $1 field(s) you were typing (not saved yet)'],
     [/^まとめ買いで売れた時 (.+)（(\d+)件）$/, 'If sold in a bundle $1 ($2)'], [/^一緒に買われた注文の利益 平均 (.+)（(\d+)件）$/, 'Profit of orders bought together, avg $1 ($2)'],
@@ -12010,7 +12014,7 @@
         if (o.synced_at && o.synced_at > maxSync) maxSync = o.synced_at;
         if (o.shop_id) { (shopTally[o.cc] = shopTally[o.cc] || {})[o.shop_id] = (shopTally[o.cc][o.shop_id] || 0) + 1; }
         (byCc[o.cc] = byCc[o.cc] || []).push({ cc: o.cc, sn: o.sn, orderId: o.order_id, buyer: o.buyer || '', status: o.status || '',
-          tab: o.tab, shipBy: o.ship_by || 0, tracking: o.tracking || '', total: (o.total != null ? o.total : null), items: o.items || [], preOrder: !!o.pre_order, shopId: o.shop_id || null, orderTs: o.order_ts || null, orderDate: o.order_date || '', payTs: o.pay_ts || null, payMethod: o.pay_method || '', region: regionByCc(o.cc) });
+          tab: o.tab, shipBy: o.ship_by || 0, tracking: o.tracking || '', total: (o.total != null ? o.total : null), items: o.items || [], preOrder: !!o.pre_order, dts: (o.dts != null ? Number(o.dts) : null), shopId: o.shop_id || null, orderTs: o.order_ts || null, orderDate: o.order_date || '', payTs: o.pay_ts || null, payMethod: o.pay_method || '', region: regionByCc(o.cc) });
       });
       state.orders.presumedShop = {};
       Object.keys(shopTally).forEach(cc => { state.orders.presumedShop[cc] = Object.keys(shopTally[cc]).sort((a, b) => shopTally[cc][b] - shopTally[cc][a])[0]; });
@@ -12206,7 +12210,7 @@
       + '<span class="smd-dim" style="font-size:10px">発送済</span><br>'
       + '<span style="font-size:11px;font-weight:700;color:' + col + '">🏭' + mdw_(scan, cc) + '</span></span>';   // 家を出た後はスキャン待ちだけ
   }
-  function shipByBadge(shipBy, pre, cc) {
+  function shipByBadge(shipBy, pre, cc, preHtml) {
     if (!shipBy) return '<span class="smd-dim">-</span>';
     const r0 = { shipBy: shipBy, tab: 300, cc: cc };
     const send = ordShipDeadline(r0), lsr = ordLsrScan(r0), nfr = ordNfrScan(r0);
@@ -12228,7 +12232,7 @@
     const last = nfr - 86400;                       // 自動キャンセルにしない最終の発送日
     return '<span title="' + tip + '" style="display:inline-block;line-height:1.3">'
       + '<span class="' + cls + '" style="display:inline-block">📦' + mdw_(send, cc) + '</span>'
-      + (pre ? '<br><span style="font-size:9px;color:#7b52c4;font-weight:700" title="予約(pre-order)：発送までの猶予が長い商品です">予約</span>' : '')
+      + (preHtml != null ? preHtml : (pre ? '<br><span style="font-size:9px;color:#7b52c4;font-weight:700" title="予約(pre-order)：発送までの猶予が長い商品です">予約</span>' : ''))
       + '<br><span style="font-size:9.5px;color:#8a8f98">' + rest + '</span>'
       + '<br><span style="font-size:9.5px;color:#c0392b">🆘' + mdw_(last, cc) + '</span></span>';
   }
@@ -12408,7 +12412,32 @@
   //   注文日がばらけているのに期日が一点に集まっており、商品ごとのDTSでは説明できない。
   //   Shopee側が期日をまとめて延ばしている可能性が高く、予約とは別物。
   //   → 憶測でラベルを付けない。GAS側で pre_order を正しく取れるまで表示しない。
-  const ordIsPre = () => false;
+  /* ★2026-11-05 本人「pre-orderってここでわからないの？日数も」（事業本部）：
+     Shopee は注文に予約の印を返さず、days_to_ship（予約出品なら10）だけを返す（VN 261104ENCGVG18 で確かめた）。GAS が orders.dts に入れる。
+     dts がまだ無い注文は「注文から期日まで」の日数で見る。9/1〜11/4 の738件：普段は2〜8日、予約は14〜19日＝11日以上なら予約と見る。
+     赤：① Request page（予約出品のはず）の注文なのに日数が3日以下 ② 予約でない（日数3日以下）のに期日まで11日以上 */
+  const ORD_REQ_RE = /Request page|Solicitar P[aá]gina|Please send me a message|Envie-me Uma Mensagem/i;
+  const ordPreInfo = (r) => {
+    if (!r) return null;
+    const dts = r.dts != null && r.dts > 0 ? Number(r.dts) : null;
+    const gap = (r.shipBy && r.orderTs) ? Math.round((r.shipBy - r.orderTs) / 86400) : null;
+    const isReq = (r.items || []).some(it => ORD_REQ_RE.test(String((it && it.name) || '')));
+    if (dts != null && dts >= 5) return { pre: true, dts, gap, est: false, warn: '' };
+    if (dts != null) {
+      if (isReq) return { pre: false, dts, gap, est: false, warn: 'Request page（予約出品のはず）なのに、この注文は予約の印が無い（' + dts + '日）' };
+      if (gap != null && gap >= 11) return { pre: false, dts, gap, est: false, warn: '予約でない（' + dts + '日）のに、注文から期日まで ' + gap + '日ある' };
+      return null;
+    }
+    if (gap != null && gap >= 11) return { pre: true, dts: null, gap, est: true, warn: '' };
+    if (isReq && gap != null) return { pre: false, dts: null, gap, est: true, warn: 'Request page（予約出品のはず）なのに、注文から期日まで ' + gap + '日しかない' };
+    return null;
+  };
+  const ordIsPre = (r) => !!(ordPreInfo(r) || {}).pre;
+  const ordPreTag = (r) => {
+    const x = ordPreInfo(r); if (!x) return '';
+    if (x.warn) return '<br><span style="font-size:10px;color:#d93025;font-weight:700" title="' + esc(x.warn) + '">⚠' + (x.dts != null ? '予約なし ' + x.dts + '日' : '予約の印なし') + '</span>';
+    return '<br><span style="font-size:10px;color:#7b52c4;font-weight:700" title="' + esc(x.est ? '予約注文（推定）：Shopee の日数はまだ取り込んでいません。注文から期日まで ' + x.gap + '日あるので予約と見ています' : '予約注文：Shopee の届くまでの日数 ' + x.dts + '日') + '">📅予約 ' + (x.dts != null ? x.dts + '日' : '（期日まで' + x.gap + '日）') + '</span>';
+  };
   const ordShipDeadline = (r) => {                                              // 家から出す期限（遅延を出さない線）
     const scan = ordLsrScan(r);
     return scan ? scan - SCAN_LEAD_DAYS * 86400 : 0;
@@ -12985,8 +13014,8 @@
         `<div class="ord-c-acct">${acctChip(r.shopId)}</div>` +
         `<span class="ord-due">${r.tab === 300
             ? (inTransit ? scanOnlyBadge(r.shipBy, r.cc)
-               : arranged ? '<span class="smd-dim" style="font-size:10px">伝票発行済</span><br>' + shipByBadge(r.shipBy, ordIsPre(r), r.cc)
-               : shipByBadge(r.shipBy, ordIsPre(r), r.cc))
+               : arranged ? '<span class="smd-dim" style="font-size:10px">伝票発行済</span><br>' + shipByBadge(r.shipBy, ordIsPre(r), r.cc, ordPreTag(r))
+               : shipByBadge(r.shipBy, ordIsPre(r), r.cc, ordPreTag(r)))
             : /unpaid/i.test(r.status || '') ? '<span style="color:#d93025;font-weight:700">未入金</span>'
             : /cancel/i.test(r.status || '') ? '<span class="smd-dim">キャンセル</span>'
             : '<span class="smd-dim" title="' + ordStatusJa(r.status) + '（発送手配後＝発送期限の対象外。状態は右の列を参照）">—</span>'}</span>` +
@@ -25073,6 +25102,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-05', items: [
+      '📅 <b>注文の行に、予約注文かどうかと日数を出しました</b>（本人「pre-orderってここでわからないの？日数も」）：発送期日の欄に「📅予約 10日」と出ます。Shopee は注文に予約の印を返さず、届くまでの日数（予約出品なら10日）だけを返すので、その日数を注文の表（orders.dts）に入れて使います。日数をまだ取り込んでいない注文は、注文から期日まで11日以上なら予約と見て「📅予約（期日まで14日）」と出します（9/1〜11/4 の738件では、普段は2〜8日・予約は14〜19日）。Request page の注文なのに予約でない時と、予約でないのに期日が長い時は赤で出します。',
       '🏷 <b>Request page の明細名を「参照番号＋短い品名」にしました</b>（本人の案・03-22。例 R261104BRRBN Pokemon ZA Switch）：番号は SKU の REQ_ の後ろと同じで、利益管理表と照らせます。お客さんの名前は写真の「Reserved for」にだけ入れます。番号が無い時はユーザー名を使います。30字に入らない語は丸ごと落とし、語の途中では切りません。',
       '🛒 <b>Request page に足した時に Shopee が断り文を返しても、明細が入っていれば「足しました」と返すようにしました</b>（03 営業部・BR Keller さん）：GAS が読み直して確かめます。入っている明細は巻き戻しで消しません。一本道（WA・SR）から &noins=1 で開いた時は、入力欄への入れ込みを試さずに「足しました」で返します。',
       '⛔ <b>値付けの見直しの「まとめて書く」（2明細以上）と「上限超えの削除」を、本人の OK が無いと書けないようにしました</b>（事業本部）：本人の OK の後に事業本部が印（2時間・明細の数の上限つき）を書いた時だけ書きます。書いた時は操作ログに残します。見直しの一覧を作って見せるのはそのままです。',

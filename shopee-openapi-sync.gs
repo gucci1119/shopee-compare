@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0230';
+var SRC_VER = '20261106-0300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5853,8 +5853,8 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
       }
       // ★pre_order は今まで一切保存しておらず、DBの既定値 false のままだった（全3,843件 false）。
       //   ship_by_date と同じく Shopee が返す一次情報なので、そのまま入れる。
-      //   days_to_ship（DTS）も本来ほしいが列が無いので、当面は pre_order だけ。
-      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, pre_order: !!o.pre_order, tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, pay_ts: o.pay_time || null, pay_method: o.payment_method || null, /* ★支払い確定時刻＋支払い方法（代引きは pay_time が無い）。orders.pay_ts / pay_method 列が要る（2026-09-14） */ shop_id: String(tok.shop_id), cancel_reason: cancelReason, packages: pkgs, synced_at: new Date().toISOString() });
+      //   days_to_ship（DTS）は 2026-11-05 に列 orders.dts を足した（_gas_private/sql/2026-11-05_orders_dts.sql）。
+      rows.push({ cc: cc, sn: o.order_sn, order_id: o.order_sn, buyer: o.buyer_username || '', status: (ORD_STATUS_LABEL[st] || st), tab: tab, ship_by: o.ship_by_date || null, pre_order: !!o.pre_order, dts: (parseInt(o.days_to_ship, 10) > 0 ? parseInt(o.days_to_ship, 10) : null), /* ★2026-11-05 本人「pre-orderってここでわからないの？日数も」：Shopee は注文に予約の印を返さず days_to_ship（予約出品なら10）だけを返す＝orders.dts に入れる */ tracking: trk, total: parseFloat(o.total_amount || 0) || null, items: items, order_date: day, order_ts: o.create_time || null, pay_ts: o.pay_time || null, pay_method: o.payment_method || null, /* ★支払い確定時刻＋支払い方法（代引きは pay_time が無い）。orders.pay_ts / pay_method 列が要る（2026-09-14） */ shop_id: String(tok.shop_id), cancel_reason: cancelReason, packages: pkgs, synced_at: new Date().toISOString() });
     });
   }
   // ★購入者情報（受取人名・電話・住所）は時間が経つとAPIで取れなくなる。
