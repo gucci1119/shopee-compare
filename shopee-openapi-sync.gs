@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261105-0330';
+var SRC_VER = '20261105-0400';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -10617,7 +10617,8 @@ function boshuDupWatch_(hours, dry) {
   var ids = {}; logs.forEach(function (l) { if (l && l.item_id) ids[String(l.item_id)] = 1; });
   var idl = Object.keys(ids), info = {};
   for (var i = 0; i < idl.length; i += 40) (sbSelect_('listings', 'select=item_id,cc,shop_id,status,name,parent_sku,models&item_id=in.(' + idl.slice(i, i + 40).join(',') + ')') || []).forEach(function (r) { info[String(r.item_id)] = r; });
-  var seen = {}, dups = [], checked = 0;
+  var seen = {}, dups = [], checked = 0, acked = [];
+  var ack = baKvFresh_('boshu_dup_ack') || {};   /* ★対処を決めた組（国|SKU|種類|item_id の並び）＝止めない。並びが変わったら（3つ目が増えた等）また止める */
   logs.forEach(function (l) {
     var it = info[String(l.item_id)]; if (!it) return;
     var ms = it.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (e) { ms = []; } }
@@ -10628,9 +10629,9 @@ function boshuDupWatch_(hours, dry) {
     if (rows.length < 2) return;
     var by = { gen: [], ser: [] };
     rows.forEach(function (r) { var tcg = /CARD|TCG|MEDAL|MONCOLLE/i.test(String(r.parent_sku || '') + ' ' + String(r.name || '')); by[baCatKind_(r, /^[A-Z0-9_]+$/.test(String(r.parent_sku || '')) && BA_GEN_NAME_RE.test(String(r.name || '')), tcg)].push(r); });
-    ['gen', 'ser'].forEach(function (kd) { if (by[kd].length >= 2) dups.push({ cc: l.cc, sku: sku, kind: kd, at: l.created_at, item: String(l.item_id), items: by[kd].map(function (r) { return { item_id: String(r.item_id), shop_id: String(r.shop_id), status: r.status, name: String(r.name || '').slice(0, 80) }; }) }); });
+    ['gen', 'ser'].forEach(function (kd) { if (by[kd].length < 2) return; var ak = l.cc + '|' + sku.toUpperCase() + '|' + kd + '|' + by[kd].map(function (r) { return String(r.item_id); }).sort().join(','); if (ack[ak]) { acked.push(ak); return; } dups.push({ cc: l.cc, sku: sku, kind: kd, at: l.created_at, item: String(l.item_id), items: by[kd].map(function (r) { return { item_id: String(r.item_id), shop_id: String(r.shop_id), status: r.status, name: String(r.name || '').slice(0, 80) }; }) }); });
   });
-  var out = { ok: true, at: new Date().toISOString(), hours: hours, logs: logs.length, checked: checked, dups: dups, paused: [] };
+  var out = { ok: true, at: new Date().toISOString(), hours: hours, logs: logs.length, checked: checked, dups: dups, acked: acked, paused: [] };
   if (dups.length && !dry) {
     var cfg = baKvFresh_(BA_CFG); if (BA_KV_FAIL[BA_CFG] || !cfg) { out.err = '設定を読めない＝止められない'; }
     else {
