@@ -44485,7 +44485,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }));
     const sa = root.querySelector('#pa-selall'); if (sa) sa.addEventListener('click', () => { view.slice(0, PA.limit).forEach(e => { if (e.sug != null && !e.blocked) PA.sel.add(e.key); });   /* ★2026-09-28 Codex：画面に出ていない提案（表示上限より後ろ）まで選んでいた */ root.querySelectorAll('.pa-ck').forEach(c => { c.checked = true; }); selCount(); });
     const sn = root.querySelector('#pa-selnone'); if (sn) sn.addEventListener('click', () => { PA.sel.clear(); root.querySelectorAll('.pa-ck').forEach(c => { c.checked = false; }); selCount(); });
-    if (applyBtn) applyBtn.addEventListener('click', (ev) => paApply(byKey, !!(ev && ev.isTrusted)));
+    if (applyBtn) applyBtn.addEventListener('click', (ev) => { if (applyBtn._busy) return; applyBtn._busy = true; Promise.resolve(paApply(byKey, !!(ev && ev.isTrusted))).finally(() => { applyBtn._busy = false; }); });   /* ★レビュー（低）：読み直しの間の2回押しで同じ値段を2回書かない */
     /* ★2026-10-03 フロントの決め（下限・候補の条件）：打ち終えたら（change）その場で区分けし直し→裏で保存。失敗したら戻す */
     root.querySelectorAll('.pa-fcfg').forEach(inp => inp.addEventListener('change', () => {
       if (!PA.reclass) return;
@@ -44757,13 +44757,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   /* ★2026-11-05 事業本部・本人「なんで？」：守りは部署や自動の処理を止めるための物で、本人の手は止めるつもりではなかった。
      本人が画面で押した時（ブラウザの本物のクリック＝isTrusted）で印が無い時は、止めて終わりにせず確かめの窓を出す。件数 N を手で打った時だけ書き、その時に pa_write_ok（by:'本人（画面）'）も残す。
      部署の会話から JS で押した時（isTrusted が false）は今までどおり止める（部署は窓に件数を入れない＝スキル action-tiers） */
+  let _paAskOpen = false;
   function paAskHuman(n, what, verb) {
-    return new Promise(resolve => {
+    if (_paAskOpen) return Promise.resolve(false);   /* ★レビュー（低）：読みを待つ間に2回押すと窓が2枚重なっていた */
+    _paAskOpen = true;
+    return new Promise(resolve0 => { const resolve = (v) => { _paAskOpen = false; resolve0(v); };
       const ov = document.createElement('div');
       ov.style.cssText = 'position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center';
       ov.innerHTML = '<div role="dialog" aria-modal="true" style="background:#fff;border-radius:10px;padding:18px 20px;max-width:420px;width:92%;box-shadow:0 8px 30px rgba(0,0,0,.3);font-size:14px;line-height:1.6">'
         + '<div style="font-weight:700;font-size:15px;margin-bottom:6px">' + esc(what) + '</div>'
-        + '<div><b>' + n + '明細</b>' + esc(verb) + '。よければ、件数 <b>' + n + '</b> を打って「' + esc(verb.indexOf('消') >= 0 ? '消す' : '書く') + '」を押してください。</div>'
+        + '<div style="font-weight:600">' + esc(n + '明細' + verb + '。よければ、件数 ' + n + ' を打って「' + (verb.indexOf('消') >= 0 ? '消す' : '書く') + '」を押してください。') + '</div>'
         + '<input class="pa-ask-n" inputmode="numeric" autocomplete="off" style="margin-top:10px;width:100%;box-sizing:border-box;padding:8px 10px;font-size:16px;border:1px solid #c7cdd6;border-radius:6px" placeholder="' + n + '">'
         + '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px"><button class="pa-ask-no" style="padding:7px 14px;border-radius:6px;border:1px solid #c7cdd6;background:#fff;cursor:pointer">やめる</button>'
         + '<button class="pa-ask-ok" disabled style="padding:7px 14px;border-radius:6px;border:0;background:#ee4d2d;color:#fff;cursor:pointer;opacity:.45">' + esc(verb.indexOf('消') >= 0 ? '消す' : '書く') + '</button></div></div>';
@@ -44782,7 +44785,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   async function paWriteGate(n, what, stEl, trusted) {
     let v = null; try { const r = await sbGetAll('app_kv', 'select=v&k=eq.pa_write_ok'); v = r && r[0] && r[0].v; } catch (_) { v = undefined; }
     const why = v === undefined ? '本人の OK の印を読めませんでした' : !v || !v.at ? '本人の OK の印がありません' : (Date.now() - Date.parse(v.at) > 2 * 3600000) ? '本人の OK の印が2時間より古い（' + String(v.at).slice(0, 16) + '）' : (Number(v.max) > 0 && n > Number(v.max)) ? '本人の OK は ' + v.max + ' 明細まで（今回 ' + n + '）' : '';
-    if (!why) { try { logAct('値付け', what + '（本人の OK の印あり）', String(v.note || '').slice(0, 80), n + '明細・' + (v.by || '')); } catch (_) {} return true; }
+    /* ★レビュー（高）：本人が窓で OK した印（by:'本人（画面）'）は、本物の押しの時だけ認める。認めると、その後2時間は部署の JS の押しも窓なしで書けてしまう */
+    const _whyX = (!why && v && v.by === '本人（画面）' && !trusted) ? '本人が画面で付けた印は、本人が画面で押した時だけ使えます' : why;
+    if (!_whyX) { try { logAct('値付け', what + '（本人の OK の印あり）', String(v.note || '').slice(0, 80), n + '明細・' + (v.by || '')); } catch (_) {} return true; }
     if (trusted) {
       const okH = await paAskHuman(n, what, /削除/.test(what) ? 'を消します（元に戻せません）' : 'の値段を書きます');
       if (!okH) { if (stEl) stEl.innerHTML = '<span class="smd-dim">やめました</span>'; return false; }
@@ -44791,7 +44796,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       try { logAct('値付け', what + '（本人が画面で確かめた）', '', n + '明細'); } catch (_) {}
       return true;
     }
-    const m = '⛔ ' + what + 'は止めています：' + why + '。本人が画面で押すと確かめの窓が出ます（部署の会話から押した時は止めます。本人の OK をもらってから、事業本部が app_kv pa_write_ok に印を書きます）';
+    const m = '⛔ ' + what + 'は止めています：' + _whyX + '。本人が画面で押すと確かめの窓が出ます（部署の会話から押した時は止めます。本人の OK をもらってから、事業本部が app_kv pa_write_ok に印を書きます）';
     if (stEl) stEl.innerHTML = '<span style="color:#d93025">' + esc(m) + '</span>'; else alert(m);
     return false;
   }
@@ -53531,8 +53536,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   const PR = { orders: null, at: 0, period: 'all', group: 'prod', sort: 'gross', cc: '', shop: '', front: false, auto: false, req: false, more: false, loading: false, open: null };
   try { const sv = JSON.parse(localStorage.getItem('smdPrank') || '{}'); ['period', 'group', 'sort', 'cc', 'shop'].forEach(k => { if (sv[k] != null) PR[k] = sv[k]; }); } catch (_) {}
   const prSave = () => { try { localStorage.setItem('smdPrank', JSON.stringify({ period: PR.period, group: PR.group, sort: PR.sort, cc: PR.cc, shop: PR.shop })); } catch (_) {} };
-  async function prEnsureMaps() {
-    if (pf.incMap && pf.incMap.size && pf.costMap && pf.invMap) return;   /* 💹利益明細を開いた後なら、もう読んである物を使う */
+  async function prEnsureMaps(force) {
+    if (!force && pf.incMap && pf.incMap.size && pf.costMap && pf.invMap && pf._invAt) return;   /* 💹利益明細を開いた後なら、もう読んである物を使う（在庫の紐付けが動いた印 _invAt=0 の時は読み直す） */
     const [income, costs, inv, sheetKv, issues] = await Promise.all([
       sbGetAll('income', 'select=cc,sn,amount,amount_initial,amount_at,amount_initial_at,fee_total,buyer_paid,fees'),
       sbGetAll('costs', 'select=cc,sn,cost,deposit,deposit_init,cost_at,self_transit_at,wb_count,wb_first_at,wb_last_at'),
@@ -53551,7 +53556,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!force && PR.orders && Date.now() - PR.at < 60 * 60000) return;
     PR.loading = true;
     try {
-      await prEnsureMaps();
+      await prEnsureMaps(force);
       PR.orders = await sbGetAll('orders', 'select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking,tab,cancel_reason,shop_id&order=order_date.desc');
       /* ★04 の線：10/20 以降に値段を変えた明細は「値段を変えた後の数がまだ無い」の印（12/4 まで）。GAS の「値段を書いた」（店|カタログ）と、ポータルの値付けの見直しの記録（国 品名30字▸明細: 前 → 後）。どちらも小さい（数十行） */
       PR.chg = { items: new Set(), names: new Set(), ok: true };
@@ -53590,8 +53595,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     /* 出品の控え（出品の画面が読む物）が手元にある時だけ：明細 → SKU・今の値段・在庫・店。商品の鍵 → 出している国 */
     const mInfo = new Map(), listedBy = new Map();
     const isMain = (sid) => { const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid)); return a ? famOfLabel(a.label) === 'gcsonlinestore' : null; };
-    const prodKey = (cc, itemId, modelId, nm, vr, sku) => {
-      const pid = pidOk ? (productIds['id:' + itemId + '#' + modelId] || productIds['id:' + itemId] || {}) : {};
+    const prodKey = (cc, itemId, modelId, nm, vr, sku, idOk) => {
+      const pid = (pidOk && idOk) ? (productIds['id:' + itemId + '#' + modelId] || productIds['id:' + itemId] || {}) : {};
       const jan = String(pid.jan || '').replace(/\D/g, ''), mpn = String(pid.mpn || '').trim();
       return jan.length >= 8 ? 'jan:' + jan : mpn ? 'mpn:' + mpn.toLowerCase() : (sku && !/^REQ_/i.test(sku)) ? 'sku:' + sku.toUpperCase() : 'nm:' + prNorm(vr ? nm + ' ' + vr : nm);
     };
@@ -53599,9 +53604,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const ms = (r.models || []).length ? r.models : [{ id: 0, n: '', price: r.price, stock: r.stock, sku: r.sku || r.parent_sku }];
       ms.forEach(m => {
         if (!m) return; const sku = String(m.sku || m.model_sku || '').trim();
-        const inf = { cc, sku, price: Number(m.price) || null, stock: Number(m.stock) || 0, shop: r.shop_id, ct: r.create_time || null };
+        const inf = { cc, sku, n: String(m.n || ''), price: Number(m.price) || null, stock: Number(m.stock) || 0, shop: r.shop_id, ct: r.create_time || null };
         mInfo.set(cc + ':' + r.item_id + '#' + (m.id != null ? m.id : 0), inf);
-        if (PR.group === 'prod') { const k = prodKey(cc, r.item_id, m.id, String(r.name || ''), String(m.n || ''), sku); let L = listedBy.get(k); if (!L) { L = []; listedBy.set(k, L); } L.push(inf); }
+        if (PR.group === 'prod') { const k = prodKey(cc, r.item_id, m.id, String(r.name || ''), String(m.n || ''), sku, true); let L = listedBy.get(k); if (!L) { L = []; listedBy.set(k, L); } L.push(inf); }
       });
     })); } catch (_) {} }
     const groups = new Map(); let tot = { n: 0, gross: 0, orders: 0, noCost: 0, noDep: 0, units: 0 };
@@ -53623,17 +53628,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const q = Number(it && it.qty) || 1, sh = q / u;
         const nm = String(it.name || ''), vr = String(it.variation || '');
         const mk = o.cc + ':' + (it.item_id || '') + '#' + (it.model_id != null ? it.model_id : 0);
-        const mi = mInfo.get(mk) || null, sku = (mi && mi.sku) || '';
+        /* ★レビュー（中）：明細を消すと model_id に別の作品が入る（詰め直し削除）。今の明細名が注文の明細名と合う時だけ、その明細の SKU・JAN・在庫を使う */
+        const mi0 = mInfo.get(mk) || null, nameOk = !!(mi0 && (!vr || prNorm(mi0.n) === prNorm(vr))), mi = nameOk ? mi0 : null, sku = (mi && mi.sku) || '';
         const req = /^REQ_/i.test(sku) || ORD_REQ_RE.test(nm + ' ' + vr);
         if (PR.req && !req) return;
-        if (PR.front && !(cost != null && cost / u <= 1000)) return;   /* フロント＝1点の仕入れ ¥1,000 以下（記憶 front-or-back-per-variant-by-cost） */
+        if (PR.front && !(cost != null && cost / u <= 1000)) return;   /* フロント＝1点の仕入れ ¥1,000 以下（記憶 front-or-back-per-variant-by-cost）。品ごとの仕入れが注文に無いので、2品以上の注文は注文の平均で見る（近い見方） */
         if (PR.auto && !(_ordAuto && vr && _ordAuto.get(o.cc + '|' + vr.toLowerCase().trim()))) return;
-        const hw = (skuHwsOf(sku + ' ' + nm + ' ' + vr)[0]) || '他';
+        const hw = (sku && skuHwsOf(sku.split('_')[0])[0]) || (skuHwsOf(nm + ' ' + vr)[0]) || '他';   /* ★レビュー（中）：SKU は「PS3_作品名」＝頭だけで当てる */
         let key, label;
-        if (PR.group === 'model') { key = mk; label = (vr ? vr + ' ／ ' : '') + nm; }
+        if (PR.group === 'model') { key = mk + '|' + prNorm(vr); label = (vr ? vr + ' ／ ' : '') + nm; }
         else if (PR.group === 'item') { key = o.cc + ':' + (it.item_id || nm); label = nm; }
         else if (PR.group === 'hw') { key = 'hw:' + hw; label = hw; }
-        else { key = prodKey(o.cc, it.item_id, it.model_id, nm, vr, sku); label = vr ? vr + ' ／ ' + nm : nm; }
+        else { key = prodKey(o.cc, it.item_id, it.model_id, nm, vr, sku, nameOk || (!vr && !lstOk)); label = vr ? vr + ' ／ ' + nm : nm; }
         let gr = groups.get(key);
         if (!gr) { gr = { key, label, n: 0, sales: 0, gross: 0, cost: 0, ded: 0, last: '', first: '', cc: {}, hw, cMin: Infinity, cMax: -Infinity, sMin: Infinity, sMax: -Infinity, loc: {}, n30: 0, n90: 0, nAll: 0, dates: [], ords: [], mks: new Set(), req: false, chg: false, owner: '' }; groups.set(key, gr); }
         /* 回転・印は選んだ期間に関係なく数える（全期間・直近30日・直近90日） */
@@ -53645,10 +53651,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!gr.owner) { const ow = PR_OWNER_PRICE.find(x => x.cc === o.cc && x.re.test(nm + ' ' + vr)); if (ow) gr.owner = ow.why; }
         gr.mks.add(mk);
         if (!inP || !known) return;
+        if (!(salesL > 0)) { tot.noSales = (tot.noSales || 0) + 1; }   /* ★レビュー（低）：売上が空の注文は、売り値の平均と幅に入れない（粗利には入れる＝利益明細と同じ） */
         const uc = cost * sh / q, us = sales * sh / q, ul = salesL * sh / q;
         gr.n += q; gr.sales += sales * sh; gr.gross += g * sh; gr.cost += cost * sh; gr.ded += ded * sh;
-        gr.cMin = Math.min(gr.cMin, uc); gr.cMax = Math.max(gr.cMax, uc); gr.sMin = Math.min(gr.sMin, us); gr.sMax = Math.max(gr.sMax, us);
-        const lc = gr.loc[o.cc] || (gr.loc[o.cc] = { sum: 0, n: 0 }); lc.sum += ul * q; lc.n += q;
+        gr.cMin = Math.min(gr.cMin, uc); gr.cMax = Math.max(gr.cMax, uc);
+        if (salesL > 0) { gr.sMin = Math.min(gr.sMin, us); gr.sMax = Math.max(gr.sMax, us); const lc = gr.loc[o.cc] || (gr.loc[o.cc] = { sum: 0, n: 0 }); lc.sum += ul * q; lc.n += q; gr.nS = (gr.nS || 0) + q; gr.salesS = (gr.salesS || 0) + sales * sh; gr.dedS = (gr.dedS || 0) + ded * sh; }
         if (d > gr.last) gr.last = d;
         if (gr.ords.length < 300) gr.ords.push({ d, cc: o.cc, sn: o.sn, q, sale: sales * sh, saleL: salesL * sh, cost: cost * sh, ded: ded * sh, g: g * sh });
         gr.cc[o.cc] = (gr.cc[o.cc] || 0) + g * sh;
@@ -53684,10 +53691,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return { rows, tot, pidOk: !!pidOk, lstOk, mPer, mTurn };
   }
   const PR_BOX = { A: ['🟢', 'よく売れて儲かる（横展開の候補）', '#1a7f37'], B: ['🟡', 'よく売れて薄い（値上げの候補）', '#b45309'], C: ['🔵', '売れにくく厚い（様子見か値下げの候補）', '#2673dd'], D: ['⚪', '売れにくく薄い（見直し）', '#6b7280'] };
-  function prJump(sn, d) {   /* 💹利益明細のその注文の行へ（月を合わせて注文番号で絞る） */
-    try { const sel = document.getElementById('pf-month'); const ym = String(d || '').slice(0, 7); if (sel && [...sel.options].some(o => o.value === ym)) sel.value = ym; } catch (_) {}
-    try { const si = document.getElementById('pf-search'); if (si) si.value = sn; pf.search = String(sn).toLowerCase(); } catch (_) {}
+  function prJump(sn, d) {   /* 💹利益明細のその注文の行へ（月を合わせて注文番号で絞る）。★レビュー（低）：月の選択肢は利益明細を開いた後にできる＝開いてから合わせる */
     showPage('profit');
+    setTimeout(() => {
+      let ok = false;
+      try { const sel = document.getElementById('pf-month'); const ym = String(d || '').slice(0, 7); if (sel && [...sel.options].some(o => o.value === ym)) { sel.value = ym; ok = true; } } catch (_) {}
+      try { const si = document.getElementById('pf-search'); if (si) si.value = sn; pf.search = String(sn).toLowerCase(); } catch (_) {}
+      if (!ok) toast('この注文の月（' + String(d || '').slice(0, 7) + '）は💹利益明細の月の選択肢に無いので、月を選び直してください。注文番号は検索に入れました');
+      renderProfit();
+    }, 400);
   }
   function prDetailHtml(r, R, yen) {
     const cur = (cc) => (regionByCc(cc) || {}).cur || '';
@@ -53701,7 +53713,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     else if (PR.group === 'hw') side = '<span class="smd-dim">機種でまとめた時は出しません（商品か明細でまとめてください）</span>';
     else {
       const on = ccs.filter(c => listedCc[c]), off = ccs.filter(c => !listedCc[c]);
-      side = '<div>出している国：' + (on.length ? on.map(c => '<b>' + c + '</b>（' + listedCc[c].map(x => (x.shop ? x.shop + ' ' : '') + (x.price != null ? fmtL(c, x.price) : '値段不明') + '・在庫' + x.stock).join('／') + '）').join('　') : '（見つかりません）') + '</div>'
+      const weakKey = PR.group === 'prod' && /^nm:/.test(r.key);   /* ★レビュー（中）：名前で束ねた物は、出品側と鍵が合わず「出していない国」に出ることがある＝重複出品のもとになる */
+      side = (weakKey ? '<div style="color:#b45309">⚠ この商品は名前で束ねているので、出しているかどうかを確かめ切れません。出す前に、その国の出品一覧で同じ物が無いかを見てください（重複出品になります）。</div>' : '<div class="smd-dim" style="font-size:11px">出す前に、その国の出品一覧で同じ物が無いかを見てください（重複出品になります）。</div>') + '<div>出している国：' + (on.length ? on.map(c => '<b>' + c + '</b>（' + listedCc[c].map(x => (x.shop ? x.shop + ' ' : '') + (x.price != null ? fmtL(c, x.price) : '値段不明') + '・在庫' + x.stock).join('／') + '）').join('　') : '（見つかりません）') + '</div>'
         + '<div style="margin-top:2px">出していない国：' + (off.length ? off.map(c => { const rg = regionByCc(c); const rate = (rg && rg.rateJpy) || 0; if (!rate) return c; const loc = avgS / rate; let pr = null; try { pr = priceProfitFor(c, avgC, loc); } catch (_) {} return '<b>' + c + '</b> 今の値段なら ' + fmtL(c, loc) + (pr && isFinite(pr.profit) ? '・粗利 ' + yen(pr.profit) : ''); }).join('　') : '（7か国とも出しています）') + '</div>'
         + '<div class="smd-dim" style="font-size:11px">「今の値段なら」＝この商品の売り値の平均（円）をその国のお金にした値段。粗利は価格計算と同じ式（重さは⚙️設定の既定）。</div>';
     }
@@ -53721,13 +53734,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const body = document.getElementById('prank-body'); if (!body) return;
     if (!PR.orders || force) body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…（全期間の注文を1回だけ読みます）</div>';
     try { await prLoad(force); } catch (e) { body.innerHTML = '<span class="smd-err">読めませんでした: ' + esc((e && e.message) || e) + '</span>'; return; }
-    if (PR.auto && !_ordAuto) { try { await ordAutoLoad(); } catch (_) {} }
+    if (PR.auto && !_ordAuto) { try { _ordAutoAt = 0; await ordAutoLoad(); } catch (_) {} }
+    /* ★レビュー（中）：🤖の控えを読めていない時に「0注文」と出さない（読めなかったのか本当に0なのかを分ける） */
+    const autoUnknown = PR.auto && !_ordAuto;
     const R = prCompute(), yen = v => (v < 0 ? '−¥' : '¥') + Math.round(Math.abs(v)).toLocaleString();
     const seg = (k, v, t) => `<button class="pr-seg${PR[k] === v ? ' on' : ''}" data-k="${k}" data-v="${v}" style="padding:4px 10px;border:1px solid #c7cdd6;border-radius:6px;background:${PR[k] === v ? '#ee4d2d' : '#fff'};color:${PR[k] === v ? '#fff' : '#333'};cursor:pointer;font-size:12.5px">${t}</button>`;
     const chk = (k, t) => `<label style="font-size:12.5px;cursor:pointer;white-space:nowrap"><input type="checkbox" class="pr-chk" data-k="${k}" ${PR[k] ? 'checked' : ''}> ${t}</label>`;
     const ccOpts = '<option value="">すべての国</option>' + REGIONS.map(r => `<option value="${r.cc}" ${PR.cc === r.cc ? 'selected' : ''}>${r.cc}</option>`).join('');
     /* 💹利益明細の今月の粗利と並べて、合っているかを画面に出す（今月を選んだ時・絞り込み無しの時） */
-    let chkTxt = '';
+    let chkTxt = autoUnknown ? ' <span style="color:#d93025;font-weight:700">⚠ 🤖の控えを読めていないので「🤖だけ」は数えられません（0件ではありません）。少し置いて🔄読み直すを押してください</span>' : '';
     if (PR.period === 'month' && !PR.cc && !PR.shop && !PR.front && !PR.auto && !PR.req) {
       const now = new Date(Date.now() + 9 * 3600000), ym = now.toISOString().slice(0, 7);
       const ok = pf.grossYm && (pf.grossYm === ym || pf.grossYm === 'thismonth') && typeof pf.grossTotal === 'number';
@@ -53751,7 +53766,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         ${R.lstOk ? '' : '<button class="pr-lst" style="padding:4px 10px;border:1px solid #c7cdd6;border-radius:6px;background:#fff;cursor:pointer;font-size:12.5px" title="出品の画面と同じ控えを読みます（出している国・今の値段・在庫・SKU が出ます）">📦 出品の控えを読む</button>'}
       </div>
       <div style="font-size:13px;margin-bottom:6px">粗利の合計 <b style="font-size:15px;color:${R.tot.gross < 0 ? '#d93025' : '#1a7f37'}">${yen(R.tot.gross)}</b>（${R.tot.orders.toLocaleString()}注文・${R.tot.units.toLocaleString()}点・${R.rows.length.toLocaleString()}件）${chkTxt}<br>
-        <span class="smd-dim" style="font-size:12px">粗利に入れていない注文：仕入れが分からない <b>${R.tot.noCost.toLocaleString()}</b>件・入金が分からない <b>${R.tot.noDep.toLocaleString()}</b>件（未払い・キャンセルは数えていません）。${PR.group === 'prod' ? (R.pidOk ? '商品は JAN→型番→SKU→名前の順で束ねています。' : '商品は SKU→名前で束ねています（JAN の台帳は出品の画面を開いた後に使います）。') : ''}</span></div>
+        <span class="smd-dim" style="font-size:12px">粗利に入れていない注文：仕入れが分からない <b>${R.tot.noCost.toLocaleString()}</b>件・入金が分からない <b>${R.tot.noDep.toLocaleString()}</b>件（未払い・キャンセルは数えていません）。${R.tot.noSales ? '売上の額が空の注文 ' + R.tot.noSales + '件は、粗利には入れ、売り値の幅には入れていません。' : ''}${PR.group === 'prod' ? (R.pidOk ? '商品は JAN→型番→SKU→名前の順で束ねています。' : '商品は SKU→名前で束ねています（JAN の台帳は出品の画面を開いた後に使います）。') : ''}</span></div>
       <div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">印（4つの箱・線は 04 経営企画部が決めた物）：<b>厚い</b>＝1点の仕入れ¥1,000以下は粗利¥250以上・¥3,000以下は¥1,500以上・¥3,000超は仕入れの50%以上／<b>よく売れる</b>＝直近90日に2点以上（国の合計・出してから90日に満たない物は90日分に直す）。リクエスト品は箱に入れません。本人が値段を決めた物・10/20 以降に値段を変えた物（12/4 まで）・全期間で1点だけ・在庫0 は、印を付けて候補から外します。${prRefNow() ? '30日の数と売り切れまでの日数は、バケーションの7日が入るので 12/4 までは参考です。' : ''}${PR.chg && !PR.chg.ok ? ' ⚠ 値段を変えた記録を読めなかったので、その印は出ていません。' : ''}表示だけで、値段の書き込みや出品はしません。行を押すと中身が開きます。</div>
       <div style="overflow-x:auto"><table class="pf-table" style="width:100%;border-collapse:collapse;font-size:12.5px">
         <thead><tr style="background:#f6f7f9">${th('順位')}${th({ prod: '商品', model: '明細', item: 'カタログ', hw: '機種' }[PR.group] || '商品', 'left')}${th('売れた数<br><span style="font-weight:400;font-size:10.5px">30日' + (prRefNow() ? '（参考）' : '') + '/90日</span>')}${th('売り値/点')}${th('差し引き/点')}${th('仕入れ値/点')}${th('粗利/点')}${th('粗利の合計')}${th('ROI')}${th('最後に売れた日', 'left')}${th('国の内訳', 'left')}</tr></thead>
@@ -56302,6 +56317,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         try { PA.data = null; PA.at = 0; } catch (_) {}   /* ★2026-11-04 レビュー 10/31 中-9：値付けの見直しの控え（前の口座の出品で作った表）も捨てる */
         // ★口座別キャッシュも全破棄（切替後に別アカウントの金額/注文が残る不具合の修正）
         try { pf.ym = null; pf._invAt = 0; } catch (_) {}
+        try { PR.orders = null; PR.at = 0; pf.incMap = new Map(); pf.costMap = new Map(); pf.invMap = null; } catch (_) {}   /* ★レビュー（中）：🏆 商品別の利益も前の口座の入金・注文を使い回さない */
         try { renderDash._cache = null; } catch (_) {}
         try { cust._cache = null; } catch (_) {}
         try { plan._cache = null; } catch (_) {}

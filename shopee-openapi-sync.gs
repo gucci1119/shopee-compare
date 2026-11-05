@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-1900';
+var SRC_VER = '20261106-1910';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -193,8 +193,23 @@ function ufBump_(n, tag) {
   /* ★2026-11-05 事業本部「どの処理から呼んだか」：今の内訳は「何を読んだか」だけで、出品の表を読む 1,777回の出どころ（18か所）が分からなかった。
      同じ入れ物に「by:処理名」でも数える（貯め方・書き出しは今のまま）。処理名＝ウェブの口なら SB_CALLER（web:口の名前）、トリガーなら一番外の関数名。
      uf_status の top からは外し、topBy に出す（ポータルの接続枠の表示は top だけを使う） */
-  try { var _bk = 'by:' + ufEntryName_(); _ufTag[_bk] = (_ufTag[_bk] || 0) + c; } catch (eBy) {}
+  try { var _bk = ufEntryName_(); _ufBy[_bk] = (_ufBy[_bk] || 0) + c; } catch (eBy) {}
   ufSpillMaybe_();
+}
+/* ★2026-11-05 レビュー（推測・中）：by: を今の入れ物（ufCount の tag）に混ぜると、1つ 9KB の上限を超えて数えの保存が毎回失敗するおそれ。
+   別の入れ物 ufBy（{d, m}・多い順に60件まで）に分ける。目安の数なので鍵は取らない（同時の実行で少し落ちることがある）。urlfetch は使わない */
+var _ufBy = {};
+function ufByFlush_() {
+  var ks = Object.keys(_ufBy); if (!ks.length) return;
+  try {
+    var d = ufToday_(), o = null; try { o = JSON.parse(P_().getProperty('ufBy') || 'null'); } catch (e1) { o = null; }
+    if (!o || o.d !== d) o = { d: d, m: {} };
+    ks.forEach(function (k) { o.m[k] = (o.m[k] || 0) + _ufBy[k]; });
+    var top = Object.keys(o.m).sort(function (a, b) { return o.m[b] - o.m[a]; });
+    if (top.length > 60) { var keep = {}; top.slice(0, 59).forEach(function (k) { keep[k] = o.m[k]; }); keep['（その他）'] = top.slice(59).reduce(function (t, k) { return t + o.m[k]; }, 0) + (o.m['（その他）'] || 0); o.m = keep; }
+    P_().setProperty('ufBy', JSON.stringify(o));
+    _ufBy = {};
+  } catch (e) {}
 }
 var _ufEntryCache = '';
 function ufEntryName_() {
@@ -219,6 +234,7 @@ function ufSpillMaybe_() {
     P_().setProperty('ufSpill_' + Utilities.getUuid().slice(0, 8), JSON.stringify({ d: ufToday_(), n: _ufRun, tag: _ufTag, at: new Date().toISOString(), mid: 1 }));
     _ufRun = 0; _ufTag = {}; _ufSpillAt = Date.now();
   } catch (e) {}
+  ufByFlush_();
 }
 /* ★2026-10-04 本人「なんでこんなに減るの早い？」：2台目・3台目が半日で約1.5万回。9,337回が🤖の同一作品判定（AI）。
    真因＝AIの1日の上限が「出品上限×4」（dailyMax 3000 → 12,000回）で、GASの枠（1台2万回）より大きかった＋私が10/3に今日の回数を0に戻した。
@@ -323,6 +339,7 @@ function priceLogFlush_() {
   try { sbUpsert_('activity_log', rows); } catch (e) { Logger.log('price log: ' + e); }
 }
 function ufPersist_() {
+  try { ufByFlush_(); } catch (eBy) {}
   try { priceLogFlush_(); } catch (ePl) {}
   if (!_ufRun && !Object.keys(_ufTag).length) return;
   var lock = null, got = false;
@@ -1918,8 +1935,7 @@ function doGetInner_(e) {
            種類はたかだか数十なので全部返す（上限40）。 */
         var tg = st.tag || {}, top = Object.keys(tg).filter(function (k) { return k.indexOf('by:') !== 0; }).map(function (k) { return { k: k, n: tg[k] }; })
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);
-        var topBy = Object.keys(tg).filter(function (k) { return k.indexOf('by:') === 0; }).map(function (k) { return { k: k.slice(3), n: tg[k] }; })
-          .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);   /* ★2026-11-05 どの処理から呼んだか（ufBump_ の by:） */
+        var topBy = []; try { ufByFlush_(); var _ub = JSON.parse(P_().getProperty('ufBy') || 'null'); if (_ub && _ub.d === ufToday_()) topBy = Object.keys(_ub.m || {}).map(function (k) { return { k: k, n: _ub.m[k] }; }).sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40); } catch (eUb) {}   /* ★2026-11-05 どの処理から呼んだか（ufBump_ → ufBy） */
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
         ufo = { ok: true, src: SRC_VER, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, topBy: topBy, aiSpend: aiSpendLoad_() };
@@ -2223,6 +2239,7 @@ function doPostInner_(e) {
   var out = { ok: false };
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    try { SB_CALLER = 'post:' + String(body.action || '-').replace(/[^\w.-]/g, '').slice(0, 40); } catch (_c2) {}   /* ★レビュー（低）：POST の書き込みが全部 by:post にまとまっていた */
     /* ★2026-09-24 ヤマトの運賃情報（userscript・鍵なし）。書けるのは app_kv dom_ship_* と経費「送料」だけ。
        Script Property YAMATO_CSTMR（お客様コード）が設定されていれば一致した時だけ通す */
     /* ★2026-09-25 本人「各国のアクセスデータ（ビュー数・訪問者）の変遷をポータルで深夜でも見たい」。
