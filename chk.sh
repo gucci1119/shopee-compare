@@ -246,4 +246,14 @@ if [ -z "$A1" ] || [ "$A1" != "$A2" ]; then echo "NG  アーケードの種類�
 # 7-11 ★2026-10-29 行末のコメント「/* …」を閉じ忘れると、次の行からのコードが黙って動かなくなる（10/12 19:11〜10/29：🃏の使った写真の印・tcg_sets の保存・候補0件で抜ける処理の3行が17日間死んでいた）
 B11=$(python3 tools/chk_opencmt.py shopee-openapi-sync.gs index.html)
 if [ -n "$B11" ]; then echo "NG  行末のコメントが閉じていない（次の行のコードが動かない）"; echo "$B11"; NG=1; else echo "OK  行末のコメントは全部閉じている"; fi
+# 7-12 ★2026-11-05 本人「毎回、なんでズレるん？」：メルカリの追跡番号のずれは 8/23・9/27（別の取引の画面を読んだ）・10/11・11/5（番号が後から変わった）の4回。
+#     守り①取引画面を読む3か所は「取引ID が本文に出るまで読まない」 ②取込GAS の追跡はヤマトの「変更後送り状番号」を拾い、付け替えの控え trk_replaced で古い番号を戻す ③ポータルの🔔が同じ番号・付け替えを出す
+U1=../mercari-purchase-info.user.js; U2=../mercari-purchase-info-supabase.user.js; G2=../_gas_private/mercari-purchase-sync.gs
+B12=""
+[ -f "$U1" ] && { grep -q "text.indexOf(_wantId) < 0" "$U1" || B12="$B12 購入一覧(fetchOne)の取引IDの確かめ"; grep -q "text.indexOf(itemId) < 0" "$U1" || B12="$B12 購入一覧(fetchTransactionDetail)の取引IDの確かめ"; }
+[ -f "$U2" ] && { grep -q "text.indexOf(id) < 0" "$U2" || B12="$B12 連携スクリプトの取引IDの確かめ"; }
+[ -f "$G2" ] && { grep -q "変更後送り状番号" "$G2" || B12="$B12 取込GASの変更後送り状番号"; grep -q "trkRepLoad_()" "$G2" || B12="$B12 取込GASの付け替えの控え"; }
+grep -q "kind: 'trkdup'" index.html || B12="$B12 ポータルの同じ追跡番号の🔔"
+grep -q "kind: 'trkchg'" index.html || B12="$B12 ポータルの付け替えの🔔"
+if [ -n "$B12" ]; then echo "NG  追跡番号のずれの守りが消えている:$B12"; NG=1; else echo "OK  追跡番号のずれの守り（取引IDの確かめ3か所・変更後送り状番号・付け替えの控え・🔔2つ）"; fi
 exit $NG

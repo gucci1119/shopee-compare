@@ -24718,7 +24718,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { await loadDelAddrs(); } catch (_) {}   // 🏢届け先（お知らせの荷物にも「どこへ届くか」を出す）
     try {
       rows = await sbGetAll('inventory',
-        'select=item_id,name,name_supplier,image,supplier,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,delivery_place,delivery_synced_at,tracking_no&status=eq.' + encodeURIComponent('入庫待ち'));
+        'select=item_id,name,name_supplier,image,supplier,supplier_order,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,delivery_place,delivery_synced_at,tracking_no&status=eq.' + encodeURIComponent('入庫待ち'));
     } catch (_) { rows = []; }
     // ★配送業者が「配達完了」を出すと、GAS(shopee-tracking.gs の AUTO_ARRIVE)が
     //   自動で status を『在庫保管中』に移す。その瞬間に入庫待ちから外れるので、
@@ -24771,6 +24771,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let lastSync = '';
     rows.forEach(r => { const v = String(r.delivery_synced_at || ''); if (v > lastSync) lastSync = v; });
     notif.diag = { waiting: rows.length, tracked: rows.filter(r => r.tracking_no).length, hit: out.length, lastSync };
+    /* ★2026-11-05 本人「毎回、なんでズレるん？」「同じミスしすぎちゃう？」（8/23・9/27・10/11・11/5）：追跡番号のずれを黙らせない。
+       ①同じ追跡番号が【別の取引】の2行以上に入っている（まとめ買いの枝番＝同じ取引は正常）②送り状番号が付け替わった（取込GAS の追跡が app_kv trk_replaced に書く） */
+    try {
+      const byT = new Map();
+      rows.filter(r => !r.__auto).forEach(r => { const t = String(r.tracking_no || '').replace(/\D/g, ''); if (t.length < 10) return; const k = String(r.supplier_order || r.item_id).replace(/-\d+$/, ''); let m = byT.get(t); if (!m) { m = new Map(); byT.set(t, m); } if (!m.has(k)) m.set(k, r); });
+      byT.forEach((m, t) => { if (m.size < 2) return; const rs = [...m.values()];
+        out.push({ id: 'trkdup:' + t, ic: '🔴', cat: 'todo', kind: 'trkdup', img: rs[0].image || '', at: notifSortKey(jstDateTime(Date.now()), invPurDate(rs[0])),
+          ti: '同じ追跡番号が別の取引に入っています：' + t,
+          sb: rs.map(r => (r.item_id || '') + ' ' + (r.supplier_order || '') + ' ' + String(r.name || r.name_supplier || '').slice(0, 30)).join(' ／ ') + '　→ 取引画面の送り状番号と照らしてください', itemId: rs[0].item_id }); });
+    } catch (_) {}
+    try {
+      const tr = await sbGetAll('app_kv', 'select=v&k=eq.trk_replaced');
+      const v = (tr && tr[0] && tr[0].v) || {}; const since = new Date(Date.now() - 14 * 86400000).toISOString();
+      Object.keys(v).forEach(o => { const x = v[o] || {}; if (!x.new || String(x.at || '') < since) return; const r = rows.find(y => y.item_id === x.item_id) || {};
+        out.push({ id: 'trkchg:' + o + ':' + x.new, ic: '🔁', cat: 'parcel', kind: 'trkchg', img: r.image || '', at: notifSortKey(jstDateTime(Date.parse(x.at) || Date.now()), invPurDate(r)),
+          ti: '送り状番号が変わったので直しました：' + (r.name || r.name_supplier || x.item_id || ''),
+          sb: [o + ' → ' + x.new, x.why || '', x.item_id || '', x.by ? '直した：' + x.by : '取込GAS の追跡'].filter(Boolean).join('　'), itemId: x.item_id }); });
+    } catch (_) {}
     // ── 📮 発送：期限が過ぎた／今日中の未手配注文（既にアラートが取ってある注文データを使い回す）
     try {
       const ach = notifBuild._ord && (Date.now() - notifBuild._ord.at < 300000) ? notifBuild._ord
@@ -25155,6 +25173,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-05', items: [
+      '🔴 <b>🔔 追跡番号のずれを黙らせないようにしました</b>（本人「毎回、なんでズレるん？」「同じミスしすぎちゃう？」）：モンスターボール Plus（m43476651950）の送り状番号は、ヤマトが「商品規格外のため宅急便に変更」して 626947746751 から 623521959594 に付け替えていました。🔔に2つ足しました。①同じ追跡番号が別の取引の2行以上に入っている（まとめ買いの枝番は除く）②送り状番号が付け替わったので直した（取込GAS の追跡がヤマトの「変更後送り状番号」を拾って直し、記録します）。',
       '⇄ <b>🏆 商品別の利益：束ねた名前を縦に並べ、手で2つの行をまとめられるようにしました</b>（本人「横に並べたら分かりにくいから、縦に並べてくれない？」「多分この2つは一緒じゃない？」）：明細の欄に、束ねた名前を1行に1つずつ「小さい写真｜国の札｜その国の名前」で並べます。いちばん上は代表の名前（英語・太字）で、同じ名前が複数の国にあれば国の札を並べて1行です。6つを超えたら「ほか N件の名前」で畳みます。同じ物の別の名前（言い換えの表）を足しました（最初は「Monster Ball Plus＝Poke Ball Plus＝モンスターボール Plus」・GO Plus＋は別の物）。行の「⇄ ほかの行とまとめる」を押してから、まとめる相手の行の「⇄ この行とまとめる」を押すと1行になります。間違えた時は表の上の「手でまとめた行」から外せます。',
       '📐 <b>🏆 商品別の利益：表を画面の幅に収め、名前と写真を並べました</b>（本人「横幅あってない」「いろんな国・いろんな出品で出していたら、それ全部入れてくれていい。画像も並べてくれていい」）：①ページを横にずらさなくても全部の列が見えるように詰めました。損益分岐は「分岐」「基準」の2行、国の内訳の札は1行に2つまでで折り返し、金額は切りません。見出しは表の上に固定して、スクロールしても見えます。②太い名前は英語の名前（無ければいちばん売れた名前）です。束ねた別の名前は、国の札付きで下に小さく出します（3つを超えたら「ほか N件の名前」・行を開くと全部）。③束ねた中の違う写真を4枚まで並べます（5枚目からは +N）。④同じ写真の単品の出品（名前を変えた出品：Monster Ball Plus と Poke Ball Plus など）は、同じ国でも1行にまとめます。',
       '🧩 <b>🏆 商品別の利益：まとめ方の既定を「明細」にしました</b>（本人「カタログで1明細出してるやつと、バリエーションで3明細とか出してるやつがあるから、明細単位っていうのかな、その方がいいかも」）：1つのカタログに明細が何個あっても、明細（中身の品）ごとに1行です。国をまたいだ同じ明細は、JAN→同じ写真→SKU→型番→名前（言葉の違いを外す）で1行にまとめます。同じカタログの別の明細は、共通の親SKU・表紙の写真・JAN でつなぎません（「GO Plus＋」と「モンスターボール Plus」が1行に混ざり、仕入れが ¥2,500〜¥18,000 になっていました）。「GO Plus」と「GO Plus＋」は「＋」で分け、「Pokémon」と「Pokemon」は同じ名前として扱います。行の名前は明細の名前を太く、カタログ名を小さく出します。「カタログ」「機種」でまとめる切り替えは残しました（国ごとの「明細」は「明細」に入れました）。',
