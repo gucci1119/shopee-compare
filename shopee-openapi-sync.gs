@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0300';
+var SRC_VER = '20261106-0500';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -581,7 +581,7 @@ function doGetInner_(e) {
         }
         var r = p.action === 'update_stock' ? updateStock_(shopId, p.item_id, mid, p.stock) : updatePrice_(shopId, p.item_id, mid, p.price);
         avFailList_({ response: r }, p.action === 'update_stock' ? '在庫' : '値段');   /* ★2026-11-05 洗い出し6：明細ごとの断りは ok:false で返す */
-        out = { ok: true, action: p.action, item_id: p.item_id, model_id: mid, result: r };
+        out = (r && r.lockSkipped) ? { ok: false, action: p.action, item_id: p.item_id, model_id: mid, lockSkipped: r.lockSkipped, error: '本人の値段（' + r.lockSkipped[0].lock + '）なので書いていません' } : { ok: true, action: p.action, item_id: p.item_id, model_id: mid, result: r };   /* ★2026-11-06 全体レビュー 高2：飛ばした時に ok:true を返さない */
       } catch (err) { out = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(cb + '(' + JSON.stringify(out) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -1211,7 +1211,7 @@ function doGetInner_(e) {
           } catch (eRb) { rfhit.full_error = String((eRb && eRb.message) || eRb).slice(0, 160); }
         }
         rfout = rfhit ? Object.assign({ ok: true, found: true, cc: rfcc, ref: rfref, read: rfread, at: new Date().toISOString() }, rfhit)
-                      : { ok: true, found: false, cc: rfcc, ref: rfref, sku: rfsku, read: rfread, cats: rfcats.length, at: new Date().toISOString() };
+                      : { ok: true, found: false, complete: rfread.length >= rfcats.length, cc: rfcc, ref: rfref, sku: rfsku, read: rfread, cats: rfcats.length, at: new Date().toISOString() };
       } catch (err) { rfout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(rfcb + '(' + JSON.stringify(rfout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -1708,7 +1708,7 @@ function doGetInner_(e) {
         var lshop = parseInt(p.shop_id, 10); if (!getToken_(lshop)) throw new Error('未認可 shop_id=' + p.shop_id);
         var arr; try { arr = JSON.parse(p.list || '[]'); } catch (_) { throw new Error('list JSON不正'); }
         var lr = p.action === 'update_price_list' ? updatePriceList_(lshop, p.item_id, arr) : updateStockList_(lshop, p.item_id, arr);
-        lout = { ok: true, action: p.action, item_id: p.item_id, result: lr };
+        lout = (lr && lr.lockSkipped && !(Number(lr.updated) > 0)) ? { ok: false, action: p.action, item_id: p.item_id, lockSkipped: lr.lockSkipped, error: '本人の値段の明細なので書いていません（' + lr.lockSkipped.length + '件）' } : { ok: true, action: p.action, item_id: p.item_id, result: lr, lockSkipped: (lr && lr.lockSkipped) || undefined };   /* ★2026-11-06 全体レビュー 高2：全部飛ばした時は ok:false・一部の時は lockSkipped を外にも出す */
       } catch (err) { lout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(lcb + '(' + JSON.stringify(lout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -2059,25 +2059,30 @@ function doGetInner_(e) {
        params: token, shop_id, item_id, kv（app_kv の items＝add_variations_bulk と同じ）, ref（参照番号・任意）。返事 act:'req_add'（古い GAS は付かない＝ポータルは前の手順に戻る） */
     if (p.action === 'req_add') {
       var rqcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
-      var rqout, rqT0 = Date.now(), rqTS = [], rqMk = function (l) { rqTS.push(l + ' ' + ((Date.now() - rqT0) / 1000).toFixed(1) + '秒'); };
+      var rqHeld = '', rqout, rqT0 = Date.now(), rqTS = [], rqMk = function (l) { rqTS.push(l + ' ' + ((Date.now() - rqT0) / 1000).toFixed(1) + '秒'); };
       try {
         var rqwt = P_().getProperty('WRITE_TOKEN');
         if (!rqwt || p.token !== rqwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         var rqshop = parseInt(p.shop_id, 10); if (!getToken_(rqshop)) throw new Error('未認可 shop_id=' + p.shop_id);
         var rqitem = parseInt(String(p.item_id || '').replace(/\D/g, ''), 10); if (!rqitem) throw new Error('item_id が要ります');
+        var rqCache = CacheService.getScriptCache(), rqBusyK = 'reqadd_busy_' + rqitem;
+        if (rqCache.get(rqBusyK)) throw new Error('同じ Request page に、いま別の追加が動いています（最長6分）。終わってから押してください');
+        rqCache.put(rqBusyK, '1', 360); rqHeld = rqBusyK;
         var rqrows = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(String(p.kv || '')));
         var rqitems = (rqrows && rqrows[0] && rqrows[0].v && rqrows[0].v.items) || [];
         if (!rqitems.length) throw new Error('対象リストが見つかりません');
         var rqBase = function () { var b = callShop_(rqshop, '/api/v2/product/get_item_base_info', { item_id_list: String(rqitem) }, 'get'); var it = (((b || {}).response || {}).item_list || [])[0]; if (!it) throw new Error('Request page を Shopee から読めませんでした: ' + String((b && (b.message || b.error)) || '').slice(0, 80)); var po = it.pre_order || {}; return { pre: !!po.is_pre_order, dts: Number(po.days_to_ship) || 0, st: String(it.item_status || '') }; };
         var r0 = rqBase(); rqMk('読む');
         var fixed = [];
-        if (!(r0.pre && r0.dts === 10)) { var upo = updateItem_({ shop_id: rqshop, item_id: rqitem, pre_order: { is_pre_order: true, days_to_ship: 10 } }); if (!upo || upo.ok === false) throw new Error('Request page を予約出品10日にできませんでした: ' + String((upo && upo.error) || '返事なし').slice(0, 120)); fixed.push('予約出品10日'); rqMk('予約出品10日に直す'); }
-        if (r0.st !== 'NORMAL') {
+        if (r0.st !== 'NORMAL') {   /* ★2026-11-06 全体レビュー 中7：sold・いいねの確かめを予約出品の書き込みより先に（断る時に何も触っていない形） */
           /* ★2026-11-05 事業本部（レビュー (4)-1）：sold・いいねが付いた非公開の Request page は自動で公開しない。読めない時も公開しない */
           var ex = callShop_(rqshop, '/api/v2/product/get_item_extra_info', { item_id_list: String(rqitem) }, 'get');
           var e0 = (((ex || {}).response || {}).item_list || [])[0];
           if (!e0) throw new Error('非公開の Request page（' + rqitem + '）の sold・いいねを読めなかったので、自動では公開しません');
           if ((Number(e0.sale) || 0) > 0 || (Number(e0.likes) || 0) > 0) throw new Error('非公開の Request page（' + rqitem + '）に sold ' + (Number(e0.sale) || 0) + '・いいね ' + (Number(e0.likes) || 0) + ' があるので、自動では公開しません（本人の OK が要ります）');
+        }
+        if (!(r0.pre && r0.dts === 10)) { var upo = updateItem_({ shop_id: rqshop, item_id: rqitem, pre_order: { is_pre_order: true, days_to_ship: 10 } }); if (!upo || upo.ok === false) throw new Error('Request page を予約出品10日にできませんでした: ' + String((upo && upo.error) || '返事なし').slice(0, 120)); fixed.push('予約出品10日'); rqMk('予約出品10日に直す'); }
+        if (r0.st !== 'NORMAL') {
           unlistItem_(rqshop, rqitem, false); fixed.push('公開'); rqMk('公開');
         }
         var live = (getModels_(rqshop, rqitem) || {}).models || []; rqMk('今の明細');
@@ -2089,13 +2094,16 @@ function doGetInner_(e) {
         var ab = addVariationsBulk_(rqshop, rqitem, rqitems, null); rqMk('明細を足す');
         try { sbDelete_('app_kv', 'k=eq.' + encodeURIComponent(String(p.kv || ''))); } catch (eD) {}
         if (!ab || ab.ok === false || !(Number(ab.added) > 0)) throw new Error('明細を足せませんでした: ' + String((ab && (ab.error || JSON.stringify(ab))) || '返事なし').slice(0, 200));
-        var r1 = rqBase(); var live2 = (getModels_(rqshop, rqitem) || {}).models || []; rqMk('読み直し');
+        var r1 = { pre: false, dts: 0, st: '?' }, live2 = [], rdErr = '';
+        try { r1 = rqBase(); live2 = (getModels_(rqshop, rqitem) || {}).models || []; } catch (eRd) { rdErr = '足した後の読み直しができませんでした（' + String((eRd && eRd.message) || eRd).slice(0, 80) + '）'; }   /* ★2026-11-06 全体レビュー 中4：明細は入っている＝ok:true・verified:false で返す */
+        rqMk('読み直し');
         var got = rqitems.map(function (x) { var n = String(x.option || '').trim(); var m = live2.filter(function (y) { return String(y.name || '').trim() === n; })[0]; return { name: n, model_id: m ? String(m.model_id) : '', img: m ? (m.img || '') : '', price: m ? m.price : null, stock: m ? m.stock : null, sku: m ? m.sku : '' }; });
         var bIn = null; if (p.promo === '1') { try { var gpj = callShop_(rqshop, '/api/v2/product/get_item_promotion', { item_id_list: String(rqitem) }, 'get'); var gpi = (((gpj || {}).response || {}).success_list || [])[0]; if (gpi) bIn = (gpi.promotion || []).some(function (x) { return /bundle/i.test(String(x.promotion_type || '')) && /ongoing/i.test(String(x.promotion_staging || 'ongoing')); }); } catch (eP) {} rqMk('まとめ買い割引を読む'); }
-        var why = [r1.pre && r1.dts === 10 ? '' : '予約出品10日になっていない（予約' + (r1.pre ? 'あり' : 'なし') + '・' + r1.dts + '日）', r1.st === 'NORMAL' ? '' : '公開になっていない（' + r1.st + '）', got.every(function (g) { return g.model_id; }) ? '' : '足した明細が読み直しで見つからない（' + got.filter(function (g) { return !g.model_id; }).map(function (g) { return g.name; }).join('・') + '）'].filter(Boolean).join('・');
+        var why = rdErr ? rdErr : [r1.pre && r1.dts === 10 ? '' : '予約出品10日になっていない（予約' + (r1.pre ? 'あり' : 'なし') + '・' + r1.dts + '日）', r1.st === 'NORMAL' ? '' : '公開になっていない（' + r1.st + '）', got.every(function (g) { return g.model_id; }) ? '' : '足した明細が読み直しで見つからない（' + got.filter(function (g) { return !g.model_id; }).map(function (g) { return g.name; }).join('・') + '）'].filter(Boolean).join('・');
         rqout = { ok: true, act: 'req_add', added: Number(ab.added) || 0, verifyNote: ab.verifyNote || '', promo: ab.promo || null, fixed: fixed, pre: r1.pre, dts: r1.dts, st: r1.st, verified: !why, why: why, models: got, bundleIn: bIn, t: rqTS, src: SRC_VER };
         /* 操作ログはポータルが書く（秒数 t も入れる） */
       } catch (err) { rqout = { ok: false, act: 'req_add', error: String((err && err.message) || err), t: rqTS, src: SRC_VER }; }
+      finally { try { if (rqHeld) CacheService.getScriptCache().remove(rqHeld); } catch (eC) {} }   /* 自分が置いた印だけ外す */
       return ContentService.createTextOutput(rqcb + '(' + JSON.stringify(rqout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'add_variations_bulk') {
@@ -2802,7 +2810,9 @@ function priceLock_() {
   PRICE_LOCK_ = ((r && r[0] && r[0].v) || {}).items || {};
   return PRICE_LOCK_;
 }
+var PRICE_LOCK_BYPASS = {};   /* ★2026-11-06 全体レビュー 高1・中3：詰め直し削除の中は印を見ない（番号の中身が1つずれるので、印のまま止めると隣の作品に本人の値段が残る）。印の番号は priceLockRekey_ で付け替える */
 function priceLockSplit_(itemId, list) {   /* list=[{model_id, price}] → {keep, skip} */
+  if (VSHIFT_SELF[String(parseInt(itemId, 10))] || PRICE_LOCK_BYPASS[String(parseInt(itemId, 10))]) return { keep: (list || []).slice(), skip: [] };
   var L = priceLock_(), keep = [], skip = [];
   (list || []).forEach(function (x) {
     var k = String(parseInt(itemId, 10)) + '|' + String(parseInt(x.model_id, 10) || 0), lk = L[k];
@@ -2810,6 +2820,19 @@ function priceLockSplit_(itemId, list) {   /* list=[{model_id, price}] → {keep
     else keep.push(x);
   });
   return { keep: keep, skip: skip };
+}
+/* 詰め直し削除で明細の番号の中身が動いた時、本人の値段の印も同じ向きに付け替える（moves＝[元の番号, 移った先]・gone＝消えた番号）。印が無いカタログは読まない */
+function priceLockRekey_(itemId, moves, gone) {
+  moves = moves || []; gone = gone || []; if (!moves.length && !gone.length) return { n: 0 };
+  var it = String(parseInt(itemId, 10)), r = sbSelect_('app_kv', 'select=v&k=eq.price_lock'), v = (r && r[0] && r[0].v) || null;
+  if (!v || !v.items) return { n: 0 };
+  var K = function (m) { return it + '|' + String(m); };
+  if (!moves.concat(gone.map(function (g) { return [g, g]; })).some(function (mv) { return v.items[K(mv[0])] || v.items[K(mv[1])]; })) return { n: 0 };
+  var snap = {}, n = 0; moves.forEach(function (mv) { snap[mv[0]] = v.items[K(mv[0])]; });
+  moves.forEach(function (mv) { var e = snap[mv[0]]; if (e) { v.items[K(mv[1])] = e; n++; } else if (v.items[K(mv[1])]) { delete v.items[K(mv[1])]; n++; } });
+  gone.forEach(function (g) { if (v.items[K(g)]) { delete v.items[K(g)]; n++; } });
+  if (n) { v.at = new Date().toISOString(); baKvSet_('price_lock', v); PRICE_LOCK_ = null; }
+  return { n: n };
 }
 function updatePrice_(shopId, itemId, modelId, price) {
   { var sp0 = priceLockSplit_(itemId, [{ model_id: modelId, price: price }]); if (sp0.skip.length) return { lockSkipped: sp0.skip, note: '本人の値段（' + sp0.skip[0].lock + '）なので書いていません' }; }
@@ -4331,11 +4354,12 @@ function shiftPendCheck_(onlyKey, maxN) {
       if (String(m.model_sku || '') !== String(ex.k || '')) sk.push({ model_id: m.model_id, sku: String(ex.k || '') });
     });
     var err = [];
-    try { if (pr.length) updatePriceList_(sid, iid, pr); } catch (e1) { err.push('価格 ' + String(e1.message || e1).slice(0, 80)); }
+    PRICE_LOCK_BYPASS[String(parseInt(iid, 10))] = 1;
+    try { if (pr.length) updatePriceList_(sid, iid, pr); } catch (e1) { err.push('価格 ' + String(e1.message || e1).slice(0, 80)); } finally { delete PRICE_LOCK_BYPASS[String(parseInt(iid, 10))]; }
     var stOk = true; try { if (st.length) updateStockList_(sid, iid, st); } catch (e2) { stOk = false; err.push('在庫 ' + String(e2.message || e2).slice(0, 80)); }
     if (stOk) rec.stockDone = true;   /* ★2026-11-04 全体レビュー 新-4②：失敗した時は立てない（以後その作品の在庫を直さなくなる） */
     try { for (var f = 0; f < sk.length; f += 50) updateModelSku_(sid, iid, sk.slice(f, f + 50)); } catch (e3) { err.push('SKU ' + String(e3.message || e3).slice(0, 80)); }
-    if (isNew && rec.moves && rec.moves.length && !rec.llogDone) { try { baLlogRekey_(sid, iid, rec.moves, rec.gone || [], rec.nameOf || {}); rec.llogDone = true; } catch (e4) { err.push('控え ' + String(e4).slice(0, 60)); } }
+    if (isNew && rec.moves && rec.moves.length && !rec.llogDone) { try { priceLockRekey_(iid, rec.moves, rec.gone || []); } catch (ePl) { err.push('本人の値段の印 ' + String(ePl).slice(0, 60)); } try { baLlogRekey_(sid, iid, rec.moves, rec.gone || [], rec.nameOf || {}); rec.llogDone = true; } catch (e4) { err.push('控え ' + String(e4).slice(0, 60)); } }
     /* ★2026-11-04 全体レビュー 2回目 新2-1：後から効いた時、ポータルの JAN・型番・状態（product_ids）と在庫0固定（keep0m）は誰も付け替えていなかった＝結果を src:'pending' で残す（ポータルの担当の PC が読んで1回だけ当て、appliedAt を付ける） */
     if (isNew && !rec.resultDone && rec.moves && (rec.moves.length || (rec.gone || []).length)) { if (shiftResultPut_(sid, iid, { at: Date.now(), rid: String(rec.rid || ''), src: 'pending', ok: true, moves: rec.moves, gone: rec.gone || [] })) rec.resultDone = true; }
     out.fixed += pr.length + st.length + sk.length; out.notes.push(key + (isNew ? ' 後から効いていた' : ' 途中まで') + '：値段' + pr.length + '・在庫' + st.length + '・SKU' + sk.length + (err.length ? '（失敗 ' + err.join(' / ') + '）' : ''));
@@ -4509,6 +4533,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
     for (var smR = 0; smR < k; smR++) if (keep[smR] !== smR) _mvR.push([String(bySlot[keep[smR]].model_id), String(bySlot[smR].model_id)]);
     for (var sgR = k; sgR < n; sgR++) _gnR.push(String(bySlot[sgR].model_id));
     for (var snR = 0; snR < n; snR++) if (bySlot[snR]) _nmR[String(bySlot[snR].model_id)] = String((optList[snR] || {}).option || '');
+    try { priceLockRekey_(itemId, _mvR, _gnR); } catch (ePl2) {}
     _llRk = baLlogRekey_(shopId, itemId, _mvR, _gnR, _nmR);
   } catch (eRk0) { _llRk = { error: String((eRk0 && eRk0.message) || eRk0).slice(0, 200) }; }
 
