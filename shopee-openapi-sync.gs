@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-1930';
+var SRC_VER = '20261106-1940';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5977,7 +5977,7 @@ function syncOrdersForShop_(tok, daysWindow, doTrk, force) {
     _ol.forEach(function (o) {
       var st = o.order_status || '', tab = ORD_STATUS_TAB[st] || 0;
       if (!tab) return;
-      var items = (o.item_list || []).map(function (it) { return { name: it.item_name || '', image: imgHash_(it), qty: it.model_quantity_purchased || 1, item_id: it.item_id || null, model_id: (it.model_id != null ? it.model_id : null), variation: it.model_name || '' }; });   /* ★2026-10-04 明細番号も残す（明細名を変えても売れた明細を突き合わせられるように） */
+      var items = (o.item_list || []).map(function (it) { return { name: it.item_name || '', image: imgHash_(it), qty: it.model_quantity_purchased || 1, item_id: it.item_id || null, model_id: (it.model_id != null ? it.model_id : null), variation: it.model_name || '', sku: String(it.model_sku || it.item_sku || '').slice(0, 60) }; });   /* ★2026-11-05 SKU も（🏆 商品別の利益で国をまたいで束ねる鍵＝機種_作品名） */   /* ★2026-10-04 明細番号も残す（明細名を変えても売れた明細を突き合わせられるように） */
       var day = o.create_time ? new Date((o.create_time + tz * 3600) * 1000).toISOString().slice(0, 10) : null;
       // キャンセル理由：買い手の記入(buyer_cancel_reason)優先→無ければcancel_reason。誰が(system/buyer/seller)も付す
       var creason = String(o.buyer_cancel_reason || o.cancel_reason || '').trim();
