@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0700';
+var SRC_VER = '20261106-0730';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6217,7 +6217,8 @@ function backfillTrackingCompletedAll() { return backfillTrackingCompleted(300, 
    get_order_detail の item_list は promotion_type=bundle_deal の印だけで、割引後の値段（model_discounted_price）は 0 で返る（PH 2611029B4XQBPR で実測）。
    額は get_escrow_detail の order_income.items にある＝activity_type（または promotion_list）が bundle_deal の品の selling_price − discounted_price（＝seller_discount）。
    同じ注文でも品ごとに率が違うことがある（同じ注文で 10% の品と 5% の品が混ざっていた）＝率は品ごとに数えて重なりを除いて持つ。
-   income.fees.bundle = { d: 割引の合計（現地通貨）, base: 割引前の合計, p: [率%…], id: bundle_deal_id }。効いていなければ持たない。 */
+   income.bundle（列・_gas_private/sql/2026-11-05_income_bundle.sql）= { d: 割引の合計（現地通貨）, base: 割引前の合計, p: [率%…], id: bundle_deal_id }。効いていなければ null。
+   fees の中に入れないのは、古い版のまま動く台（2台目）が fees を丸ごと書き直して消すため（知らない列は古い版の upsert が触らない）。 */
 function escrowBundle_(inc) {
   var d = 0, base = 0, ps = {}, id = '';
   ((inc && inc.items) || []).forEach(function (it) {
@@ -6237,7 +6238,6 @@ function escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid) {
   var fees = { commission: f_comm, service: f_serv, transaction: f_txn, buyer_total: buyerPaid,
     original_price: parseFloat(inc.original_price) || null, voucher_seller: parseFloat(inc.voucher_from_seller) || 0,
     final_shipping_fee: parseFloat(inc.final_shipping_fee) || 0, ams_commission: parseFloat(inc.order_ams_commission_fee) || 0 };
-  var bd = escrowBundle_(inc); if (bd) fees.bundle = bd;
   return fees;
 }
 
@@ -6272,7 +6272,7 @@ function syncEscrowForShop_(tok, deadline, finalized) {
     var fees = escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid);
     // 初回取得値(暫定)は保持。amount_at は「額が実際に変わった時刻」＝前回と同額なら前回のまま、変われば今
     var pv = prev[cc + ':' + o.sn];
-    var row = { cc: cc, sn: o.sn, amount: amt, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), buyer_paid: buyerPaid, fee_total: feeTotal, fees: fees, synced_at: now2  };
+    var row = { cc: cc, sn: o.sn, amount: amt, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), buyer_paid: buyerPaid, fee_total: feeTotal, fees: fees, bundle: escrowBundle_(inc), synced_at: now2  };
     if (pv) {
       row.amount_initial = (pv.amount_initial != null) ? pv.amount_initial : parseFloat(pv.amount);
       row.amount_initial_at = pv.amount_initial_at || now2;
@@ -6338,7 +6338,7 @@ function backfillEscrowUnchanged(limitN) {
     out.push({ cc: t.cc, sn: t.sn, amount: amt, amount_at: now2,
       amount_initial: parseFloat(t.amount_initial), buyer_paid: buyerPaid,
       fee_total: f_comm + f_serv + f_txn,
-      fees: escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid),
+      fees: escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid), bundle: escrowBundle_(inc),
       synced_at: now2 });
   }
   if (out.length) { for (var k = 0; k < out.length; k += 200) sbUpsert_('income', out.slice(k, k + 200), 'cc,sn'); }
