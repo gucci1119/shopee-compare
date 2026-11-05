@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-1910';
+var SRC_VER = '20261106-1920';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -873,6 +873,23 @@ function doGetInner_(e) {
       try { var lwwt = P_().getProperty('WRITE_TOKEN'); if (!lwwt || p.token !== lwwt) throw new Error('WRITE_TOKEN不正'); lwo = llogShiftWatch_(200000, p.dry === '1'); }
       catch (eLw2) { lwo = { ok: false, error: String((eLw2 && eLw2.message) || eLw2).slice(0, 200) }; }
       return ContentService.createTextOutput(lwcb + '(' + JSON.stringify(lwo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'ba_kind_count') {   /* ★2026-11-05 事業本部②：ケース必須の機種で「ケースの写っていない写真」がどれくらい通っているか（判定の控えを機種×写真の中身で数える・読むだけ・AI は呼ばない） */
+      var bkcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var bkout;
+      try {
+        var bkwt = P_().getProperty('WRITE_TOKEN'); if (!bkwt || p.token !== bkwt) throw new Error('WRITE_TOKEN不正');
+        var bj = baKv_(BA_JUDGED) || {}, tally = {}, nAll = 0;
+        Object.keys(bj).forEach(function (k) {
+          var i = k.indexOf('|v13|'); if (i < 0) return;
+          var rest = k.slice(i + 5), hwW = rest.split('|')[0], v = String(bj[k] || '');
+          var t = tally[hwW] || (tally[hwW] = { ok: 0, ng: 0, kinds: {} });
+          if (v.indexOf('ok:') === 0) { t.ok++; var kd = v.slice(3) || '?'; t.kinds[kd] = (t.kinds[kd] || 0) + 1; } else t.ng++;
+          nAll++;
+        });
+        bkout = { ok: true, judged: nAll, byHw: tally };
+      } catch (ebk) { bkout = { ok: false, error: String((ebk && ebk.message) || ebk) }; }
+      return ContentService.createTextOutput(bkcb + '(' + JSON.stringify(bkout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'comment_probe') {   /* ★2026-11-05 事業本部：product/get_comment が今の権限で通るかを1回だけ（読むだけ・1ページ） */
       var cpcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), cpo;
@@ -8820,7 +8837,14 @@ var BA_CASE_REQUIRED_HW = { ds: 1, '3ds': 1, vita: 1, psp: 1, ps1: 1, ps2: 1, ps
    ★2026-09-23 例外：基準を【ゆるめた】時（白背景でも影・傾きがあれば実物）は控えの鍵だけ v12 に上げ、BA_RULE_VER は上げない＝出品済みの見直し（baRephoto_）を全件やり直さない（前にOKだった物はゆるめた基準でもOK） */
 var BA_RULE_VER = 16, BA_RECHECK_DAYS = 30;   /* 16＝2026-09-26 写真の上に後から載せた文字を落とす（overlay）＝出品済みも見直す／15＝2026-09-26 シュリンク確認で機種ロゴも照合（Switch に PS4 版の写真が残っていた）＝出品済みも見直す／14＝2026-09-26 シュリンクの印（はみ出し/シワ/閉じ筋/フィルム上の値札）を書き写させて落とす＝出品済みも見直す／12＝2026-09-23 21:00 白背景の緩めを取り消し／13＝2026-09-26 四隅の確認（Sonnet）を足した＝出品済みも見直す */
 var BA_RULE_RECHECK_SINCE = '2026-09-23T11:05:00Z';   /* v11 で出した明細のうち、この時刻より前の分は厳しい基準で通っているので見直さない（緩めていた 20:10〜21:00 の分だけ見直す） */
-function baSoftOnlyName_(a) { return /ソフトのみ|カセットのみ|カートリッジのみ|ソフト単品|箱(なし|無し)|ケース(なし|無し)/.test(String((a && a.name) || '')); }
+function baSoftOnlyName_(a) { return /ソフトのみ|カセットのみ|カートリッジのみ|ソフト単品|UMD\s*のみ|UMD\s*単品|ディスク\s*のみ|ディスク\s*単品|箱(なし|無し)|ケース(なし|無し)/i.test(String((a && a.name) || '')); }
+/* ★2026-11-05 事業本部・本人「UMDだけで出品されてる」（MY／BR のぷよぷよフィーバーと見られる・ケースなしの UMD 1枚）：PSP は BA_CASE_REQUIRED_HW に入っていたが、
+   落とすのは写真の中身が cartridge の時だけで、UMD だけの写真は disc と答えられて通っていた（推測）。PSP は disc だけの写真も ng:cartonly にする。
+   他の機種（PS1〜PS4・Wii・WiiU・GC・Switch）に広げるかは、ケースの写っていない写真の数を見て事業本部が決める（それまでは PSP だけ）。
+   出品済みは PSP だけ見直す（BA_RULE_HW_BUMP で機種ごとの版を1つ上げる＝全機種の見直しをやり直さない） */
+var BA_CASE_DISC_NG = { psp: 1 };
+var BA_RULE_HW_BUMP = { psp: 1 };
+function baRuleVerFor_(hw) { return BA_RULE_VER + (BA_RULE_HW_BUMP[String(hw || '')] || 0); }
 function baBoxedName_(a) { var n = String((a && a.name) || ''); return /箱(付|あり|有|・?説|取説|説明書)|箱説|完品|外箱/.test(n) && !/箱(なし|無し|無)|ソフトのみ|カセットのみ/.test(n); }
 function baCondRank_(x, hw) { var c = String((x && x.cond) || ''); if (/未使用|新品/.test(c)) return -1; var worn = /状態が悪い|傷や?汚れあり/.test(c) && !/やや/.test(c), some = /やや/.test(c), clean = /なし/.test(c); if (BA_PAPER_HW[String(hw || '')]) return worn ? 0 : (some ? 1 : (clean ? 2 : 3)); return clean ? 0 : (some ? 1 : (worn ? 2 : 3)); }
 /* ★v192 全件がカタログ画像だと分かっている出品元（メルカリShops の「【中古】NGCソフト …」型＝中古チェーンの通販。2026-09-18 実測：くるりんスカッシュ・PC原人・ZOIDS・WWE がこれで、Haiku は絵柄だけの画像に OK（箱）を付けた）。Shops 全体は外さない（本人「ショップスからでもいい」） */
@@ -9041,6 +9065,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v13|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
   if (cache && cache[u]) {
     var c0 = String(cache[u]);
+    if (c0 === 'ok:disc' && expect && BA_CASE_DISC_NG[String(expect.hwKey || '')]) { cache[u] = 'ng:cartonly'; return { ok: false, judged: true, kind: 'cartonly', cached: true }; }   /* ★2026-11-05 控えの「ok:disc」も PSP は落とす（AI を呼び直さない） */
     if (c0.indexOf('ok:') === 0 && !(expect && expect.tcg)) {   /* ★2026-09-26 Haiku で通っていた写真も四隅の確認を1回だけ通す（控えがあれば呼ばない）。🃏トレカは通さない（2026-10-10） */
       /* ★2026-09-28 本人「さらに減らせる余地」①：シュリンクの確認（38%を落とす・Haiku）を先、四隅の確認（5.5%・上位モデル）を後に。
          先に落ちた写真には高い方をかけない。確認の中身は同じ＝基準は変わらない */
@@ -9105,6 +9130,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   if (ok && expect && BA_CART_ONLY_HW[String(expect.hwKey || '')] && (o.box_visible === true || o.manual_visible === true)) { ok = false; kind = 'boxed'; }   /* ★2026-10-26 kind=cartridge でも箱・説明書が写っていたら使わない（Claude 側 merge_games.py と同じ決まり） */
   if (ok && expect && String(expect.hwKey || '') === 'fc' && /disk\s*system|ディスクシステム|ディスクカード/i.test(String(o.platform_seen || '') + ' ' + String(o.title_seen || ''))) { ok = false; kind = 'wrongplatform'; }
   if (ok && expect && BA_CASE_REQUIRED_HW[String(expect.hwKey || '')] && String(o.kind || '') === 'cartridge') { ok = false; kind = 'cartonly'; }
+  if (ok && expect && BA_CASE_DISC_NG[String(expect.hwKey || '')] && String(o.kind || '') === 'disc') { ok = false; kind = 'cartonly'; }   /* ★2026-11-05 PSP の UMD だけ（ケースなし） */
   /* ★2026-09-20 本人「高額品ソフトは海賊版も多いので気をつけて」「ファミコンとか特に注意で」＝見た目が海賊版・リプロなら使わない */
   if (ok && o.repro === true) { ok = false; kind = 'repro'; }
   /* ★2026-10-10 本人「相場4万円くらいするんだけど、なんでこんなクソ安い値段で出てるんだ？」＝通常版「NieR: Automata」の明細に、限定版 Black Box Edition の化粧箱の写真が付いて6か国に出ていた（BR で売れた）。
@@ -9155,8 +9181,9 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
     if (!a || !a.item_id || !a.shop_id || !a.en || !a.img) return false;
     if (String(a.hw || '') === String(skipHw || '')) return false;   /* この回に明細を足す機種は触らない（差し替え直後の add_model が弾かれる） */
     var m = rp.items[a.item_id + '#' + a.en];
-    if (!m) { if (Number(a.jv || 0) === 11 && String(a.at || '') < BA_RULE_RECHECK_SINCE) return false; return Number(a.jv || 0) !== BA_RULE_VER; }   /* 入れた時の基準が今と同じなら、その時の判定でよい。v11 でも緩める前の分は見直さない */
-    if (Number(m.v || 0) !== BA_RULE_VER) return true;               /* 基準が変わった＝見直す */
+    var _rv = baRuleVerFor_(a.hw);   /* ★2026-11-05 機種ごとの版（PSP だけ1つ上＝PSP だけ見直す） */
+    if (!m) { if (Number(a.jv || 0) === 11 && String(a.at || '') < BA_RULE_RECHECK_SINCE) return false; return Number(a.jv || 0) !== _rv; }   /* 入れた時の基準が今と同じなら、その時の判定でよい。v11 でも緩める前の分は見直さない */
+    if (Number(m.v || 0) !== _rv) return true;               /* 基準が変わった＝見直す */
     if (m.s === 'error' && (nowMs - (Date.parse(m.at || '') || 0)) > 6 * 3600000) return true;   /* ★2026-09-26 差し替えに失敗した明細（宣材と分かっているのに残る）を30日待たせない＝6時間後にもう一度 */
     return (nowMs - (Date.parse(m.at || '') || 0)) > BA_RECHECK_DAYS * 86400000;   /* 30日たった＝もう一度見る */
   });
@@ -9175,7 +9202,7 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
     var j0 = baJudge_(curUrl, st, judged, cap, ex);
     if (!j0.judged) break;   /* 鍵なし・上限・障害＝今日はここまで（印は付けない＝次回また見る） */
     n++; changed = true;
-    if (j0.ok) { rp.items[id] = { s: 'keep', v: BA_RULE_VER, at: new Date().toISOString() }; continue; }
+    if (j0.ok) { rp.items[id] = { s: 'keep', v: baRuleVerFor_(hw), at: new Date().toISOString() }; continue; }
     /* ★2026-10-29 レビュー 10/25 中-3：機種の鍵を読む台（pre_h_meta の runners）では、写真の控えに今の回の機種しか入っていない。
        見直すのは他の機種の作品なので、その機種の控えを読み足してから候補を探す。読めなかった時は印を付けない（「代わりなし」で30日止めない） */
     if (hw && baPreHwMode_()) { try { baPreHEnsure_(hw); } catch (eHe) {} if (!BA_PRE_H_LOADED[hw] || BA_KV_FAIL['boshu_auto_pre']) { baLog_(st, '📷 写真の見直し：' + hw + ' の写真の控えを読めなかったので次の回へ: ' + a.en); continue; } }
@@ -9190,14 +9217,14 @@ function baRephoto_(st, cfg, judged, pre, used, t0, skipHw) {
       if (!jc.ok) continue;
       try {
         var r = setVariationImagesBulk_(a.shop_id, a.item_id, [{ option: a.en, url: cu, expect: a.img }]);
-        if (r && !r.applied && r.changed && r.changed.length) { rp.items[id] = { s: 'manual', v: BA_RULE_VER, at: new Date().toISOString(), cc: a.cc }; baLog_(st, '📷 人が差し替えた写真なので触らない: ' + a.en); done = true; break; }
-        if (r && r.applied) { used[cuKey] = baUsedTag_(a.key, a.hw); _usedDirtyRp = true;   /* ★#18 書くのは回の最後に1回（相方の分も残す） */ rp.items[id] = { s: 'replaced', v: BA_RULE_VER, at: new Date().toISOString(), was: j0.kind, cc: a.cc, src: cands[k].src || '' }; baLog_(st, '📷 写真を差し替え（' + j0.kind + '）: ' + a.cc + ' ' + a.en); done = true; }
-      } catch (eS) { baLog_(st, '写真の差し替えに失敗: ' + a.en + ' ' + String(eS).slice(0, 160)); rp.items[id] = { s: 'error', v: BA_RULE_VER, at: new Date().toISOString(), was: j0.kind, cc: a.cc, err: String(eS).slice(0, 80) }; done = true; }
+        if (r && !r.applied && r.changed && r.changed.length) { rp.items[id] = { s: 'manual', v: baRuleVerFor_(hw), at: new Date().toISOString(), cc: a.cc }; baLog_(st, '📷 人が差し替えた写真なので触らない: ' + a.en); done = true; break; }
+        if (r && r.applied) { used[cuKey] = baUsedTag_(a.key, a.hw); _usedDirtyRp = true;   /* ★#18 書くのは回の最後に1回（相方の分も残す） */ rp.items[id] = { s: 'replaced', v: baRuleVerFor_(hw), at: new Date().toISOString(), was: j0.kind, cc: a.cc, src: cands[k].src || '' }; baLog_(st, '📷 写真を差し替え（' + j0.kind + '）: ' + a.cc + ' ' + a.en); done = true; }
+      } catch (eS) { baLog_(st, '写真の差し替えに失敗: ' + a.en + ' ' + String(eS).slice(0, 160)); rp.items[id] = { s: 'error', v: baRuleVerFor_(hw), at: new Date().toISOString(), was: j0.kind, cc: a.cc, err: String(eS).slice(0, 80) }; done = true; }
     }
-    if (!done) { rp.items[id] = { s: 'nophoto', v: BA_RULE_VER, at: new Date().toISOString(), was: lastKind, cc: a.cc, item_id: a.item_id, shop_id: a.shop_id, en: a.en, hw: hw }; baLog_(st, '📷 写真が基準外（' + lastKind + '）だが代わりが無い: ' + a.cc + ' ' + a.en); }
+    if (!done) { rp.items[id] = { s: 'nophoto', v: baRuleVerFor_(hw), at: new Date().toISOString(), was: lastKind, cc: a.cc, item_id: a.item_id, shop_id: a.shop_id, en: a.en, hw: hw }; baLog_(st, '📷 写真が基準外（' + lastKind + '）だが代わりが無い: ' + a.cc + ' ' + a.en); }
   }
   try { var cnt = { ok: 0, ng: 0, wait: 0, ver: BA_RULE_VER, todo: todo.length, at: new Date().toISOString() };
-    Object.keys(rp.items).forEach(function (k) { var m2 = rp.items[k]; if (!m2 || Number(m2.v || 0) !== BA_RULE_VER) return; if (m2.s === 'keep') cnt.ok++; else if (m2.s === 'replaced') cnt.ng++; else if (m2.s === 'nophoto') cnt.wait++; });
+    Object.keys(rp.items).forEach(function (k) { var m2 = rp.items[k]; if (!m2 || Number(m2.v || 0) < BA_RULE_VER) return; if (m2.s === 'keep') cnt.ok++; else if (m2.s === 'replaced') cnt.ng++; else if (m2.s === 'nophoto') cnt.wait++; });
     st.rephoto = cnt; } catch (eC) {}
   /* ★2026-10-24 全体レビュー（出品管理 #18）：使った写真の印は新しい値を読んで自分の分を重ねて書く（別の台が足した印を消さない＝同じ写真が別の作品に付かない） */
   if (_usedDirtyRp) { try { baKvSetMerged_(BA_IMGS, used, baKvFreshMany_([BA_IMGS]), 0); } catch (eUr) { baLog_(st, '使った写真の印の保存に失敗: ' + String(eUr).slice(0, 100)); } }
@@ -11342,7 +11369,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
            出品ログの写真表示がこの明細だけ素通りする（img は URL ではなく **imageId** を入れる） */
         try {
           baLooseMark_(hw, cc, _x0._p.ja, tgt.item_id);
-          st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', mpn: _x0._p.mpn || '', jc: _x0._p.jc || 0, jw: _x0._p.jan ? 1 : 0, jv: BA_RULE_VER,
+          st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', mpn: _x0._p.mpn || '', jc: _x0._p.jc || 0, jw: _x0._p.jan ? 1 : 0, jv: baRuleVerFor_(hw),
             shop_id: tgt.shop_id, key: _x0._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: _x0._p.src || '', srcTitle: String(_x0._p.srcTitle || '').slice(0, 60), srcPrice: Number(_x0._p.srcPrice) || 0, q: _x0._p.q || '', from: _x0._p.from || 'yahoo',
             en: _x0.option, ja: String(_x0._p.ja || '').slice(0, 80), price: _x0.price, stock: (_ru.stock != null ? _ru.stock : _x0.stock),
             img: _x0._p.imageId || '', cost: _x0._p.cost || 0, hits: _x0._p.hits || 0, reused: 1, partial: _ru.partial ? 1 : 0 });
@@ -11406,7 +11433,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (mid) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; _addedHere++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
         if (mid && x._p.jan && !BA_LOOSE_HW.test(String(hw))) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
-        try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', mpn: x._p.mpn || '', jc: x._p.jc || 0, jw: (mid && x._p.jan) ? 1 : 0, jv: BA_RULE_VER, shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', srcTitle: String(x._p.srcTitle || '').slice(0, 60), srcPrice: Number(x._p.srcPrice) || 0, q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', mpn: x._p.mpn || '', jc: x._p.jc || 0, jw: (mid && x._p.jan) ? 1 : 0, jv: baRuleVerFor_(hw), shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', srcTitle: String(x._p.srcTitle || '').slice(0, 60), srcPrice: Number(x._p.srcPrice) || 0, q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
