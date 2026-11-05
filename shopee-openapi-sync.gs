@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0730';
+var SRC_VER = '20261106-1100';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5208,6 +5208,10 @@ function addItem_(body) {
       if (_ovA.length) throw new Error('VN の値段は 909,090 VND までです（超えると出品ごと非公開）。上限超え ' + _ovA.length + '件：' + _ovA.slice(0, 4).join(' / ') + '（何も作っていません）'); } }
   /* ★2026-10-05 カテゴリの指定が無ければ、題名から機種のカテゴリを当てる（「Games」で探すと Video Games > Others に入り、Shopee に降格されていた） */
   var categoryId = body.category_id ? parseInt(body.category_id, 10) : ((!body.category && baCatByName_(body.item_name)) || resolveCategoryId_(shopId, body.category || 'Games'));
+  /* ★2026-11-05 01 商品部（本人「出品取り下げを調べて対応」）：ポケモンなどカードのカタログが「Toys & Games > Others（101409）」で作られ、
+     Shopee が「Dice, Board & Card Games（101400）」へ直すよう降格を付けていた（BR 7件・TH 2店舗目・13店で55件）。複製は元のカテゴリを写すので、作る所1か所で直す。
+     101400 は BR で brand_id 0（NoBrand）が要る（01 が update_item で確かめた）。必須の属性（Bluetooth を含むか＝No）は断られた時に mandatoryAttrFill_ が No で埋める */
+  if (categoryId === 101409 && /\b(trading\s*cards?|cards?|tcg|ccg)\b|カード|ポケカ/i.test(String(body.item_name || '')) && !/memory\s*card|sd\s*card|amiibo/i.test(String(body.item_name || ''))) { categoryId = 101400; body.brand_id = 0; }
   // Locker系を除いた使える全チャネルを有効化（高額品がLockerのmax price上限で弾かれるのを防ぐ＝手動出品と同じ）
   var logisticInfo = body.logistic_id ? [{ logistic_id: parseInt(body.logistic_id, 10), enabled: true }] : resolveLogisticInfo_(shopId);
   var _imgCache = {}; // 同一URLは1回だけアップロード（カタログ×バリエで重複するURLの二重アップを防ぐ＝枠/時間節約）
