@@ -10096,7 +10096,8 @@
     let tErr = '';
     try { tks = await sbGetAll('tasks', 'select=*&done=eq.false&order=priority.desc,due.asc.nullslast,sort.desc'); } catch (e) { tErr = String((e && e.message) || e); }   // ★2026-10-24 レビュー #7：読めなかった時に🎉（片付いた）と出していた
     const btn = (p, label, col) => `<button class="todo-go smd-btn" data-p="${p}" style="font-size:13px;padding:7px 14px;border-color:${col};color:${col};font-weight:700">${label}</button>`;
-    host.innerHTML = `<div class="tool-card" style="max-width:760px">
+    let slsTop = ''; try { const S = await slsClaimLoad(); const ln = slsClaimLine(S.cnt); if (ln) slsTop = `<div class="tool-card" style="max-width:760px;margin-bottom:12px;border-left:4px solid #d93025"><b style="color:#d93025">🛡 SLS+ の補償の申請：${esc(ln)}</b><div class="smd-dim" style="font-size:11.5px;margin:4px 0 6px">期限を過ぎると補償を受けられません（ブラジルは120日）。申請したら「申請した」を押してください（未申請 ${S.cnt.todo}件）。</div>${btn('returns', '↩️ 申請の一覧を開く', '#d93025')}</div>`; } catch (_) {}
+    host.innerHTML = slsTop + `<div class="tool-card" style="max-width:760px">
       <div style="font-weight:700;font-size:14px;margin-bottom:4px">📅 今日の実務</div>
       <div class="smd-dim" style="font-size:12px;margin-bottom:10px">今日やること（発送・売上・返品対応）は専用画面にまとまっています。ここから開けます：</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -18477,8 +18478,17 @@
       let itemRows = '';
       if (x.items && Object.keys(x.items).length) {
         const ids = Object.keys(x.items).concat(Object.keys(x.ctrl || {})); const now = {};
-        for (let i = 0; i < ids.length; i += 150) {
-          const r = await sbGetAll('listing_stats_history', 'select=item_id,snap_date,views,likes,sale&item_id=in.(' + ids.slice(i, i + 150).join(',') + ')&snap_date=gte.' + x.at + '&order=snap_date.desc');
+        /* ★2026-11-06 全体レビュー（重さ）：使うのは出品ごとの一番新しい1日だけ＝施策の日から今日までの全部の日を読んでいた（アクセス画面を開くたびに約13万行・134回）。
+           一番新しいスナップの日を1回だけ読み、その日の行だけを読む。その日に無い出品だけ、前の形（施策の日以降の新しい順）で読み足す */
+        if (!window._taSnapLast || Date.now() - window._taSnapLast.at > 30 * 60000) { try { const ls = await sbGet('listing_stats_history', 'select=snap_date&order=snap_date.desc&limit=1'); window._taSnapLast = { d: (ls && ls[0] && ls[0].snap_date) || '', at: Date.now() }; } catch (_) { window._taSnapLast = { d: '', at: Date.now() }; } }
+        const snapD = window._taSnapLast.d;
+        for (let i = 0; snapD && i < ids.length; i += 150) {
+          const r = await sbGetAll('listing_stats_history', 'select=item_id,snap_date,views,likes,sale&item_id=in.(' + ids.slice(i, i + 150).join(',') + ')&snap_date=eq.' + snapD);
+          (r || []).forEach(q => { const k = String(q.item_id); if (!now[k]) now[k] = q; });
+        }
+        const miss = ids.filter(k => !now[String(k)]);
+        for (let i = 0; i < miss.length; i += 150) {
+          const r = await sbGetAll('listing_stats_history', 'select=item_id,snap_date,views,likes,sale&item_id=in.(' + miss.slice(i, i + 150).join(',') + ')&snap_date=gte.' + x.at + '&order=snap_date.desc');
           (r || []).forEach(q => { const k = String(q.item_id); if (!now[k]) now[k] = q; });
         }
         const sum = (o, f, cur) => Object.keys(o || {}).reduce((a, k) => a + (cur ? (now[k] ? Number(now[k][f]) || 0 : 0) : (Number((o[k] || [])[f === 'views' ? 0 : f === 'likes' ? 1 : 2]) || 0)), 0);
@@ -23673,6 +23683,119 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       catch (e) { b.disabled = false; b.textContent = '⚠️ 失敗：' + String(e.message).slice(0, 60); }
     });
   }
+  /* ★2026-11-06 事業本部・本人「漏らさないようにしないと」「仕組みで」：SLS+ の補償の申請の漏れを止める。
+     背景：Shopee Japan の窓口の返事（他のセラー宛て・公式文書ではない）＝「ブラジルは補償申請を120日以内・超えたら受けられない」「Parcel not delivered は申請しないと補償されない」。
+     対象は 02 業務部の数え方と同じ＝returns の ACCEPTED/CLOSED（返金済み）と、キャンセルのうち Failed Delivery／parcel has been lost [system]。
+     状態：入った（order_adjustments の compensation・または返品画面で記入した受取額）／申請済み（日付）／対象外／未申請。
+     期限：起点は注文日と返金日の早い方（安全側）＋国ごとの日数（分からない国は 120日で安全側・app_kv sls_claim の days で国ごとに直せる）。
+     控え：app_kv sls_claim = { items: { "国:注文番号": { st: 'applied'|'na', at, by } }, days: { BR: 120, … } }、毎日の数え sls_claim_daily = { days: { 日付: {…} } } */
+  const SLS_CLAIM_DAYS_DEF = 120;
+  let _slsC = null;
+  async function slsClaimLoad(force) {
+    if (!force && _slsC && Date.now() - _slsC.at < 10 * 60000) return _slsC;
+    const SYS_RE = /Failed Delivery|parcel has been lost/i;
+    const [rets, cxl, adj, iss, kv] = await Promise.all([
+      sbGetAll('returns', 'select=cc,order_sn,return_sn,status,reason,create_time,update_time,refund_amount&or=(status.eq.ACCEPTED,status.eq.CLOSED)'),
+      sbGetAll('orders', 'select=cc,sn,order_date,order_ts,cancel_reason,items&tab=eq.600&or=(cancel_reason.ilike.*Failed%20Delivery*,cancel_reason.ilike.*parcel%20has%20been%20lost*)'),
+      sbGetAll('order_adjustments', 'select=cc,order_sn,amount,payout_time&kind=eq.compensation'),
+      sbGetAll('order_issues', 'select=cc,sn,comp_amount,comp_date&comp_amount=gt.0').catch(() => []),
+      sbGet('app_kv', 'select=v,updated_at&k=eq.sls_claim'),
+    ]);
+    const kvV = (kv && kv[0] && kv[0].v) || {}, claims = kvV.items || {}, daysCfg = kvV.days || {};
+    const compK = new Map(); (adj || []).forEach(a => { const k = a.cc + ':' + a.order_sn; if (Number(a.amount) > 0) compK.set(k, (compK.get(k) || 0) + Number(a.amount)); });
+    const manK = new Set((iss || []).map(x => x.cc + ':' + x.sn));
+    /* 返品の注文日（orders から・返品は数百件まで） */
+    const rSn = [...new Set((rets || []).map(r => String(r.order_sn || '')).filter(Boolean))];
+    const odOf = new Map();
+    for (let i = 0; i < rSn.length; i += 150) { const rr = await sbGetAll('orders', 'select=cc,sn,order_date,items&sn=in.(' + rSn.slice(i, i + 150).map(encodeURIComponent).join(',') + ')'); (rr || []).forEach(o => odOf.set(o.cc + ':' + o.sn, o)); }
+    const ymd = (t) => { const n = Number(t); if (!(n > 0)) return ''; return jstDate(n < 1e12 ? n * 1000 : n); };
+    const today = jstDate(Date.now()), dayMs = 86400000, toMs = d => Date.parse(d + 'T00:00:00+09:00');
+    const rows = [];
+    const add = (cc, sn, kind, reason, od, rd, nm, rsn) => {
+      const k = cc + ':' + sn, start = [od, rd].filter(Boolean).sort()[0] || '';
+      const lim = Number(daysCfg[cc]) > 0 ? Number(daysCfg[cc]) : SLS_CLAIM_DAYS_DEF;
+      const dl = start ? jstDate(toMs(start) + lim * dayMs) : '', left = dl ? Math.round((toMs(dl) - toMs(today)) / dayMs) : null;
+      const cl = claims[k] || null;
+      const st = (compK.has(k) || manK.has(k)) ? 'got' : cl && cl.st === 'na' ? 'na' : cl && cl.st === 'applied' ? 'applied' : 'todo';
+      rows.push({ k, cc, sn, kind, reason: String(reason || ''), od, rd, start, lim, dl, left, st, at: (cl && cl.at) || '', nm: nm || '', rsn: rsn || '', limGuess: !(Number(daysCfg[cc]) > 0) && cc !== 'BR' });
+    };
+    const seen = new Set();
+    (rets || []).forEach(r => { const o = odOf.get(r.cc + ':' + r.order_sn) || {}; const k = r.cc + ':' + r.order_sn; if (seen.has(k)) return; seen.add(k);
+      add(r.cc, r.order_sn, '返品', r.reason, o.order_date || '', ymd(r.update_time) || ymd(r.create_time), ((o.items || [])[0] || {}).name, r.return_sn); });
+    (cxl || []).forEach(o => { if (!SYS_RE.test(String(o.cancel_reason || ''))) return; const k = o.cc + ':' + o.sn; if (seen.has(k)) return; seen.add(k);
+      add(o.cc, o.sn, 'キャンセル', String(o.cancel_reason || '').replace(/\s*\[system\]\s*/i, ''), o.order_date || '', '', ((o.items || [])[0] || {}).name, ''); });
+    const open = rows.filter(r => r.st === 'todo');
+    const cnt = { all: rows.length, todo: open.length, applied: rows.filter(r => r.st === 'applied').length, got: rows.filter(r => r.st === 'got').length, na: rows.filter(r => r.st === 'na').length,
+      expired: open.filter(r => r.left != null && r.left < 0).length, le7: open.filter(r => r.left != null && r.left >= 0 && r.left <= 7).length,
+      le14: open.filter(r => r.left != null && r.left > 7 && r.left <= 14).length, le30: open.filter(r => r.left != null && r.left > 14 && r.left <= 30).length };
+    _slsC = { at: Date.now(), rows, cnt, kvAt: (kv && kv[0] && kv[0].updated_at) || '' };
+    try { slsClaimDaily(cnt, rows); } catch (_) {}
+    return _slsC;
+  }
+  /* 毎日1回、数えた結果を控えに残す（02 の毎週の点検でも読む）。同じ日は書き直さない */
+  async function slsClaimDaily(cnt, rows) {
+    const d = jstDate(Date.now()); let mk = ''; try { mk = localStorage.getItem('smdSlsDaily') || ''; } catch (_) {}
+    if (mk === d) return;
+    const r = await sbGet('app_kv', 'select=v&k=eq.sls_claim_daily'); const v = (r && r[0] && r[0].v) || { days: {} }; v.days = v.days || {};
+    if (!v.days[d]) {
+      const byCc = {}; rows.filter(x => x.st === 'todo').forEach(x => { byCc[x.cc] = (byCc[x.cc] || 0) + 1; });
+      v.days[d] = Object.assign({}, cnt, { byCc, at: new Date().toISOString() });
+      Object.keys(v.days).sort().slice(0, -90).forEach(k => delete v.days[k]);
+      await sbUpsert('app_kv', [{ k: 'sls_claim_daily', v, updated_at: new Date().toISOString() }]);
+    }
+    try { localStorage.setItem('smdSlsDaily', d); } catch (_) {}
+  }
+  async function slsClaimSet(k, st) {
+    const r = await sbGet('app_kv', 'select=v&k=eq.sls_claim'); const v = (r && r[0] && r[0].v) || {}; v.items = v.items || {};
+    if (st) v.items[k] = { st, at: jstDate(Date.now()), by: (typeof myDeviceName === 'function' ? myDeviceName() : '') || '' }; else delete v.items[k];
+    await sbUpsert('app_kv', [{ k: 'sls_claim', v, updated_at: new Date().toISOString() }]);
+    _slsC = null;
+  }
+  function slsClaimLine(c) {   /* 1行のまとめ（🔔・やること・返品画面の見出し） */
+    const p = [];
+    if (c.expired) p.push('期限切れ ' + c.expired);
+    if (c.le7) p.push('7日以内 ' + c.le7);
+    if (c.le14) p.push('14日以内 ' + c.le14);
+    if (c.le30) p.push('30日以内 ' + c.le30);
+    return p.join('・');
+  }
+  async function slsClaimRender(force) {
+    const box = document.getElementById('sls-claim-box'); if (!box) return;
+    let D; try { D = await slsClaimLoad(force); } catch (e) { box.innerHTML = '<div class="tool-card" style="max-width:none;margin:0 0 12px;color:#d93025">⚠ SLS+ の補償の申請の一覧を読めませんでした（' + esc(String((e && e.message) || e).slice(0, 120)) + '）。「漏れが無い」とは言えません。</div>'; return; }
+    const c = D.cnt, line = slsClaimLine(c);
+    const ST = { todo: '<b style="color:#d93025">未申請</b>', applied: '<span style="color:#1565c0;font-weight:700">申請済み</span>', got: '<span style="color:#1a7f37;font-weight:700">✓ 入った</span>', na: '<span class="smd-dim">対象外</span>' };
+    const leftTxt = r => r.left == null ? '<span class="smd-dim">注文日なし</span>' : r.left < 0 ? '<b style="color:#d93025">期限切れ（' + (-r.left) + '日前）</b>' : r.left <= 7 ? '<b style="color:#d93025">あと ' + r.left + '日</b>' : r.left <= 14 ? '<b style="color:#e65100">あと ' + r.left + '日</b>' : r.left <= 30 ? '<b style="color:#b45309">あと ' + r.left + '日</b>' : 'あと ' + r.left + '日';
+    let showAll = false; try { showAll = localStorage.getItem('smdSlsAll') === '1'; } catch (_) {}
+    const ord = { todo: 0, applied: 1, got: 2, na: 3 };
+    const list = D.rows.filter(r => showAll || r.st === 'todo' || r.st === 'applied').sort((a, b) => (ord[a.st] - ord[b.st]) || ((a.left == null ? 1e9 : a.left) - (b.left == null ? 1e9 : b.left)));
+    const tr = list.map(r => `<tr style="border-top:1px solid #f1f1f1;${r.st === 'todo' && r.left != null && r.left <= 7 ? 'background:#fff5f5' : ''}">
+        <td style="padding:3px 6px;white-space:nowrap"><b style="color:${(regionByCc(r.cc) || {}).color || '#888'}">${esc(r.cc)}</b></td>
+        <td style="padding:3px 6px;white-space:nowrap">${esc(r.kind)}</td>
+        <td style="padding:3px 6px;font-size:11px">${esc(r.nm)}<div class="smd-dim" style="font-size:10.5px">${esc(r.reason)}</div></td>
+        <td style="padding:3px 6px;font-family:monospace;font-size:11px;white-space:nowrap">${esc(r.sn)}${r.rsn ? '<div class="smd-dim">' + esc(r.rsn) + '</div>' : ''}</td>
+        <td style="padding:3px 6px;white-space:nowrap">${esc(r.od || '—')}</td>
+        <td style="padding:3px 6px;white-space:nowrap">${esc(r.rd || '—')}</td>
+        <td style="padding:3px 6px;white-space:nowrap" title="起点（注文日と返金日の早い方）＋${r.lim}日${r.limGuess ? '（この国の期限は分からないので 120日で安全側）' : ''}">${esc(r.dl || '—')}${r.limGuess ? '<span class="smd-dim">*</span>' : ''}</td>
+        <td style="padding:3px 6px;white-space:nowrap">${r.st === 'todo' ? leftTxt(r) : '<span class="smd-dim">—</span>'}</td>
+        <td style="padding:3px 6px;white-space:nowrap">${ST[r.st]}${r.st === 'applied' && r.at ? '<div class="smd-dim" style="font-size:10.5px">' + esc(r.at) + '</div>' : ''}</td>
+        <td style="padding:3px 6px;white-space:nowrap">${r.st === 'got' ? '' : r.st === 'todo'
+          ? `<button class="smd-btn sls-set" data-k="${esc(r.k)}" data-st="applied" style="font-size:11px;padding:1px 8px;border-color:#1565c0;color:#1565c0;font-weight:700">申請した</button> <button class="smd-btn sls-set" data-k="${esc(r.k)}" data-st="na" style="font-size:11px;padding:1px 8px">対象外</button>`
+          : `<button class="smd-btn sls-set" data-k="${esc(r.k)}" data-st="" style="font-size:11px;padding:1px 8px">戻す</button>`}</td></tr>`).join('');
+    box.innerHTML = `<div class="tool-card" style="max-width:none;margin:0 0 12px;border-left:4px solid ${c.expired || c.le7 ? '#d93025' : c.todo ? '#e65100' : '#1a7f37'}">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b style="font-size:14px">🛡 SLS+ の補償の申請</b>
+        <span style="font-size:12.5px">未申請 <b style="color:#d93025">${c.todo}</b>・申請済み ${c.applied}・入った ${c.got}・対象外 ${c.na}</span>
+        ${line ? '<b style="color:#d93025;font-size:12.5px">⚠ ' + esc(line) + '</b>' : ''}
+        <label style="font-size:11.5px;margin-left:auto"><input type="checkbox" id="sls-all" ${showAll ? 'checked' : ''}> 入った・対象外も出す</label></div>
+      <div class="smd-dim" style="font-size:11px;margin:4px 0 6px">期限＝起点（注文日と返金日の早い方）＋120日（ブラジルは Shopee Japan の窓口の返事。ほかの国は分からないので同じ120日で安全側＝*）。Parcel not delivered などは申請しないと補償されません。申請したら「申請した」を押してください。補償が入ると自動で「✓ 入った」に変わります。</div>
+      ${list.length ? `<div class="pf-scroll" style="max-height:46vh"><table style="border-collapse:collapse;font-size:11.5px;width:100%"><thead><tr style="border-bottom:1px solid #e3e6ea;text-align:left"><th style="padding:3px 6px">国</th><th style="padding:3px 6px">種類</th><th style="padding:3px 6px">商品・理由</th><th style="padding:3px 6px">注文番号</th><th style="padding:3px 6px">注文日</th><th style="padding:3px 6px">返金日</th><th style="padding:3px 6px">申請の期限</th><th style="padding:3px 6px">あと</th><th style="padding:3px 6px">補償</th><th style="padding:3px 6px"></th></tr></thead><tbody>${tr}</tbody></table></div>` : '<div style="color:#1a7f37;font-size:12px">✓ 申請が要る注文はありません</div>'}
+    </div>`;
+    const ca = box.querySelector('#sls-all'); if (ca) ca.addEventListener('change', () => { try { localStorage.setItem('smdSlsAll', ca.checked ? '1' : '0'); } catch (_) {} slsClaimRender(); });
+    box.querySelectorAll('.sls-set').forEach(b => b.addEventListener('click', async () => {
+      b.disabled = true; const st = b.dataset.st;
+      try { await slsClaimSet(b.dataset.k, st); toast(st === 'applied' ? '✅ 申請した日を残しました（' + jstDate(Date.now()) + '）' : st === 'na' ? '対象外にしました' : '元に戻しました'); try { logAct('SLS+補償の申請', st === 'applied' ? '申請した' : st === 'na' ? '対象外' : '戻す', b.dataset.k, ''); } catch (_) {} slsClaimRender(true); }
+      catch (e) { b.disabled = false; toast('⚠ 残せませんでした: ' + String((e && e.message) || e).slice(0, 80), true); }
+    }));
+  }
   async function renderReturns(force) {
     const body = document.getElementById('ret-body');
     // ★1件記録するたびに描き直すと表のスクロールが先頭に戻っていた（レビュー #8）。読み込み中に縮む前に位置を控える
@@ -24160,12 +24283,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <select id="rf-sort" style="font-size:11.5px;padding:3px 6px">${SORTS.map(x => `<option value="${x[0]}" ${SK === x[0] ? 'selected' : ''}>${esc(x[1])}</option>`).join('')}</select>
       ${(F.kind || F.stage || F.restock || F.comp || F.cc || F.q) ? `<button class="smd-btn" id="rf-clear" style="font-size:11px;padding:2px 10px">× 解除</button><span class="smd-dim">${filteredN}件を除外中</span>` : ''}
     </div>`;
-    body.innerHTML = tabBar + summary +
+    body.innerHTML = '<div id="sls-claim-box"></div>' + tabBar + summary +
       (rtab === 'formal'
         ? formalBlock
         : rtab === 'refund'
           ? (stageTodo + analysisCard + compCard + adjCard + addTool + lostToggle + cxlToggle + filterBar + tableBlock)
           : (addTool + filterBar + tableBlock));
+    slsClaimRender(!!force).catch(() => {});
     { const pk = [rtab, retPage, JSON.stringify(renderReturns._f || {}), renderReturns._sort || '', !!renderReturns._lostOnly, !!renderReturns._showCxl, !!renderReturns._showCanc].join('|');
       renderReturns._posKey = pk;
       if (_keepPos.key === pk) {
@@ -25109,6 +25233,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           sb: [notifWhen(isFinite(ms) ? jstDateTime(ms) : o.order_date, '注文'), o.cc, '注文番号 ' + o.sn].filter(Boolean).join('　'), sn: o.sn, cc: o.cc });
       });
     } catch (_) {}
+    /* ★2026-11-06 SLS+ の補償の申請の期限（期限切れ・7日・14日・30日以内）を先頭に */
+    try {
+      const S = await slsClaimLoad(); const c = S.cnt;
+      [['expired', '🚨', 'SLS+ の補償の申請：期限切れ ' + c.expired + '件（申請できるか Shopee に確かめる）'], ['le7', '🚨', 'SLS+ の補償の申請：期限まで7日以内 ' + c.le7 + '件'], ['le14', '⏰', 'SLS+ の補償の申請：期限まで14日以内 ' + c.le14 + '件'], ['le30', '⏰', 'SLS+ の補償の申請：期限まで30日以内 ' + c.le30 + '件']]
+        .forEach(([k, ic, ti], i) => { if (c[k] > 0) out.push({ id: 'slsclaim:' + k + ':' + jstDate(Date.now()) + ':' + c[k], ic, cat: 'todo', kind: 'slsclaim', at: '9999-' + (9 - i), ti, sb: '返品・キャンセルの画面の一番上「🛡 SLS+ の補償の申請」で、申請したら「申請した」を押す（未申請 ' + c.todo + '件）' }); });
+    } catch (_) {}
     // 全部そろってから、新しい順に並べる（荷物＝到着時刻／発送＝期限／お金＝入金日）
     out.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')) || String(a.ti).localeCompare(String(b.ti)));
     // カテゴリごとに上限をかける（ベルが埋まると読まなくなる）
@@ -25205,7 +25335,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
             ${x.kind === 'arrived' || x.kind === 'likely' ? `<button class="ok nf-recv" data-item="${esc(x.itemId)}" title="在庫台帳の状態を「在庫保管中」にします">✅ 受け取った</button>` : ''}
             ${x.kind === 'arrivedAuto' ? '<span class="smd-dim" style="font-size:10.5px;color:#1a7f37">✓ 配達完了の記録が出たので、自動で在庫保管中にしました（3日たつとこの行は消えます）</span>' : ''}
             ${x.cat === 'parcel' ? '<button class="go nf-go" title="仕入れ管理の入庫待ちを開きます">⏳ 入庫待ちを見る</button>' : ''}
-            ${(x.cat === 'ship' || x.cat === 'todo' || x.cat === 'order') && x.kind !== 'aidown' ? '<button class="go nf-orders" title="注文管理を開きます">📦 注文を見る</button>' : ''}
+            ${x.kind === 'slsclaim' ? '<button class="go nf-returns" title="返品・キャンセルを開きます">↩️ 申請の一覧を開く</button>' : (x.cat === 'ship' || x.cat === 'todo' || x.cat === 'order') && x.kind !== 'aidown' ? '<button class="go nf-orders" title="注文管理を開きます">📦 注文を見る</button>' : ''}
             ${x.cat === 'money' ? '<button class="go nf-money" title="損益・入出金を開きます">💹 損益を見る</button>' : ''}
             ${un ? '<button class="nf-read">既読にする</button>' : ''}
           </div>
@@ -25230,6 +25360,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const p2 = document.getElementById('smd-notif-panel'); if (p2) p2.scrollTop = 0;
     }));
     pn.querySelectorAll('.nf-orders').forEach(b => b.addEventListener('click', () => { notifClose(); showPage('orders'); }));
+    pn.querySelectorAll('.nf-returns').forEach(b => b.addEventListener('click', () => { notifClose(); showPage('returns'); }));
     pn.querySelectorAll('.nf-money').forEach(b => b.addEventListener('click', () => { notifClose(); showPage('profit'); }));
     pn.querySelectorAll('.nf-item').forEach(el => {
       const id = el.dataset.id;
