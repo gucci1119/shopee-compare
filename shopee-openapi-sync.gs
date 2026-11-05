@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-2010';
+var SRC_VER = '20261106-2120';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5234,7 +5234,7 @@ function listMeta_(body) {
 // 出品作成（単一バリエ・E2E実証形）。spec: { shop_id, item_name, description, price, stock, weight(kg), images:[url...], category|category_id, logistic_id, brand_id, publish(bool) }
 // ※バリエーション商品は add_item 後に init_tier_variation が必要＝次段で対応。まずは単品/1明細で実証。
 // 必須属性のうち「No／否」で埋められるもの（成人向けか？ 等）を足す。埋めた数を返す（0なら何もしていない）
-function mandatoryAttrFill_(shopId, catId, list) {
+function mandatoryAttrFill_(shopId, catId, list, itemName) {
   list = (list || []).slice(); var have = {}; list.forEach(function (a) { have[a.attribute_id] = 1; });
   var tree = []; try { tree = getAttributeTree_(shopId, catId, 'en') || []; } catch (e) {}
   var added = 0, names = [];
@@ -5244,6 +5244,10 @@ function mandatoryAttrFill_(shopId, catId, list) {
     /* ★2026-10-12 TH のトレカ・グッズのカタログが「Platform Compatibility が必須」で作れなかった（型のポケカのカタログにも値が無い）。
        カード・グッズには機種が無い＝「Others（その他）」が事実。属性名が Platform の時だけ Others を選ぶ（他の必須属性は事実が無ければ埋めない＝10/05 の決めごと） */
     if ((!o || !o.id) && (/platform/i.test(String(a.name || '')) || Number(a.attribute_id) === 100545)) o = (a.options || []).filter(function (x) { return /^(others?|อื่นๆ|其他|khác)(\s|$|\b)/i.test(String((x && x.name) || '').trim()); })[0];
+    /* ★2026-11-05 01 商品部：TW の N64 拡張パック（カテゴリ 100696）が「Connection Type が必須」で作れなかった。
+       拡張パック・メモリーカードなど無線を含まない物は「Wired / Others / No connection」が事実（BR の PS2 メモリーカード 20999665136 はこの値で通った）。
+       題名に無線の印（wireless・bluetooth・wi-fi・無線 等）がある物は事実が分からないので埋めない */
+    if ((!o || !o.id) && (/connection\s*type/i.test(String(a.name || '')) || Number(a.attribute_id) === 100408) && !/wireless|bluetooth|wi-?fi|\bRF\b|無線|ワイヤレス|藍牙|無線/i.test(String(itemName || ''))) o = (a.options || []).filter(function (x) { return /^wired\b|no\s*connection/i.test(String((x && x.name) || '').trim()); })[0];
     if (!o || !o.id) return;
     list.push({ attribute_id: a.attribute_id, attribute_value_list: [{ value_id: o.id }] }); added++; names.push(a.name + '=' + o.name);
   });
@@ -5344,7 +5348,7 @@ function addItem_(body) {
     if (!/attribute/i.test(msgA)) throw eAdd;
     var _baseA = payload.attribute_list || body.src_attrs || [];
     if (body._cardBr && (body.src_attrs || []).length) { var _hv = {}; _baseA = _baseA.slice(); _baseA.forEach(function (a) { _hv[a.attribute_id] = 1; }); body.src_attrs.forEach(function (a) { if (!_hv[a.attribute_id]) _baseA.push(a); }); }   /* BR のカードで最初に1つ付けた時も、元のカタログの属性を土台に残す */
-    var fillA = mandatoryAttrFill_(shopId, categoryId, _baseA);
+    var fillA = mandatoryAttrFill_(shopId, categoryId, _baseA, body.item_name);
     /* ★2026-09-23 本人「twはなぜでない？」＝TW の Switch は元のカタログに「成人向け=No」が【既に入っている】ので
        「足す物が無い」と諦めていた。最初の送信では属性を1つも送っていないのだから、元の属性があればそれを付けて送り直す */
     if (!fillA.added && !(fillA.list && fillA.list.length)) throw eAdd;
