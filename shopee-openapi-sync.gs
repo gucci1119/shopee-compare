@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0500';
+var SRC_VER = '20261106-0600';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1827,7 +1827,7 @@ function doGetInner_(e) {
         var IMGD = { PH: 'cf.shopee.ph', SG: 'cf.shopee.sg', MY: 'cf.shopee.com.my', BR: 'cf.shopee.com.br', VN: 'cf.shopee.vn', TH: 'cf.shopee.co.th', TW: 'cf.shopee.tw' };
         boout = { ok: true, buyer: bu, cc: bcc, orders: borows.map(function (o) {
           return { cc: o.cc, sn: o.sn, date: o.order_date || String(o.order_ts || '').slice(0, 10), total: o.total, tab: o.tab, status: o.status || '', issue: issues[o.cc + ':' + o.sn] || '', tracking: o.tracking || '', shop_id: String(o.shop_id || ''),
-            items: (o.items || []).slice(0, 10).map(function (it) { var im = String(it.image || ''); return { name: String(it.name || '').slice(0, 120), variation: String(it.variation || '').slice(0, 80), qty: it.qty || 1, item_id: it.item_id != null ? String(it.item_id) : '', model_id: it.model_id != null ? String(it.model_id) : '', sku: (it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) || '', img: im ? (/^https?:/.test(im) ? im : 'https://' + (IMGD[o.cc] || 'cf.shopee.sg') + '/file/' + im + '_tn') : '' }; }) }; }) };
+            items: (o.items || []).slice(0, 10).map(function (it) { var im = String(it.image || ''); return { name: String(it.name || '').slice(0, 120), variation: String(it.variation || '').slice(0, 80), qty: it.qty || 1, item_id: it.item_id != null ? String(it.item_id) : '', model_id: it.model_id != null ? String(it.model_id) : '', sku: String(it.sku || '') || (it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) || '', skuSrc: it.sku ? 'order' : ((it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) ? 'listing' : ''),   /* ★2026-11-06 03 営業部：注文した時の SKU を先に（詰め直し削除の後は model_id が別の REQ_番号を指す）。注文に SKU が無い古い注文だけ今の出品の表から（skuSrc で分かる） */ img: im ? (/^https?:/.test(im) ? im : 'https://' + (IMGD[o.cc] || 'cf.shopee.sg') + '/file/' + im + '_tn') : '' }; }) }; }) };
       } catch (err) { boout = { ok: false, error: String((err && err.message) || err) }; }
       ufPersist_();
       return ContentService.createTextOutput(bocb + '(' + JSON.stringify(boout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
