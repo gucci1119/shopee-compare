@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-2120';
+var SRC_VER = '20261106-2300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1174,6 +1174,34 @@ function doGetInner_(e) {
         }
       } catch (err) { vout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(vcb + '(' + JSON.stringify(vout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    /* ★2026-11-05 03 営業部の決め（本人「明細たすの遅すぎますね」・BR R261105BR3DH）：番号（REQ_番号・照合番号）で Request page の明細を引く【読むだけ】の口。
+       SR・WA・Zalo が「返事が3分来ない時に、入っていれば足し済みにする」「✅ もう足してある／↩ 足されていない を押す前の確かめ」に使う。
+       params: cc（国）, ref（照合番号 R…）または sku（REQ_…）, max（Shopee を読むカタログの数の上限・既定3・最大8）
+       読み方：DB（listings）からその国の Request page を選び（DB の明細に番号がある物を先に）、Shopee の get_model_list を1つずつ読んで最初に見つかった所で止める＝1回の呼び出しで Shopee を読むのは max 回まで（ふつう1回）。書き込みはしない
+       返事：{ ok, found, cc, ref, sku, item_id, shop_id, model_id, name, price, stock, img, cat_status, read, at } / 見つからない時 found:false と読んだカタログの番号 */
+    if (p.action === 'req_find') {
+      var rfcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), rfout;
+      try {
+        var rfcc = String(p.cc || '').toUpperCase(); if (!/^[A-Z]{2}$/.test(rfcc)) throw new Error('cc（国）が要ります');
+        var rfref = String(p.ref || '').trim(), rfsku = String(p.sku || '').trim();
+        if (!rfsku && rfref) rfsku = 'REQ_' + rfref; if (!rfref && /^REQ_/i.test(rfsku)) rfref = rfsku.slice(4);
+        if (!/^[A-Za-z0-9_-]{4,40}$/.test(rfref)) throw new Error('ref（照合番号）か sku（REQ_…）が要ります');
+        var rfmax = Math.max(1, Math.min(8, parseInt(p.max, 10) || 3));
+        var rfcats = sbSelectAll_('listings', 'select=item_id,shop_id,status,name,models&cc=eq.' + rfcc + '&or=(name.ilike.*Request%20page*,name.ilike.*Solicitar*)') || [];
+        var rfL = rfref.toLowerCase();
+        var rfHas = function (c) { return (c.models || []).some(function (m) { return m && (String(m.sku || '').toLowerCase() === ('req_' + rfL) || String(m.n || '').toLowerCase().indexOf(rfL) === 0); }); };
+        rfcats.sort(function (a, b) { return (rfHas(b) ? 1 : 0) - (rfHas(a) ? 1 : 0) || (a.status === 1 ? 0 : 1) - (b.status === 1 ? 0 : 1); });
+        var rfread = [], rfhit = null;
+        for (var rfi = 0; rfi < rfcats.length && rfread.length < rfmax && !rfhit; rfi++) {
+          var rc = rfcats[rfi]; rfread.push(String(rc.item_id));
+          var rms = getModels_(rc.shop_id, rc.item_id) || [];
+          rms.forEach(function (m) { if (rfhit) return; if (String(m.sku || '').toLowerCase() === rfsku.toLowerCase() || String(m.name || '').toLowerCase().indexOf(rfL) === 0) rfhit = { item_id: String(rc.item_id), shop_id: String(rc.shop_id), cat_status: rc.status, model_id: String(m.model_id), name: m.name, sku: m.sku, price: m.price, stock: m.stock, img: m.img || '' }; });
+        }
+        rfout = rfhit ? Object.assign({ ok: true, found: true, cc: rfcc, ref: rfref, read: rfread, at: new Date().toISOString() }, rfhit)
+                      : { ok: true, found: false, cc: rfcc, ref: rfref, sku: rfsku, read: rfread, cats: rfcats.length, at: new Date().toISOString() };
+      } catch (err) { rfout = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(rfcb + '(' + JSON.stringify(rfout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'get_models') {
       var gcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
