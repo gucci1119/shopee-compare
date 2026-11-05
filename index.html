@@ -3754,10 +3754,14 @@
      Claude が会話の中で判定するための書き出し。判定は app_kv boshu_auto_judged_manual（ポータルの 👍／👎 と同じ控え＝GAS は AI より先に見る）に入れる */
   try { window.__smdTcgTick = (which) => { const u = { child: settings.boshuUrl, child2: settings.boshuUrl2, child3: settings.boshuUrl3 }[which]; if (!u) throw new Error('台の名前は child / child2 / child3'); return gasCall({ action: 'tcg_tick', token: settings.writeToken, manual: '1', _url: u }, 330000); }; } catch (_) {}   /* 本人「すぐにやってもいい」：Claude の判定が効くか、その台で🃏を手で1回 */
   try { window.__smdTcgPreview = (hw, n) => gasCall({ action: 'tcg_preview', token: settings.writeToken, hw: hw, n: n || 40, _url: settings.boshuUrl3 }, 240000); } catch (_) {}
-  try { window.__smdOaUpdate = async (action, shopId, itemId, modelId, val) => {   /* 在庫・価格を model_id 指定で（名前で引かない＝取り違えない） */
+  try { window.__smdOaUpdate = async (action, shopId, itemId, modelId, val, expect) => {   /* 在庫・価格を model_id 指定で（名前で引かない＝取り違えない） */
+    /* ★2026-11-05 03 営業部：明細を消すと model_id が別の作品へ移る（10/23）。6つ目に明細名（文字）か { name, sku } を渡すと、GAS が今の明細と照らし、合わなければ書かない（SRC 20261106-0600 から） */
     if (action !== 'update_stock' && action !== 'update_price') throw new Error('在庫と価格だけ');
     if (!(Number(modelId) > 0)) throw new Error('model_id が要ります');
-    return openapiUpdate(action, Object.assign({ shop_id: shopId, item_id: itemId, model_id: modelId }, action === 'update_stock' ? { stock: val } : { price: val }));
+    const ex = (expect && typeof expect === 'object') ? expect : { name: expect };
+    const chk = {}; if (String(ex.name || '').trim()) chk.model_name = String(ex.name).trim(); if (String(ex.sku || '').trim()) chk.expect_sku = String(ex.sku).trim();
+    if (!chk.model_name && !chk.expect_sku) console.warn('__smdOaUpdate: 明細名か SKU を6つ目に渡すと、model_id のずれを GAS が止めます');
+    return openapiUpdate(action, Object.assign({ shop_id: shopId, item_id: itemId, model_id: modelId }, chk, action === 'update_stock' ? { stock: val } : { price: val }));
   }; } catch (_) {}
   // 公式APIで明細名(バリエ名)を置換（tierのoption名 before→after。after='' は削除も可）
   async function openapiRenameModels(shopId, itemId, before, after) {
@@ -8731,7 +8735,9 @@
     'マスタを読み込めませんでした。通信を確かめて、もう一度開いてください。': 'Could not load the master list. Check your connection and open it again.',
   });
   const I18N_PAT = [
-    /* ★2026-11-05 注文の予約の印 */
+    /* ★2026-11-05 注文の予約の印・まとめ買いの印 */
+    [/^🎁まとめ買い (.+)$/, '🎁Bundle deal $1'],
+    [/^まとめ買い割引（Bundle Deal）が効いた注文です。割引前 (.+) から (.+) 引き（.+$/, 'Bundle deal applied: $2 off $1 (sum of the per-item discounts in Shopee\'s payment detail). Two rates mean the items got different rates.'],
     [/^⚠ 同じ参照番号の明細がもうあります: (.+)$/, '⚠ A variation with the same reference already exists: $1'], [/^⚠ 同じ参照番号の明細が Shopee にもうあります（足し済み）: (.+)$/, '⚠ A variation with the same reference is already on Shopee (added): $1'],
     [/^📅予約 (\d+)日$/, '📅Pre-order $1 days'], [/^📅予約 （期日まで(\d+)日）$/, '📅Pre-order ($1 days to deadline)'], [/^⚠予約なし (\d+)日$/, '⚠Not pre-order, $1 days'], [/^⚠予約の印なし$/, '⚠No pre-order mark'],
     [/^予約注文：Shopee の届くまでの日数 (\d+)日$/, 'Pre-order: Shopee days to ship $1'], [/^予約注文（推定）：Shopee の日数はまだ取り込んでいません。注文から期日まで (\d+)日あるので予約と見ています$/, 'Pre-order (estimated): Shopee days-to-ship not imported yet; $1 days from order to deadline'],
@@ -12076,6 +12082,30 @@
      「国｜明細名」の集合を作り、注文の明細名と一致したら 🤖 の印を出す。
      ★注文データには item_id が入っていない（実測：直近の注文は items[].item_id が空）ので、🤖自身の「売れた」判定と同じく明細名で突き合わせる。
      読み込みは30分に1回だけ（app_kv 十数行＋控え1行）。 */
+  /* ★2026-11-05 事業本部・本人「まとめ買い割引が効いているかもここでみたい」：GAS が入金明細（get_escrow_detail）から income.fees.bundle に割引額を入れる。
+     ここでは割引が付いた注文だけを読む（直近60日・列は2つだけ＝読む量は小さい）。30分は読み直さない */
+  let _ordBdAt = 0;
+  function ordBundleLoad() {
+    if (_ordBdAt && Date.now() - _ordBdAt < 30 * 60000) return Promise.resolve(null);
+    _ordBdAt = Date.now();
+    const since = new Date(Date.now() - 60 * 86400000).toISOString();
+    return sbGetAll('income', 'select=cc,sn,bd:fees->bundle&fees->bundle=not.is.null&synced_at=gte.' + since).then(rows => {
+      const m = new Map(); (rows || []).forEach(x => { if (x && x.bd && Number(x.bd.d) > 0) m.set(x.cc + ':' + x.sn, x.bd); });
+      state.orders.bundle = m; return m;
+    }).catch(() => { _ordBdAt = 0; return null; });
+  }
+  function ordBundleHtml(r) {
+    const b = state.orders.bundle && state.orders.bundle.get(r.cc + ':' + r.sn);
+    if (!b || !(Number(b.d) > 0)) return '';
+    const rg = r.region || regionByCc(r.cc) || {}, cur = rg.cur || '';
+    const ps = (Array.isArray(b.p) ? b.p : []).filter(x => Number(x) > 0).map(x => '−' + x + '%').join('/');
+    const amt = Number(b.d).toLocaleString('en-US', { maximumFractionDigits: 2 });
+    const fxOk = !!(FXD.days && Object.keys(FXD.days).length);   /* 日次レートが読めていない時は円を出さない（2024年末の既定値で出さない） */
+    const fx = fxOk ? fxRate(r.cc, r.orderDate || '') : 0, yen = fx > 0 ? Math.round(Number(b.d) * fx) : 0;
+    const txt = '🎁まとめ買い ' + (ps ? ps + '・' : '') + '−' + cur + amt + (yen ? '（≈¥' + yen.toLocaleString() + '）' : '');
+    const tip = 'まとめ買い割引（Bundle Deal）が効いた注文です。割引前 ' + cur + Number(b.base || 0).toLocaleString('en-US', { maximumFractionDigits: 2 }) + ' から ' + cur + amt + ' 引き（Shopee の入金明細の品ごとの割引の合計）。率が2つある時は品ごとに違う率が付いています';
+    return `<div class="ord-itemsub ord-bundle" style="color:#b45309;font-weight:700;margin-top:2px" title="${esc(tip)}">${esc(txt)}</div>`;
+  }
   let _ordAuto = null, _ordAutoAt = 0, _ordAutoItems = null;   /* _ordAutoItems＝🤖が明細を足したカタログ item_id → { cc, hw, ids:Set(model_id) }（収支の厳密な突き合わせ用） */
   function ordAutoLoad() {
     if (_ordAutoAt && Date.now() - _ordAutoAt < 30 * 60000) return Promise.resolve(null);   /* 読み込み済み＝描き直さない（描画の中から再描画を予約しない [[portal-no-render-loop]]） */
@@ -12117,6 +12147,7 @@
   // withLive=false: DBのみ即表示（開いた瞬間は速い）。withLive=true（更新ボタン/同期時）: ライブで上書き
   function loadOrders(withLive) {
     ordAutoLoad().then(set => { if (set && set.size) renderOrders(); });
+    ordBundleLoad().then(m => { if (m && m.size) renderOrders(); });
     state.orders.started = true;
     if (!state.accounts) loadAccounts().then(() => renderOrders()).catch(() => {}); // 🏪ショップ名表示のため登録簿を確保→ロード後に再描画
     loadSelfTransit().then(() => renderOrders()); // 倉庫輸送中フラグを読み込んで反映
@@ -12985,7 +13016,7 @@
         (it.variation ? `<div class="ord-itemsub">${esc(it.variation)}</div>` : '') +
         `</div></div>`
       ).join('<div style="border-top:1px dashed #e8e8e8;margin:4px 0"></div>') +
-        (r.items.length > 1 ? `<div class="ord-itemsub" style="color:#6b7280;margin-top:2px">${r.items.length}商品・合計${qty}点</div>` : '');
+        (r.items.length > 1 ? `<div class="ord-itemsub" style="color:#6b7280;margin-top:2px">${r.items.length}商品・合計${qty}点</div>` : '') + ordBundleHtml(r);
       // Shopeeが既に発送手配済み（PROCESSED/SHIPPING等）＝自動手配のSLS注文。ship_orderは「再手配不可/1方式を選べ」で弾かれるので手配済み扱いにし、📮公式発送ボタンは出さない（伝票印刷して倉庫へ持込むだけ）。
       const arranged = ordArranged(r); // 表示・遅延・KPI・フィルタで同一判定（統一）
       const stKey = r.cc + ':' + r.sn;
@@ -25107,6 +25138,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-05', items: [
+      '🎁 <b>注文の行に、まとめ買い割引が効いたかと割り引かれた額を出しました</b>（本人「まとめ買い割引が効いているかもここでみたい」）：品物の下に「🎁まとめ買い −10%・−₱805（≈¥…）」と出ます。効いていない注文には何も出ません。額は Shopee の入金明細の品ごとの割引の合計で、同じ注文で品ごとに率が違う時は「−10%/−5%」と2つ出ます。GAS の入金明細の同期（毎時）のたびに埋まっていきます。あわせて、入金明細を取り直す処理が手数料の内訳の一部（売れた時の値段など）を消していたのを直しました。',
+      '🛡 <b>在庫・値段を model_id で書く口に、明細名か SKU を添えられるようにしました</b>（03 営業部）：添えると GAS が今の明細と照らし、明細を消して番号がずれていたら書きません。',
       '🔁 <b>Request page に足す前の「同じ明細がもうあるか」を、参照番号でも照らすようにしました</b>（03-22）：名前の頭か SKU（REQ_番号）が同じ明細があれば、品名が違っても足しません。WA の 🧾 購入履歴にも、明細の番号（item_id・model_id）と Request page の SKU を返すようにしました（GAS・配備待ち）。',
       '📅 <b>注文の行に、予約注文かどうかと日数を出しました</b>（本人「pre-orderってここでわからないの？日数も」）：発送期日の欄に「📅予約 10日」と出ます。Shopee は注文に予約の印を返さず、届くまでの日数（予約出品なら10日）だけを返すので、その日数を注文の表（orders.dts）に入れて使います。日数をまだ取り込んでいない注文は、注文から期日まで11日以上なら予約と見て「📅予約（期日まで14日）」と出します（9/1〜11/4 の738件では、普段は2〜8日・予約は14〜19日）。Request page の注文なのに予約でない時と、予約でないのに期日が長い時は赤で出します。',
       '🏷 <b>Request page の明細名を「参照番号＋短い品名」にしました</b>（本人の案・03-22。例 R261104BRRBN Pokemon ZA Switch）：番号は SKU の REQ_ の後ろと同じで、利益管理表と照らせます。お客さんの名前は写真の「Reserved for」にだけ入れます。番号が無い時はユーザー名を使います。30字に入らない語は丸ごと落とし、語の途中では切りません。',

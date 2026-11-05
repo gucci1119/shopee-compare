@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0600';
+var SRC_VER = '20261106-0700';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6213,6 +6213,34 @@ function backfillTrackingCompleted(limitN, days) {
 // 直近90日ぶんを全部（数回に分けて実行してください。1回300件まで）
 function backfillTrackingCompletedAll() { return backfillTrackingCompleted(300, 90); }
 
+/* ★2026-11-05 事業本部・本人「まとめ買い割引が効いているかもここでみたい」：
+   get_order_detail の item_list は promotion_type=bundle_deal の印だけで、割引後の値段（model_discounted_price）は 0 で返る（PH 2611029B4XQBPR で実測）。
+   額は get_escrow_detail の order_income.items にある＝activity_type（または promotion_list）が bundle_deal の品の selling_price − discounted_price（＝seller_discount）。
+   同じ注文でも品ごとに率が違うことがある（同じ注文で 10% の品と 5% の品が混ざっていた）＝率は品ごとに数えて重なりを除いて持つ。
+   income.fees.bundle = { d: 割引の合計（現地通貨）, base: 割引前の合計, p: [率%…], id: bundle_deal_id }。効いていなければ持たない。 */
+function escrowBundle_(inc) {
+  var d = 0, base = 0, ps = {}, id = '';
+  ((inc && inc.items) || []).forEach(function (it) {
+    var isB = String(it.activity_type || '') === 'bundle_deal' || (it.promotion_list || []).some(function (x) { return String(x.promotion_type || '') === 'bundle_deal'; });
+    if (!isB) return;
+    var sell = parseFloat(it.selling_price) || parseFloat(it.original_price) || 0, dp = parseFloat(it.discounted_price);
+    var cut = (sell > 0 && dp > 0 && dp < sell) ? (sell - dp) : (parseFloat(it.seller_discount) || 0);
+    if (!(cut > 0) || !(sell > 0)) return;
+    d += cut; base += sell; ps[Math.round(cut / sell * 100)] = 1;
+    if (!id && it.activity_id) id = String(it.activity_id);
+  });
+  if (!(d > 0)) return null;
+  return { d: Math.round(d * 100) / 100, base: Math.round(base * 100) / 100, p: Object.keys(ps).map(Number).sort(function (a, b) { return b - a; }), id: id };
+}
+/* 入金明細の fees を作る所を1つに（★2026-11-05：backfillEscrow が短い形で fees を丸ごと書き、original_price・voucher_seller・ams_commission と bundle を消していた） */
+function escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid) {
+  var fees = { commission: f_comm, service: f_serv, transaction: f_txn, buyer_total: buyerPaid,
+    original_price: parseFloat(inc.original_price) || null, voucher_seller: parseFloat(inc.voucher_from_seller) || 0,
+    final_shipping_fee: parseFloat(inc.final_shipping_fee) || 0, ams_commission: parseFloat(inc.order_ams_commission_fee) || 0 };
+  var bd = escrowBundle_(inc); if (bd) fees.bundle = bd;
+  return fees;
+}
+
 // 入金(escrow) → income（★手数料内訳・買主支払額も保存）
 function syncEscrowForShop_(tok, deadline, finalized) {
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
@@ -6241,9 +6269,7 @@ function syncEscrowForShop_(tok, deadline, finalized) {
     var f_comm = parseFloat(inc.commission_fee) || 0, f_serv = parseFloat(inc.service_fee) || 0, f_txn = parseFloat(inc.seller_transaction_fee) || 0;
     var feeTotal = f_comm + f_serv + f_txn;
     var buyerPaid = parseFloat(inc.buyer_total_amount); if (isNaN(buyerPaid)) buyerPaid = null;
-    var fees = { commission: f_comm, service: f_serv, transaction: f_txn, buyer_total: buyerPaid,
-      original_price: parseFloat(inc.original_price) || null, voucher_seller: parseFloat(inc.voucher_from_seller) || 0,
-      final_shipping_fee: parseFloat(inc.final_shipping_fee) || 0, ams_commission: parseFloat(inc.order_ams_commission_fee) || 0 };
+    var fees = escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid);
     // 初回取得値(暫定)は保持。amount_at は「額が実際に変わった時刻」＝前回と同額なら前回のまま、変われば今
     var pv = prev[cc + ':' + o.sn];
     var row = { cc: cc, sn: o.sn, amount: amt, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), buyer_paid: buyerPaid, fee_total: feeTotal, fees: fees, synced_at: now2  };
@@ -6312,8 +6338,7 @@ function backfillEscrowUnchanged(limitN) {
     out.push({ cc: t.cc, sn: t.sn, amount: amt, amount_at: now2,
       amount_initial: parseFloat(t.amount_initial), buyer_paid: buyerPaid,
       fee_total: f_comm + f_serv + f_txn,
-      fees: { commission: f_comm, service: f_serv, transaction: f_txn, buyer_total: buyerPaid,
-        final_shipping_fee: parseFloat(inc.final_shipping_fee) || 0 },
+      fees: escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid),
       synced_at: now2 });
   }
   if (out.length) { for (var k = 0; k < out.length; k += 200) sbUpsert_('income', out.slice(k, k + 200), 'cc,sn'); }
