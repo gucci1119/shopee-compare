@@ -53671,14 +53671,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
      写真は3つ以上の違う名前に使われた物（まとめ出品の共通の表紙など）は鍵にしない。実測：2か国以上で使われた写真 190種類・そのうち3つ以上の名前に使われた物 0 */
   const PR_STOP_RE = /\b(usado|usada|used|japon[eê]s|japonesa|japanese|japan|jap[aã]o|ver|vers[aã]o|version|jogo|jogos|game|games|edi[cç][aã]o|edition|cartucho|cartridge|somente|only|working|tested|original|variation|varia[cç][aã]o|software|disc|disco|disk|series|s[eé]rie|region|free|multi|language|nintendo|sony|official|genuine|import|ntsc|jp)\b|二手|中古|日版|日本版/gi;
   const PR_PLAT_RE = [[/playstation\s*(\d)/gi, 'ps$1'], [/\bps\s+(\d)\b/gi, 'ps$1'], [/nintendo\s*switch\s*2|switch\s*2/gi, 'switch2'], [/game\s*boy\s*advance/gi, 'gba'], [/game\s*boy\s*color/gi, 'gbc'], [/game\s*boy/gi, 'gb'], [/game\s*cube/gi, 'gc'], [/super\s*famicom|super\s*nintendo|\bsnes\b/gi, 'sfc'], [/\bfamicom\b|\bnes\b/gi, 'fc'], [/nintendo\s*3ds|\b3ds\b/gi, '3ds'], [/nintendo\s*ds\b/gi, 'ds'], [/ps\s*vita|playstation\s*vita/gi, 'vita'], [/wii\s*u/gi, 'wiiu']];
-  function prNameKey(nm, vr) {
-    let t = String(nm || '');
-    if (/\bvaria(tion|[cç][aã]o)\b/i.test(t) && vr) { const plat = (skuHwsOf(t)[0] || ''); t = String(vr) + ' ' + plat; } else if (vr) t = t + ' ' + String(vr);
-    t = t.toLowerCase().replace(/\[[^\]]*\]|\([^)]*\)/g, ' ').replace(/[①-⑳]/g, ' ');
+  function prToks(t) {
+    t = String(t || '').toLowerCase().replace(/\[[^\]]*\]|\([^)]*\)/g, ' ').replace(/[①-⑳]/g, ' ');
     PR_PLAT_RE.forEach(([re, to]) => { t = t.replace(re, to); });
     t = t.replace(PR_STOP_RE, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-    return [...new Set(t.split(/\s+/).filter(w => w && w.length > 0))].sort().join(' ');
+    return [...new Set(t.split(/\s+/).filter(Boolean))].sort().join(' ');
   }
+  /* 名前の鍵：言葉の違いを外して語を並べ替える。明細名は名前の語に混ぜない（題名に「2GB 4GB 8GB」と並ぶ物で容量違いが1つになっていた・11/5 試しで確かめた） */
+  function prNameKey(nm, vr) {
+    nm = String(nm || ''); vr = String(vr || '');
+    if (/\bvaria(tion|[cç][aã]o)\b/i.test(nm) && vr) return prToks(vr + ' ' + (skuHwsOf(nm)[0] || ''));
+    return prToks(nm) + (vr ? ' | ' + prToks(vr) : '');
+  }
+  const prNums = (k) => new Set(String(k || '').replace(/^nm:/, '').replace(/\|/g, ' ').split(/\s+/).filter(w => /\d/.test(w) && !/^(ps[1-5]|3ds|n64)$/.test(w)));
   function prCompute() {
     const { start, end } = prPeriodRange();
     const now = Date.now(), d30 = new Date(now - 30 * 86400000).toISOString().slice(0, 10), d90 = new Date(now - 90 * 86400000).toISOString().slice(0, 10);
@@ -53707,11 +53712,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const idKeys = (itemId, modelId, nameOk) => { const out = []; if (!(pidOk && nameOk)) return out; const pid = productIds['id:' + itemId + '#' + modelId] || productIds['id:' + itemId] || {}; const jan = String(pid.jan || '').replace(/\D/g, ''), mpn = String(pid.mpn || '').trim(); if (jan.length >= 8) out.push('jan:' + jan); if (mpn) out.push('mpn:' + mpn.toLowerCase()); return out; };
     const imgOf = (it) => String((it && it.image) || '').replace(/_tn$/, '');
     if (PR.group === 'prod') {
+      /* 写真で結ぶのは、その写真に付いた名前が1つか、2つで「違う国どうし（言葉の違い）」かつ「数字（容量・番号）が同じ」時だけ（同じ国の中の別の物・容量違いを鎖のようにつながない） */
       const imgNames = new Map();
-      (PR.orders || []).forEach(o => { if (o.tab === 200 || o.tab === 600) return; (o.items || []).forEach(it => { const im = imgOf(it); if (!im) return; const nk = prNameKey(it.name, it.variation); let S = imgNames.get(im); if (!S) { S = new Set(); imgNames.set(im, S); } S.add(nk); }); });
+      (PR.orders || []).forEach(o => { if (o.tab === 200 || o.tab === 600) return; (o.items || []).forEach(it => { const im = imgOf(it); if (!im) return; const nk = 'nm:' + prNameKey(it.name, it.variation); let M = imgNames.get(im); if (!M) { M = new Map(); imgNames.set(im, M); } let C = M.get(nk); if (!C) { C = new Set(); M.set(nk, C); } C.add(o.cc); }); });
+      const imgOk = (im) => { const M = imgNames.get(im); if (!M) return false; if (M.size === 1) return true; if (M.size !== 2) return false; const [[ka, a], [kb, b]] = [...M.entries()]; if ([...a].some(c => b.has(c))) return false; const na = prNums(ka), nb = prNums(kb); return na.size === nb.size && [...na].every(x => nb.has(x)); };
       (PR.orders || []).forEach(o => { if (o.tab === 200 || o.tab === 600) return; (o.items || []).forEach(it => {
         const vr = String(it.variation || ''), nk = 'nm:' + prNameKey(it.name, vr); ufU(nk, nk);
-        const im = imgOf(it); if (im && (imgNames.get(im) || new Set()).size <= 2) ufU(nk, 'img:' + im);
+        const im = imgOf(it); if (im && imgOk(im)) ufU(nk, 'img:' + im);
         const mk = o.cc + ':' + (it.item_id || '') + '#' + (it.model_id != null ? it.model_id : 0), mi0 = mInfo.get(mk), nameOk = !!(mi0 && (!vr || prNorm(mi0.n) === prNorm(vr)));
         const sku = String((it.sku || (nameOk && mi0 && mi0.sku) || '')).trim(); if (sku && !/^REQ_/i.test(sku)) ufU(nk, 'sku:' + sku.toUpperCase());
         idKeys(it.item_id, it.model_id, nameOk || (!vr && !lstOk)).forEach(k => ufU(nk, k));
