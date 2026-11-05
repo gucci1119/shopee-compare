@@ -25371,6 +25371,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-06', items: [
+      '🔒 <b>本人の値段の印を作りました</b>（事業本部・本人が決めた値段を上書きしない）：ゼルダ BR R$326・たまごっち Plus Color 6色のカタログ（PH ₱35,039・BR R$3,031・SG S$707・MY RM2,252・TH 本店と2店舗目 ฿18,646）・TW のブルー NT$9,600 の38明細。値付けの見直し・まとめての値直し・🤖 のどれも、この明細を違う値段に書きません（GAS が書く前に止めて「本人の値段」と返す）。値付けの見直しの表には「🔒 本人の値段」と出し、提案しません。',
+      '💬 <b>案内の英文の明細を選ぶ行を、Smart Reply・WA・Zalo と同じ形にしました</b>（03 営業部）：Please select the option "R261105BR3DH Code of Switch" (R$246). の次に、画面で名前が少し違って見える時に番号と値段で探す1行。値段は記号を前に書きます。',
       '📂 <b>アクセス（各国）の画面を畳めるようにしました・グラフを一番上に</b>（本人「この辺、折り畳めるように。見たいのはグラフ」）：取り込みが止まっている店の表と説明の帯は、閉じた形を既定にして1行（例「⚠ 止まっている店 4：PH・SG・MY・TW の2店舗目（9日届いていない）」）。カートに入れた人の表・売れていない品・訪問者の表も見出しで畳めます。開いた・閉じたはこの端末に覚えます。',
       '🧺 <b>見積もりの小窓：まとめ買いの仕入れと重さを品ごとに見せます</b>（本人「まとめ買いなら、xx+xx みたいに」）：「🧺 まとめ買い 2点｜仕入れ ¥14,680 + ¥15,780 = ¥30,460｜重さ 150 + 200 = 350g」の形。チャットのカードの内訳の行にも出します。',
       '🎁 <b>まとめ買いの見積もりに、まとめ買い割引（Bundle Deal）を入れました・選んだ方で Request page に足せます</b>（事業本部の決め・03 営業部）：2点以上をまとめて見積もる時は、Shopee が実際に引く割引（2点 5%・3点以上 10%）を引いた後で粗利の線を守る値段にします。今まで全部の見積もりで引いていた「想定値引き 5%」とは重ねず、置き換えます（2点は値段が今と同じ・3点以上は少し上がります）。割引に入っている Request page が無い国（今は SG・TH・VN）では、想定値引きだけで計算します。お客さんがまとめを選んだ時は、品物ごとの明細で Request page に足します（値段は仕入れの比で分け、合計は見積もりと同じ）。案内の英文には、明細を全部並べて「1つずつカートに入れて1回で買う」と書きます。単品を選んだ時は今までどおり1明細です。',
@@ -44305,8 +44307,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   ];
   const PA_CATS_OLD = { thin: '🟠 利益が薄い（前の決め）', over: '🟡 上げすぎ（前の決め）', room: '🔵 値上げの余地（前の決め）' };
   const PA_FRONT_HI = 700, PA_LINE_MIN = 1500, PA_LINE_HICOST = 3000, PA_LINE_RATE = 0.5;
-  const paCanEdit = e => !!(e && e.status === 1 && e.cost != null && e.k > 0 && e.rNow > 0 && e.price > 0 && !PA_REQ_RE.test(String(e.name || '')));
-  const paHasTo = e => !!(e && (e.sug != null || (PA.edit[e.key] > 0 && paCanEdit(e))));   /* 書ける値段がある＝提案がある、か打った値段がある */
+  /* ★2026-11-06 事業本部（本人の値段の印）：app_kv price_lock の明細（item_id|model_id）は、値付けの見直しで提案も書き込みもしない（🔒 本人の値段）。GAS も書く前に止める */
+  const paLockOf = e => (e && PA.lock) ? (PA.lock[String(e.item_id) + '|' + String(e.model_id || 0)] || null) : null;
+  const paCanEdit = e => !!(e && e.status === 1 && e.cost != null && e.k > 0 && e.rNow > 0 && e.price > 0 && !PA_REQ_RE.test(String(e.name || '')) && !paLockOf(e));
+  const paHasTo = e => !!(e && !paLockOf(e) && (e.sug != null || (PA.edit[e.key] > 0 && paCanEdit(e))));   /* 書ける値段がある＝提案がある、か打った値段がある */
   const paFrontHand = e => { const F = PA.front || {}; return !!((F.keys && F.keys[e.key]) || (paSkuKey(e.sku) && F.skus && F.skus[paSkuKey(e.sku)])); };   /* 本人が手で付けたフロントの印（親SKU の決まりのトレカは含めない） */
   const paLineOf = e => e.front ? paFrontCfg().floor : Math.max(PA_LINE_MIN, e.cost > PA_LINE_HICOST ? Math.round(e.cost * PA_LINE_RATE) : 0);
   const PA = { cc: '', cat: 'act', q: '', sort: 'score', dir: -1, sub: 'adj', data: null, at: 0, busy: null, sel: new Set(), edit: {}, limit: 200, chart: null };
@@ -44331,10 +44335,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const since = new Date(Date.now() - 200 * 86400000).toISOString().slice(0, 10);
       // ★読めなかった表を空として進めると「赤字0件」と言ってしまう＝どれか1つでも読めなければ止める（数えられない時に0件と言わない）
       /* ★2026-11-03 事業本部「（33秒）のまま表が出ない」：どの読みを待っているかを読み込み中の所に出す（PA.ld）・かかった時間を PA.ms に残す（window.__paMs で見られる） */
-      const _t0 = Date.now(), _nm = ['注文', '入金', '仕入', '在庫台帳', '出品', '値付けの記録', '利益計算表', 'フロントの印', '手元の在庫', '🤖の仕入れ目安', 'リクエスト品の印'];
+      const _t0 = Date.now(), _nm = ['注文', '入金', '仕入', '在庫台帳', '出品', '値付けの記録', '利益計算表', 'フロントの印', '手元の在庫', '🤖の仕入れ目安', 'リクエスト品の印', '本人の値段の印'];
       PA.ld = {}; _nm.forEach(n => { PA.ld[n] = null; });
       const _tr = arr => arr.map((p0, ix) => Promise.resolve(p0).then(v => { PA.ld[_nm[ix]] = (Date.now() - _t0) / 1000; return v; }, e => { PA.ld[_nm[ix]] = -1; throw e; }));
-      const [orders, inc, costs, inv, lis, logKv, sheetKv, frontKv, handInv, llogKv, reqKv] = await Promise.all(_tr([
+      const [orders, inc, costs, inv, lis, logKv, sheetKv, frontKv, handInv, llogKv, reqKv, lockKv] = await Promise.all(_tr([
         sbGetAll('orders', `select=cc,sn,status,items,order_date,order_ts,shop_id&order_date=gte.${since}`),
         sbGetAll('income', 'select=cc,sn,amount,fees'),
         sbGetAll('costs', 'select=cc,sn,cost'),
@@ -44346,11 +44350,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         sbGetAll('app_kv', 'select=v&k=eq.front_items').catch(() => null),
         sbGetAll('inventory', 'select=name,name_supplier,price&status=eq.' + encodeURIComponent('在庫保管中') + '&shopee_sn=is.null').catch(() => null),   /* ★2026-10-25 手元の在庫の目安（約1,500行・3列）。読めなければ「読めませんでした」と出す */
         llogFetchAll(!!force, 30 * 60000).catch(() => null),
-        sbGet('app_kv', 'select=v&k=eq.req_items').catch(() => null),   /* リクエスト品の印（小さい鍵・国|item_id） */   /* 値付けの見直しでは30分使い回す（🔄で読み直し） */   /* ★2026-10-25 🤖の仕入れ目安（46本・埋め戻し後 約11MB）。出品ログと5分は使い回す・1本ずつ順番に読む。名前か SKU が今の明細と合う物だけ使う */
+        sbGet('app_kv', 'select=v&k=eq.req_items').catch(() => null),
+        sbGet('app_kv', 'select=v&k=eq.price_lock').catch(() => 'ERR'),   /* ★2026-11-06 本人の値段の印（小さい鍵） */   /* リクエスト品の印（小さい鍵・国|item_id） */   /* 値付けの見直しでは30分使い回す（🔄で読み直し） */   /* ★2026-10-25 🤖の仕入れ目安（46本・埋め戻し後 約11MB）。出品ログと5分は使い回す・1本ずつ順番に読む。名前か SKU が今の明細と合う物だけ使う */
       ]));
       const _tRead = Date.now() - _t0;
       PA.llog = {}; PA.llogOk = Array.isArray(llogKv); (llogKv || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(k0 => { const v0 = m[k0]; if (v0 && typeof v0 === 'object' && Number(v0.c) > 0) PA.llog[k0] = v0; }); });
       PA.handInv = Array.isArray(handInv) ? handInv : null; PA.handMemo = {};
+      PA.lockOk = Array.isArray(lockKv); PA.lock = (PA.lockOk && lockKv[0] && lockKv[0].v && lockKv[0].v.items) || (PA.lockOk ? {} : null);   /* 読めない時は null＝書けない扱いにしない（GAS 側が書く前に止める） */
       PA.reqOk = Array.isArray(reqKv); PA.reqKeys = (reqKv && reqKv[0] && reqKv[0].v && reqKv[0].v.keys) || {}; PA.reqList = [];
       PA.frontOk = frontKv !== null; PA.front = (frontKv && frontKv[0] && frontKv[0].v) || {}; PA.front.keys = PA.front.keys || {}; PA.front.skus = PA.front.skus || {};
       const sheet = (sheetKv && sheetKv[0] && sheetKv[0].v && sheetKv[0].v.items) || {};
@@ -44581,7 +44587,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       /* ★2026-11-04 本人「フロントの商品でも、利益は調整できるようにして」：値段を逆算できる行（出品中・仕入れ・手取り率・為替がある・リクエスト用でない）は、提案が無くても入力欄を出す（初めは今の値段）。
          書くのは打って☑した行だけ・本人が「書き込む」を押した時だけ（売れた記録が無い行の手取り率は国の平均） */
       const canEd = paCanEdit(e);
-      const sugV = PA.edit[e.key] != null ? PA.edit[e.key] : (e.sug != null ? e.sug : (canEd ? e.price : null));
+      const lk = paLockOf(e), sugV = lk ? null : (PA.edit[e.key] != null ? PA.edit[e.key] : (e.sug != null ? e.sug : (canEd ? e.price : null)));
       const pS = sugV != null ? e.profitAt(sugV) : null;
       const chg = (sugV != null && e.price) ? Math.round((sugV / e.price - 1) * 100) : null;
       const img = e.img ? (/^https?:/.test(e.img) ? e.img : IMG_CDN + e.img) + '_tn' : '';
@@ -44590,7 +44596,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <td>${(e.sug != null || canEd) && !e.blocked ? `<input type="checkbox" class="pa-ck" data-k="${esc(e.key)}"${PA.sel.has(e.key) ? ' checked' : ''}${e.sug == null ? ' title="提案の値段は無い行＝値段か利益を打ってから☑"' : ''}>` : (e.blocked ? '<span title="この値段はこのカタログ（国）では Shopee が断る＝右の「移す」「消す」で" style="font-size:11px">🚫</span>' : '')}</td>
         <td style="white-space:nowrap;color:${c[2]};font-weight:700;font-size:11px">${c[1]}<div style="margin-top:3px">${e.front ? '<span style="display:inline-block;background:#e6f4ea;color:#1e8e3e;border:1px solid #81c995;border-radius:8px;padding:0 6px;font-size:10.5px">🟢 フロント</span> ' : ''}${e.frontRule ? '<span class="smd-dim" style="font-size:11px;font-weight:400" title="親SKU が POKECA_FRONT_／OPCG_FRONT_ のカタログ＝トレカのフロント（1カード1出品）。印ではなく決まりでフロントにしているので、ここでは外せません">トレカ（親SKU）</span>' : `<button class="smd-btn pa-front" data-k="${esc(e.key)}" style="font-size:11px;padding:0 6px;font-weight:400${!e.front && e.frontCand ? ';border-color:#1e8e3e;color:#1e8e3e' : ''}" title="${e.front ? 'フロントの印を外す（同じ明細SKUの明細は全国まとめて外れます）' : 'フロントにする＝値上げ候補に出さず、下限1個¥250で見る（同じ明細SKUの明細は全国まとめて）'}">${e.front ? 'フロントを外す' : (e.frontCand ? '🟢 フロントにする（候補）' : 'フロントにする')}</button>`} <button class="smd-btn pa-req" data-k="${esc(e.key)}" style="font-size:11px;padding:0 6px;font-weight:400" title="Request page 経由で作った1回限りの出品＝値付けの見直しと在庫の自動の戻しから外す（印は国＋出品ごと）">📮 リクエスト品</button>${''/* ★2026-10-25 本人「手元の在庫はデタラメです」＝在庫台帳の「在庫保管中」の数は実物と合わない。手元の目安の表示は外した（04 の依頼） */}${e.fromList ? '<div class="smd-dim" style="font-size:11px;font-weight:400;margin-top:2px">直近200日 売れていない</div>' : ''}${(() => { const lim = paFrontCfg().candCost; if (e.front && e.cost != null && e.cost > lim && paFrontHand(e)) return '<div class="smd-dim" style="font-size:11px;font-weight:400;margin-top:2px" title="本人 2026-11-04「フロントは独断と偏見で選ぶ場合もある」＝手で付けたフロントは、仕入れが ¥' + lim.toLocaleString() + ' を超えていてもフロントの基準（¥250〜700）で見る。自動で選ぶ所（🤖・候補）は ¥' + lim.toLocaleString() + '以下のまま">仕入れ ' + paYen(e.cost) + '・¥' + lim.toLocaleString() + '超（本人が選んだフロント）</div>'; return (e.front && e.cost != null && e.cost > lim) ? '<div style="font-size:11px;color:#c5221f;font-weight:700;margin-top:2px" title="フロントかバックかは明細（容量・色・版）ごとの仕入れで決める（本人 10/25）。この明細の仕入れがフロントの線を超えている＝値付けの基準（10/25 確定）ではフロント以外＝相場で粗利¥1,500以上（仕入れ¥3,000超は仕入れの50%以上）。印を外すかは人が決める">⚠ 仕入れ' + paYen(e.cost) + '＝¥' + lim.toLocaleString() + '超＝フロントではない（粗利¥1,500以上の線）</div>' : ''; })()}</div></td>
         <td><span style="background:${rg.color || '#888'};color:#fff;border-radius:4px;padding:0 5px;font-size:10.5px">${e.cc}</span></td>
-        <td style="width:200px;max-width:200px;min-width:150px" title="${esc(e.name + (e.vari ? ' ▸ ' + e.vari : ''))}">${img ? `<img src="${esc(img)}" loading="lazy" style="width:30px;height:30px;object-fit:cover;border-radius:4px;float:left;margin-right:6px" onerror="this.style.display='none'">` : ''}<a href="${hrefOk(url)}" target="_blank" rel="noopener" style="color:inherit;font-size:11.5px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(e.name)}</a>${e.vari ? `<div style="color:#5b3fd6;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;clear:both">▸ ${esc(e.vari)}</div>` : ''}</td>
+        <td style="width:200px;max-width:200px;min-width:150px" title="${esc(e.name + (e.vari ? ' ▸ ' + e.vari : ''))}">${img ? `<img src="${esc(img)}" loading="lazy" style="width:30px;height:30px;object-fit:cover;border-radius:4px;float:left;margin-right:6px" onerror="this.style.display='none'">` : ''}<a href="${hrefOk(url)}" target="_blank" rel="noopener" style="color:inherit;font-size:11.5px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(e.name)}</a>${e.vari ? `<div style="color:#5b3fd6;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;clear:both">▸ ${esc(e.vari)}</div>` : ''}${lk ? `<div style="clear:both;font-size:11px;font-weight:700;color:#b45309" title="${esc((lk.note || '') + '（' + (lk.at || '') + '）')}">🔒 本人の値段 ${esc(String(lk.p))}（見直さない）</div>` : ''}</td>
         <td style="text-align:right;white-space:nowrap"><b style="font-size:13.5px">${e.u30}</b><span style="font-size:11px;color:#6b7280">個</span><div class="smd-dim" style="font-size:11px">直近30日（前は月${Math.round(e.uPrev * 10) / 10}個）</div></td>
         <td style="text-align:right;white-space:nowrap"><b style="font-size:14px;color:${e.pNow == null ? '#6b7280' : e.pNow < 0 ? '#d93025' : (e.target != null && e.pNow < e.target) ? '#c25a00' : '#1a7f37'}">${paYen(e.pNow)}</b>${e.pNow != null && e.target != null ? `<div>${paMeetHtml(e, e.pNow)}</div>` : ''}<div class="smd-dim" style="font-size:11px">前に売れた時（実績） ${paYen(e.pMed)}（${e.nP}件）</div>${e.nB ? `<div class="smd-dim" style="font-size:11px" title="まとめ買いの注文の手取り率（入金額÷売れた時の値段の合計＝まとめ買いの割引・送料のまとめ払いを含む）で、今の値段とこの明細の仕入れから出した利益">まとめ買いで売れた時 ${paYen(e.pNowB)}（${e.nB}件）</div>` : ''}${e.front && e.nBO ? `<div style="font-size:11px;color:#1a7f37" title="この明細を含むまとめ買いの注文の利益（注文全体・入金×レート−仕入れの合計）の平均">一緒に買われた注文の利益 平均 ${paYen(e.bOrdAvg)}（${e.nBO}件）</div>` : ''}</td>
         <td style="text-align:right;white-space:nowrap"><b style="font-size:13.5px;color:#374151">${paYen(e.target)}</b>${e.target != null && e.cost != null ? `<div class="smd-dim" style="font-size:11px">${e.front ? 'フロント（¥250以上）' : (e.cost > PA_LINE_HICOST ? '仕入れの半分' : '最低 ¥1,500')}</div><div class="smd-dim" style="font-size:11px">仕入れ ${paYen(e.cost)}${e.costFrom === 'llog' ? '（🤖の目安）' : ''}</div>` : ''}</td>

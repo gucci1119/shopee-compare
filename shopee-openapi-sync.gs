@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0130';
+var SRC_VER = '20261106-0300';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2789,7 +2789,30 @@ function avFailList_(j, what) {
   var fl = ((j && j.response) || {}).failure_list || [];
   if (fl.length) throw new Error(what + 'を変えられませんでした（明細ごとの断り ' + fl.length + '件）: ' + fl.slice(0, 3).map(function (f) { return (f.model_id || '') + ' ' + String(f.failed_reason || f.reason || ''); }).join(' / ').slice(0, 200));
 }
+/* ★2026-11-06 事業本部（本人の値段の印）：本人が決めた値段（ゼルダ BR R$326・たまごっち Plus Color の6色など）を、値付けの見直し・まとめての値直し・🤖 が上書きしないための控え。
+   app_kv price_lock = { items: { "item_id|model_id": { p: 値段, cc, at, by, note（本人の言葉） } } }。値段を書く2つの関数（updatePrice_・updatePriceList_）が書く前に見て、
+   控えと違う値段なら、その明細は書かずに飛ばす（返事の lockSkipped に「本人の値段」として残す）。控えと同じ値段は書いてよい。
+   控えを読めない時は値段を書かない（印があるか分からないまま上書きしない）。1回の実行で1回だけ読む */
+var PRICE_LOCK_ = null;
+function priceLock_() {
+  if (PRICE_LOCK_) return PRICE_LOCK_;
+  var r;
+  try { r = sbSelect_('app_kv', 'select=v&k=eq.price_lock'); }
+  catch (e) { throw new Error('本人の値段の控え（price_lock）を読めなかったので、値段は書いていません: ' + String((e && e.message) || e).slice(0, 80)); }
+  PRICE_LOCK_ = ((r && r[0] && r[0].v) || {}).items || {};
+  return PRICE_LOCK_;
+}
+function priceLockSplit_(itemId, list) {   /* list=[{model_id, price}] → {keep, skip} */
+  var L = priceLock_(), keep = [], skip = [];
+  (list || []).forEach(function (x) {
+    var k = String(parseInt(itemId, 10)) + '|' + String(parseInt(x.model_id, 10) || 0), lk = L[k];
+    if (lk && lk.p != null && Math.abs(Number(lk.p) - parseFloat(x.price)) > 0.005) skip.push({ model_id: parseInt(x.model_id, 10) || 0, want: parseFloat(x.price), lock: Number(lk.p), at: lk.at || '', note: '本人の値段' });
+    else keep.push(x);
+  });
+  return { keep: keep, skip: skip };
+}
 function updatePrice_(shopId, itemId, modelId, price) {
+  { var sp0 = priceLockSplit_(itemId, [{ model_id: modelId, price: price }]); if (sp0.skip.length) return { lockSkipped: sp0.skip, note: '本人の値段（' + sp0.skip[0].lock + '）なので書いていません' }; }
   var body = { item_id: parseInt(itemId, 10), price_list: [{ model_id: parseInt(modelId, 10) || 0, original_price: parseFloat(price) }] };
   var j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body);
   /* ★2026-11-05 洗い出し6（03 営業部）：明細ごとに断られたのに「変えた」と値段の記録を書いていた＝見積もりと出品の額がずれる。断られた時は記録を書かない（投げない＝呼び出し元の流れはそのまま・ポータルの口は ok:false で返す） */
@@ -2897,6 +2920,9 @@ function getAttributeTree_(shopId, catId, lang) {
 }
 // ★価格を複数モデルまとめて更新（update_price price_list）。list=[{model_id,price}]（バリエ無しはmodel_id:0）
 function updatePriceList_(shopId, itemId, list) {
+  var spL = priceLockSplit_(itemId, list || []);
+  if (spL.skip.length && !spL.keep.length) return { updated: 0, lockSkipped: spL.skip, note: '本人の値段の明細なので書いていません（' + spL.skip.length + '件）' };
+  list = spL.keep;
   var pl = (list || []).map(function (x) { return { model_id: parseInt(x.model_id, 10) || 0, original_price: parseFloat(x.price) }; }).filter(function (x) { return !isNaN(x.original_price); });
   if (!pl.length) throw new Error('価格リストが空');
   var body = { item_id: parseInt(itemId, 10), price_list: pl }, j, promo = null;
@@ -2920,7 +2946,7 @@ function updatePriceList_(shopId, itemId, list) {
   var fl = ((j && j.response) || {}).failure_list || [];
   if (fl.length) throw new Error('一部の明細を変えられませんでした（' + fl.length + '/' + pl.length + '）: ' + fl.slice(0, 3).map(function (f) { return (f.model_id || '') + ' ' + String(f.failed_reason || f.reason || ''); }).join(' / ').slice(0, 200));
   priceLogPush_(shopId, itemId, pl.map(function (x) { return { m: x.model_id, p: x.original_price }; }), pl.length + '明細' + (promo ? '・販促を外して書いた' : ''));
-  return { updated: pl.length, response: (j && j.response) || j, promo: promo };
+  return { updated: pl.length, response: (j && j.response) || j, promo: promo, lockSkipped: spL.skip.length ? spL.skip : undefined };
 }
 /* 価格を書く前に販促から外す（get_item_promotion で今入っている販促を読む）。戻り＝{bundleOut:[id], discountOut:[id], other:[種類], bundleBack:[], bundleBackErr:[]} */
 /* 品物がまだその販促に入っているか（true/false）。読めなければ null */
