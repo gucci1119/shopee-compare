@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-1950';
+var SRC_VER = '20261106-2010';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -8853,8 +8853,10 @@ function baSoftOnlyName_(a) { return /ソフトのみ|カセットのみ|カー�
    落とすのは写真の中身が cartridge の時だけで、UMD だけの写真は disc と答えられて通っていた（推測）。PSP は disc だけの写真も ng:cartonly にする。
    他の機種（PS1〜PS4・Wii・WiiU・GC・Switch）に広げるかは、ケースの写っていない写真の数を見て事業本部が決める（それまでは PSP だけ）。
    出品済みは PSP だけ見直す（BA_RULE_HW_BUMP で機種ごとの版を1つ上げる＝全機種の見直しをやり直さない） */
-var BA_CASE_DISC_NG = { psp: 1 };
-var BA_RULE_HW_BUMP = { psp: 1 };
+/* ★2026-11-05 20時 事業本部の決め：ディスクの機種全部に広げる（ディスクだけで合格していたのは PSP 8・サターン 6・Wii 5・PS2 3・PS1/PS4/WiiU 各1＝少ない・本人の「UMDだけで出品されてる」と同じ型を先に止める）。
+   GC は 9/20 の決め（箱付き・汚くてよい）のまま入れない。題名が「ディスクのみ／ソフトのみ」の物は今まで通り（後回し）。出品済みは広げた機種だけ見直す（機種ごとの版を1つ上げる） */
+var BA_CASE_DISC_NG = { psp: 1, ps1: 1, ps2: 1, ps3: 1, ps4: 1, wii: 1, wiiu: 1, ss: 1 };
+var BA_RULE_HW_BUMP = { psp: 1, ps1: 1, ps2: 1, ps3: 1, ps4: 1, wii: 1, wiiu: 1, ss: 1 };
 function baRuleVerFor_(hw) { return BA_RULE_VER + (BA_RULE_HW_BUMP[String(hw || '')] || 0); }
 function baBoxedName_(a) { var n = String((a && a.name) || ''); return /箱(付|あり|有|・?説|取説|説明書)|箱説|完品|外箱/.test(n) && !/箱(なし|無し|無)|ソフトのみ|カセットのみ/.test(n); }
 function baCondRank_(x, hw) { var c = String((x && x.cond) || ''); if (/未使用|新品/.test(c)) return -1; var worn = /状態が悪い|傷や?汚れあり/.test(c) && !/やや/.test(c), some = /やや/.test(c), clean = /なし/.test(c); if (BA_PAPER_HW[String(hw || '')]) return worn ? 0 : (some ? 1 : (clean ? 2 : 3)); return clean ? 0 : (some ? 1 : (worn ? 2 : 3)); }
