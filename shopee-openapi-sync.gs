@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-1130';
+var SRC_VER = '20261106-1900';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -190,7 +190,20 @@ function ufBump_(n, tag) {
   var c = (n > 0 ? n : 1);
   _ufRun += c;
   if (tag) { var k = String(tag); _ufTag[k] = (_ufTag[k] || 0) + c; }
+  /* ★2026-11-05 事業本部「どの処理から呼んだか」：今の内訳は「何を読んだか」だけで、出品の表を読む 1,777回の出どころ（18か所）が分からなかった。
+     同じ入れ物に「by:処理名」でも数える（貯め方・書き出しは今のまま）。処理名＝ウェブの口なら SB_CALLER（web:口の名前）、トリガーなら一番外の関数名。
+     uf_status の top からは外し、topBy に出す（ポータルの接続枠の表示は top だけを使う） */
+  try { var _bk = 'by:' + ufEntryName_(); _ufTag[_bk] = (_ufTag[_bk] || 0) + c; } catch (eBy) {}
   ufSpillMaybe_();
+}
+var _ufEntryCache = '';
+function ufEntryName_() {
+  if (SB_CALLER) return String(SB_CALLER);
+  if (_ufEntryCache) return _ufEntryCache;   /* トリガーの1回の実行の中では一番外の関数は変わらない */
+  var nm = '';
+  try { var st = String((new Error()).stack || '').split('\n'); for (var i = st.length - 1; i >= 0; i--) { var m = st[i].match(/at\s+([A-Za-z0-9_$]+)\s*\(/); if (m && !/^(ufEntryName_|ufBump_)$/.test(m[1])) { nm = m[1]; break; } } } catch (e) {}
+  _ufEntryCache = nm || 'trig';
+  return _ufEntryCache;
 }
 /* ★2026-09-27 3台目の数え漏れの真因。数えた回数は実行の【最後に】まとめて書く作りで、
    6分の上限で殺された実行は finally も走らない＝その回に使った通信が1回も記録されない。
@@ -1903,11 +1916,13 @@ function doGetInner_(e) {
            ★2026-09-21 上位12件で切っていたため、self 2,844 のうち 516回（18%）が
            「どれに入るか分からない」まま残り、【出品に回せる枠の上限】を数字で言えなかった。
            種類はたかだか数十なので全部返す（上限40）。 */
-        var tg = st.tag || {}, top = Object.keys(tg).map(function (k) { return { k: k, n: tg[k] }; })
+        var tg = st.tag || {}, top = Object.keys(tg).filter(function (k) { return k.indexOf('by:') !== 0; }).map(function (k) { return { k: k, n: tg[k] }; })
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);
+        var topBy = Object.keys(tg).filter(function (k) { return k.indexOf('by:') === 0; }).map(function (k) { return { k: k.slice(3), n: tg[k] }; })
+          .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);   /* ★2026-11-05 どの処理から呼んだか（ufBump_ の by:） */
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, src: SRC_VER, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, aiSpend: aiSpendLoad_() };
+        ufo = { ok: true, src: SRC_VER, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, topBy: topBy, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
