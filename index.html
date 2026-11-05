@@ -10466,12 +10466,16 @@
     const padX = 22, padY = 10, gap = 6, h = Math.round(size * 1.0) + padY * 2 + 6; let y = 36;
     lines.forEach(t => { const w = g.measureText(t).width, x = (S - w) / 2; g.fillStyle = '#f44336'; g.fillRect(x - padX, y, w + padX * 2, h); g.fillStyle = '#fff'; g.fillText(t, x, y + padY + 2); y += h + gap; });
     const top = y + 24;
-    if (srcUrl) {
-      try {
-        const im = await fetchImgBytes(srcUrl); const bmp = await createImageBitmap(new Blob([im.bytes], { type: im.mime || 'image/jpeg' }));
-        const maxW = S - 80, maxH = S - top - 30, k = Math.min(maxW / bmp.width, maxH / bmp.height, 1.6), w = Math.round(bmp.width * k), hh = Math.round(bmp.height * k);
-        g.drawImage(bmp, Math.round((S - w) / 2), Math.round(top + (maxH - hh) / 2), w, hh);
-      } catch (e) { g.fillStyle = '#64748b'; g.font = 'bold 40px Arial, sans-serif'; const t = '(photo will be sent in chat)', w = g.measureText(t).width; g.fillText(t, (S - w) / 2, top + 200); }
+    /* ★2026-11-05 事業本部の決め（本人「写真ないよ／その文字だけしかない」・BR R261105BR3DH）：仕入れ先の写真が無い・取れない時は、帯だけの画像を作らずに止める（明細も足さない）。
+       前は写真が空なら帯の字だけ、取れなければ「(photo will be sent in chat)」の文字で上げていた */
+    if (!String(srcUrl || '').trim()) throw new Error('仕入れ先の写真がありません（写真の URL が空です）。明細は足していません');
+    {
+      let bmp = null;
+      try { const im = await fetchImgBytes(srcUrl); bmp = await createImageBitmap(new Blob([im.bytes], { type: im.mime || 'image/jpeg' })); }
+      catch (e) { throw new Error('仕入れ先の写真を取れませんでした（' + String((e && e.message) || e).slice(0, 80) + '）。明細は足していません'); }
+      if (!bmp || !(bmp.width > 20 && bmp.height > 20)) throw new Error('仕入れ先の写真が小さすぎます・読めません。明細は足していません');
+      const maxW = S - 80, maxH = S - top - 30, k = Math.min(maxW / bmp.width, maxH / bmp.height, 1.6), w = Math.round(bmp.width * k), hh = Math.round(bmp.height * k);
+      g.drawImage(bmp, Math.round((S - w) / 2), Math.round(top + (maxH - hh) / 2), w, hh);
     }
     return uploadImgToStorage(cv.toDataURL('image/jpeg', 0.9), 'req');
   }
@@ -10763,6 +10767,8 @@
     try { return await pcQuoteAddReq0(); } finally { pcQuote.addBusy = false; if (btn) btn.disabled = false; pcRateGate(); }
   }
   async function pcQuoteAddReq0() {
+    /* ★2026-11-05 03 営業部（本人「明細たすの遅すぎますね」）：手順ごとの秒数を操作ログに残す（どこが遅いかを数えて言えるように） */
+    const _T0 = Date.now(), _TS = [], _mk = (l) => { _TS.push(l + ' ' + ((Date.now() - _T0) / 1000).toFixed(1) + '秒'); try { window.__reqT = _TS.slice(); } catch (_) {} };
     const L = pcQuote.last, msg = document.getElementById('pc-q-msg'); if (!L) { msg.textContent = '先に仕入額を入れてください'; return; }
     if (pcRateIsDefault()) { msg.textContent = '⛔ 為替を読めず既定のレートで計算した値段なので、Request page に足していません。為替を読み直してから押してください'; return; }   /* ★2026-11-05 03 営業部：既定のレートの値段で足さない（仕入れ予定の 🛒・&auto=1 もここを通る） */
     if (!L.buyer) { msg.textContent = '相手のユーザー名を入れてください（明細の写真の Reserved for に入れます）'; return; }
@@ -10789,7 +10795,7 @@
     let pick = cand[0] || null; const madeNew = false;
     const reqList = async () => { const out = []; for (const x of all.slice(0, 8)) { const st = await pcReqStats(x.c); const ps = x.ms.map(m => Number(m.price) || 0).filter(v => v > 0); out.push(x.c.item_id + '（' + (x.c.status === 1 ? '公開' : '非公開') + '・明細' + x.ms.length + '・' + (ps.length ? Math.min.apply(null, ps) + '〜' + Math.max.apply(null, ps) : '値段なし') + '・sold ' + (st ? st.sale : '?') + '・いいね ' + (st ? st.likes : '?') + '）'); } return out.join(' ／ '); };
     if (!pick) { const ls = await reqList(); msg.textContent = '⚠ ' + L.cc + ' に入る Request page がありません（' + (all.length ? '明細100個で満杯か、値段の差が ' + lim + '倍を超える' : '1つもありません') + '）。新しいカタログは作りません。事業本部に知らせてください。' + (ls ? ' この国の Request page：' + ls : ''); return; }
-    try { await pcReqReady(pick.c, msg); } catch (eR) { const ls = await reqList(); msg.textContent = '❌ ' + String((eR && eR.message) || eR).slice(0, 200) + '（足していません）' + (ls ? ' この国の Request page：' + ls : ''); return; }
+    _mk('一覧と入れ先'); try { await pcReqReady(pick.c, msg); } catch (eR) { const ls = await reqList(); msg.textContent = '❌ ' + String((eR && eR.message) || eR).slice(0, 200) + '（足していません）' + (ls ? ' この国の Request page：' + ls : ''); return; }
     const nmHead = String(L.ref || pcQuote.ref || '').trim() || String(L.buyer);   /* ★2026-11-05 本人「明細をバイヤー名じゃなくて、参照番号にしたら？」「利益管理表との照合も必要」＝先頭は参照番号（SKU の REQ_ の後ろと同じ）。番号が無い時だけユーザー名。お客さんの名前は写真の Reserved for にだけ */
     const nm = (() => { const f = (nmHead + ' ' + (L.title || pcQuote.q || '')).replace(/\s+/g, ' ').trim(); if (f.length <= 30) return f;
       /* ★2026-11-05 レビュー (4)-8・03-22（本人「明細名いつもおかしい」＝Keller さん「…Pokem」）：30字に収める時、語の途中で切らない。
@@ -10805,17 +10811,17 @@
     if (pick.ms.some(m => String(m.n || '').trim() === nm)) { msg.textContent = '⚠ 同じ名前の明細がもうあります: ' + nm; return; }
     if (pick.ms.some(sameRef)) { msg.textContent = '⚠ 同じ参照番号の明細がもうあります: ' + _rf; return; }
     /* ★2026-10-24 レビュー：DB の明細一覧は反映が遅れる＝成功の直後にもう一度押すと同じ明細が2つ入る。足す直前に Shopee の今の明細で確かめる */
-    if (!madeNew) { try { const gm0 = await gasCall({ action: 'get_models', shop_id: pick.c.shop_id, item_id: pick.c.item_id }, 60000); const live = ((gm0 || {}).data || {}).models; if (!Array.isArray(live)) throw new Error(String((gm0 && gm0.error) || '明細の一覧が返りませんでした').slice(0, 80)); if (live.some(m => String(m.name || '').trim() === nm)) { msg.textContent = '⚠ 同じ名前の明細が Shopee にもうあります（足し済み）: ' + nm; return; } if (live.some(sameRef)) { msg.textContent = '⚠ 同じ参照番号の明細が Shopee にもうあります（足し済み）: ' + _rf; return; } if (live.length >= 100) { msg.textContent = '⚠ 入れ先が100明細で満杯になっていました。もう一度押すと別のページを探します'; return; } } catch (eG) { msg.textContent = '⚠ Shopee の今の明細を確かめられなかったので足していません（' + String((eG && eG.message) || eG).slice(0, 80) + '）。少し待ってもう一度押してください'; return; } }   /* ★2026-10-24 価格計算レビュー6：読めない時に重複の確かめを黙って飛ばしていた */
+    _mk('予約・公開の確かめ'); if (!madeNew) { try { const gm0 = await gasCall({ action: 'get_models', shop_id: pick.c.shop_id, item_id: pick.c.item_id }, 60000); const live = ((gm0 || {}).data || {}).models; if (!Array.isArray(live)) throw new Error(String((gm0 && gm0.error) || '明細の一覧が返りませんでした').slice(0, 80)); if (live.some(m => String(m.name || '').trim() === nm)) { msg.textContent = '⚠ 同じ名前の明細が Shopee にもうあります（足し済み）: ' + nm; return; } if (live.some(sameRef)) { msg.textContent = '⚠ 同じ参照番号の明細が Shopee にもうあります（足し済み）: ' + _rf; return; } if (live.length >= 100) { msg.textContent = '⚠ 入れ先が100明細で満杯になっていました。もう一度押すと別のページを探します'; return; } } catch (eG) { msg.textContent = '⚠ Shopee の今の明細を確かめられなかったので足していません（' + String((eG && eG.message) || eG).slice(0, 80) + '）。少し待ってもう一度押してください'; return; } }   /* ★2026-10-24 価格計算レビュー6：読めない時に重複の確かめを黙って飛ばしていた */
     /* ★2026-10-24 確認ダイアログはやめる（本人の決め：確認は削除だけ・10/3）。押した瞬間に下の文言が変わる */
     const btn = document.getElementById('pc-q-addreq'); btn.disabled = true; msg.textContent = '追加しています…（1分ほど）';
     try {
       const kv = 'reqadd_' + L.cc + '_' + pick.c.item_id + '_' + Date.now().toString(36);
       const d = pcQuote.deal || { price: (window._pcCtx || {}).cost, site: '手入力' };
       msg.textContent = '「Reserved for ' + L.buyer + '」の画像を作っています…';
-      let rImg = ''; try { rImg = await pcReservedImage(L.buyer, d.img || ''); } catch (eI) { rImg = ''; }
+      _mk('今の明細'); let rImg = ''; rImg = await pcReservedImage(L.buyer, d.img || '');   /* ★11/5 写真が無い・取れない時はここで止まる（理由はそのまま SR・WA へ） */
       if (!rImg) throw new Error('「Reserved for」の画像を作れませんでした（書き込みキー sbSecret・画像の置き場 listing-imgs を確かめてください）');
       msg.textContent = '追加しています…（1分ほど）';
-      await sbUpsert('app_kv', [{ k: kv, v: { items: [{ option: nm, price: price, stock: 1, sku: ('REQ_' + (L.ref || L.buyer)).slice(0, 40), image: madeNew ? '' : rImg }] }, updated_at: new Date().toISOString() }]);
+      _mk('写真'); await sbUpsert('app_kv', [{ k: kv, v: { items: [{ option: nm, price: price, stock: 1, sku: ('REQ_' + (L.ref || L.buyer)).slice(0, 40), image: madeNew ? '' : rImg }] }, updated_at: new Date().toISOString() }]);
       const res = await gasSerial(() => gasCall({ action: 'add_variations_bulk', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, kv: kv }, 300000));
       if (!res || res.ok === false || !(Number(res.added) > 0)) throw new Error((res && (res.error || JSON.stringify(res).slice(0, 120))) || '返事がありません');
       pcQuote.verifyNote = String((res && res.verifyNote) || '');   /* ★2026-11-05 Shopee の返事は断り文だったが明細は入っていた（GAS が読み直して確かめた） */
@@ -10831,9 +10837,9 @@
         if (!ir || ir.ok === false || ir.failed) throw new Error('写真を付けられませんでした: ' + String((ir && (ir.error || JSON.stringify(ir))) || '').slice(0, 100));
       }
       /* 仕入れ目安を残す（依頼品の仕入値＝見積もりに使った中古の値段） */
-      try { await sbUpsert('app_kv', [{ k: 'req_quote_' + L.cc + '_' + pick.c.item_id + '_' + Date.now().toString(36), v: { at: new Date().toISOString(), ref: L.ref, sku: 'REQ_' + (L.ref || L.buyer), cc: L.cc, item_id: pick.c.item_id, option: nm, price, pp: L.ppL, pp_cur: (L.cc === 'MY' || L.cc === 'VN') ? 'JPY' : L.ISO, pp_jpy: Math.ceil(L.ppJ || 0), iso: L.ISO, plan: L.plan, buyer: L.buyer, title: L.title, cost: Math.round(Number(d.eff || d.price)), src: d.url || '', site: d.site || '' }, updated_at: new Date().toISOString() }]); } catch (_) {}
+      _mk('明細を足す'); try { await sbUpsert('app_kv', [{ k: 'req_quote_' + L.cc + '_' + pick.c.item_id + '_' + Date.now().toString(36), v: { at: new Date().toISOString(), ref: L.ref, sku: 'REQ_' + (L.ref || L.buyer), cc: L.cc, item_id: pick.c.item_id, option: nm, price, pp: L.ppL, pp_cur: (L.cc === 'MY' || L.cc === 'VN') ? 'JPY' : L.ISO, pp_jpy: Math.ceil(L.ppJ || 0), iso: L.ISO, plan: L.plan, buyer: L.buyer, title: L.title, cost: Math.round(Number(d.eff || d.price)), src: d.url || '', site: d.site || '' }, updated_at: new Date().toISOString() }]); } catch (_) {}
       const v2 = await pcReqReady(pick.c, msg, true);   /* ★2026-11-05 公開中・予約出品10日を Shopee から読み直して確かめる */
-      let mImg = ''; try { const gm9 = await gasCall({ action: 'get_models', shop_id: pick.c.shop_id, item_id: pick.c.item_id }, 60000); const m9 = (((gm9 || {}).data || {}).models || []).find(m => String(m.name || '').trim() === nm); mImg = (m9 && m9.img) || ''; } catch (_) {}
+      _mk('予約・公開の読み直し'); let mImg = ''; try { const gm9 = await gasCall({ action: 'get_models', shop_id: pick.c.shop_id, item_id: pick.c.item_id }, 60000); const m9 = (((gm9 || {}).data || {}).models || []).find(m => String(m.name || '').trim() === nm); mImg = (m9 && m9.img) || ''; } catch (_) {}
       pcQuote.req = { itemId: String(pick.c.item_id), modelName: nm, modelImg: mImg || rImg || '', preDays: v2.r.pre ? v2.r.dts : 0, listed: v2.r.st === 'NORMAL', madeNew: false, rid: pcQuote.ref || L.ref || '' };   /* quote-card-spec 19.6 */
       if (!v2.ok) throw new Error('足した後の読み直しで ' + v2.why + '（明細は足してあります。Seller Center で確かめてください）');
       const rg = regionByCc(L.cc) || {}; const link = 'https://' + (rg.buyer || 'shopee.com.br') + '/product/' + pick.c.shop_id + '/' + pick.c.item_id;   /* ★2026-10-24 レビュー：host はセラー用（seller.shopee…）＝お客さんは開けない→買い手用の buyer */
@@ -10845,8 +10851,8 @@
         + (madeNew ? '<br><b style="color:#b45309">🆕 新しい Request page を作りました（非公開）。お客さんが買えるように公開してください →</b> <button type="button" class="smd-btn" id="pc-q-reqpub" style="font-size:11px;padding:2px 9px">▶ 公開する</button>' : '');
       if (madeNew) { const pb2 = document.getElementById('pc-q-reqpub'); if (pb2) pb2.onclick = () => { pb2.disabled = true; pb2.textContent = '⏳ 公開しています…'; gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, unlist: 0 }, 60000).then(ur => { if (ur && ur.ok === false) throw new Error(ur.error || ''); pb2.textContent = '✅ 公開しました'; }).catch(eP => { pb2.disabled = false; pb2.textContent = '❌ 公開できませんでした（もう一度）'; try { toast('公開できませんでした: ' + String((eP && eP.message) || eP).slice(0, 80)); } catch (_) {} }); }; }
       try { refreshOneListing(L.cc, pick.c.item_id, pick.c.shop_id); } catch (_) {}
-      try { logAct('出品', '依頼品をRequest pageへ', nm, L.cc + ' ' + price + (L.ppL ? '＋PayPal ' + L.ppL : '')); } catch (_) {}
-    } catch (e) { msg.textContent = '❌ 足せませんでした: ' + String((e && e.message) || e).slice(0, 120) + '（Shopee の画面で確かめてから、もう一度押すか手で足してください）'; }
+      try { _mk('明細の写真の読み直し'); logAct('出品', '依頼品をRequest pageへ', nm, L.cc + ' ' + price + (L.ppL ? '＋PayPal ' + L.ppL : '') + ' ⏱ ' + _TS.join('・')); } catch (_) {}
+    } catch (e) { msg.textContent = '❌ 足せませんでした: ' + String((e && e.message) || e).slice(0, 120) + '（Shopee の画面で確かめてから、もう一度押すか手で足してください）'; try { _mk('止まった'); logAct('出品', '依頼品をRequest pageへ（足せなかった）', nm, L.cc + ' ' + String((e && e.message) || e).slice(0, 80) + ' ⏱ ' + _TS.join('・')); } catch (_) {} }
     finally { btn.disabled = false; }
   }
   /* ★2026-10-25 05：見積もりの仕入れ候補にも仕入れ上限（仕入れ検索と同じ srcCapOf＝受取−1,500・¥3,000超は受取÷1.5）。
