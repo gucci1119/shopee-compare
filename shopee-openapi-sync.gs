@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-1940';
+var SRC_VER = '20261106-1950';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5249,6 +5249,17 @@ function mandatoryAttrFill_(shopId, catId, list) {
   });
   return { list: list, added: added, names: names };
 }
+/* ★2026-11-05 本人「中古なのに状態が『新品』の3,727件、これだけ一旦直して」：作る道（🤖・カタログの複製・フロント・Request page・ポータル）は全部ここを通る。
+   複製は元のカタログの状態を写すので、元が新品だと中古の品も新品で広がっていた。→ 題名に中古の印があれば必ず USED、新品の印だけがあれば NEW、どちらも無ければ渡された値（無ければ USED）。
+   「New Super Mario」のような題名の new は新品の印にしない */
+var BA_COND_USED_RE = /\[\s*used\s*\]|\bused\b|\busad[oa]s?\b|中古|二手|\bpre-?owned\b|\bsecond\s*hand\b|đã qua sử dụng|มือสอง|\bbekas\b/i;
+var BA_COND_NEW_RE = /新品|未開封|未使用|\bbrand\s*new\b|\bfactory\s*sealed\b|\bsealed\b|\blacrad[oa]\b|全新/i;
+function baCondFor_(name, given) {
+  var n = String(name || ''), g = String(given || '').toUpperCase();
+  if (BA_COND_USED_RE.test(n)) return 'USED';
+  if (BA_COND_NEW_RE.test(n)) return 'NEW';
+  return (g === 'NEW' || g === 'USED') ? g : 'USED';
+}
 function addItem_(body) {
   var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
   /* ★2026-10-24 全体レビュー（出品管理 #24）：VN は 909,090 VND を超えると出品ごと非公開になる（2026-10-09 Shopee 通知）。明細の追加（3613）と同じ確かめを新規作成にも */
@@ -5286,7 +5297,7 @@ function addItem_(body) {
     item_name: shopNameFit_(shopId, body.item_name),
     category_id: categoryId,
     brand: { brand_id: body.brand_id != null ? parseInt(body.brand_id, 10) : 0 },
-    condition: body.condition || 'USED',
+    condition: baCondFor_(body.item_name, body.condition),
     item_status: body.publish ? 'NORMAL' : 'UNLIST',
     seller_stock: [{ stock: parseInt(body.stock != null ? body.stock : 1, 10) }],
     image: { image_id_list: imgIds },
