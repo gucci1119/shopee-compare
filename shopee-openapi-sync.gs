@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-1100';
+var SRC_VER = '20261106-1130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -5211,7 +5211,12 @@ function addItem_(body) {
   /* ★2026-11-05 01 商品部（本人「出品取り下げを調べて対応」）：ポケモンなどカードのカタログが「Toys & Games > Others（101409）」で作られ、
      Shopee が「Dice, Board & Card Games（101400）」へ直すよう降格を付けていた（BR 7件・TH 2店舗目・13店で55件）。複製は元のカテゴリを写すので、作る所1か所で直す。
      101400 は BR で brand_id 0（NoBrand）が要る（01 が update_item で確かめた）。必須の属性（Bluetooth を含むか＝No）は断られた時に mandatoryAttrFill_ が No で埋める */
-  if (categoryId === 101409 && /\b(trading\s*cards?|cards?|tcg|ccg)\b|カード|ポケカ/i.test(String(body.item_name || '')) && !/memory\s*card|sd\s*card|amiibo/i.test(String(body.item_name || ''))) { categoryId = 101400; body.brand_id = 0; }
+  if (categoryId === 101409 && /\b(trading\s*cards?|cards?|tcg|ccg)\b|カード|ポケカ/i.test(String(body.item_name || '')) && !/memory\s*card|sd\s*card|amiibo/i.test(String(body.item_name || ''))) {
+    categoryId = 101400; body.brand_id = 0;
+    /* ★2026-11-05 01：BR の 101400 は「Contains Bluetooth, Wireless and/or RF Technology」（106664）が要り、付けずに送ると10件断られ、No（20997）を付けると全部通った＝BR は最初から付ける */
+    var _ccCard = ''; try { _ccCard = baCcOfShop_(shopId); } catch (eCc) {}
+    if (_ccCard === 'BR' && !(body.attribute_list || []).some(function (a) { return Number(a.attribute_id) === 106664; })) { body.attribute_list = (body.attribute_list || []).concat([{ attribute_id: 106664, attribute_value_list: [{ value_id: 20997 }] }]); body._cardBr = true; }
+  }
   // Locker系を除いた使える全チャネルを有効化（高額品がLockerのmax price上限で弾かれるのを防ぐ＝手動出品と同じ）
   var logisticInfo = body.logistic_id ? [{ logistic_id: parseInt(body.logistic_id, 10), enabled: true }] : resolveLogisticInfo_(shopId);
   var _imgCache = {}; // 同一URLは1回だけアップロード（カタログ×バリエで重複するURLの二重アップを防ぐ＝枠/時間節約）
@@ -5277,7 +5282,9 @@ function addItem_(body) {
       j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload);
     } else {
     if (!/attribute/i.test(msgA)) throw eAdd;
-    var fillA = mandatoryAttrFill_(shopId, categoryId, payload.attribute_list || body.src_attrs || []);
+    var _baseA = payload.attribute_list || body.src_attrs || [];
+    if (body._cardBr && (body.src_attrs || []).length) { var _hv = {}; _baseA = _baseA.slice(); _baseA.forEach(function (a) { _hv[a.attribute_id] = 1; }); body.src_attrs.forEach(function (a) { if (!_hv[a.attribute_id]) _baseA.push(a); }); }   /* BR のカードで最初に1つ付けた時も、元のカタログの属性を土台に残す */
+    var fillA = mandatoryAttrFill_(shopId, categoryId, _baseA);
     /* ★2026-09-23 本人「twはなぜでない？」＝TW の Switch は元のカタログに「成人向け=No」が【既に入っている】ので
        「足す物が無い」と諦めていた。最初の送信では属性を1つも送っていないのだから、元の属性があればそれを付けて送り直す */
     if (!fillA.added && !(fillA.list && fillA.list.length)) throw eAdd;
