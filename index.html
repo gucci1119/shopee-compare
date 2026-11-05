@@ -24781,6 +24781,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           ti: '同じ追跡番号が別の取引に入っています：' + t,
           sb: rs.map(r => (r.item_id || '') + ' ' + (r.supplier_order || '') + ' ' + String(r.name || r.name_supplier || '').slice(0, 30)).join(' ／ ') + '　→ 取引画面の送り状番号と照らしてください', itemId: rs[0].item_id }); });
     } catch (_) {}
+    /* ③どの経路で番号が変わっても気づく：入庫待ちの行の番号を控え（app_kv trk_seen＝{item_id:番号}）と比べ、入っていた番号が別の番号に変わったら trk_replaced に足す（自動処理の担当の PC だけが書く） */
+    try {
+      if (settings.sbSecret && typeof pcIsOwner === 'function' && pcIsOwner()) {
+        const sk = await sbGetAll('app_kv', 'select=v&k=eq.trk_seen').catch(() => undefined);
+        if (sk !== undefined) {
+          const seen = (sk && sk[0] && sk[0].v) || {}, next = {}, add = {}; let diff = false;
+          rows.filter(r => !r.__auto).forEach(r => { const t = String(r.tracking_no || '').replace(/\D/g, ''); if (t.length < 10) return; next[r.item_id] = t; const o = seen[r.item_id]; if (o !== t) diff = true; if (o && o !== t) add[o] = { new: t, item_id: r.item_id, at: new Date().toISOString(), why: '入っていた番号が変わった（ポータルが見た）', by: 'ポータル' }; });
+          if (Object.keys(seen).length !== Object.keys(next).length) diff = true;
+          if (Object.keys(add).length) { const tr0 = await sbGetAll('app_kv', 'select=v&k=eq.trk_replaced').catch(() => undefined); if (tr0 !== undefined) { const cur = (tr0 && tr0[0] && tr0[0].v) || {}; Object.keys(add).forEach(o => { if (!cur[o] || cur[o].new !== add[o].new) cur[o] = add[o]; }); await sbUpsert('app_kv', [{ k: 'trk_replaced', v: cur, updated_at: new Date().toISOString() }], 'k'); } }
+          if (diff) await sbUpsert('app_kv', [{ k: 'trk_seen', v: next, updated_at: new Date().toISOString() }], 'k');
+        }
+      }
+    } catch (_) {}
     try {
       const tr = await sbGetAll('app_kv', 'select=v&k=eq.trk_replaced');
       const v = (tr && tr[0] && tr[0].v) || {}; const since = new Date(Date.now() - 14 * 86400000).toISOString();
