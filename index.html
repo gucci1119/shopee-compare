@@ -25151,7 +25151,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-05', items: [
-      '🏆 <b>💹 損益・入出金に「🏆 商品別の利益」を足しました</b>（本人「どの商品でどれくらい今までに稼いだか」「そのランキングとかも知りたい」）：商品ごとに今までの粗利を足して多い順に並べます（売れた数・売上・粗利の合計・1点あたり・ROI・最後に売れた日・国の内訳）。期間（全期間・今年・今月・直近30日・直近90日）、まとめ方（商品・明細・カタログ・機種）、並べ替え（粗利の合計・売れた数・1点あたり・赤字の大きい順）、国・店・フロント・🤖・リクエスト品で絞れます。数字は💹利益明細と同じ計算で、今月を選ぶと利益明細の今月の粗利と合うかが出ます。各行に「売り値 − 差し引き（手数料・送料など）− 仕入れ値 ＝ 粗利」を1点あたりで並べ、行を押すと仕入れ値・売り値の幅、回転（直近30日・90日・売れる間隔・在庫と売り切れまでの日数）、横展開（出している国・出していない国で今の値段ならいくら・粗利いくら）、注文ごとの一覧（💹利益明細へ飛べる）が開きます。印は「粗利/点 × 回転」の4つの箱（線は仮で中央値・04 が決める）。表示だけで、値段の書き込みや出品はしません。',
+      '🏆 <b>💹 損益・入出金に「🏆 商品別の利益」を足しました</b>（本人「どの商品でどれくらい今までに稼いだか」「そのランキングとかも知りたい」）：商品ごとに今までの粗利を足して多い順に並べます（売れた数・売上・粗利の合計・1点あたり・ROI・最後に売れた日・国の内訳）。期間（全期間・今年・今月・直近30日・直近90日）、まとめ方（商品・明細・カタログ・機種）、並べ替え（粗利の合計・売れた数・1点あたり・赤字の大きい順）、国・店・フロント・🤖・リクエスト品で絞れます。数字は💹利益明細と同じ計算で、今月を選ぶと利益明細の今月の粗利と合うかが出ます。各行に「売り値 − 差し引き（手数料・送料など）− 仕入れ値 ＝ 粗利」を1点あたりで並べ、行を押すと仕入れ値・売り値の幅、回転（直近30日・90日・売れる間隔・在庫と売り切れまでの日数）、横展開（出している国・出していない国で今の値段ならいくら・粗利いくら）、注文ごとの一覧（💹利益明細へ飛べる）が開きます。印は「粗利/点 × 回転」の4つの箱で、線は 04 経営企画部が決めた物（厚い＝1点の仕入れ¥1,000以下は粗利¥250以上・¥3,000以下は¥1,500以上・¥3,000超は仕入れの50%以上／よく売れる＝直近90日に2点以上・出したばかりの物は90日分に直す）。本人が値段を決めた物・10/20 以降に値段を変えた物・全期間で1点だけ・在庫0 は印を付けて候補から外し、リクエスト品は箱に入れません。表示だけで、値段の書き込みや出品はしません。',
       '🔑 <b>値付けの見直しで、本人が押した時は止めずに確かめの窓を出すようにしました</b>（本人「なんで？」）：「選んだ明細の価格を書き込む」（2明細以上）と「上限超えの削除」は、OK の印が無いと止まっていました。本人が画面で押した時は「N明細の値段を書きます」の窓が出て、件数 N を打つと書きます（その時に OK の印も残します）。部署の会話から押した時は今までどおり止めます。',
       '🎁 <b>注文の行に、まとめ買い割引が効いたかと割り引かれた額を出しました</b>（本人「まとめ買い割引が効いているかもここでみたい」）：品物の下に「🎁まとめ買い −10%・−₱805（≈¥…）」と出ます。効いていない注文には何も出ません。額は Shopee の入金明細の品ごとの割引の合計で、同じ注文で品ごとに率が違う時は「−10%/−5%」と2つ出ます。GAS の入金明細の同期（毎時）のたびに埋まっていきます。あわせて、入金明細を取り直す処理が手数料の内訳の一部（売れた時の値段など）を消していたのを直しました。',
       '🛡 <b>在庫・値段を model_id で書く口に、明細名か SKU を添えられるようにしました</b>（03 営業部）：添えると GAS が今の明細と照らし、明細を消して番号がずれていたら書きません。',
@@ -53553,6 +53553,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     try {
       await prEnsureMaps();
       PR.orders = await sbGetAll('orders', 'select=cc,sn,order_id,total,items,order_date,order_ts,buyer,status,tracking,tab,cancel_reason,shop_id&order=order_date.desc');
+      /* ★04 の線：10/20 以降に値段を変えた明細は「値段を変えた後の数がまだ無い」の印（12/4 まで）。GAS の「値段を書いた」（店|カタログ）と、ポータルの値付けの見直しの記録（国 品名30字▸明細: 前 → 後）。どちらも小さい（数十行） */
+      PR.chg = { items: new Set(), names: new Set(), ok: true };
+      try {
+        const [ga, pa] = await Promise.all([
+          sbGetAll('activity_log', 'select=target,detail&page=eq.GAS&action=like.*' + encodeURIComponent('値段を書いた') + '*&ts=gte.2026-10-19T15:00:00Z'),
+          sbGetAll('activity_log', 'select=detail&action=eq.' + encodeURIComponent('値付けの見直し(公式)') + '&ts=gte.2026-10-19T15:00:00Z'),
+        ]);
+        (ga || []).forEach(x => { let cc = ''; try { cc = (JSON.parse(x.detail || '{}') || {}).cc || ''; } catch (_) {} const it = String(x.target || '').split('|')[1]; if (cc && it) PR.chg.items.add(cc + ':' + it); });
+        (pa || []).forEach(x => String(x.detail || '').replace(/^.*?　/, '').split(' / ').forEach(seg => { const m = seg.match(/^([A-Z]{2}) (.+?): [\d.]+ → [\d.]+/); if (!m) return; const nv = m[2].split('▸'); PR.chg.names.add(m[1] + '|' + String(nv[0] || '').trim().slice(0, 30).toLowerCase() + '|' + String(nv[1] || '').trim().toLowerCase()); }));
+      } catch (_) { PR.chg.ok = false; }
       PR.at = Date.now();
       if (!state.accounts) { try { await loadAccounts(); } catch (_) {} }
     } finally { PR.loading = false; }
@@ -53567,6 +53577,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (PR.period === '90') return iso(Date.now() - 90 * 86400000);
     return '';
   }
+  /* ★04 経営企画部の線（2026-11-05・共有メモ「利益拡大部_商品別の利益の4つの箱の線」）。本人が値段を決めた物は値上げ・値下げの候補に出さない */
+  const PR_OWNER_PRICE = [{ cc: 'BR', re: /skyward\s*sword/i, why: '本人が値段を決めた（R$326・11/5）' }];
+  const PR_REF_UNTIL = '2026-12-04';
+  const prRefNow = () => Date.now() <= Date.parse(PR_REF_UNTIL + 'T23:59:59+09:00');   /* 30日の数・売り切れまでの日数は、バケーションの7日（10/28〜11/3）が入るので、この日までは「参考」 */
+  function prThick(r) { const uc = r.cost / r.n, per = r.gross / r.n; return uc <= 1000 ? per >= 250 : uc <= 3000 ? per >= 1500 : per >= uc * 0.5; }
   function prCompute() {
     const start = prPeriodStart();
     const now = Date.now(), d30 = new Date(now - 30 * 86400000).toISOString().slice(0, 10), d90 = new Date(now - 90 * 86400000).toISOString().slice(0, 10);
@@ -53593,15 +53608,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     (PR.orders || []).forEach(o => {
       if (o.tab === 200 || o.tab === 600) return;   /* 未払い・キャンセルは入れない（pfMonthGross と同じ） */
       const rg = regionByCc(o.cc); if (!rg) return;
-      const d = ordYmd(o);
-      if (start && d < start) return;
+      const d = ordYmd(o), inP = !start || d >= start;
       if (PR.cc && o.cc !== PR.cc) return;
       if (PR.shop) { const mn = isMain(o.shop_id); if (mn === null || (PR.shop === 'main') !== mn) return; }
       const di = pfDepInfo(o), dep = di ? di.amt : null, cost = pfCost(o);
-      if (dep == null) { tot.noDep++; return; }
-      if (cost == null) { tot.noCost++; return; }
-      const rate = ordRate(o) || 0, pp = pfPaypal(o), g = dep * rate + pp - cost, salesL = pfSales(o), sales = salesL * rate;
-      const ded = sales - dep * rate - pp;   /* 差し引き（手数料・送料など）＝売り値 − 入金 − PayPal差分 ⇒ 売り値 − 差し引き − 仕入れ ＝ 粗利 */
+      const known = dep != null && cost != null;   /* 入金か仕入れが分からない注文は粗利に入れない（件数だけ）。回転（売れた数）には入れる */
+      if (inP && dep == null) tot.noDep++; else if (inP && cost == null) tot.noCost++;
+      const rate = ordRate(o) || 0, pp = known ? pfPaypal(o) : 0, g = known ? dep * rate + pp - cost : 0, salesL = pfSales(o), sales = salesL * rate;
+      const ded = known ? sales - dep * rate - pp : 0;   /* 差し引き（手数料・送料など）＝売り値 − 入金 − PayPal差分 ⇒ 売り値 − 差し引き − 仕入れ ＝ 粗利 */
       const its = (o.items || []).length ? o.items : [{ name: '（品名なし）', qty: 1 }];
       const u = its.reduce((s, it) => s + (Number(it && it.qty) || 1), 0) || 1;
       let used = false;
@@ -53612,7 +53626,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const mi = mInfo.get(mk) || null, sku = (mi && mi.sku) || '';
         const req = /^REQ_/i.test(sku) || ORD_REQ_RE.test(nm + ' ' + vr);
         if (PR.req && !req) return;
-        if (PR.front && !(cost / u <= 1000)) return;   /* フロント＝1点の仕入れ ¥1,000 以下（記憶 front-or-back-per-variant-by-cost） */
+        if (PR.front && !(cost != null && cost / u <= 1000)) return;   /* フロント＝1点の仕入れ ¥1,000 以下（記憶 front-or-back-per-variant-by-cost） */
         if (PR.auto && !(_ordAuto && vr && _ordAuto.get(o.cc + '|' + vr.toLowerCase().trim()))) return;
         const hw = (skuHwsOf(sku + ' ' + nm + ' ' + vr)[0]) || '他';
         let key, label;
@@ -53621,33 +53635,50 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         else if (PR.group === 'hw') { key = 'hw:' + hw; label = hw; }
         else { key = prodKey(o.cc, it.item_id, it.model_id, nm, vr, sku); label = vr ? vr + ' ／ ' + nm : nm; }
         let gr = groups.get(key);
-        if (!gr) { gr = { key, label, n: 0, sales: 0, gross: 0, cost: 0, ded: 0, last: '', first: '', cc: {}, hw, cMin: Infinity, cMax: -Infinity, sMin: Infinity, sMax: -Infinity, loc: {}, n30: 0, n90: 0, dates: [], ords: [], mks: new Set() }; groups.set(key, gr); }
+        if (!gr) { gr = { key, label, n: 0, sales: 0, gross: 0, cost: 0, ded: 0, last: '', first: '', cc: {}, hw, cMin: Infinity, cMax: -Infinity, sMin: Infinity, sMax: -Infinity, loc: {}, n30: 0, n90: 0, nAll: 0, dates: [], ords: [], mks: new Set(), req: false, chg: false, owner: '' }; groups.set(key, gr); }
+        /* 回転・印は選んだ期間に関係なく数える（全期間・直近30日・直近90日） */
+        gr.nAll += q; if (d >= d30) gr.n30 += q; if (d >= d90) gr.n90 += q;
+        for (let k = 0; k < q; k++) gr.dates.push(d);
+        if (!gr.first || d < gr.first) gr.first = d;
+        if (req) gr.req = true;
+        if (PR.chg && (PR.chg.items.has(o.cc + ':' + it.item_id) || PR.chg.names.has(o.cc + '|' + nm.slice(0, 30).toLowerCase() + '|' + vr.toLowerCase()))) gr.chg = true;
+        if (!gr.owner) { const ow = PR_OWNER_PRICE.find(x => x.cc === o.cc && x.re.test(nm + ' ' + vr)); if (ow) gr.owner = ow.why; }
+        gr.mks.add(mk);
+        if (!inP || !known) return;
         const uc = cost * sh / q, us = sales * sh / q, ul = salesL * sh / q;
         gr.n += q; gr.sales += sales * sh; gr.gross += g * sh; gr.cost += cost * sh; gr.ded += ded * sh;
         gr.cMin = Math.min(gr.cMin, uc); gr.cMax = Math.max(gr.cMax, uc); gr.sMin = Math.min(gr.sMin, us); gr.sMax = Math.max(gr.sMax, us);
         const lc = gr.loc[o.cc] || (gr.loc[o.cc] = { sum: 0, n: 0 }); lc.sum += ul * q; lc.n += q;
-        if (d > gr.last) gr.last = d; if (!gr.first || d < gr.first) gr.first = d;
-        if (d >= d30) gr.n30 += q; if (d >= d90) gr.n90 += q;
-        for (let k = 0; k < q; k++) gr.dates.push(d);
+        if (d > gr.last) gr.last = d;
         if (gr.ords.length < 300) gr.ords.push({ d, cc: o.cc, sn: o.sn, q, sale: sales * sh, saleL: salesL * sh, cost: cost * sh, ded: ded * sh, g: g * sh });
-        gr.mks.add(mk);
         gr.cc[o.cc] = (gr.cc[o.cc] || 0) + g * sh;
         tot.gross += g * sh; tot.units += q; used = true;
       });
       if (used) tot.orders++;
     });
-    const rows = [...groups.values()];
+    const rows = [...groups.values()].filter(r => r.n > 0);
     /* 回転・在庫・横展開（出品の控えがある時だけ） */
     rows.forEach(r => {
       r.dates.sort(); r.gap = r.dates.length >= 2 ? (Date.parse(r.dates[r.dates.length - 1]) - Date.parse(r.dates[0])) / 86400000 / (r.dates.length - 1) : null;
       const inf = PR.group === 'prod' ? (listedBy.get(r.key) || []) : [...r.mks].map(k => mInfo.get(k)).filter(Boolean);
       r.listed = inf; r.stock = lstOk ? inf.reduce((s, x) => s + (x.stock || 0), 0) : null;
-      r.sellOut = (r.stock != null && r.n30 > 0) ? Math.round(r.stock / (r.n30 / 30)) : null;
+      r.sellOut = (r.stock != null && r.n90 > 0) ? Math.round(r.stock / (r.n90 / 83)) : null;   /* 04：90日の点数 ÷ 83日（バケーションの7日を引いた売れる日） */
+      /* 出してからの日数（出品の控えの作った日時＝カタログの日時。後から足した明細は古めに出る＝補正は小さめの側） */
+      const cts = inf.map(x => { const v = x.ct; if (v == null || v === '') return NaN; const n = Number(v); return isFinite(n) ? (n < 1e11 ? n * 1000 : n) : Date.parse(v); }).filter(x => isFinite(x));
+      r.ageDays = cts.length ? Math.max(1, Math.round((now - Math.min(...cts)) / 86400000)) : null;
     });
-    /* 4つの箱（仮の線＝全体の中央値・04 経営企画部が線を決めるまで）：粗利/点 × 直近90日に売れた数 */
-    const med = (a) => { const b = a.filter(x => isFinite(x)).sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : 0; };
-    const mPer = med(rows.map(r => r.gross / r.n)), mTurn = med(rows.map(r => r.n90));
-    rows.forEach(r => { const hi = (r.gross / r.n) >= mPer, fast = r.n90 > mTurn; r.box = fast && hi ? 'A' : fast ? 'B' : hi ? 'C' : 'D'; });
+    /* 4つの箱（04 経営企画部の線）：厚い＝1点の仕入れで分ける（¥1,000以下は粗利¥250以上・¥3,000以下は¥1,500以上・¥3,000超は仕入れの50%以上）× よく売れる＝直近90日に2点以上
+       （出してから90日に満たない物は、出してからの日数で割って90日分に直す）。リクエスト品は箱に入れない。印の付いた物は箱には入れても候補から外す */
+    rows.forEach(r => {
+      r.n90adj = (r.ageDays != null && r.ageDays < 90) ? r.n90 * 90 / r.ageDays : r.n90;
+      r.box = r.req ? null : (r.n90adj >= 2 ? (prThick(r) ? 'A' : 'B') : (prThick(r) ? 'C' : 'D'));
+      r.flags = [];
+      if (r.owner) r.flags.push(r.owner);
+      if (r.chg && Date.now() <= Date.parse(PR_REF_UNTIL + 'T23:59:59+09:00')) r.flags.push('10/20 以降に値段を変えた（変えた後の数がまだ無い・12/4 まで）');
+      if (r.nAll <= 1) r.flags.push('全期間で1点だけ');
+      if (r.stock === 0) r.flags.push('在庫0');
+    });
+    const mPer = 0, mTurn = 2;
     const by = { gross: (a, b) => b.gross - a.gross, n: (a, b) => b.n - a.n || b.gross - a.gross, per: (a, b) => (b.gross / b.n) - (a.gross / a.n), loss: (a, b) => a.gross - b.gross }[PR.sort] || ((a, b) => b.gross - a.gross);
     rows.sort(by);
     return { rows, tot, pidOk: !!pidOk, lstOk, mPer, mTurn };
@@ -53679,7 +53710,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div><b>仕入れ値</b>：1点あたり ${yen(avgC)}（いちばん安い ${yen(r.cMin)}〜いちばん高い ${yen(r.cMax)}）・合計 ${yen(r.cost)}</div>
       <div><b>売り値</b>：1点あたり ${yen(avgS)}（${esc(locTxt)}）（いちばん安い ${yen(r.sMin)}〜いちばん高い ${yen(r.sMax)}）</div>
       <div><b>差し引き</b>（手数料・送料など）：1点あたり ${yen(avgD)}　⇒　売り値 ${yen(avgS)} − 差し引き ${yen(avgD)} − 仕入れ値 ${yen(avgC)} ＝ <b>粗利 ${yen(r.gross / r.n)}</b>/点</div>
-      <div style="margin-top:4px"><b>回転</b>：直近30日 ${r.n30}点・直近90日 ${r.n90}点・売れる間隔の平均 ${r.gap != null ? Math.round(r.gap) + '日' : '—（1回だけ）'}・初めて売れた日 ${esc(r.first)}・今の在庫 ${r.stock != null ? r.stock : '—'}${r.sellOut != null ? '・今のペースで約 ' + r.sellOut + '日で売り切れ' : ''}<br><span class="smd-dim" style="font-size:11px">「出してから最初に売れるまでの日数」は、明細を足した日の記録（出品ログ）を読む必要があるので、まだ出していません。</span></div>
+      <div style="margin-top:4px"><b>回転</b>：直近30日 ${r.n30}点${prRefNow() ? '（参考）' : ''}・直近90日 ${r.n90}点${r.ageDays != null && r.ageDays < 90 ? '（出して ' + r.ageDays + '日＝90日分に直すと ' + (Math.round(r.n90adj * 10) / 10) + '点）' : ''}・全期間 ${r.nAll}点・売れる間隔の平均 ${r.gap != null ? Math.round(r.gap) + '日' : '—（1回だけ）'}・初めて売れた日 ${esc(r.first)}・今の在庫 ${r.stock != null ? r.stock : '—'}${r.sellOut != null ? '・今のペース（90日の点数÷83日）で約 ' + r.sellOut + '日で売り切れ' + (prRefNow() ? '（参考）' : '') : ''}<br><span class="smd-dim" style="font-size:11px">「出してから最初に売れるまでの日数」は、明細を足した日の記録（出品ログ）を読む必要があるので、まだ出していません。</span></div>
       <div style="margin-top:4px"><b>横展開</b>：${side}</div>
       <div style="margin-top:4px"><b>値段の手がかり</b>：前に売れた時の値段 ${esc(locTxt) || '—'}${R.lstOk ? '（今の値段は上の「出している国」）' : ''}<br><span class="smd-dim" style="font-size:11px">値段を変えた前後の売れ方・閲覧とカートは、別の記録を読む必要があるので、まだ出していません。</span></div>
       <div style="margin-top:6px;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px"><thead><tr style="background:#eef1f4"><th style="padding:2px 6px;text-align:left">日付</th><th style="padding:2px 6px">国</th><th style="padding:2px 6px;text-align:right">数</th><th style="padding:2px 6px;text-align:right">売り値</th><th style="padding:2px 6px;text-align:right">差し引き</th><th style="padding:2px 6px;text-align:right">仕入れ値</th><th style="padding:2px 6px;text-align:right">粗利</th><th style="padding:2px 6px"></th></tr></thead><tbody>
@@ -53704,7 +53735,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }
     const shown = PR.more ? R.rows : R.rows.slice(0, 100);
     const ccChips = (o) => Object.keys(o).sort((a, b) => o[b] - o[a]).map(c => `<span style="display:inline-block;margin:1px 3px 1px 0;padding:0 5px;border-radius:4px;background:${(regionByCc(c) || {}).color || '#888'};color:#fff;font-size:10.5px">${c} ${yen(o[c])}</span>`).join('');
-    const boxChip = (b) => { const x = PR_BOX[b]; return x ? `<span title="${esc(x[1])}" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;border:1px solid ${x[2]};color:${x[2]};font-size:10.5px;white-space:nowrap">${x[0]} ${esc(x[1])}</span>` : ''; };
+    const boxChip = (r) => { const x = PR_BOX[r.box]; const fl = (r.flags || []).length ? `<span title="${esc(r.flags.join('／'))}" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#f1f3f5;color:#5a6b8c;font-size:10.5px;white-space:nowrap">候補から外す：${esc(r.flags.join('・'))}</span>` : ''; return (x ? `<span title="${esc(x[1])}" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;border:1px solid ${x[2]};color:${x[2]};font-size:10.5px;white-space:nowrap">${x[0]} ${esc(x[1])}</span>` : (r.req ? '<span style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#f1f3f5;color:#5a6b8c;font-size:10.5px">リクエスト品（箱に入れない）</span>' : '')) + fl; };
     const th = (t, al) => `<th style="text-align:${al || 'right'};padding:4px 6px;white-space:nowrap">${t}</th>`, td = (t, st) => `<td style="text-align:right;padding:4px 6px;white-space:nowrap;${st || ''}">${t}</td>`;
     body.innerHTML =
       `<div style="display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-bottom:8px">
@@ -53721,10 +53752,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       </div>
       <div style="font-size:13px;margin-bottom:6px">粗利の合計 <b style="font-size:15px;color:${R.tot.gross < 0 ? '#d93025' : '#1a7f37'}">${yen(R.tot.gross)}</b>（${R.tot.orders.toLocaleString()}注文・${R.tot.units.toLocaleString()}点・${R.rows.length.toLocaleString()}件）${chkTxt}<br>
         <span class="smd-dim" style="font-size:12px">粗利に入れていない注文：仕入れが分からない <b>${R.tot.noCost.toLocaleString()}</b>件・入金が分からない <b>${R.tot.noDep.toLocaleString()}</b>件（未払い・キャンセルは数えていません）。${PR.group === 'prod' ? (R.pidOk ? '商品は JAN→型番→SKU→名前の順で束ねています。' : '商品は SKU→名前で束ねています（JAN の台帳は出品の画面を開いた後に使います）。') : ''}</span></div>
-      <div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">印（4つの箱）＝粗利/点 × 直近90日に売れた数。線は仮で全体の中央値（粗利/点 ${yen(R.mPer)}・90日 ${R.mTurn}点）。線は 04 経営企画部が決めます。表示だけで、値段の書き込みや出品はしません。行を押すと中身が開きます。</div>
+      <div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">印（4つの箱・線は 04 経営企画部が決めた物）：<b>厚い</b>＝1点の仕入れ¥1,000以下は粗利¥250以上・¥3,000以下は¥1,500以上・¥3,000超は仕入れの50%以上／<b>よく売れる</b>＝直近90日に2点以上（国の合計・出してから90日に満たない物は90日分に直す）。リクエスト品は箱に入れません。本人が値段を決めた物・10/20 以降に値段を変えた物（12/4 まで）・全期間で1点だけ・在庫0 は、印を付けて候補から外します。${prRefNow() ? '30日の数と売り切れまでの日数は、バケーションの7日が入るので 12/4 までは参考です。' : ''}${PR.chg && !PR.chg.ok ? ' ⚠ 値段を変えた記録を読めなかったので、その印は出ていません。' : ''}表示だけで、値段の書き込みや出品はしません。行を押すと中身が開きます。</div>
       <div style="overflow-x:auto"><table class="pf-table" style="width:100%;border-collapse:collapse;font-size:12.5px">
-        <thead><tr style="background:#f6f7f9">${th('順位')}${th({ prod: '商品', model: '明細', item: 'カタログ', hw: '機種' }[PR.group] || '商品', 'left')}${th('売れた数<br><span style="font-weight:400;font-size:10.5px">30日/90日</span>')}${th('売り値/点')}${th('差し引き/点')}${th('仕入れ値/点')}${th('粗利/点')}${th('粗利の合計')}${th('ROI')}${th('最後に売れた日', 'left')}${th('国の内訳', 'left')}</tr></thead>
-        <tbody>${shown.map((r, i) => { const open = PR.open === r.key; return `<tr class="pr-row" data-key="${esc(r.key)}" style="border-top:1px solid #eee;cursor:pointer;${open ? 'background:#fff8f2' : ''}">${td(i + 1)}<td style="padding:4px 6px;max-width:380px">${boxChip(r.box)}${esc(r.label)}${PR.group !== 'hw' && r.hw !== '他' ? ` <span class="smd-dim" style="font-size:10.5px">${esc(r.hw)}</span>` : ''}</td>${td(r.n.toLocaleString() + '<br><span class="smd-dim" style="font-size:10.5px">' + r.n30 + '/' + r.n90 + '</span>')}${td(yen(r.sales / r.n))}${td(yen(r.ded / r.n))}${td(yen(r.cost / r.n))}${td(yen(r.gross / r.n), 'font-weight:700;color:' + (r.gross < 0 ? '#d93025' : '#1a7f37'))}${td(yen(r.gross), 'font-weight:700;color:' + (r.gross < 0 ? '#d93025' : '#1a7f37'))}${td(r.cost > 0 ? Math.round(r.gross / r.cost * 100) + '%' : '—')}<td style="padding:4px 6px;white-space:nowrap">${esc(r.last)}</td><td style="padding:4px 6px">${ccChips(r.cc)}</td></tr>${open ? `<tr><td></td><td colspan="10" style="padding:4px 6px 10px">${prDetailHtml(r, R, yen)}</td></tr>` : ''}`; }).join('')}</tbody></table></div>
+        <thead><tr style="background:#f6f7f9">${th('順位')}${th({ prod: '商品', model: '明細', item: 'カタログ', hw: '機種' }[PR.group] || '商品', 'left')}${th('売れた数<br><span style="font-weight:400;font-size:10.5px">30日' + (prRefNow() ? '（参考）' : '') + '/90日</span>')}${th('売り値/点')}${th('差し引き/点')}${th('仕入れ値/点')}${th('粗利/点')}${th('粗利の合計')}${th('ROI')}${th('最後に売れた日', 'left')}${th('国の内訳', 'left')}</tr></thead>
+        <tbody>${shown.map((r, i) => { const open = PR.open === r.key; return `<tr class="pr-row" data-key="${esc(r.key)}" style="border-top:1px solid #eee;cursor:pointer;${open ? 'background:#fff8f2' : ''}">${td(i + 1)}<td style="padding:4px 6px;max-width:380px">${boxChip(r)}${esc(r.label)}${PR.group !== 'hw' && r.hw !== '他' ? ` <span class="smd-dim" style="font-size:10.5px">${esc(r.hw)}</span>` : ''}</td>${td(r.n.toLocaleString() + '<br><span class="smd-dim" style="font-size:10.5px">' + r.n30 + '/' + r.n90 + '</span>')}${td(yen(r.sales / r.n))}${td(yen(r.ded / r.n))}${td(yen(r.cost / r.n))}${td(yen(r.gross / r.n), 'font-weight:700;color:' + (r.gross < 0 ? '#d93025' : '#1a7f37'))}${td(yen(r.gross), 'font-weight:700;color:' + (r.gross < 0 ? '#d93025' : '#1a7f37'))}${td(r.cost > 0 ? Math.round(r.gross / r.cost * 100) + '%' : '—')}<td style="padding:4px 6px;white-space:nowrap">${esc(r.last)}</td><td style="padding:4px 6px">${ccChips(r.cc)}</td></tr>${open ? `<tr><td></td><td colspan="10" style="padding:4px 6px 10px">${prDetailHtml(r, R, yen)}</td></tr>` : ''}`; }).join('')}</tbody></table></div>
       ${R.rows.length > 100 && !PR.more ? `<div style="margin-top:8px"><button class="pr-more" style="padding:5px 12px;border:1px solid #c7cdd6;border-radius:6px;background:#fff;cursor:pointer">残り ${(R.rows.length - 100).toLocaleString()}件も出す</button></div>` : ''}`;
     body.querySelectorAll('.pr-seg').forEach(b => b.addEventListener('click', () => { PR[b.dataset.k] = b.dataset.v; PR.more = false; PR.open = null; prSave(); renderProfitRank(); }));
     body.querySelectorAll('.pr-sel').forEach(el => el.addEventListener('change', () => { PR[el.dataset.k] = el.value; PR.more = false; PR.open = null; prSave(); renderProfitRank(); }));
