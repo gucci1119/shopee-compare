@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0330';
+var SRC_VER = '20261107-0500';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1196,10 +1196,11 @@ function doGetInner_(e) {
         var rfmax = Math.max(1, Math.min(8, parseInt(p.max, 10) || 3));
         var rfcats = sbSelectAll_('listings', 'select=item_id,shop_id,status,name,models&cc=eq.' + rfcc + '&or=(name.ilike.*Request%20page*,name.ilike.*Solicitar*)') || [];
         /* ★2026-11-07 18項目の13：足した先（item_id・shop_id）が分かっている時は、表に無くても（作ったばかり）そのページを最初に読む */
-        if (p.item_id && p.shop_id) { var rfI = String(p.item_id).replace(/\D/g, ''); rfcats = rfcats.filter(function (c) { return String(c.item_id) !== rfI; }); rfcats.unshift({ item_id: rfI, shop_id: String(p.shop_id).replace(/\D/g, ''), status: 0, name: '', models: [{ sku: 'req_' + rfL }] }); }
-        var rfL = rfref.toLowerCase();
+        var rfL = rfref.toLowerCase();   /* ★11/7 全体レビュー 高8：下の 'req_' + rfL より前に決める（前は req_undefined になり、足した先が後ろに回っていた） */
+        var rfI = '';
+        if (p.item_id && p.shop_id) { rfI = String(p.item_id).replace(/\D/g, ''); rfcats = rfcats.filter(function (c) { return String(c.item_id) !== rfI; }); rfcats.unshift({ item_id: rfI, shop_id: String(p.shop_id).replace(/\D/g, ''), status: 0, name: '', models: [{ sku: 'req_' + rfL }] }); }
         var rfHas = function (c) { return (c.models || []).some(function (m) { return m && (String(m.sku || '').toLowerCase() === ('req_' + rfL) || String(m.n || '').toLowerCase().indexOf(rfL) === 0); }); };
-        rfcats.sort(function (a, b) { return (rfHas(b) ? 1 : 0) - (rfHas(a) ? 1 : 0) || (a.status === 1 ? 0 : 1) - (b.status === 1 ? 0 : 1); });
+        rfcats.sort(function (a, b) { return (rfI && String(b.item_id) === rfI ? 1 : 0) - (rfI && String(a.item_id) === rfI ? 1 : 0) || (rfHas(b) ? 1 : 0) - (rfHas(a) ? 1 : 0) || (a.status === 1 ? 0 : 1) - (b.status === 1 ? 0 : 1); });   /* 足した先は並べ替えでも必ず最初 */
         var rfread = [], rfhit = null;
         for (var rfi = 0; rfi < rfcats.length && rfread.length < rfmax && !rfhit; rfi++) {
           var rc = rfcats[rfi]; rfread.push(String(rc.item_id));
@@ -1214,6 +1215,8 @@ function doGetInner_(e) {
         }
         rfout = rfhit ? Object.assign({ ok: true, found: true, cc: rfcc, ref: rfref, read: rfread, at: new Date().toISOString() }, rfhit)
                       : { ok: true, found: false, complete: rfread.length >= rfcats.length, cc: rfcc, ref: rfref, sku: rfsku, read: rfread, cats: rfcats.length, at: new Date().toISOString() };
+        /* ★11/7 全体レビュー 高4：その Request page にいま追加が動いている（reqadd_busy_）なら busy＝「まだ足している途中」。見つからなくても「入っていない」とは言わない */
+        if (!rfhit && rfI) { try { if (CacheService.getScriptCache().get('reqadd_busy_' + rfI)) { rfout.busy = true; rfout.complete = false; } } catch (eBz) {} }
       } catch (err) { rfout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(rfcb + '(' + JSON.stringify(rfout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -2098,7 +2101,8 @@ function doGetInner_(e) {
         if (String(ruit.sku || '') && String(ruit.sku) !== String(rutg.sku || '')) ruCh.push('SKU：' + (rutg.sku || '（空）') + ' → ' + ruit.sku);
         if (ruit.image || ruit.image_id) ruCh.push('写真：新しい Reserved の写真に替える');
         var ruCc = ''; try { ruCc = baCcOfShop_(rushop); } catch (eCc3) {}
-        var ruLim = ruCc === 'BR' ? 4 : 5, ruPs = rulive.filter(function (m) { return m !== rutg && !reqIsPlaceholder_(m); }).map(function (m) { return parseFloat(m.price) || 0; }).concat([parseFloat(ruit.price) || 0]).filter(function (v) { return v > 0; });
+        var ruLim = ruCc === 'BR' ? 4 : 5, ruPs = rulive.filter(function (m) { return m !== rutg; }).map(function (m) { return parseFloat(m.price) || 0; }).concat([parseFloat(ruit.price) || 0]).filter(function (v) { return v > 0; });
+        /* ★11/7 全体レビュー 中12：案内用の明細も Shopee は値段の差に数える（試しの req_add と同じ）＝前は数えず、試しは通って本番で断られていた */
         if (ruPs.length > 1 && Math.max.apply(null, ruPs) / Math.min.apply(null, ruPs) > ruLim) ruB.push('値段の差が ' + ruLim + '倍を超えます（' + Math.min.apply(null, ruPs) + '〜' + Math.max.apply(null, ruPs) + '）');
         if (ruCc === 'VN' && parseFloat(ruit.price) > 909090) ruB.push('VN の明細の上限 909,090 を超えます');
         if (String(p.dry || '') === '1' || ruB.length) {
@@ -2144,9 +2148,11 @@ function doGetInner_(e) {
           if (!(r0.pre && r0.dts === 10)) dF.push('予約出品10日にする（今 予約' + (r0.pre ? 'あり' : 'なし') + '・' + r0.dts + '日）');
           var dLive = (getModels_(rqshop, rqitem) || {}).models || [];
           var dRef = String(p.ref || '').trim().toLowerCase();
-          var dDup = rqitems.map(function (x) { return String(x.option || '').trim(); }).filter(function (n) { return dLive.some(function (m) { return String(m.name || '').trim() === n; }); })[0];
-          if (dDup) dB.push('同じ名前の明細がもうある（足し済み）: ' + dDup);
-          if (dRef && dLive.some(function (m) { var sk = String(m.sku || '').toLowerCase(); return sk === 'req_' + dRef || sk.indexOf('req_' + dRef + '-') === 0 || String(m.name || '').trim().split(' ')[0].toLowerCase() === dRef; })) dB.push('同じ参照番号の明細がもうある（足し済み）: ' + p.ref);
+          var dDupAll = rqitems.map(function (x) { return String(x.option || '').trim(); }).filter(function (n) { return dLive.some(function (m) { return String(m.name || '').trim() === n; }); }), dDup = dDupAll[0];
+          var dPart = !!dDup && rqitems.length > 1 && dDupAll.length < rqitems.length;   /* ★11/7 高7：まとめ買いの一部だけ入っている＝残りだけ足す（止めない） */
+          if (dPart) dN.push('まとめ買いのうち ' + dDupAll.length + '件はもう入っている＝入っていない ' + (rqitems.length - dDupAll.length) + '件だけ足す');
+          else if (dDup) dB.push('同じ名前の明細がもうある（足し済み）: ' + dDup);
+          if (dRef && !dPart && dLive.some(function (m) { var sk = String(m.sku || '').toLowerCase(); return sk === 'req_' + dRef || sk.indexOf('req_' + dRef + '-') === 0 || String(m.name || '').trim().split(' ')[0].toLowerCase() === dRef; })) dB.push('同じ参照番号の明細がもうある（足し済み）: ' + p.ref);
           if (dLive.length + rqitems.length > 100) dB.push('明細が100で満杯（今 ' + dLive.length + '・足すのは ' + rqitems.length + '）');
           var dTestOnly = dLive.length === 1 && (String(dLive[0].name || '').trim().toLowerCase() === 'test' || (String(p.newpage || '') === '1' && !/^REQ_/i.test(String(dLive[0].sku || ''))));   /* ★2026-11-07 18項目の4 */
           var dWithImg = dLive.filter(function (m) { return !!m.img; }).length, dNewImg = rqitems.filter(function (x) { return x.image || x.image_id; }).length;
@@ -2192,24 +2198,29 @@ function doGetInner_(e) {
           setVariationImage_(rqshop, rqitem, String(live[0].name || 'test'), cvUrl); fixed.push('仮の明細に表紙の写真'); rqMk('test に写真'); Utilities.sleep(1500);
         }
         var rqref = String(p.ref || '').trim(), rqrefL = rqref.toLowerCase();
-        var dupN = rqitems.map(function (x) { return String(x.option || '').trim(); }).filter(function (n) { return live.some(function (m) { return String(m.name || '').trim() === n; }); })[0];
+        var dupAll = rqitems.map(function (x) { return String(x.option || '').trim(); }).filter(function (n) { return live.some(function (m) { return String(m.name || '').trim() === n; }); }), dupN = dupAll[0], rqSkipped = 0;
+        /* ★11/7 全体レビュー 高7：まとめ買いで一部だけ入っている（前の回で残りが断られた）時は、入っていない分だけ足す＝押し直しで止まり続けない */
+        if (dupN && rqitems.length > 1 && dupAll.length < rqitems.length) { rqSkipped = dupAll.length; rqitems = rqitems.filter(function (x) { return dupAll.indexOf(String(x.option || '').trim()) < 0; }); dupN = ''; }
         if (dupN) throw new Error('同じ名前の明細が Shopee にもうあります（足し済み）: ' + dupN);
-        if (rqrefL && live.some(function (m) { var sk = String(m.sku || '').toLowerCase(); return sk === 'req_' + rqrefL || sk.indexOf('req_' + rqrefL + '-') === 0 || String(m.name || '').trim().split(' ')[0].toLowerCase() === rqrefL; })) throw new Error('同じ参照番号の明細が Shopee にもうあります（足し済み）: ' + rqref);
+        if (rqrefL && !rqSkipped && live.some(function (m) { var sk = String(m.sku || '').toLowerCase(); return sk === 'req_' + rqrefL || sk.indexOf('req_' + rqrefL + '-') === 0 || String(m.name || '').trim().split(' ')[0].toLowerCase() === rqrefL; })) throw new Error('同じ参照番号の明細が Shopee にもうあります（足し済み）: ' + rqref);
         if (live.length + rqitems.length > 100) throw new Error('入れ先が100明細で満杯です（今 ' + live.length + '・足すのは ' + rqitems.length + '）。もう一度押すと別のページを探します');
         /* ★2026-11-07 仮の明細（案内用・test）があれば、1件目はそれを書き換える（増やさない）。残りは今までどおり足す */
         var phM = live.filter(function (m) { return reqIsPlaceholder_(m) || (testOnly && m === live[0]); })[0] || null, ab, overwrote = '';
         if (phM && rqitems.length) {
           reqOverwriteModel_(rqshop, rqitem, phM.model_id, rqitems[0]); overwrote = '仮の明細「' + phM.name + '」を「' + String(rqitems[0].option || '') + '」に書き換えた'; rqMk('仮の明細を書き換え');
-          var rest = rqitems.slice(1);
-          ab = rest.length ? addVariationsBulk_(rqshop, rqitem, rest, null) : { ok: true, added: 0, models: [] };
+          var rest = rqitems.slice(1), restErr = '';
+          /* ★11/7 全体レビュー 高7：1件目は書き換え済み＝残りで断られても ok:false にしない（partial・入らなかった名前を返す） */
+          if (rest.length) { try { ab = addVariationsBulk_(rqshop, rqitem, rest, null); if (!ab || ab.ok === false) { restErr = String((ab && (ab.error || JSON.stringify(ab))) || '返事なし').slice(0, 200); ab = { ok: true, added: 0, models: [] }; } } catch (eRest) { restErr = String((eRest && eRest.message) || eRest).slice(0, 200); ab = { ok: true, added: 0, models: [] }; } }
+          else ab = { ok: true, added: 0, models: [] };
           ab.added = (Number(ab.added) || 0) + 1; ab.filledTest = true;
+          if (restErr) { ab.partial = true; ab.partialErr = restErr; ab.notAdded = rest.map(function (x) { return String(x.option || ''); }); }
         } else ab = addVariationsBulk_(rqshop, rqitem, rqitems, null);
         rqMk('明細を足す');
         try { sbDelete_('app_kv', 'k=eq.' + encodeURIComponent(String(p.kv || ''))); } catch (eD) {}
         if (!ab || ab.ok === false || !(Number(ab.added) > 0)) throw new Error('明細を足せませんでした: ' + String((ab && (ab.error || JSON.stringify(ab))) || '返事なし').slice(0, 200));
         var testDel = overwrote;
         /* ★2026-11-07 本人「最初から2つ作れば？」「その２つ目の明細は、次に書き換えられないといけない」：本物の明細が1つだけなら、末尾に案内用の明細（在庫0）を1つ足す（2つ以上なら足さない） */
-        try { Utilities.sleep(1500); var eg = reqEnsureGuide_(rqshop, rqitem, false); if (eg.added) testDel = [testDel, '末尾に案内用の明細「' + REQ_GUIDE_NAME + '」（在庫0）を足した'].filter(String).join('・'); }
+        try { Utilities.sleep(1500); var eg = reqEnsureGuide_(rqshop, rqitem, false); if (eg.promo && ((eg.promo.backErr || []).length || eg.promo.discountOut)) testDel = [testDel, '案内用の明細を足す時に販促を外した（' + (eg.promo.text || ('値下げを外したまま ' + (eg.promo.discountOut || 0) + '・戻せなかった ' + (eg.promo.backErr || []).length)) + '）'].filter(String).join('・'); if (eg.added) testDel = [testDel, '末尾に案内用の明細「' + REQ_GUIDE_NAME + '」（在庫0）を足した'].filter(String).join('・'); }
         catch (eEg) { testDel = [testDel, '案内用の明細を足せなかった（' + String((eEg && eEg.message) || eEg).slice(0, 80) + '）'].filter(String).join('・'); }
         rqMk('案内用の明細');
         if (pubErr) { try { unlistItem_(rqshop, rqitem, false); fixed.push('公開（足した後）'); pubErr = ''; } catch (ePub2) { pubErr = String((ePub2 && ePub2.message) || ePub2).slice(0, 200); } rqMk('公開をもう一度'); }
@@ -2220,7 +2231,8 @@ function doGetInner_(e) {
         var bIn = null; if (p.promo === '1') { try { var gpj = callShop_(rqshop, '/api/v2/product/get_item_promotion', { item_id_list: String(rqitem) }, 'get'); var gpi = (((gpj || {}).response || {}).success_list || [])[0]; if (gpi) bIn = (gpi.promotion || []).some(function (x) { return /bundle/i.test(String(x.promotion_type || '')) && /ongoing/i.test(String(x.promotion_staging || 'ongoing')); }); } catch (eP) {} rqMk('まとめ買い割引を読む'); }
         var why = rdErr ? rdErr : [r1.pre && r1.dts === 10 ? '' : '予約出品10日になっていない（予約' + (r1.pre ? 'あり' : 'なし') + '・' + r1.dts + '日）', r1.st === 'NORMAL' ? '' : '公開になっていない（' + r1.st + '）', got.every(function (g) { return g.model_id; }) ? '' : '足した明細が読み直しで見つからない（' + got.filter(function (g) { return !g.model_id; }).map(function (g) { return g.name; }).join('・') + '）'].filter(Boolean).join('・');
         if (r1.st !== 'NORMAL' && pubErr) why = [why, '公開できなかった理由: ' + pubErr].filter(String).join('・');
-        rqout = { ok: true, act: 'req_add', catalog_name: r1.name || r0.name, added: Number(ab.added) || 0, verifyNote: [ab.verifyNote || '', testDel].filter(String).join('／'), promo: ab.promo || null, fixed: fixed, testOnly: testOnly, testDel: testDel, pubErr: pubErr, pre: r1.pre, dts: r1.dts, st: r1.st, verified: !why, why: why, models: got, bundleIn: bIn, t: rqTS, src: SRC_VER };
+        if (ab.partial) why = [why, '残りの明細 ' + ab.notAdded.length + '件を足せなかった（' + String(ab.partialErr || '').slice(0, 120) + '）＝もう一度押すと入っていない分だけ足します'].filter(String).join('・');
+        rqout = { ok: true, act: 'req_add', partial: !!ab.partial, notAdded: ab.notAdded || [], skipped: rqSkipped, catalog_name: r1.name || r0.name, added: Number(ab.added) || 0, verifyNote: [ab.verifyNote || '', testDel].filter(String).join('／'), promo: ab.promo || null, fixed: fixed, testOnly: testOnly, testDel: testDel, pubErr: pubErr, pre: r1.pre, dts: r1.dts, st: r1.st, verified: !why, why: why, models: got, bundleIn: bIn, t: rqTS, src: SRC_VER };
         /* 操作ログはポータルが書く（秒数 t も入れる） */
       } catch (err) { rqout = { ok: false, act: 'req_add', error: String((err && err.message) || err), t: rqTS, src: SRC_VER }; }
       finally { try { if (rqHeld) CacheService.getScriptCache().remove(rqHeld); } catch (eC) {} }   /* 自分が置いた印だけ外す */
@@ -4481,8 +4493,12 @@ function shiftPendCheck_(onlyKey, maxN) {
     try { for (var f = 0; f < sk.length; f += 50) updateModelSku_(sid, iid, sk.slice(f, f + 50)); } catch (e3) { err.push('SKU ' + String(e3.message || e3).slice(0, 80)); }
     if (isNew && rec.moves && rec.moves.length && !rec.llogDone) { try { priceLockRekey_(iid, rec.moves, rec.gone || []); } catch (ePl) { err.push('本人の値段の印 ' + String(ePl).slice(0, 60)); } try { baLlogRekey_(sid, iid, rec.moves, rec.gone || [], rec.nameOf || {}); rec.llogDone = true; } catch (e4) { err.push('控え ' + String(e4).slice(0, 60)); } }
     /* ★2026-11-04 全体レビュー 2回目 新2-1：後から効いた時、ポータルの JAN・型番・状態（product_ids）と在庫0固定（keep0m）は誰も付け替えていなかった＝結果を src:'pending' で残す（ポータルの担当の PC が読んで1回だけ当て、appliedAt を付ける） */
-    if (isNew && !rec.resultDone && rec.moves && (rec.moves.length || (rec.gone || []).length)) { if (shiftResultPut_(sid, iid, { at: Date.now(), rid: String(rec.rid || ''), src: 'pending', ok: true, moves: rec.moves, gone: rec.gone || [] })) rec.resultDone = true; }
+    if (isNew) rec.everNew = true;   /* 次の回は並びがもう新しい＝isNew でなくても結果の控えは書き直す */
+    if ((isNew || rec.everNew) && !rec.resultDone && rec.moves && (rec.moves.length || (rec.gone || []).length)) { if (shiftResultPut_(sid, iid, { at: Date.now(), rid: String(rec.rid || ''), src: 'pending', ok: true, moves: rec.moves, gone: rec.gone || [] })) rec.resultDone = true; }
     out.fixed += pr.length + st.length + sk.length; out.notes.push(key + (isNew ? ' 後から効いていた' : ' 途中まで') + '：値段' + pr.length + '・在庫' + st.length + '・SKU' + sk.length + (err.length ? '（失敗 ' + err.join(' / ') + '）' : ''));
+    /* ★11/7 全体レビュー 中2：結果の控え（JAN・在庫0固定の付け替えの元）を書けていない時は消さない＝次の回にもう一度書く */
+    var resNeed = (isNew || rec.everNew) && rec.moves && (rec.moves.length || (rec.gone || []).length) && !rec.resultDone;
+    if (resNeed) { err.push('結果の控えを書けなかった（次の回にもう一度）'); ch = true; }
     if (!err.length) { delete it[key]; ch = true; }
     try { var lg = baKvFresh_('shift_pending_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), key: key, isNew: isNew, price: pr.length, stock: st.length, sku: sk.length, err: err.slice(0, 3) }); lg.items = a.slice(0, 60); baKvSet_('shift_pending_log', lg); } catch (eL) {}
   });
@@ -4653,7 +4669,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
     for (var smR = 0; smR < k; smR++) if (keep[smR] !== smR) _mvR.push([String(bySlot[keep[smR]].model_id), String(bySlot[smR].model_id)]);
     for (var sgR = k; sgR < n; sgR++) _gnR.push(String(bySlot[sgR].model_id));
     for (var snR = 0; snR < n; snR++) if (bySlot[snR]) _nmR[String(bySlot[snR].model_id)] = String((optList[snR] || {}).option || '');
-    try { priceLockRekey_(itemId, _mvR, _gnR); } catch (ePl2) {}
+    try { priceLockRekey_(itemId, _mvR, _gnR); } catch (ePl2) { fixErr.push('本人の値段の印の付け替え ' + String((ePl2 && ePl2.message) || ePl2).slice(0, 80)); }   /* ★11/7 全体レビュー 中17：黙って捨てない（印が古い番号に残ると隣の作品の値段が「本人の値段」として飛ばされる） */
     _llRk = baLlogRekey_(shopId, itemId, _mvR, _gnR, _nmR);
   } catch (eRk0) { _llRk = { error: String((eRk0 && eRk0.message) || eRk0).slice(0, 200) }; }
 
@@ -4809,10 +4825,17 @@ function reqOverwriteModel_(shopId, itemId, modelId, x) {
   var ol = (t.option_list || []).map(function (o, k) { return k === ix ? tierOpt_(o, nm, imgId || null) : tierOpt_(o); });
   var hasImg = ol.some(function (o) { return o.image && o.image.image_id; }), allImg = ol.every(function (o) { return o.image && o.image.image_id; });
   if (hasImg && !allImg) throw new Error('書き換えると写真の無い明細が混ざります（1段目は全部写真あり／全部なし）');
-  updateTierVariation_(shopId, itemId, [{ name: t.name, option_list: ol }], (r.model || []).map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; }));
+  /* ★11/7 全体レビュー 高2：前は 名前・写真 → 値段 の順＝販促中のページで値段を断られると名前だけ変わって止まり、押し直すと「足し済み」になっていた。
+     値段を先に（updatePriceList_＝まとめ買い割引は外して書いて戻す）→ 名前・写真 → 在庫。名前の後で止まったら名前を元に戻す */
+  var tm = (r.model || []).map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
+  if (x.price != null) updatePriceList_(shopId, itemId, [{ model_id: modelId, price: parseFloat(x.price) }]);   /* 断られたら投げる＝名前はまだ変わっていない */
+  updateTierVariation_(shopId, itemId, [{ name: t.name, option_list: ol }], tm);
   Utilities.sleep(1200);
-  if (x.price != null) { var pr = updatePrice_(shopId, itemId, modelId, parseFloat(x.price)); if ((((pr || {}).failure_list) || []).length) throw new Error('値段を書けませんでした: ' + JSON.stringify(pr.failure_list).slice(0, 120)); }
-  if (x.stock != null) { var sr = updateStock_(shopId, itemId, modelId, parseInt(x.stock, 10) || 0); if ((((sr || {}).failure_list) || []).length) throw new Error('在庫を書けませんでした: ' + JSON.stringify(sr.failure_list).slice(0, 120)); }
+  if (x.stock != null) {
+    var sErr = ''; try { var sr = updateStock_(shopId, itemId, modelId, parseInt(x.stock, 10) || 0); if ((((sr || {}).failure_list) || []).length) sErr = JSON.stringify(sr.failure_list).slice(0, 120); } catch (eS) { sErr = String((eS && eS.message) || eS).slice(0, 120); }
+    if (sErr) { var back = ''; try { updateTierVariation_(shopId, itemId, [{ name: t.name, option_list: (t.option_list || []).map(function (o) { return tierOpt_(o); }) }], tm); back = '名前は元に戻しました'; } catch (eB) { back = '名前を元に戻せませんでした（' + String((eB && eB.message) || eB).slice(0, 60) + '）'; }
+      throw new Error('在庫を書けませんでした: ' + sErr + '（' + back + '）'); }
+  }
   callShop_(shopId, '/api/v2/product/update_model', null, 'post', { item_id: itemId, model: [{ model_id: parseInt(modelId, 10), model_sku: String(x.sku || '') }] });
   return { model_id: String(modelId), option: nm };
 }
@@ -4826,7 +4849,7 @@ function reqEnsureGuide_(shopId, itemId, dry) {
   var cvUrl = ((cvi.image || {}).image_url_list || [])[0] || ''; if (!cvUrl) throw new Error('案内用の明細に付ける表紙の写真がありません');
   var ab = addVariationsBulk_(shopId, itemId, [{ option: REQ_GUIDE_NAME, price: real[0].price, stock: 0, sku: '', image: cvUrl }], null);
   if (!ab || ab.ok === false || !(Number(ab.added) > 0)) throw new Error('案内用の明細を足せませんでした: ' + String((ab && (ab.error || JSON.stringify(ab))) || '').slice(0, 120));
-  return { need: true, added: true, real: 1, guide: 1 };
+  return { need: true, added: true, real: 1, guide: 1, promo: ab.promo || null };   /* ★11/7 全体レビュー 中16：販促を外して戻せなかった事を捨てない */
 }
 function avFillPlaceholder_(shopId, itemId, items) {
   if (!items || !items.length) return null;
@@ -4843,12 +4866,12 @@ function avFillPlaceholder_(shopId, itemId, items) {
   if (st0 > 0) return null;   /* 在庫のある test は仮の明細と見なさない */
   var imgId = x.image_id ? String(x.image_id) : uploadImageUrl_(x.image);
   if (!imgId) throw new Error('写真を上げられませんでした（' + String(x.image || '').slice(0, 60) + '）');
+  /* ★11/7 全体レビュー 高2（同じ型）：値段を先に（販促は updatePriceList_ が外して戻す）→ 名前・写真 → 在庫。在庫で止まったら名前を test に戻す */
+  updatePriceList_(shopId, itemId, [{ model_id: m0.model_id, price: parseFloat(x.price) }]);
   updateTierVariation_(shopId, itemId, [{ name: tiers[0].name, option_list: [{ option: nm, image: { image_id: imgId } }] }], [{ model_id: m0.model_id, tier_index: [0] }]);
   Utilities.sleep(1500);
-  var pr = updatePrice_(shopId, itemId, m0.model_id, parseFloat(x.price));
-  if (((((pr || {}).failure_list) || []).length)) throw new Error('値段を書けませんでした: ' + JSON.stringify(pr.failure_list).slice(0, 120));
-  var sr = updateStock_(shopId, itemId, m0.model_id, parseInt(x.stock, 10) || 0);
-  if (((((sr || {}).failure_list) || []).length)) throw new Error('在庫を書けませんでした: ' + JSON.stringify(sr.failure_list).slice(0, 120));
+  var sr = null, sE = ''; try { sr = updateStock_(shopId, itemId, m0.model_id, parseInt(x.stock, 10) || 0); if (((((sr || {}).failure_list) || []).length)) sE = JSON.stringify(sr.failure_list).slice(0, 120); } catch (eS0) { sE = String((eS0 && eS0.message) || eS0).slice(0, 120); }
+  if (sE) { try { updateTierVariation_(shopId, itemId, [{ name: tiers[0].name, option_list: [{ option: 'test' }] }], [{ model_id: m0.model_id, tier_index: [0] }]); } catch (eB0) {} throw new Error('在庫を書けませんでした: ' + sE + '（名前は test に戻しました）'); }
   if (x.sku) callShop_(shopId, '/api/v2/product/update_model', null, 'post', { item_id: parseInt(itemId, 10), model: [{ model_id: m0.model_id, model_sku: String(x.sku) }] });
   return { option: nm, model_id: m0.model_id };
 }
