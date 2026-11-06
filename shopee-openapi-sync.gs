@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0510';
+var SRC_VER = '20261107-0600';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -653,7 +653,7 @@ function doGetInner_(e) {
       try {
         var rtwt = P_().getProperty('WRITE_TOKEN');
         if (!rtwt || p.token !== rtwt) throw new Error('WRITE_TOKEN不正');
-        var rtn = syncReturnsRange_(45);
+        var rtn = syncReturnsRange_(Math.max(1, Math.min(730, parseInt(p.days, 10) || 45)));   /* ★2026-11-07 days で過去の分も取り直せる（買い手の文・写真の埋め戻し） */
         ufPersist_();
         rtout = { ok: true, action: 'run_returns', rows: rtn };
       } catch (rterr) { rtout = { ok: false, error: String((rterr && rterr.message) || rterr) }; }
@@ -7121,6 +7121,11 @@ function returnRows_(list, cc, shopId, nowIso) {
       currency: r.currency || null,
       create_time: r.create_time || 0,
       update_time: r.update_time || 0,
+      /* ★2026-11-07 本人「ここ返金の理由も欲しい」：get_return_list の返事にある買い手の文・写真・動画・品を捨てずに残す（列は SQL 2026-11-07_returns_detail.sql で足した） */
+      text_reason: String(r.text_reason || '').slice(0, 2000),
+      buyer_images: (r.image || []).filter(function (u) { return /^https?:\/\//.test(String(u)); }).slice(0, 10),
+      buyer_videos: (r.buyer_videos || []).map(function (v) { return typeof v === 'string' ? v : ((v && (v.video_url || v.url)) || ''); }).filter(function (u) { return /^https?:\/\//.test(String(u)); }).slice(0, 5),
+      items: (r.item || []).map(function (it) { return { item_id: String(it.item_id || ''), model_id: String(it.model_id || ''), name: String(it.name || '').slice(0, 200), img: String(((it.images || [])[0]) || ''), sku: String(it.variation_sku || it.item_sku || ''), qty: Number(it.amount) || 1, price: Number(it.item_price) || 0 }; }).slice(0, 20),
       synced_at: nowIso
     };
   }).filter(function (x) { return x.return_sn; });
