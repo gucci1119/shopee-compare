@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261106-0600';
+var SRC_VER = '20261107-0030';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4668,7 +4668,47 @@ function bulkEditTier_(shopId, itemId, opts, imgs) {
    （product.error_cannt_init_tier_in_promotion）→ 断られた時だけ、値段の書き込みと同じ手（priceUnlockPromo_）で販促から外して足し、まとめ買い割引にはすぐ戻す。
    値下げ（Discount）は値段の書き込みと同じく外したまま（足した明細には値下げの値段が無い・戻すには明細ごとの値段が要る）。
    Flash Sale など外せない販促は戻して失敗のまま返す。ポータルの一括追加（1659）と🤖巡回の両方がここを通る */
+/* ★2026-11-07 事業本部・本人「前も同じエラーなかった？」（10/22 BR ポップコーンバケツ②・10/23 front_run と同じ型）：
+   複製で作ったカタログには仮の明細 test（写真なし・在庫0）が1つだけ入る。1層のバリエは「全部に写真あり／全部なし」しか許さないので、
+   写真付きの明細を足すと必ず断られていた（11/6 BR 58272439042 の Request page）。
+   → 中身が test 1つ（在庫0）だけの時は、test を1件目の明細に書き換える（明細を増やさない＝写真の有無がそろう・test を消す手間も無い）。
+   名前・写真は枠で、値段・在庫・SKU は同じ model に書く。2件目からは今までどおり足す。明細を足す口（🤖・フロント・Request page・まとめ買い・add_variations_bulk）は全部ここを通る */
+function avFillPlaceholder_(shopId, itemId, items) {
+  if (!items || !items.length) return null;
+  var x = items[0], nm = String((x && x.option) || '').trim();
+  if (!nm || !(x.image || x.image_id)) return null;   /* 写真の無い明細を足す時は「全部なし」のまま足せる＝書き換えない */
+  var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  var r = j.response || {}, tiers = r.tier_variation || [], models = r.model || [];
+  if (tiers.length !== 1) return null;
+  var ol = tiers[0].option_list || [];
+  if (ol.length !== 1 || models.length !== 1 || String(ol[0].option || '').trim().toLowerCase() !== 'test') return null;
+  if (ol[0].image && (ol[0].image.image_id || (ol[0].image.image_id_list || [])[0])) return null;   /* 🤖は足す前に test へ写真を付けてから足し、後で test を消す＝写真付きの test はその流れに任せる（触らない） */
+  var m0 = models[0], sv = m0.stock_info_v2 || {}, ss = (sv.seller_stock || [])[0] || {};
+  var st0 = parseInt(ss.stock != null ? ss.stock : ((sv.summary_info || {}).total_available_stock || 0), 10) || 0;
+  if (st0 > 0) return null;   /* 在庫のある test は仮の明細と見なさない */
+  var imgId = x.image_id ? String(x.image_id) : uploadImageUrl_(x.image);
+  if (!imgId) throw new Error('写真を上げられませんでした（' + String(x.image || '').slice(0, 60) + '）');
+  updateTierVariation_(shopId, itemId, [{ name: tiers[0].name, option_list: [{ option: nm, image: { image_id: imgId } }] }], [{ model_id: m0.model_id, tier_index: [0] }]);
+  Utilities.sleep(1500);
+  var pr = updatePrice_(shopId, itemId, m0.model_id, parseFloat(x.price));
+  if (((((pr || {}).failure_list) || []).length)) throw new Error('値段を書けませんでした: ' + JSON.stringify(pr.failure_list).slice(0, 120));
+  var sr = updateStock_(shopId, itemId, m0.model_id, parseInt(x.stock, 10) || 0);
+  if (((((sr || {}).failure_list) || []).length)) throw new Error('在庫を書けませんでした: ' + JSON.stringify(sr.failure_list).slice(0, 120));
+  if (x.sku) callShop_(shopId, '/api/v2/product/update_model', null, 'post', { item_id: parseInt(itemId, 10), model: [{ model_id: m0.model_id, model_sku: String(x.sku) }] });
+  return { option: nm, model_id: m0.model_id };
+}
 function addVariationsBulk_(shopId, itemId, items, jobKey) {
+  var ph = null;
+  try { ph = avFillPlaceholder_(parseInt(shopId, 10), parseInt(itemId, 10), items); }
+  catch (ePh) { throw new Error('仮の明細 test を書き換えられませんでした（明細は足していません）: ' + String((ePh && ePh.message) || ePh).slice(0, 160)); }
+  if (!ph) return addVariationsBulkP_(shopId, itemId, items, jobKey);
+  var rest = items.slice(1), base = { ok: true, added: 1, models: [ph], filledTest: true, opt_count: 1, model_count: 1, verifyNote: '仮の明細 test を「' + ph.option + '」に書き換えました' };
+  if (!rest.length) return base;
+  var r2 = addVariationsBulkP_(shopId, itemId, rest, jobKey);
+  r2.added = (Number(r2.added) || 0) + 1; r2.models = [ph].concat(r2.models || []); r2.filledTest = true; r2.verifyNote = [base.verifyNote, r2.verifyNote].filter(String).join('／');
+  return r2;
+}
+function addVariationsBulkP_(shopId, itemId, items, jobKey) {
   /* ★2026-10-22 レビュー：①外せない／再送も失敗した時に元の文言（in_promotion）を残すと、🤖が「販促中＝見送らない」と扱い30分ごとに外す・戻すを繰り返した
      → 文言を消して【promo_hard】の印にする（🤖は普通の失敗として見送る）。②戻せたかを文面に正しく出し、外した割引・値下げの ID を app_kv promo_unlock_log に控える（後で promo_bundle_add で戻せる） */
   var clean = function (t) { return String(t || '').replace(/product\.error_cannt_init_tier_in_promotion|in_promotion|has promotion/ig, '販促中'); };

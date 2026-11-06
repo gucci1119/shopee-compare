@@ -10908,6 +10908,21 @@
     const all = (cats || []).map(c => { const ms = parseMs(c); const ps = ms.map(m => Number(m.price) || 0).filter(v => v > 0); const b = pcReqBand(c.name); const lo = ps.length ? Math.min.apply(null, ps) : pMin, hi = ps.length ? Math.max.apply(null, ps) : pMax; const lo2 = Math.min(lo, pMin), hi2 = Math.max(hi, pMax); return { c, ms, b, inBand: pMin >= b[0] && pMax <= b[1], ratio: lo2 > 0 ? hi2 / lo2 : 99, mid: Math.sqrt(lo * hi) }; });
     /* ★2026-11-05 本人「ん？今のカタログを修正すればいいのでは？」「リクエストページはバリエーションですよ」「10日にしておいて」（事業本部）：
        新しいカタログは作らない。非公開の Request page も候補にし（公開中を先に）、足す前に予約出品10日・公開に直す（pcReqReady） */
+    /* ★2026-11-07 事業本部「今押すと二重になる」：同じ照合番号（明細 SKU の REQ_番号か、明細名の頭の R番号）の明細が、その国のどの Request page かにもうあれば足さずに「✅ もう足してあります」で返す
+       （01 が手で足した・前に押して入っていた等）。DB の明細で見る＝GAS の req_add も足す直前に Shopee の今の明細で同じ照らしをする */
+    { const rf0 = String(L.ref || pcQuote.ref || '').trim();
+      if (rf0) { const skuR = ('REQ_' + rf0).slice(0, 40).toUpperCase(), skuB = ('REQ_' + rf0).slice(0, 37).toUpperCase() + '-';
+        const rawMs = (c) => { let ms = c.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (_) { ms = []; } } return (ms || []).filter(Boolean); };
+        let hitC = null, hitM = null;
+        for (const c of (cats || [])) { const m = rawMs(c).find(m0 => { const sk = String(m0.sku || m0.model_sku || '').trim().toUpperCase(); return sk === skuR || sk.indexOf(skuB) === 0 || String(m0.n || m0.name || '').trim().split(' ')[0] === rf0; }); if (m) { hitC = c; hitM = m; break; } }
+        if (hitC) {
+          const rgA = regionByCc(L.cc) || {}, linkA = 'https://' + (rgA.buyer || 'shopee.com.br') + '/product/' + hitC.shop_id + '/' + hitC.item_id, nmA = String(hitM.n || hitM.name || '').trim();
+          pcQuote.link = linkA; pcQuote.optName = nmA; pcQuote.pick = { shop_id: hitC.shop_id, item_id: hitC.item_id, cc: L.cc, buyer: L.buyer, ref: rf0 };
+          pcQuote.req = { itemId: String(hitC.item_id), modelName: nmA, modelImg: String(hitM.img || ''), preDays: 0, listed: hitC.status === 1, madeNew: false, already: true, rid: rf0 };
+          msg.innerHTML = '✅ もう足してあります（' + esc(String(hitC.name || '').slice(0, 30)) + '・' + esc(String(hitC.item_id)) + '・明細「' + esc(nmA) + '」）。二重には足しません：<a href="' + esc(linkA) + '" target="_blank" rel="noopener">' + esc(linkA) + '</a>';
+          try { refreshOneListing(L.cc, hitC.item_id, hitC.shop_id); } catch (_) {}
+          return;
+        } } }
     const inDeal = (x) => !!(BQ && pcBundleDealPct() && (BQ.dealIds || []).indexOf(String(x.c.item_id)) >= 0);   /* ★2026-11-05 まとめは割引に入っているページを先に */
     const cand = all.filter(x => (x.c.status === 1 || x.c.status === 8) && x.ms.length + nAdd <= 100 && x.ratio <= lim)
       .sort((a, b) => ((inDeal(b) ? 1 : 0) - (inDeal(a) ? 1 : 0)) || ((b.inBand ? 1 : 0) - (a.inBand ? 1 : 0)) || ((a.c.status === 1 ? 0 : 1) - (b.c.status === 1 ? 0 : 1)) || (Math.abs(Math.log(a.mid / Math.sqrt(pMin * pMax))) - Math.abs(Math.log(b.mid / Math.sqrt(pMin * pMax)))));
@@ -10958,7 +10973,7 @@
       if (rImgs.some(x => !x)) throw new Error('「Reserved for」の画像を作れませんでした（書き込みキー sbSecret・画像の置き場 listing-imgs を確かめてください）');
       const rImg = rImgs[0];
       msg.textContent = '追加しています…（1分ほど）';
-      _mk('写真'); await sbUpsert('app_kv', [{ k: kv, v: { items: names.map((n, i) => ({ option: n, price: pList[i], stock: 1, sku: skuOf(i), image: madeNew ? '' : rImgs[i] })) }, updated_at: new Date().toISOString() }]);
+      _mk('写真'); await sbUpsert('app_kv', [{ k: kv, v: { items: names.map((n, i) => ({ option: n, price: pList[i], stock: 1, sku: skuOf(i), image: rImgs[i] })) }, updated_at: new Date().toISOString() }]);
       let one = null;
       try { one = await gasSerial(() => gasCall({ action: 'req_add', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, kv: kv, ref: _rf, promo: BQ ? '1' : '' }, 330000)); }
       catch (eO) { throw new Error('GAS から返事が来ませんでした（' + String((eO && eO.message) || eO).slice(0, 80) + '）。足されたかもしれないので、もう一度押す前に Seller Center か番号（req_find）で確かめてください'); }   /* 返事が無い時は前の手順で足し直さない（二重に入る） */
@@ -11858,6 +11873,7 @@
                   if (shopAmt0 > 0) { const L9 = pcQuote.last || {}, u9 = ((regionByCc(cc) || {}).priceUnit || 1); if (L9.plan !== planP || Math.abs((Number(L9.shopL) || 0) - shopAmt0) > (u9 < 1 ? 0.005 : 0.5)) { const t9b = 'Shopee の額が ' + shopAmt0 + ' になりません（計算は ' + (L9.shopL || '') + '・払い方 ' + (L9.plan || '') + '）。この画面で確かめて 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t9b; tell(false, t9b); return; } }
                   await pcQuoteAddReq();
                   if (!pcQuote.link) { const t3 = (mm && mm.textContent) || 'Request page に足せませんでした'; tell(false, t3); return; }
+                  if ((pcQuote.req || {}).already) { tell(true, 'もう足してあります（' + pcQuote.link + '・明細「' + (pcQuote.optName || '') + '」）。二重には足していません'); return; }
                   if (p.get('noins') === '1') { tell(true, '足しました（英文は呼び出し元の段から入れます）' + (pcQuote.verifyNote ? '／' + pcQuote.verifyNote : '')); return; }   /* ★2026-11-05 03 営業部：一本道（WA・SR）は英文を後の段で入れる＝入力欄へ入れ込まない */
                   pcQuoteToChat();
                   setTimeout(() => { const t4 = (mm && mm.textContent) || ''; const ok4 = /入れました/.test(t4); tell(ok4, ok4 ? ('Request page に足して、案内文を入力欄に入れました' + (shopAmt0 > 0 ? '（Shopee の額 ' + ((pcQuote.last || {}).shopL || '') + ' ' + ((pcQuote.last || {}).ISO || '') + '）' : priceAuto ? '（値段は計算の ' + ((pcQuote.last || {}).shopL || '') + ' ' + ((pcQuote.last || {}).ISO || '') + '）' : '')) : ('Request page には足しました（' + pcQuote.link + '）。' + t4)); if (ok4) setTimeout(() => { try { window.close(); } catch (_) {} }, 1500); }, 3600);
@@ -25916,6 +25932,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-06', items: [
+      '🧩 <b>仮の明細 test だけの Request page に足せなかったのを直しました</b>（本人「前も同じエラーなかった？」＝10/22・10/23 と同じ形）：複製で作ったページの test は写真が無く、写真付きの明細を足すと「全部に写真あり／全部なし」の決まりで断られていました。明細を足す口（🤖・フロント・Request page・まとめ買い）は全部、test だけ（在庫0・写真なし）の時は test をその明細に書き換えるようにしました（明細を増やさない）。あわせて、同じ照合番号の明細がもうその国の Request page にあれば、足さずに「✅ もう足してあります（リンク）」と返します。',
       '🛒 <b>Request page に入る物が無い時は、止めずに新しく作って足すようにしました</b>（本人「この場合は作っていいやろ」）：明細100個で満杯・値段の差（BR 4倍・他 5倍）を超える時は、既存の Request page と同じ名前の付け方で番号を進めて複製し、仮の明細の値段を今の値段にします（高い物用・安い物用に分かれて、次から入りやすくなります）。作る前にその店の出品の上限（TW 本店 100 など）を確かめ、当たる時だけ理由を出して止めます。足した後は仮の明細 test を消して写真を付け、公開まで自動です（▶ 公開する は出しません）。中身が test だけのページ（作った直後の物）にも同じ手順で足します。',
       '💴 <b>営業の画面に「見積もりを送った人」の一覧を足しました</b>（本人「見積送ったひとを把握できるようにしたい」）：Smart Reply・WhatsApp・Zalo・Viber の見積もりカードで「✅ 送った」を押した見積もりが、4つの道具共通で1件ずつ並びます（2台の PC で同じ）。日時・道具・国・相手（押すと会話）・品名・写真・値段・粗利・ROI・利益率・払い方・状態・返事なしの日数。状態（送った／返事あり／合意／Request page を作った／買ってもらった／断られた）は行で手で変えられ、Request page に足せた時と、注文の明細 SKU（REQ_照合番号）が合った時は自動で進みます。返事なしで3日以上の人が上に出ます。各道具が書き始めるのは、それぞれの版が入ってからです。',
       '🎯 <b>価格計算で「目標の利益率」と「目標ROI」を指定できるようにしました</b>（本人「利益率とROIも指定できるように」）：目標の利益率（÷売り値）を入れると、粗利÷売り値がその率になる出品価格を国ごとに逆算します。目標ROI（÷仕入）は 粗利＝ROI×仕入 に直して、目標粗利と同じ逆算に乗せます（前は⚙️の表の計算に通すだけで少しずれていました）。どちらも1件の経費を引く前の粗利で、優先は 目標粗利 → 利益率 → ROI。見積もりカード（Smart Reply・WhatsApp）からも &margin= ／ &roi= で指定できます。基準の線より下になる時は注意が出ます。',
