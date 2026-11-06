@@ -24812,13 +24812,19 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       sbGetAll('order_adjustments', 'select=cc,order_sn,amount,payout_time&kind=eq.compensation'),
       sbGetAll('order_issues', 'select=cc,sn,comp_amount,comp_date,stage&or=(comp_amount.gt.0,stage.not.is.null)').catch(() => []),
       sbGet('app_kv', 'select=v,updated_at&k=eq.sls_claim'),
-      sbGetAll('income', 'select=cc,sn,adj&adj->>seller_lost_compensation=not.is.null').catch(() => null),
+      sbGetAll('income', 'select=cc,sn,adj&adj=not.is.null').catch(() => null),   /* ★11/7 02 の95件：補償は入金の調整（total_adjustment_amount）にも入る＝adj のある行（返品・キャンセルの注文・数百行）を読む */
     ]);
     const kvV = (kv && kv[0] && kv[0].v) || {}, claims = kvV.items || {}, daysCfg = kvV.days || {};
     const compK = new Map(), compPay = new Map(); (adj || []).forEach(a => { const k = a.cc + ':' + a.order_sn; if (Number(a.amount) > 0) { compK.set(k, (compK.get(k) || 0) + Number(a.amount)); const pt = Number(a.payout_time) || 0; if (pt > (compPay.get(k) || 0)) compPay.set(k, pt); } });
     const manK = new Map(); (iss || []).forEach(x => { if (Number(x.comp_amount) > 0) manK.set(x.cc + ':' + x.sn, x.comp_date || ''); });
     const stageK = new Map(); (iss || []).forEach(x => { if (x.stage) stageK.set(x.cc + ':' + x.sn, x.stage); });
-    const incK = new Map(); (incL || []).forEach(x => { const v = Number(((x && x.adj) || {}).seller_lost_compensation) || 0; if (v > 0) incK.set(x.cc + ':' + x.sn, v); });
+    /* ★2026-11-07 02 の調べ（95件の入金明細）：SLS+ の補償は ①seller_lost_compensation か ②入金の調整（total_adjustment_amount がプラス・返金 seller_return_refund が引かれている＝返金のほぼ半額）に入る。
+       返金が引かれていない返品（seller_return_refund が無い）は損が無い＝対象外（損なし）。adj が無い注文は今までどおり（判らない） */
+    const incK = new Map(), incWhy = new Map(), noLossK = new Set();
+    (incL || []).forEach(x => { const a = (x && x.adj) || {}, k = x.cc + ':' + x.sn, lost = Number(a.seller_lost_compensation) || 0, tadj = Number(a.total_adjustment_amount) || 0, rr = Number(a.seller_return_refund) || 0;
+      if (lost > 0) { incK.set(k, lost); incWhy.set(k, '補償の項目'); }
+      else if (tadj > 0 && rr < 0) { incK.set(k, tadj); incWhy.set(k, '入金の調整 +' + tadj + '（返金 ' + rr + ' の ' + Math.round(tadj / -rr * 100) + '%）'); }
+      else if (!(rr < 0)) noLossK.add(k); });
     /* 返品の注文日（orders から・返品は数百件まで） */
     const rSn = [...new Set((rets || []).map(r => String(r.order_sn || '')).filter(Boolean))];
     const odOf = new Map();
@@ -24837,10 +24843,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const gotAt = gotBy === 'adj' ? ymd(compPay.get(k)) : gotBy === 'man' ? String(manK.get(k) || '').slice(0, 10) : '';
       /* ★2026-11-07 本人「倉庫でスキャンされる前のオーダーで返金依頼が来た場合はSLS+の保証はないし商品も戻ってくる」＝スキャン前は対象外（日本の中で戻る）。分からない物は残して「スキャン不明」 */
       const sc = scanStateOf_(ex.o || {}, { stage: stageK.get(k) || '', got: !!gotBy, ret: kind === '返品' });
-      const st = gotBy ? 'got' : sc.st === 'before' ? 'pre' : cl && cl.st === 'na' ? 'na' : cl && cl.st === 'applied' ? 'applied' : 'todo';
+      const st = gotBy ? 'got' : sc.st === 'before' ? 'pre' : (kind === '返品' && noLossK.has(k)) ? 'noloss' : cl && cl.st === 'na' ? 'na' : cl && cl.st === 'applied' ? 'applied' : 'todo';   /* ★11/7 返金が引かれていない返品＝損なし */
       const lastB = [od, rd].filter(Boolean).sort().pop() || '', dlMax = lastB ? jstDate(toMs(lastB) + lim * dayMs) : '';   /* 申請の区分（A・B）は、注文日と返金日の遅い方（どちらかの数え方で間に合う物）で見る */
       rows.push({ k, cc, sn, kind, reason: String(reason || ''), od, rd, start, lim, dl, left, st, at: (cl && cl.at) || '', nm: nm || '', rsn: rsn || '', limGuess: !(Number(daysCfg[cc]) > 0) && cc !== 'BR', dlMax, amt: Number(amt) || 0, trk: String(trk || ''),
-        items: ex.items || [], ret: ex.ret || null, cxr: ex.cxr || '', scan: sc.st, scanWhy: sc.why, gotBy, gotAt });
+        items: ex.items || [], ret: ex.ret || null, cxr: ex.cxr || '', scan: sc.st, scanWhy: sc.why, gotBy, gotAt, incWhy: incWhy.get(k) || '' });
     };
     const seen = new Set();
     (rets || []).forEach(r => { const o = odOf.get(r.cc + ':' + r.order_sn) || {}; const k = r.cc + ':' + r.order_sn; if (seen.has(k)) return; seen.add(k);
@@ -24850,7 +24856,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const open = rows.filter(r => r.st === 'todo');
     const preByCc = {}; rows.filter(r => r.st === 'pre').forEach(r => { preByCc[r.cc] = (preByCc[r.cc] || 0) + 1; });
     const cnt = { all: rows.length, todo: open.length, applied: rows.filter(r => r.st === 'applied').length, got: rows.filter(r => r.st === 'got').length, na: rows.filter(r => r.st === 'na').length,
-      pre: rows.filter(r => r.st === 'pre').length, preByCc, unk: open.filter(r => r.scan === 'unknown').length, incRead: incL !== null,
+      pre: rows.filter(r => r.st === 'pre').length, preByCc, noloss: rows.filter(r => r.st === 'noloss').length, unk: open.filter(r => r.scan === 'unknown').length, incRead: incL !== null,
       expired: open.filter(r => r.left != null && r.left < 0).length, le7: open.filter(r => r.left != null && r.left >= 0 && r.left <= 7).length,
       le14: open.filter(r => r.left != null && r.left > 7 && r.left <= 14).length, le30: open.filter(r => r.left != null && r.left > 14 && r.left <= 30).length };
     _slsC = { at: Date.now(), rows, cnt, kvAt: (kv && kv[0] && kv[0].updated_at) || '', sent: Array.isArray(kvV.sent) ? kvV.sent : [], inq0730: kvV.inq0730 || '2026-07-30' };
@@ -24987,10 +24993,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const box = document.getElementById('sls-claim-box'); if (!box) return;
     let D; try { D = await slsClaimLoad(force); } catch (e) { box.innerHTML = '<div class="tool-card" style="max-width:none;margin:0 0 12px;color:#d93025">⚠ SLS+ の補償の申請の一覧を読めませんでした（' + esc(String((e && e.message) || e).slice(0, 120)) + '）。「漏れが無い」とは言えません。</div>'; return; }
     const c = D.cnt, line = slsClaimLine(c);
-    const ST = { todo: '<b style="color:#d93025">未申請</b>', applied: '<span style="color:#1565c0;font-weight:700">申請済み</span>', got: '<span style="color:#1a7f37;font-weight:700">✓ 入った</span>', na: '<span class="smd-dim">対象外</span>', pre: '<span class="smd-dim" title="倉庫でスキャンされる前＝荷物は日本の中で戻る・損なし・SLS+ の対象外">対象外（日本の中で戻る）</span>' };
+    const ST = { todo: '<b style="color:#d93025">未申請</b>', applied: '<span style="color:#1565c0;font-weight:700">申請済み</span>', got: '<span style="color:#1a7f37;font-weight:700">✓ 入った</span>', na: '<span class="smd-dim">対象外</span>', pre: '<span class="smd-dim" title="倉庫でスキャンされる前＝荷物は日本の中で戻る・損なし・SLS+ の対象外">対象外（日本の中で戻る）</span>', noloss: '<span class="smd-dim" title="入金の明細で返金が引かれていない（seller_return_refund が無い）＝損が無いので SLS+ の申請は要らない">対象外（損なし）</span>' };
     const leftTxt = r => r.left == null ? '<span class="smd-dim">注文日なし</span>' : r.left < 0 ? '<b style="color:#d93025">期限切れ（' + (-r.left) + '日前）</b>' : r.left <= 7 ? '<b style="color:#d93025">あと ' + r.left + '日</b>' : r.left <= 14 ? '<b style="color:#e65100">あと ' + r.left + '日</b>' : r.left <= 30 ? '<b style="color:#b45309">あと ' + r.left + '日</b>' : 'あと ' + r.left + '日';
     let showAll = false; try { showAll = localStorage.getItem('smdSlsAll') === '1'; } catch (_) {}
-    const ord = { todo: 0, applied: 1, got: 2, na: 3, pre: 4 };
+    const ord = { todo: 0, applied: 1, got: 2, na: 3, pre: 4, noloss: 5 };
     /* まだ間に合う物を期限の近い順に先・期限切れはその後（新しく切れた順）＝今やれる物を上に */
     const lk = r => r.left == null ? 2e9 : r.left >= 0 ? r.left : 1e9 - r.left;
     const list = D.rows.filter(r => showAll || r.st === 'todo' || r.st === 'applied').sort((a, b) => (ord[a.st] - ord[b.st]) || (lk(a) - lk(b)));
@@ -25004,13 +25010,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td style="padding:3px 6px;white-space:nowrap">${esc(r.rd || '—')}</td>
         <td style="padding:3px 6px;white-space:nowrap" title="起点（注文日と返金日の早い方）＋${r.lim}日${r.limGuess ? '（この国の期限は分からないので 120日で安全側）' : ''}">${esc(r.dl || '—')}${r.limGuess ? '<span class="smd-dim">*</span>' : ''}</td>
         <td style="padding:3px 6px;white-space:nowrap">${r.st === 'todo' ? leftTxt(r) : '<span class="smd-dim">—</span>'}</td>
-        <td style="padding:3px 6px;white-space:nowrap">${ST[r.st]}${r.st === 'applied' && r.at ? '<div class="smd-dim" style="font-size:10.5px">' + esc(r.at) + '</div>' : ''}${r.st === 'got' ? `<div style="font-size:10.5px;color:#1a7f37" title="${r.gotBy === 'adj' ? '入金明細（payout）の補償の入金日' : r.gotBy === 'man' ? '手で記入した受取日' : '入金の明細（income）に SLS+ の補償の項目がある。入金日はこの明細からは分かりません'}">${r.gotAt ? '💰' + esc(r.gotAt) + ' 入金' : (r.gotBy === 'inc' ? '入金明細に補償（日付は分からない）' : '入金日は分からない')}</div>` : ''}</td>
-        <td style="padding:3px 6px;white-space:nowrap">${r.st === 'got' || r.st === 'pre' ? '' : r.st === 'todo'
+        <td style="padding:3px 6px;white-space:nowrap">${ST[r.st]}${r.st === 'applied' && r.at ? '<div class="smd-dim" style="font-size:10.5px">' + esc(r.at) + '</div>' : ''}${r.st === 'got' ? `<div style="font-size:10.5px;color:#1a7f37" title="${r.gotBy === 'adj' ? '入金明細（payout）の補償の入金日' : r.gotBy === 'man' ? '手で記入した受取日' : '入金の明細（income）に SLS+ の補償がある（' + esc(r.incWhy || '') + '）。入金日はこの明細からは分かりません'}">${r.gotAt ? '💰' + esc(r.gotAt) + ' 入金' : (r.gotBy === 'inc' ? '入金明細に補償（' + esc(r.incWhy || '') + '・日付は分からない）' : '入金日は分からない')}</div>` : ''}</td>
+        <td style="padding:3px 6px;white-space:nowrap">${r.st === 'got' || r.st === 'pre' || r.st === 'noloss' ? '' : r.st === 'todo'
           ? `<button class="smd-btn sls-set" data-k="${esc(r.k)}" data-st="applied" style="font-size:11px;padding:1px 8px;border-color:#1565c0;color:#1565c0;font-weight:700">申請した</button> <button class="smd-btn sls-set" data-k="${esc(r.k)}" data-st="na" style="font-size:11px;padding:1px 8px">対象外</button>`
           : `<button class="smd-btn sls-set" data-k="${esc(r.k)}" data-st="" style="font-size:11px;padding:1px 8px">戻す</button>`}</td></tr>`).join('');
     box.innerHTML = `<div class="tool-card" style="max-width:none;margin:0 0 12px;border-left:4px solid ${c.expired || c.le7 ? '#d93025' : c.todo ? '#e65100' : '#1a7f37'}">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b style="font-size:14px">🛡 SLS+ の補償の申請</b>
-        <span style="font-size:12.5px">未申請 <b style="color:#d93025">${c.todo}</b>${c.unk ? `<span style="color:#b45309" title="倉庫でスキャンされたかが分からない物。外さずに未申請に残しています">（うちスキャン不明 ${c.unk}）</span>` : ''}・申請済み ${c.applied}・入った ${c.got}・対象外 ${c.na}${c.pre ? `・<span title="倉庫でスキャンされる前のキャンセル・返金＝荷物は日本の中で戻る・損なし・SLS+ の対象外。申請の一覧・申請文・CSV から外しています（右の「入った・対象外も出す」で見られます）">対象外（日本の中で戻る）${c.pre}${Object.keys(c.preByCc || {}).length ? '（' + Object.keys(c.preByCc).map(k => k + ' ' + c.preByCc[k]).join('・') + '）' : ''}</span>` : ''}</span>
+        <span style="font-size:12.5px">未申請 <b style="color:#d93025">${c.todo}</b>${c.unk ? `<span style="color:#b45309" title="倉庫でスキャンされたかが分からない物。外さずに未申請に残しています">（うちスキャン不明 ${c.unk}）</span>` : ''}・申請済み ${c.applied}・入った ${c.got}・対象外 ${c.na}${c.noloss ? '・<span title="入金の明細で返金が引かれていない返品＝損なし">対象外（損なし）' + c.noloss + '</span>' : ''}${c.pre ? `・<span title="倉庫でスキャンされる前のキャンセル・返金＝荷物は日本の中で戻る・損なし・SLS+ の対象外。申請の一覧・申請文・CSV から外しています（右の「入った・対象外も出す」で見られます）">対象外（日本の中で戻る）${c.pre}${Object.keys(c.preByCc || {}).length ? '（' + Object.keys(c.preByCc).map(k => k + ' ' + c.preByCc[k]).join('・') + '）' : ''}</span>` : ''}</span>
         ${line ? '<b style="color:#d93025;font-size:12.5px">⚠ ' + esc(line) + '</b>' : ''}
         <button class="smd-btn" id="sls-apply-open" style="font-size:12.5px;font-weight:700;border-color:#1565c0;color:#1565c0">📨 申請をまとめる</button>
         <label style="font-size:11.5px;margin-left:auto"><input type="checkbox" id="sls-all" ${showAll ? 'checked' : ''}> 入った・対象外も出す</label></div>
@@ -26732,6 +26738,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-07', items: [
+      '🛡 <b>SLS+ の申請の一覧：入金の調整で入った補償も「✓ 入った」に</b>（02 が95件の入金明細を読んだ結果）：入金の明細の調整（total_adjustment_amount）がプラスで返金が引かれている返品は、返金のほぼ半額の補償が入っている＝「✓ 入った」（調整の額と返金の何%かを出す）。返金が引かれていない返品は「対象外（損なし）」。入金の行が無かった返品91件も取り込んだ。',
       '🗂 <b>機種の丸ボタン（約80個）を3段に分けました：大項目 → 中項目 → 機種</b>（本人「これは多すぎるから、もっと大項目、中項目に分けた方がいい」）。ふだんは大項目の1行だけ（🎮 ゲーム／🕹 本体・周辺機器／📱 電子ペット／🃏 トレカ／🧸 グッズ・おもちゃ／🎰 一番くじ／📦 その他・それぞれ件数つき）。大項目を押すと中項目（例 🎮 なら 任天堂・据え置き／任天堂・携帯／PlayStation／セガ・その他／機種が分からない）、中項目を押すとその中の機種が出ます。横に<b>新品・中古</b>の切り替え（名前が New・[New]・新品・新 で始まる物＝新品）。入れた画面：👣 アクセス（各国）の商品ごと・📅 出品ログ（日別の一覧と、これまでに自動で出した明細の表）・📚 母数（🎰 一番くじを 🧸 から分け、中項目で行を絞る）・🏆 商品別の利益（区分で絞る）。前に選んでいた機種はそのまま効きます（大・中はそこから自動で選びます）。分け方は1つの関数（hwTierOf）で、明細 SKU のある画面は SKU の頭（PS3_…）を先に見ます。本体・コントローラ・メモリーカード等は、機種の中に混ざっていたのを名前で抜き出しました',
       '🖼 <b>商品が並ぶ一覧に、写真・カタログ名・明細名を付けました（返品・キャンセル以外の画面も）</b>（本人「こういうのぜんぶ画像欲しい」「このページ以外も」「文字だけでわからないもん」「カタログ名とか、明細名とか」）：返品画面で作った部品（写真・1行目カタログ名・2行目明細名・2品以上の注文は全品・写真が無い時は灰色の「写真なし」）を、🏠ダッシュボードの⏰発送期限が近い注文、⚠️自動検知（🚚発送期日・🚨伝票済みで期限超過・🧾データ不整合・入庫待ちや滞留など在庫の5つ・🔋ELI・🏷値付けの提案・🔔売れて在庫0）、📦在庫台帳・棚卸しの読んだ一覧・🔁二重採番・在庫に注文を割り当てる窓、🛒入庫待ち（到着予定・長期滞留の点検）、出品管理（🩸マージン漏れ・👻誰にも見られていない・👀見られてるのに売れない・💸儲かっていない＝売れた明細・🖼同じ写真・🔁同じ作品・📋統合候補・🔥横展開・🔥売れ筋明細・📒値付けの記録と効果・💰利益台帳の明細の行・🔁在庫の自動復活の📜最近の動き）、💹利益明細のキャンセルの仕分け・🔎在庫候補、👣カートに入ったのに売れていない、👤顧客管理の購入履歴に使いました。📦発送スケジュールの日の吹き出しは、2品以上の注文の全品と明細名を文字で出します（写真は日を押した下の一覧）。<b>在庫には明細の欄が無い</b>ので、明細名は在庫の Shopee注文SN が、その画面で読んである注文に当たる時だけ出します（当たらない時は「明細：—（在庫に明細の欄なし）」）。読み込みは増やしていません（写真は見えている分だけ読みます）。',
       '↩️ <b>返品・キャンセル：一覧に写真・カタログ名・明細名、返金の理由、スキャン前のキャンセルを外す</b>（本人「こういうのぜんぶ画像欲しい」「カタログ名とか、明細名とか」「ここ返金の理由も欲しい」「これ、オーダーびは？」「倉庫でスキャンされる前のオーダーで返金依頼が来た場合はSLS+の保証はないし商品も戻ってくる」）：🛡 SLS+ の補償の申請・💸 返金・補償／🚫 キャンセル・↩️ 返品リクエスト・🩹 返金による損失の表の商品の欄を、小さい写真（押すと大きく）＋1行目カタログ名・2行目明細名に（2品以上は全品・写真が無い時は「写真なし」の箱）。理由は Shopee の区分を日本語に（実データの11種を全部・API が返す NOT_RECEIPT も）、その下に買い手が書いた文の原文と「訳は ▸」（押した1件だけ Google 翻訳・無料）、買い手の写真と ▶ 動画、Seller Center の返品の画面へのリンク（URL の形は推測）。文が無い時は「買い手は文を書いていない」／まだ取り直していない時はそう出します。キャンセルの行は Shopee の理由を日本語で入力欄の下にも。表の「日時」を「注文日」と「返品の申請日」に分けました（前は返品の行に申請日が入り、注文日の並べ替えも申請日で並んでいた）。SLS+ の表は「返金日」→「買い手への返金日」（補償が入った日ではない）・「✓ 入った」に入金日・入金の明細（income）の SLS+ の補償の項目でも「入った」に。倉庫でスキャンされる前のキャンセル・返金は「対象外（日本の中で戻る）」として申請の一覧・申請文・CSV から外し件数を出します。スキャンが分からない物は「スキャン不明」として残します。補償が入った注文・返品は段階の推定を「日本を出た後」に（前は補償だけの行が追跡番号を読まず「発送前（推）」）。段階の絞り込みに「スキャン後（日本を出た後）・返品を除く」「返品（配達後）」。🚨 補償の取りこぼしが NOT_RECEIPT に当たっていなかったのも直しました',
