@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0600';
+var SRC_VER = '20261107-0620';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -647,6 +647,18 @@ function doGetInner_(e) {
     // 返品リクエストをその場で取り込む（ポータルの「まとめて更新」用）。
     // ★定例の syncReturnsAll() は bgAllowed_() で手動枠を守るため**黙ってスキップ**することがある。
     //   これは人が押した手動更新なので、枠を気にせず syncReturnsRange_ を直接叩く。
+    /* ★2026-11-07 案イ・ウ：返品・キャンセル後の入金の取り直し（n 件・dry=1 は数えるだけ）／入金の調整（order_adjustments）の深い取り直し（cc ごと・days） */
+    if (p.action === 'income_refresh_returns' || p.action === 'run_adjust_deep') {
+      var irCb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), irOut;
+      try {
+        var irWt = P_().getProperty('WRITE_TOKEN'); if (!irWt || p.token !== irWt) throw new Error('WRITE_TOKEN不正');
+        if (p.action === 'income_refresh_returns') irOut = Object.assign({ ok: true, action: p.action }, refreshIncomeAfterReturn_(parseInt(p.n, 10) || 40, 270, String(p.dry || '') === '1'));
+        else { var adCc = String(p.cc || '').toUpperCase(); if (!/^[A-Z]{2}$/.test(adCc)) throw new Error('cc（国）が要ります（6分に収めるため1国ずつ）');
+          irOut = { ok: true, action: p.action, cc: adCc, rows: backfillAdjustments(Math.max(30, Math.min(1095, parseInt(p.days, 10) || 330)), 40, [adCc]) }; }
+        ufPersist_();
+      } catch (irE) { irOut = { ok: false, error: String((irE && irE.message) || irE) }; }
+      return ContentService.createTextOutput(irCb + '(' + JSON.stringify(irOut) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'run_returns') {
       var rtcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var rtout;
@@ -6666,6 +6678,16 @@ function escrowBundle_(inc) {
   if (!(d > 0)) return null;
   return { d: Math.round(d * 100) / 100, base: Math.round(base * 100) / 100, p: Object.keys(ps).map(Number).sort(function (a, b) { return b - a; }), id: id };
 }
+/* ★2026-11-07 02 の調べ（BR 260703N0E9EJ83：DB +R$254.02・今の Shopee −R$19＝seller_return_refund −308.57）：返金・補償の項目を income.adj（列）に残す。
+   fees に入れないのは bundle と同じ訳（古い版の台が fees を丸ごと書き直して消す）。0 の項目は入れない。at＝読んだ時刻 */
+var ESCROW_ADJ_KEYS_ = ['seller_lost_compensation', 'seller_return_refund', 'drc_adjustable_refund', 'escrow_amount_after_adjustment', 'total_adjustment_amount',
+  'reverse_shipping_fee', 'final_return_to_seller_shipping_fee', 'return_handling_fee', 'overseas_return_service_fee',
+  'fsf_seller_protection_fee_claim_amount', 'rsf_seller_protection_fee_claim_amount', 'lff_seller_protection_fee_amount', 'shipping_seller_protection_fee_amount', 'delivery_seller_protection_fee_premium_amount'];
+function escrowAdj_(inc) {
+  var o = { at: new Date().toISOString() };
+  ESCROW_ADJ_KEYS_.forEach(function (k) { var v = parseFloat((inc || {})[k]); if (!isNaN(v) && v !== 0) o[k] = Math.round(v * 100) / 100; });
+  return o;
+}
 /* 入金明細の fees を作る所を1つに（★2026-11-05：backfillEscrow が短い形で fees を丸ごと書き、original_price・voucher_seller・ams_commission と bundle を消していた） */
 function escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid) {
   var fees = { commission: f_comm, service: f_serv, transaction: f_txn, buyer_total: buyerPaid,
@@ -6705,7 +6727,7 @@ function syncEscrowForShop_(tok, deadline, finalized) {
     var fees = escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid);
     // 初回取得値(暫定)は保持。amount_at は「額が実際に変わった時刻」＝前回と同額なら前回のまま、変われば今
     var pv = prev[cc + ':' + o.sn];
-    var row = { cc: cc, sn: o.sn, amount: amt, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), buyer_paid: buyerPaid, fee_total: feeTotal, fees: fees, bundle: escrowBundle_(inc), synced_at: now2  };
+    var row = { cc: cc, sn: o.sn, amount: amt, pending: (o.status !== 'COMPLETED'), category: 4, shop_id: String(tok.shop_id), buyer_paid: buyerPaid, fee_total: feeTotal, fees: fees, bundle: escrowBundle_(inc), adj: escrowAdj_(inc), synced_at: now2  };
     if (pv) {
       row.amount_initial = (pv.amount_initial != null) ? pv.amount_initial : parseFloat(pv.amount);
       row.amount_initial_at = pv.amount_initial_at || now2;
@@ -6771,12 +6793,51 @@ function backfillEscrowUnchanged(limitN) {
     out.push({ cc: t.cc, sn: t.sn, amount: amt, amount_at: now2,
       amount_initial: parseFloat(t.amount_initial), buyer_paid: buyerPaid,
       fee_total: f_comm + f_serv + f_txn,
-      fees: escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid), bundle: escrowBundle_(inc),
+      fees: escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid), bundle: escrowBundle_(inc), adj: escrowAdj_(inc),
       synced_at: now2 });
   }
   if (out.length) { for (var k = 0; k < out.length; k += 200) sbUpsert_('income', out.slice(k, k + 200), 'cc,sn'); }
   Logger.log('backfillEscrow: 照会' + done + '件 / 金額が動いた ' + moved + '件 / エラー ' + errs + '件（残り対象 ' + Math.max(0, targets.length - done) + '件）');
   return { done: done, moved: moved, errs: errs };
+}
+/* ★2026-11-07 02 の調べ・事業本部（案イ）：返品・キャンセルになった注文の入金を取り直す。syncEscrowForShop_ は CANCELLED を飛ばし、
+   取り込んだ後に返金・補償が付いても DB の額が古いままだった（BR 260703N0E9EJ83）。
+   対象＝income に行があり、①注文がキャンセル（tab 600）か返品の行がある、かつ ②adj がまだ無い か adj.at が返品の更新より前。
+   1回 lim 件まで・deadlineSec で切る（quota-guard：bgAllowed_ を毎件見る）。額が変わったら amount と amount_at、いつも fees・adj を書く（amount_initial は触らない） */
+function refreshIncomeAfterReturn_(lim, deadlineSec, dry) {
+  lim = Math.max(1, Math.min(300, lim || 40));
+  var toks = listTokens_(), byShop = {}; toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
+  var incs = sbSelectAll_('income', 'select=cc,sn,amount,shop_id,adj&order=sn.asc') || [];
+  var im = {}; incs.forEach(function (x) { im[x.cc + ':' + x.sn] = x; });
+  var want = {};
+  (sbSelectAll_('orders', 'select=cc,sn&tab=eq.600') || []).forEach(function (o) { want[o.cc + ':' + o.sn] = 0; });
+  (sbSelectAll_('returns', 'select=cc,order_sn,update_time') || []).forEach(function (r) { if (!r.order_sn) return; var k = r.cc + ':' + r.order_sn; want[k] = Math.max(want[k] || 0, Number(r.update_time) || 0); });
+  var targets = [];
+  Object.keys(want).forEach(function (k) { var cur = im[k]; if (!cur || !cur.shop_id || !byShop[String(cur.shop_id)]) return;
+    var at = cur.adj && cur.adj.at ? Date.parse(cur.adj.at) / 1000 : 0;
+    if (!cur.adj || (want[k] && at < want[k])) targets.push(cur); });
+  var res = { targets: targets.length, done: 0, moved: 0, errs: 0, lost: 0, examples: [] };
+  if (dry) return res;
+  var deadline = now_() + (deadlineSec || 150), out = [], now2 = new Date().toISOString();
+  for (var i = 0; i < targets.length && res.done < lim; i++) {
+    if (now_() > deadline) break;
+    if (!bgAllowed_()) { res.stop = '枠の予約線'; break; }
+    var t = targets[i], e;
+    try { e = callShop_(parseInt(t.shop_id, 10), '/api/v2/payment/get_escrow_detail', { order_sn: t.sn }, 'get'); } catch (ex) { res.errs++; continue; }
+    var inc = ((e.response || {}).order_income) || {};
+    var amt = parseFloat(inc.escrow_amount); if (isNaN(amt)) { res.errs++; continue; }
+    res.done++;
+    var f_comm = parseFloat(inc.commission_fee) || 0, f_serv = parseFloat(inc.service_fee) || 0, f_txn = parseFloat(inc.seller_transaction_fee) || 0;
+    var buyerPaid = parseFloat(inc.buyer_total_amount); if (isNaN(buyerPaid)) buyerPaid = null;
+    var adj = escrowAdj_(inc), row = { cc: t.cc, sn: t.sn, amount: amt, fees: escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid), fee_total: f_comm + f_serv + f_txn, adj: adj, synced_at: now2 };
+    if (amt !== parseFloat(t.amount)) { row.amount_at = now2; res.moved++; if (res.examples.length < 8) res.examples.push(t.cc + ' ' + t.sn + ' ' + t.amount + '→' + amt); }
+    if (adj.seller_lost_compensation) res.lost++;
+    out.push(row);
+  }
+  if (out.length) { for (var k2 = 0; k2 < out.length; k2 += 100) sbUpsert_('income', out.slice(k2, k2 + 100), 'cc,sn'); }
+  try { ufPersist_(); } catch (eU) {}
+  res.left = Math.max(0, targets.length - res.done);
+  return res;
 }
 function syncEscrowAll(force) {
   if (!coreAllowed_()) { Logger.log('syncEscrowAll skip: urlfetch予約枠(手動用)を確保'); return [{ skipped: 'uf_budget' }]; }   /* ★入金は業務の血流 */
@@ -6804,6 +6865,7 @@ function syncEscrowAll(force) {
   try { log.push({ 在庫紐付け: relinkInventoryFromProfitSheet() }); } catch (e) { log.push({ 在庫紐付け: 'error ' + String(e).slice(0, 100) }); }
   // 初回値が空のまま残った行を埋める（既存を読めなかった回に初回値を書かなかった分）
   try { log.push({ 初回値補完: fillIncomeInitial_() }); } catch (e) { log.push({ 初回値補完: 'error ' + String(e).slice(0, 100) }); }
+  try { if (bgAllowed_()) log.push({ 返品キャンセル後の取り直し: refreshIncomeAfterReturn_(15, 60) }); } catch (eRf) { log.push({ 返品キャンセル後の取り直し: 'error ' + String(eRf).slice(0, 100) }); }   /* ★2026-11-07 案イ：毎回少しずつ（15件・60秒） */
   ufPersist_();
   Logger.log(JSON.stringify(log, null, 1)); return log;
 }
@@ -8561,7 +8623,7 @@ function recheckEscrowForReturns(limitN) {
     done++;
     if (amt === parseFloat(cur.amount)) continue;
     moved++;
-    out.push({ cc: t.cc, sn: t.order_sn, amount: amt, amount_at: now2, synced_at: now2 });
+    out.push({ cc: t.cc, sn: t.order_sn, amount: amt, amount_at: now2, adj: escrowAdj_(inc), synced_at: now2 });
   }
   if (out.length) { for (var k = 0; k < out.length; k += 200) sbUpsert_('income', out.slice(k, k + 200), 'cc,sn'); }
   Logger.log('返品ありの注文を再確認: 照会' + done + '件 / 金額が変わった ' + moved + '件（SLS+補償などが反映された分）');
