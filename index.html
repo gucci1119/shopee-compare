@@ -22099,26 +22099,60 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   /* ★2026-11-06 事業本部・本人「ROIとか利益率もちゃんと書いておいてほしい」「経費抜く前と抜いたあとの両方知りたい」：月次の損益カードの上に「📐 率」の段。
      2列＝経費を引く前（粗利で）／引いた後（営業利益で）× 行＝÷入金・÷売上・÷仕入。参考に事業の ROI・経費率・現金ベースの ROI。
      数字は今のカードの値だけから出す（新しい読みは足さない）。前月は plRatesPrev（月ごとの控え）＝無い月は「—」 */
+  /* ★2026-11-06 事業本部：前月の率を app_kv.pl_rates_monthly に月ごとに小さく控える（1か月 約200字）＝どの端末でも ▲▼。
+     書くのはカードが c.ok で描けた時、値が 0.1 以上動いた時だけ（4秒まとめ）。読めなかった時は書かない（空で上書きしない）。 */
+  const PLRT = { kv: null, at: 0, loading: null, pend: {}, t: null, lastC: {} };
+  function plRatesKvLoad(force) {
+    if (!settings.sbSecret) return Promise.resolve(null);
+    if (!force && PLRT.kv && Date.now() - PLRT.at < 600000) return Promise.resolve(PLRT.kv);
+    if (PLRT.loading) return PLRT.loading;
+    PLRT.loading = sbGet('app_kv', 'select=v&k=eq.pl_rates_monthly').then(r => {
+      if (r === null || r === undefined) return null;
+      PLRT.kv = (((r || [])[0] || {}).v || {}).months || {}; PLRT.at = Date.now(); window.__plRatesKv = PLRT.kv;
+      try { document.querySelectorAll('.pl-rates[data-noprev="1"]').forEach(el => { const c = PLRT.lastC[el.dataset.ym]; if (c) el.outerHTML = plRatesHtml(c); }); } catch (_) {}
+      return PLRT.kv;
+    }).catch(() => null).finally(() => { PLRT.loading = null; });
+    return PLRT.loading;
+  }
+  function plRatesKvSave(ym, R) {
+    try {
+      if (!settings.sbSecret || demoOn() || !/^\d{4}-\d{2}$/.test(String(ym || '')) || !R || R.gm == null) return;
+      const o = {}; ['gm', 'opm', 'gs', 'ops', 'roiItem', 'roiNet', 'roiBiz', 'roiCash', 'expR'].forEach(k => { o[k] = R[k] == null ? null : R[k]; });
+      const old = PLRT.kv && PLRT.kv[ym];
+      if (old && Object.keys(o).every(k => (old[k] == null && o[k] == null) || (old[k] != null && o[k] != null && Math.abs(old[k] - o[k]) < 0.1))) return;
+      PLRT.pend[ym] = Object.assign(o, { at: new Date().toISOString() });
+      clearTimeout(PLRT.t);
+      PLRT.t = setTimeout(async () => {
+        const pend = PLRT.pend; PLRT.pend = {}; if (!Object.keys(pend).length) return;
+        const cur = await sbGet('app_kv', 'select=v&k=eq.pl_rates_monthly').catch(() => null); if (cur === null || cur === undefined) return;   /* 読めなければ書かない */
+        const m = Object.assign({}, (((cur || [])[0] || {}).v || {}).months || {}, pend);
+        const nm = {}; Object.keys(m).sort().slice(-36).forEach(k => { nm[k] = m[k]; });
+        await sbUpsert('app_kv', [{ k: 'pl_rates_monthly', v: { months: nm }, updated_at: new Date().toISOString() }], 'k');
+        PLRT.kv = nm; PLRT.at = Date.now(); window.__plRatesKv = nm;
+      }, 4000);
+    } catch (_) {}
+  }
   function plRatesOf(c) {
     const dep = (Number(c.depFix) || 0) + (Number(c.depProv) || 0), r = (a, b) => (b > 0 && a != null && isFinite(a)) ? Math.round(a / b * 1000) / 10 : null;
     return { gm: r(c.gross, dep), opm: r(c.net, dep), gs: r(c.gross, c.sales), ops: r(c.net, c.sales), roiItem: r(c.gross, c.cost), roiNet: r(c.net, c.cost), roiBiz: r(c.net, (Number(c.cost) || 0) + (Number(c.expTotal) || 0)), roiCash: (c.cashNet != null && c.buy > 0) ? r(c.cashNet, c.buy) : null, expR: r(c.expTotal, dep), dep };
   }
   function plRatesPrev(ym) {
-    try { const kv = window.__plRatesKv; if (kv && kv[ym]) return kv[ym]; } catch (_) {}
+    try { const kv = PLRT.kv || window.__plRatesKv; if (kv && kv[ym]) return kv[ym]; } catch (_) {}
     try { const st = JSON.parse(localStorage.getItem('smdPlRates') || '{}') || {}; return st[ym] || null; } catch (_) { return null; }
   }
   function plRatesHtml(c) {
     const R = plRatesOf(c), y = v => (Number(v) < 0 ? '−' : '') + fmtJpy(Math.abs(Math.round(v || 0))), f = v => v == null ? '—' : Number(v).toFixed(1) + '%';
     try { const st = JSON.parse(localStorage.getItem('smdPlRates') || '{}') || {}; const keep = {}; Object.keys(st).sort().slice(-23).forEach(k => { keep[k] = st[k]; }); const o = Object.assign({}, R); delete o.dep; o.at = Date.now(); keep[c.ym] = o; localStorage.setItem('smdPlRates', JSON.stringify(keep)); } catch (_) {}
-    try { if (typeof plRatesKvSave === 'function') plRatesKvSave(c.ym, R); } catch (_) {}
+    try { if (c.ok) plRatesKvSave(c.ym, R); } catch (_) {}
     const pym = (() => { const m = String(c.ym).match(/^(\d{4})-(\d{2})$/); if (!m) return ''; const d = new Date(Number(m[1]), Number(m[2]) - 2, 1); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); })();
     const P = plRatesPrev(pym);
+    PLRT.lastC[c.ym] = c; if (!PLRT.kv) { try { plRatesKvLoad(); } catch (_) {} }
     const cmp = (k, goodUp) => { if (!P || P[k] == null || R[k] == null) return '<span class="smd-dim" style="font-size:10.5px">前月 —</span>'; const d = Math.round((R[k] - P[k]) * 10) / 10; const up = d > 0, good = goodUp ? up : !up; return '<span class="smd-dim" style="font-size:10.5px">前月 ' + f(P[k]) + '</span> ' + (d === 0 ? '<span class="smd-dim" style="font-size:10.5px">±0</span>' : '<span style="font-size:10.5px;color:' + (good ? '#1a7f37' : '#d93025') + '">' + (up ? '▲' : '▼') + Math.abs(d).toFixed(1) + '</span>'); };
     const cell = (k, formula, goodUp) => `<td style="padding:4px 10px;vertical-align:top"><div style="font-weight:800;font-size:15px;white-space:nowrap;color:${R[k] != null && R[k] < 0 ? '#c5221f' : '#1f2937'}">${f(R[k])} ${cmp(k, goodUp)}</div><div class="smd-dim" style="font-size:10.5px">${formula}</div></td>`;
     const row2 = (label, k1, f1, k2, f2) => `<tr style="border-top:1px solid #e5e7eb"><td style="padding:4px 10px;white-space:nowrap;font-weight:700;vertical-align:top">${label}</td>${cell(k1, f1, true)}${cell(k2, f2, true)}</tr>`;
     const ref = (label, k, formula, goodUp, note) => `<div style="margin-top:3px;font-size:12px"><b>${label}</b> <b style="font-size:13.5px;color:${R[k] != null && R[k] < 0 ? '#c5221f' : '#1f2937'}">${f(R[k])}</b> ${cmp(k, goodUp)} <span class="smd-dim" style="font-size:10.5px">＝ ${formula}${note ? '　' + note : ''}</span></div>`;
     const G = '粗利 ' + y(c.gross), N = '営業利益 ' + y(c.net);
-    return `<div style="margin:2px 0 10px;padding:8px 10px;border:1px solid #d9e2ec;border-radius:8px;background:#f8fafc;max-width:820px">
+    return `<div class="pl-rates" data-ym="${esc(c.ym)}" data-noprev="${P ? '0' : '1'}" style="margin:2px 0 10px;padding:8px 10px;border:1px solid #d9e2ec;border-radius:8px;background:#f8fafc;max-width:820px">
       <div style="font-weight:700;font-size:13px;margin-bottom:4px">📐 率 <span class="smd-dim" style="font-weight:400;font-size:11px">（前月 ${esc(pym)} と比べて ▲▼${P ? '' : '・前月の控えがまだ無いので —'}）</span></div>
       <table style="border-collapse:collapse;font-size:12.5px;width:100%">
         <tr style="background:#eef2f7"><th style="padding:4px 10px;text-align:left;font-size:11.5px"></th><th style="padding:4px 10px;text-align:left;font-size:12px">経費を引く前（粗利で）</th><th style="padding:4px 10px;text-align:left;font-size:12px">経費を引いた後（営業利益で）</th></tr>
@@ -25676,6 +25710,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-06', items: [
+      '📐 前月の率を月ごとに小さく控えるようにしました（app_kv pl_rates_monthly・1か月 約200字）＝どの端末で開いても前月比 ▲▼ が出ます。控えるのはカードが描けた時・値が動いた時だけです。',
       '📐 <b>「率」の段を2列の表にしました</b>（本人「経費抜く前と抜いたあとの両方知りたい」）：列＝経費を引く前（粗利で）／引いた後（営業利益で）、行＝利益率（÷入金）・売上に対する利益率（÷売上）・ROI（÷仕入）。各マスに式と前月比 ▲▼。下に参考で事業の ROI・経費率・現金ベースの ROI。',
       '📐 <b>月次の損益カードに「率」の段を足しました</b>（本人「ROIとか利益率もちゃんと書いておいてほしい」）：粗利率（粗利÷入金）・営業利益率（営業利益÷入金・参考に売上比）・商品の ROI（粗利÷仕入）・事業の ROI（営業利益÷（仕入＋経費合計））・現金ベースの ROI（現金ベースの残り÷この月に仕入れた全部・在庫を多く買った月はマイナスに出やすい）・経費率（経費合計÷入金）を、式と金額を横に書いて並べます。前月の同じ率は、前月のカードをこの端末で開いた時の値を覚えておいて ▲▼ で出します（まだ開いていない月は —）。',
       '📨 <b>SLS+ の補償の申請をポータルからまとめられるようにしました</b>（本人「これ、ポータルから申請できるようにしてくれない？」）：返品・キャンセルの「🛡 SLS+ の補償の申請」の「📨 申請をまとめる」で、入れる注文を自動で選びます（A 期限内／B 7/30 のお問い合わせの時点で期限内／C 1〜3月の注文で未入金・チェックで外せる）。件名と本文は件数と国別を埋めて作り（2回目からは「前回の申請の続き」）、📋 でコピー、⬇ で添付の一覧（CSV）、🔗 で Shopee Japan のお問い合わせを開けます。区分は「SLS補償カテゴリー①」。送るのは Shopee のフォームで本人が押し、「✅ 送った」で選んだ注文に申請日をまとめて付けます。',
