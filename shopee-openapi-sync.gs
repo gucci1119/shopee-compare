@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0620';
+var SRC_VER = '20261107-0630';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6834,7 +6834,9 @@ function refreshIncomeAfterReturn_(lim, deadlineSec, dry) {
     if (adj.seller_lost_compensation) res.lost++;
     out.push(row);
   }
-  if (out.length) { for (var k2 = 0; k2 < out.length; k2 += 100) sbUpsert_('income', out.slice(k2, k2 + 100), 'cc,sn'); }
+  /* 一度に書く行は列をそろえる（PostgREST は「All object keys must match」で断る）＝額が変わった行（amount_at あり）と変わらない行を分けて書く */
+  var outA = out.filter(function (r) { return r.amount_at; }), outB = out.filter(function (r) { return !r.amount_at; });
+  [outA, outB].forEach(function (grp) { for (var k2 = 0; k2 < grp.length; k2 += 100) sbUpsert_('income', grp.slice(k2, k2 + 100), 'cc,sn'); });
   try { ufPersist_(); } catch (eU) {}
   res.left = Math.max(0, targets.length - res.done);
   return res;
