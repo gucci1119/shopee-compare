@@ -10957,7 +10957,7 @@
           msg.innerHTML = '✅ もう足してあります（' + esc(pcReqCatLabel(hitC, L.cc)) + '・明細「' + esc(nmA) + '」）。二重には足しません：<a href="' + esc(linkA) + '" target="_blank" rel="noopener">' + esc(linkA) + '</a>';
           pcQuote.req.catalogName = String(hitC.name || '');
           /* ★2026-11-07 本人「作り直しのオプションも必要ね」：作り直し（updateMode）の時は、このページのこの明細を書き換える流れへ進む */
-          if (pcQuote.updateMode) { pcQuote._updPick = { c: hitC, ms: [] }; }
+          if (pcQuote.updateMode) { pcQuote._updPick = { c: hitC, ms: [] }; pcQuote._updCurName = nmA; }
           else {
             /* ★2026-11-07 本人「明細を選ばせるようにしないと」（03-12）：もう足してある時も、ページの本物の明細が1つだけなら、押した時に案内用の2つ目（在庫0）を足す（試しで先に出す） */
             try {
@@ -11002,8 +11002,13 @@
       /* ★2026-11-07 18項目の11（「Amd Ryzen Edition」＝型番 5800X3D が消えた）：入らない時は、語に点を付けて高い順に残し、元の順に並べる。
          型番（英字と数字が混ざった語）3・4字以上の語 2・短い語 1・Edition などの添え物と 10th のような序数 0 */
       { const STOP = /^(edition|version|ver|the|for|with|and|japan|japanese|import|new|used|game|games|software|series|set|pack|cooler|without)$/i;
-        const sc = (w) => (/[a-z]/i.test(w) && /\d/.test(w) && !/^\d+(st|nd|rd|th)$/i.test(w)) ? 3 : (STOP.test(w) || /^\d+(st|nd|rd|th)$/i.test(w)) ? 0 : (w.length >= 4 ? 2 : 1);
-        const order = ws.map((w, i) => ({ w, i, s: sc(w) })).sort((a, b) => (b.s - a.s) || (a.i - b.i));
+        /* ★2026-11-07 事業本部（作り直しで「Ryzen 7 5800X3D」→「Amd Ryzen 5800x3D」に悪くなった）：型番は大文字に・型番の直前の短い語（Ryzen 7 の 7）は残す・メーカー名（AMD など）は最後に回す */
+        const MAKER = /^(amd|intel|nvidia|asus|msi|gigabyte|sony|microsoft|sega|bandai|namco|konami|capcom|square|enix)$/i;
+        const isModel = (w) => /[a-z]/i.test(w) && /\d/.test(w) && !/^\d+(st|nd|rd|th)$/i.test(w);
+        const firstModel = ws.findIndex(isModel);
+        const sc = (w, i) => isModel(w) ? (i === firstModel ? 3 : 1.5) : (STOP.test(w) || /^\d+(st|nd|rd|th)$/i.test(w)) ? 0 : MAKER.test(w) ? 0.5 : (i + 1 < ws.length && isModel(ws[i + 1]) && w.length <= 3) ? 2.5 : (w.length >= 4 ? 2 : 1);
+        ws.forEach((w, i) => { if (isModel(w)) ws[i] = w.toUpperCase(); });
+        const order = ws.map((w, i) => ({ w, i, s: sc(w, i) })).sort((a, b) => (b.s - a.s) || (a.i - b.i));
         if (!order.some(o => o.s === 3)) order.length = 0;   /* 型番の無い名前は今までの縮め方（最後の機種の語を残す）のまま */
         let len = B.length; const keep = new Set();
         for (const o of order) { if (o.s <= 0) continue; if (len + 1 + o.w.length <= 30) { keep.add(o.i); len += 1 + o.w.length; } }
@@ -11034,14 +11039,18 @@
       if (rImgs.some(x => !x)) throw new Error('「Reserved for」の画像を作れませんでした（書き込みキー sbSecret・画像の置き場 listing-imgs を確かめてください）');
       const rImg = rImgs[0];
       msg.textContent = '追加しています…（1分ほど）';
+      /* ★2026-11-07 作り直しで名前が今より短く・情報が減る（今の名前の語だけでできている・大文字小文字だけ違う）時は、名前は今のまま */
+      if (pcQuote.updateMode && pcQuote._updCurName && !BQ) { const cur = String(pcQuote._updCurName), nw = String(names[0] || ''), tk = (x) => x.toLowerCase().split(/\s+/).filter(Boolean), cs = new Set(tk(cur));
+        if (nw.toLowerCase() === cur.toLowerCase() || (tk(nw).every(w => cs.has(w)) && nw.length <= cur.length) || nw.length < cur.length * 0.8) { names[0] = cur; pcQuote._nameKept = cur; } }
       _mk('写真'); await sbUpsert('app_kv', [{ k: kv, v: { items: names.map((n, i) => ({ option: n, price: pList[i], stock: 1, sku: skuOf(i), image: rImgs[i] })) }, updated_at: new Date().toISOString() }]);
+      if (pcQuote.updateMode) { pcQuote._nameKept = ''; }
       if (pcQuote.updateMode) {   /* ★2026-11-07 本人「作り直しのオプションも必要ね」：同じ照合番号の明細を model_id 指定で書き換える（増やさない・消さない） */
         _mk('作り直しの試し'); msg.textContent = '作り直す前の確かめをしています…（書き込みはしません）';
         const ud = await gasSerial(() => gasCall({ action: 'req_update', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, ref: _rf, kv: kv, dry: '1' }, 120000));
         if (!ud || ud.ok === false) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(kv)); } catch (_) {} throw new Error('作り直す前の確かめで止まりました：' + String((ud && ud.error) || '返事なし').slice(0, 160)); }
         const chg = (ud.changes || []).length ? ud.changes.join('／') : '変わる所なし';
         if (!ud.pass || pcQuote.dryOnly || !(ud.changes || []).length) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(kv)); } catch (_) {}
-          msg.innerHTML = '♻ <b>作り直しの試し：' + (ud.pass ? '<span style="color:#1a7f37">通ります</span>' : '<span style="color:#d93025">止まります</span>') + '</b>（入れ先：' + esc(pcReqCatLabel(pick.c, L.cc)) + '・明細 ' + esc(String(ud.model_id)) + '）<br>変わる所：' + esc(chg) + ((ud.blockers || []).length ? '<br><span style="color:#d93025">止まる所：' + esc(ud.blockers.join('／')) + '</span>' : '') + (pcQuote.dryOnly ? '<br>（試しだけ＝Shopee には書いていません）' : (!(ud.changes || []).length ? '<br>（変わる所が無いので書いていません）' : ''));
+          msg.innerHTML = '♻ <b>作り直しの試し：' + (ud.pass ? '<span style="color:#1a7f37">通ります</span>' : '<span style="color:#d93025">止まります</span>') + '</b>（入れ先：' + esc(pcReqCatLabel(pick.c, L.cc)) + '・明細 ' + esc(String(ud.model_id)) + '）<br>変わる所：' + esc(chg) + (pcQuote._nameKept ? '<br>名前は今のまま（' + esc(pcQuote._nameKept) + '・新しい名前の方が情報が少ないため）' : '') + ((ud.blockers || []).length ? '<br><span style="color:#d93025">止まる所：' + esc(ud.blockers.join('／')) + '</span>' : '') + (pcQuote.dryOnly ? '<br>（試しだけ＝Shopee には書いていません）' : (!(ud.changes || []).length ? '<br>（変わる所が無いので書いていません）' : ''));
           if (!ud.pass && !pcQuote.dryOnly) throw new Error('作り直していません：' + (ud.blockers || []).join('／'));
           return; }
         _mk('作り直す'); msg.textContent = '作り直しています…（' + chg + '）';
@@ -11051,7 +11060,7 @@
         const af = uu.after || {}, rgU = regionByCc(L.cc) || {}, linkU = 'https://' + (rgU.buyer || 'shopee.com.br') + '/product/' + pick.c.shop_id + '/' + pick.c.item_id;
         pcQuote.link = linkU; pcQuote.optName = String(af.name || nm); pcQuote.pick = { shop_id: pick.c.shop_id, item_id: pick.c.item_id, cc: L.cc, buyer: L.buyer, ref: _rf };
         pcQuote.req = { itemId: String(pick.c.item_id), modelName: String(af.name || nm), modelImg: String(af.img || rImgs[0] || ''), preDays: 0, listed: true, madeNew: false, updated: true, changes: uu.changes || [], catalogName: String(pick.c.name || ''), rid: _rf };
-        msg.innerHTML = '♻ ✅ 作り直しました（' + esc(pcReqCatLabel(pick.c, L.cc)) + '・明細「' + esc(String(af.name || nm)) + '」・' + esc(chg) + '）：<a href="' + esc(linkU) + '" target="_blank" rel="noopener">' + esc(linkU) + '</a>';
+        msg.innerHTML = '♻ ✅ 作り直しました（' + esc(pcReqCatLabel(pick.c, L.cc)) + '・明細「' + esc(String(af.name || nm)) + '」・' + esc(chg) + (pcQuote._nameKept ? '・名前は今のまま' : '') + '）：<a href="' + esc(linkU) + '" target="_blank" rel="noopener">' + esc(linkU) + '</a>';
         try { logAct('出品', '依頼品の明細を作り直した', String(af.name || nm), pcReqCatLabel(pick.c, L.cc) + ' ' + chg); } catch (_) {}
         try { refreshOneListing(L.cc, pick.c.item_id, pick.c.shop_id); } catch (_) {}
         return;
@@ -26047,6 +26056,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-06', items: [
+      '🔤 <b>明細名の縮め方を直しました</b>：型番は大文字（5800X3D）・型番の直前の短い語（Ryzen 7 の 7）も残し、メーカー名（AMD など）・Edition・without Cooler から落とします（例「R261106BRWE1 Ryzen 7 5800X3D」）。作り直しで新しい名前の方が短く・情報が少ない時は、名前は今のまま残します（試しに「名前は今のまま」と出します）。',
       '🔢 <b>Request page の明細は「選ぶ欄」が出る形に・作り直しの口</b>（本人「最初から2つ作れば？」「その２つ目の明細は、次に書き換えられないといけないので」「作り直しのオプションも必要ね」「しかもこれ価格帯違うしね」）：①仮の明細（案内用「Please send me a message」・test）があるページに足す時は、新しく足さずにその明細を書き換えます（増やさない）。本物の明細が1つだけになる時だけ、末尾に案内用（在庫0）を1つ足します ②もう足してある時も、ページの本物の明細が1つだけなら、押した時に案内用の2つ目を足します ③「♻ 作り直す」＝同じ照合番号の明細を今の見積もりの名前・値段・在庫・写真・SKU に書き換えます（注文が入っていれば止める・先に試しで変わる所を出す）④新しく作るページの名前は、足す値段が入る幅（BR 100×4倍の刻み・他 400×5倍の刻み）で付けます ⑤入れ先のカタログ名は Shopee の今の名前を読んで出します ⑥GAS が理由を返した時は、番号で探さずに理由をそのまま出します。',
       '💱 <b>見積もりの小窓で「為替を読めていない」で 🛒 が止まらないように</b>：為替の表が読めない・空の時は 2.5秒あけて2回まで読み直し、それでも読めない時は帯の文に理由を出して、自動でもう1回読み直します（「🔄 為替を読み直す」も残します）。読み込み中の時は「いま読み込み中です」と出します。',
       '🧪 <b>価格計算の見積もりに「🧪 試しだけ（足さない）」ボタン</b>（本人「必ず実機確認もしてくださいね」）：本番と同じ順で入れ先の Request page を読み、止まる所・自動で直す所を画面に出します（Shopee には何も書きません）。本番でも、試しの結果（直す所）を画面に出してから足します。入れ先のカタログは番号だけでなく「カタログ名（国・番号）」で出し、SR・WA にもカタログ名（catalog_name）を返します（本人「これって、カタログ名じゃないとわからん」）。',
