@@ -10506,8 +10506,10 @@
     const box = document.getElementById('pc-quote'); if (!box) return;
     let g = document.getElementById('pc-q-rategate');
     if (!d) { if (g) g.remove(); return; }
+    /* ★2026-11-07 読めていない時は、自動で1回だけ読み直す（読み終わったら計算と帯を描き直す） */
+    if (FXD._doneAt && !FXD._autoRetry) { FXD._autoRetry = Date.now(); setTimeout(async () => { try { await applyFxRates(); } catch (_) {} try { priceCalcRun(); } catch (_) {} try { pcRateGate(); } catch (_) {} }, 1200); }
     if (!g) { g = document.createElement('div'); g.id = 'pc-q-rategate'; g.style.cssText = 'margin:6px 0;padding:6px 10px;border:1px solid #f5c6c0;background:#fdecea;border-radius:6px;font-size:12px;color:#b3261e;display:flex;gap:8px;align-items:center;flex-wrap:wrap'; box.insertBefore(g, box.firstChild); }
-    g.innerHTML = '<b>⛔ 今日の為替を読めていないので、🛒 と 💬 は押せません</b><span>（既定のレートで計算した値段を、お客さんに出さないため）</span><button type="button" class="smd-btn" id="pc-q-ratere" style="font-size:12px;padding:2px 10px;border-color:#b3261e;color:#b3261e;font-weight:700">🔄 為替を読み直す</button>';
+    g.innerHTML = '<b>⛔ 今日の為替を読めていないので、🛒 と 💬 は押せません</b><span>（既定のレートで計算した値段を、お客さんに出さないため' + (FXD._doneAt ? '' : '・いま読み込み中です') + (FXD.err ? '・理由：' + esc(FXD.err) : '') + (FXD._autoRetry ? '・自動で1回読み直しました' : '') + '）</span><button type="button" class="smd-btn" id="pc-q-ratere" style="font-size:12px;padding:2px 10px;border-color:#b3261e;color:#b3261e;font-weight:700">🔄 為替を読み直す</button>';
     const rb = g.querySelector('#pc-q-ratere'); if (rb) rb.onclick = async () => { rb.disabled = true; rb.textContent = '⏳ 読んでいます…'; try { await applyFxRates(); } catch (_) {} try { priceCalcRun(); } catch (_) {} pcRateGate(); if (pcRateIsDefault()) { const g2 = document.getElementById('pc-q-ratere'); if (g2) { g2.disabled = false; g2.textContent = '🔄 もう一度読み直す（読めませんでした）'; } } else { try { toast('✅ 今日の為替を読みました'); } catch (_) {} } };
   }
   function pcQuoteToChat() {
@@ -24929,7 +24931,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     + '<br>💱ページを開いて取り込むか、時間を置いて画面を更新してください。</div>';
   async function applyFxRates() {
     try {
-      const kv = await sbGetAll('app_kv', 'select=v&k=eq.fx_daily');
+      /* ★2026-11-07 事業本部（SR の小窓で「⛔ 為替を読めていない」で 🛒 が止まった）：読めない・空の時は 2.5秒あけて2回まで読み直す。読めなかった理由は FXD.err に残して帯に出す */
+      let kv = null, why = '';
+      for (let t = 0; t < 3; t++) { if (t) await new Promise(z => setTimeout(z, 2500)); try { kv = await sbGetAll('app_kv', 'select=v&k=eq.fx_daily'); why = (kv && kv[0] && kv[0].v && kv[0].v.days) ? '' : '為替の表（fx_daily）が空でした'; } catch (eF) { kv = null; why = '為替の表を読めませんでした（' + String((eF && eF.message) || eF).slice(0, 80) + '）'; } if (!why) break; }
+      FXD.err = why;
       const v = kv && kv[0] && kv[0].v;
       if (v && v.days) {
         FXD.days = v.days; FXD.flat = v.flat || {}; FXD.spread = Number(v.spread) || 0; FXD.spreadCc = v.spreadCc || {}; FXD.at = v.src || '';
@@ -25988,6 +25993,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-06', items: [
+      '💱 <b>見積もりの小窓で「為替を読めていない」で 🛒 が止まらないように</b>：為替の表が読めない・空の時は 2.5秒あけて2回まで読み直し、それでも読めない時は帯の文に理由を出して、自動でもう1回読み直します（「🔄 為替を読み直す」も残します）。読み込み中の時は「いま読み込み中です」と出します。',
       '🧪 <b>価格計算の見積もりに「🧪 試しだけ（足さない）」ボタン</b>（本人「必ず実機確認もしてくださいね」）：本番と同じ順で入れ先の Request page を読み、止まる所・自動で直す所を画面に出します（Shopee には何も書きません）。本番でも、試しの結果（直す所）を画面に出してから足します。入れ先のカタログは番号だけでなく「カタログ名（国・番号）」で出し、SR・WA にもカタログ名（catalog_name）を返します（本人「これって、カタログ名じゃないとわからん」）。',
       '🛡 <b>見積もり→Request page に足す流れで起こりうる止まりを潰しました</b>（本人「この場で想定するエラーをぜんぶ潰しておきたい」）：試しができない（GAS が古い・返事が来ない）時は本番をしない／GAS の返事が来ない時は番号で探して入ったかを読み、入っていればそのまま進める／作ったページの仮の明細は名前が test でなくても仮と見なす／30字に縮める時に型番（5800X3D など）を残す／仕入れ先の写真が取れない時は同じ写真の元の大きさを試し、画像を置き場に上げられない時は同じ照合番号で前に作った画像を使う／販促から外して足した時と、公開できなかった理由を結果に出す。',
       '🧪 <b>Request page に足す前に「試し」を1回回すようにしました</b>（本人「エラーが出ないかまでチェックした上でやってくれないの？」）：書き込みはせずに、ページの公開・予約出品10日・1段目の写真の有無・値段の差・明細の数・同じ照合番号・販促・写真が取れるかを本番と同じ順で読み、止まる所があれば足さずに理由を出します。仮の明細 test だけのページは、先に test に表紙の写真を付けてから足し、足した後に test を消します（本人「最初からtestに画像を設定しておいたらいいんちゃう？」）。公開に失敗しても止めずに足し、足した後にもう一度公開を試して、だめなら理由を出します。',
