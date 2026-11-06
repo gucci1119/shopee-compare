@@ -2955,7 +2955,7 @@
         if (lstMeta === null || window._lstMetaLoading) { try { await Promise.race([lstLoadMeta(), new Promise(r0 => setTimeout(r0, 90000))]); } catch (_) {} }
         if (!kvOk.listing_meta || lstMeta === null) continue;
         await shiftAppliedPut(row.k, x => { x.lock = { by: PC.id, at: Date.now() }; });
-        const tS = Date.now(); let nAll = 0; for (const e of todo) { nAll += pidRekeyAfterShift(m[1], { moves: e.moves, gone: e.gone || [] }) || 0; }
+        const tS = Date.now(); let nAll = 0; let sq = 0; for (const e of todo) { nAll += pidRekeyAfterShift(m[1], { moves: e.moves, gone: e.gone || [], revertOnFail: true, revertSeq: sq++ }) || 0; }
         const saved = nAll ? await pidSaveWait(tS, 30000) : true;   /* JAN の台帳を書いた時は、保存が通るまで待つ */
         if (!saved) { try { logAct('出品', '詰め直しの付け替え（後から）の保存が通らず', m[1], '当てた印は付けない＝10分後にやり直す'); } catch (_) {} continue; }
         await shiftAppliedPut(row.k, x => { const nowA = Date.now(); todo.forEach(e => { x.ats[String(e.at)] = { at: nowA, by: PC.id }; }); delete x.lock; });
@@ -11078,7 +11078,7 @@
       /* ★2026-11-07 事業本部・本人「エラーが出ないかまでチェックした上でやってくれないの？」：本番の前に GAS の試し（dry=1・書き込みなし）を1回回し、
          止まる所（blockers）があれば足さずに理由を出す。自動で直す所（fixes）は本番の中で直す。古い GAS（dry を知らない）の時は今までどおり */
       { _mk('試し'); msg.textContent = '足す前の確かめをしています…（書き込みはしません）';
-        let dr = null, drErr = ''; try { dr = await gasSerial(() => gasCall({ action: 'req_add', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, kv: kv, ref: _rf, dry: '1', newpage: madeNew ? '1' : '' }, 120000)); } catch (eDr) { dr = (eDr && eDr.res) || null; drErr = String((eDr && eDr.message) || eDr || '').replace('__DISCONNECTED__', ''); }   /* ★11/7 全体レビュー 中4：GAS が断った理由（「いま別の追加が動いています」など）を消さない */
+        let dr = null, drErr = ''; try { dr = await gasSerial(() => gasCall({ action: 'req_add_dry', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, kv: kv, ref: _rf, dry: '1', newpage: madeNew ? '1' : '' }, 120000)); } catch (eDr) { dr = (eDr && eDr.res) || null; drErr = String((eDr && eDr.message) || eDr || '').replace('__DISCONNECTED__', ''); }   /* ★11/7 全体レビュー 中4：GAS が断った理由（「いま別の追加が動いています」など）を消さない */
         if (dr && dr.act === 'req_add' && dr.ok === false) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(kv)); } catch (_) {} throw new Error('足す前の確かめで止まりました: ' + String(dr.error || '').slice(0, 200)); }
         if (!dr && drErr && !/timeout|time out|時間内|タイムアウト|aborted|通信が切れ|Failed to fetch|NetworkError/i.test(drErr)) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(kv)); } catch (_) {} throw new Error('足す前の確かめで止まりました: ' + drErr.slice(0, 200) + '。足していません'); }
         if (!dr || !dr.dry) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(kv)); } catch (_) {} throw new Error('足す前の確かめができませんでした（' + (dr ? 'GAS が古い版です（試しの口が無い・版 ' + String(dr.src || '?') + '）' : 'GAS から返事が来ませんでした' + (drErr ? '：' + drErr.slice(0, 80) : '')) + '）。足していません。⚙️ の「🧩 GAS の版」を確かめてください'); }   /* ★2026-11-07 18項目の12 */
@@ -12025,7 +12025,8 @@
                   if ((pcQuote.req || {}).already) { tell(true, 'もう足してあります（' + pcQuote.link + '・明細「' + (pcQuote.optName || '') + '」）。二重には足していません'); return; }
                   if (p.get('noins') === '1') { tell(true, '足しました（英文は呼び出し元の段から入れます）' + (pcQuote.verifyNote ? '／' + pcQuote.verifyNote : '')); return; }   /* ★2026-11-05 03 営業部：一本道（WA・SR）は英文を後の段で入れる＝入力欄へ入れ込まない */
                   pcQuoteToChat();
-                  setTimeout(() => { const t4 = (mm && mm.textContent) || ''; const ok4 = /入れました/.test(t4); tell(ok4, ok4 ? ('Request page に足して、案内文を入力欄に入れました' + (shopAmt0 > 0 ? '（Shopee の額 ' + ((pcQuote.last || {}).shopL || '') + ' ' + ((pcQuote.last || {}).ISO || '') + '）' : priceAuto ? '（値段は計算の ' + ((pcQuote.last || {}).shopL || '') + ' ' + ((pcQuote.last || {}).ISO || '') + '）' : '')) : ('Request page には足しました（' + pcQuote.link + '）。' + t4)); if (ok4) setTimeout(() => { try { window.close(); } catch (_) {} }, 1500); }, 3600);
+                  /* ★11/7 全体レビュー 中10：3.6秒で決めていた＝WA の確かめ（最長5.5秒）より早く「入りませんでした」を返していた。「入れました」が出るまで最長10秒待つ */
+                  { const tA = Date.now(); const fin = () => { const t4 = (mm && mm.textContent) || ''; const ok4 = /入れました/.test(t4); tell(ok4, ok4 ? ('Request page に足して、案内文を入力欄に入れました' + (shopAmt0 > 0 ? '（Shopee の額 ' + ((pcQuote.last || {}).shopL || '') + ' ' + ((pcQuote.last || {}).ISO || '') + '）' : priceAuto ? '（値段は計算の ' + ((pcQuote.last || {}).shopL || '') + ' ' + ((pcQuote.last || {}).ISO || '') + '）' : '')) : ('Request page には足しました（' + pcQuote.link + '）。' + t4)); if (ok4) setTimeout(() => { try { window.close(); } catch (_) {} }, 1500); }; const tick = () => { const t4q = (mm && mm.textContent) || ''; if (/入れました/.test(t4q) || Date.now() - tA > 10000) fin(); else setTimeout(tick, 300); }; setTimeout(tick, 800); }
                 } catch (eA) { const t5 = '自動で進められませんでした: ' + String((eA && eA.message) || eA).slice(0, 120); if (mm) mm.textContent = '❌ ' + t5; tell(false, t5); }
               }, 1500);
             }
@@ -17859,7 +17860,7 @@
         + `<td style="text-align:left">${flagSet.has(flagKey(r)) ? '🚩 ' : ''}${who}<div class="smd-dim" style="font-size:10.5px">${esc(r.ref || '')}</div></td>`
         + `<td style="text-align:left;max-width:260px">${esc(r.item || r.en || '—')}${r.item && r.en ? '<div class="smd-dim" style="font-size:10.5px">' + esc(r.en) + '</div>' : ''}</td><td>${img}</td>`
         + `<td style="text-align:right;white-space:nowrap">${price}</td><td style="text-align:right">${y(r.profit)}</td><td style="text-align:right">${r.roi != null && r.roi !== '' ? Number(r.roi).toFixed(0) + '%' : '—'}</td><td style="text-align:right">${r.margin != null && r.margin !== '' ? Number(r.margin).toFixed(0) + '%' : '—'}</td><td>${esc(r.plan ? '①②③'.charAt(Number(r.plan) - 1) || r.plan : '—')}</td>`
-        + `<td style="text-align:left"><select class="ql-set" data-k="${esc(r._k)}" style="font-size:11.5px"${demo ? ' disabled' : ''}>${opts}</select>${r.stateBy === 'manual' ? '<div class="smd-dim" style="font-size:10px">手で変えた</div>' : ''}${(r.orderSn || r._bought) ? '<div class="smd-dim" style="font-size:10.5px">' + esc(r.orderSn || r._bought) + '</div>' : ''}</td>`
+        + `<td style="text-align:left"><select class="ql-set" data-k="${esc(r._k)}" style="font-size:11.5px"${demo ? ' disabled' : ''}>${opts}</select>${r.stateBy === 'manual' ? '<div class="smd-dim" style="font-size:10.5px">手で変えた</div>' : ''}${(r.orderSn || r._bought) ? '<div class="smd-dim" style="font-size:10.5px">' + esc(r.orderSn || r._bought) + '</div>' : ''}</td>`
         + `<td style="text-align:right;white-space:nowrap">${nr != null ? '<b style="color:' + (nr >= 3 ? '#b45309' : '#374151') + '">' + nr + '日</b>' : '—'}</td></tr>`;
     }).join('');
     box.innerHTML = `<div class="tool-card" style="max-width:none;margin:0 0 6px;padding:10px 12px">
@@ -26084,6 +26085,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-06', items: [
+      '🧯 <b>全体レビュー（11/7）の残り</b>：Request page の公開は明細を足した後に（途中で止まっても仮の明細が買える形で出ない）／試しは別の口（req_add_dry）＝古い GAS が試しを本番として足さない／新しいページの印（newpage）でも在庫のある明細・照合番号で始まる明細は上書きしない／複製した直後の test（在庫1）にも写真付きで足せる／WA から押した時、入力欄に入ったかを最長10秒待ってから返す／JAN 台帳の付け替えを保存できなかった時は手元も戻す（後から2回当ててずれない）。',
       '🧯 <b>全体レビュー（11/7）の直し</b>：作り直しが止まった時に「成功」と返さない（作り直す所が無い時は「明細は今のまま」）／GAS の返事が来ず番号でも見つからない時は「足したか分からない」の印（unk）で返す（GAS がまだ足している途中なら待つ）／新しい Request page 作りに失敗した時に画面が止まる誤りを直した／仮の明細の書き換えは値段を先に（販促中でも名前だけ変わって止まらない）／まとめ買いで一部だけ入った時は、押し直すと入っていない分だけ足す／番号で探す時に足したばかりのページを最初に読む／試しで GAS が断った理由をそのまま出す／「足し済み」だけで止まる時は「もう足してあります」で返す／明細の打ちかけを別の明細に戻さない／SLS+ の申請日を件数だけで止めない／JAN の重複で続編（Galaxy と Galaxy 2）を同じ作品にしない／作ったばかりの Request page をすぐ控えに載せる・消したページは控えから外す。',
       '🔤 <b>明細名の縮め方を直しました</b>：型番は大文字（5800X3D）・型番の直前の短い語（Ryzen 7 の 7）も残し、メーカー名（AMD など）・Edition・without Cooler から落とします（例「R261106BRWE1 Ryzen 7 5800X3D」）。作り直しで新しい名前の方が短く・情報が少ない時は、名前は今のまま残します（試しに「名前は今のまま」と出します）。（出す前に印を消していた順番も直しました）',
       '🔢 <b>Request page の明細は「選ぶ欄」が出る形に・作り直しの口</b>（本人「最初から2つ作れば？」「その２つ目の明細は、次に書き換えられないといけないので」「作り直しのオプションも必要ね」「しかもこれ価格帯違うしね」）：①仮の明細（案内用「Please send me a message」・test）があるページに足す時は、新しく足さずにその明細を書き換えます（増やさない）。本物の明細が1つだけになる時だけ、末尾に案内用（在庫0）を1つ足します ②もう足してある時も、ページの本物の明細が1つだけなら、押した時に案内用の2つ目を足します ③「♻ 作り直す」＝同じ照合番号の明細を今の見積もりの名前・値段・在庫・写真・SKU に書き換えます（注文が入っていれば止める・先に試しで変わる所を出す）④新しく作るページの名前は、足す値段が入る幅（BR 100×4倍の刻み・他 400×5倍の刻み）で付けます ⑤入れ先のカタログ名は Shopee の今の名前を読んで出します ⑥GAS が理由を返した時は、番号で探さずに理由をそのまま出します。',
@@ -46730,12 +46732,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       ensureProductIds().then(() => { pidRekeyAfterShift(itemId, r); if (!productIds) try { toast('⚠ 明細の番号が入れ替わりましたが、JAN の台帳を読めず付け替えていません（出品一覧を開き直してください）', 8000); } catch (_) {} }).catch(() => { try { pidRekeyAfterShift(itemId, r); toast('⚠ 明細の番号が入れ替わりましたが、JAN の台帳を読めず付け替えていません', 8000); } catch (_) {} });
       return 0; }   /* 古い GAS（moves を返さない）・末尾だけの削除は何もしない */
     const id = String(itemId), K = mid => 'id:' + id + '#' + mid; let n = 0;
-    if (productIds) {
+    if (productIds && !kvOk.product_ids) { r.__rekeyed = false; try { toast('⚠ 明細の番号が入れ替わりましたが、JAN の台帳を読めていないので付け替えていません（出品一覧を開き直すと付け替えます）', true); } catch (_) {} }   /* ★11/7 全体レビュー 中1：保存できない時は手元も変えない */
+    else if (productIds) {
       const snap = {}; r.moves.forEach(mv => { snap[mv[0]] = productIds[K(mv[0])]; });   /* 先に全部控えてから書く（連鎖で1つずつずれない） */
+      const undo = {}; r.moves.forEach(mv => { undo[K(mv[1])] = productIds[K(mv[1])]; }); (r.gone || []).forEach(t => { undo[K(t)] = productIds[K(t)]; });   /* ★中1：保存が通らなかった時に戻す元 */
       r.moves.forEach(mv => { if (snap[mv[0]] !== undefined) productIds[K(mv[1])] = snap[mv[0]]; else delete productIds[K(mv[1])]; n++; });
       (r.gone || []).forEach(t => { if (productIds[K(t)] !== undefined) { delete productIds[K(t)]; n++; } });
       try { _pidDupCache = null; } catch (_) {}
-      saveProductIds();
+      const tS = Date.now(); saveProductIds();
+      /* ★11/7 全体レビュー 中1：保存が通らなければ手元の台帳を元に戻す（前は付け替え済みのまま＝10分後に同じ付け替えをもう一度当てて2つずれ、次の保存で Supabase に載っていた） */
+      const chk = (k9) => { if ((window.__pidSavedAt || 0) > tS) return; if ((window.__pidSaveErrAt || 0) > tS || k9 >= 12) { Object.keys(undo).forEach(k => { if (undo[k] === undefined) delete productIds[k]; else productIds[k] = undo[k]; }); r.__rekeyed = false; try { _pidDupCache = null; } catch (_) {} try { toast('⚠ JAN の台帳の付け替えを保存できなかったので、手元も元に戻しました（次に読み直した時にもう一度付け替えます）', 8000); } catch (_) {} return; } setTimeout(() => chk(k9 + 1), 5000); };
+      if (r.revertOnFail) setTimeout(() => chk(0), 3000 + (60 - Math.min(60, Number(r.revertSeq) || 0)) * 20);   /* 同じ回に何件も当てた時は、後の物から戻す（順番を逆に） */   /* 後から当てる道（10分ごと）だけ＝当てた印を付けずにやり直す道。すぐ当てる道は印が先に付くので戻さない（戻すと二度と当たらない） */
     }
     /* ★2026-11-04 全体レビュー 新-2：在庫0固定（listing_meta）がまだ読めていない・読み込み中なら、読み終わるまで待ってから付け替える（最大2分） */
     if ((lstMeta === null || window._lstMetaLoading) && !r.__metaWait) { r.__metaWait = true; let tries = 0;

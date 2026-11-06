@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0500';
+var SRC_VER = '20261107-0510';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -471,6 +471,8 @@ function doGet(e) {
 }
 function doGetInner_(e) {
   var p = (e && e.parameter) || {};
+  /* ★11/7 全体レビュー 中6：試しは別の口 req_add_dry（前は req_add＋dry=1＝dry を知らない古い台は試しを本番として足していた）。古い台は「知らない action」で断る */
+  if (p.action === 'req_add_dry') { p = Object.assign({}, p, { action: 'req_add', dry: '1' }); }
   try { SB_CALLER = 'web:' + String(p.action || '-').replace(/[^\w.-]/g, '').slice(0, 40); } catch (_c) {}
   /* ★2026-09-28 レビュー（脆弱性）：公開URLから鍵なしで叩ける読み取りの口（外部URLの取得＝1回で最大20回ぶん枠を使う・明細/在庫の読み取り・ZIP作成）に鍵を要求する。
      叩かれ続けると接続枠（2万/日）が尽きて出品・発送手配まで止まる。ポータルは rk に WRITE_TOKEN を付けて呼ぶ（token だと書き込み扱いになり再試行しないため別名）。
@@ -2154,7 +2156,7 @@ function doGetInner_(e) {
           else if (dDup) dB.push('同じ名前の明細がもうある（足し済み）: ' + dDup);
           if (dRef && !dPart && dLive.some(function (m) { var sk = String(m.sku || '').toLowerCase(); return sk === 'req_' + dRef || sk.indexOf('req_' + dRef + '-') === 0 || String(m.name || '').trim().split(' ')[0].toLowerCase() === dRef; })) dB.push('同じ参照番号の明細がもうある（足し済み）: ' + p.ref);
           if (dLive.length + rqitems.length > 100) dB.push('明細が100で満杯（今 ' + dLive.length + '・足すのは ' + rqitems.length + '）');
-          var dTestOnly = dLive.length === 1 && (String(dLive[0].name || '').trim().toLowerCase() === 'test' || (String(p.newpage || '') === '1' && !/^REQ_/i.test(String(dLive[0].sku || ''))));   /* ★2026-11-07 18項目の4 */
+          var dTestOnly = dLive.length === 1 && (String(dLive[0].name || '').trim().toLowerCase() === 'test' || (String(p.newpage || '') === '1' && !/^REQ_/i.test(String(dLive[0].sku || '')) && !(Number(dLive[0].stock) > 0) && !/^R\d{6}/i.test(String(dLive[0].name || '').trim())));   /* ★2026-11-07 18項目の4 */
           var dWithImg = dLive.filter(function (m) { return !!m.img; }).length, dNewImg = rqitems.filter(function (x) { return x.image || x.image_id; }).length;
           if (dTestOnly && !dLive[0].img && dNewImg) dF.push('仮の明細 test に表紙の写真を付けてから足す（1段目は全部写真あり／全部なし）');
           else if (dWithImg > 0 && dWithImg < dLive.length) dB.push('写真の無い明細が ' + (dLive.length - dWithImg) + '件ある（1段目は全部写真あり／全部なし）: ' + dLive.filter(function (m) { return !m.img; }).slice(0, 4).map(function (m) { return m.name; }).join(' / '));
@@ -2182,15 +2184,13 @@ function doGetInner_(e) {
           if ((Number(e0.sale) || 0) > 0 || (Number(e0.likes) || 0) > 0) throw new Error('非公開の Request page（' + rqitem + '）に sold ' + (Number(e0.sale) || 0) + '・いいね ' + (Number(e0.likes) || 0) + ' があるので、自動では公開しません（本人の OK が要ります）');
         }
         if (!(r0.pre && r0.dts === 10)) { var upo = updateItem_({ shop_id: rqshop, item_id: rqitem, pre_order: { is_pre_order: true, days_to_ship: 10 } }); if (!upo || upo.ok === false) throw new Error('Request page を予約出品10日にできませんでした: ' + String((upo && upo.error) || '返事なし').slice(0, 120)); fixed.push('予約出品10日'); rqMk('予約出品10日に直す'); }
-        var pubErr = '';
-        if (r0.st !== 'NORMAL') {   /* ★2026-11-07 公開に失敗しても止めずに明細を足し、足した後にもう一度公開を試す（BR 58222414980 で unlist_item_all_failed） */
-          try { unlistItem_(rqshop, rqitem, false); fixed.push('公開'); } catch (ePub) { pubErr = String((ePub && ePub.message) || ePub).slice(0, 200); }
-          rqMk('公開');
-        }
+        /* ★11/7 全体レビュー 中14：公開は明細を書き換え・足した【後】に（前は先に公開＝途中で止まると仮の明細 test 在庫1 が買える形で公開されたままだった） */
+        var pubErr = '', pubLater = r0.st !== 'NORMAL';
         var live = (getModels_(rqshop, rqitem) || {}).models || []; rqMk('今の明細');
         /* ★2026-11-07 本人「最初からカタログ作ったときにtestに画像を設定しておいたらいいんちゃう？」：中身が仮の明細 test だけで写真が無い時は、先に test に表紙の写真を付けてから写真付きで足す（🤖と同じ形）。
            足した後に test を詰め直しで消す（下）。表紙の写真が無い・付けられない時は止める */
-        var testOnly = live.length === 1 && (String(live[0].name || '').trim().toLowerCase() === 'test' || (String(p.newpage || '') === '1' && !/^REQ_/i.test(String(live[0].sku || '')))), testModel = testOnly ? live[0] : null;   /* ★2026-11-07 18項目の4：作ったページの仮の明細は名前が test でなくても */
+        /* ★11/7 全体レビュー 中13：newpage=1 でも、在庫のある明細・照合番号（R+6桁）で始まる名前の明細は仮の明細と見なさない（DB が古い間に手で直したお客さんの明細を上書きしない） */
+        var testOnly = live.length === 1 && (String(live[0].name || '').trim().toLowerCase() === 'test' || (String(p.newpage || '') === '1' && !/^REQ_/i.test(String(live[0].sku || '')) && !(Number(live[0].stock) > 0) && !/^R\d{6}/i.test(String(live[0].name || '').trim()))), testModel = testOnly ? live[0] : null;   /* ★2026-11-07 18項目の4：作ったページの仮の明細は名前が test でなくても */
         if (testOnly && !live[0].img && rqitems.some(function (x) { return x.image || x.image_id; })) {
           var cvj = callShop_(rqshop, '/api/v2/product/get_item_base_info', { item_id_list: String(rqitem) }, 'get'); var cvi = (((cvj || {}).response || {}).item_list || [])[0] || {};
           var cvUrl = ((cvi.image || {}).image_url_list || [])[0] || '';
@@ -2223,7 +2223,7 @@ function doGetInner_(e) {
         try { Utilities.sleep(1500); var eg = reqEnsureGuide_(rqshop, rqitem, false); if (eg.promo && ((eg.promo.backErr || []).length || eg.promo.discountOut)) testDel = [testDel, '案内用の明細を足す時に販促を外した（' + (eg.promo.text || ('値下げを外したまま ' + (eg.promo.discountOut || 0) + '・戻せなかった ' + (eg.promo.backErr || []).length)) + '）'].filter(String).join('・'); if (eg.added) testDel = [testDel, '末尾に案内用の明細「' + REQ_GUIDE_NAME + '」（在庫0）を足した'].filter(String).join('・'); }
         catch (eEg) { testDel = [testDel, '案内用の明細を足せなかった（' + String((eEg && eEg.message) || eEg).slice(0, 80) + '）'].filter(String).join('・'); }
         rqMk('案内用の明細');
-        if (pubErr) { try { unlistItem_(rqshop, rqitem, false); fixed.push('公開（足した後）'); pubErr = ''; } catch (ePub2) { pubErr = String((ePub2 && ePub2.message) || ePub2).slice(0, 200); } rqMk('公開をもう一度'); }
+        if (pubLater) { try { unlistItem_(rqshop, rqitem, false); fixed.push('公開（足した後）'); pubErr = ''; } catch (ePub2) { pubErr = String((ePub2 && ePub2.message) || ePub2).slice(0, 200); } rqMk('公開'); }
         var r1 = { pre: false, dts: 0, st: '?' }, live2 = [], rdErr = '';
         try { r1 = rqBase(); live2 = (getModels_(rqshop, rqitem) || {}).models || []; } catch (eRd) { rdErr = '足した後の読み直しができませんでした（' + String((eRd && eRd.message) || eRd).slice(0, 80) + '）'; }   /* ★2026-11-06 全体レビュー 中4：明細は入っている＝ok:true・verified:false で返す */
         rqMk('読み直し');
@@ -4863,7 +4863,7 @@ function avFillPlaceholder_(shopId, itemId, items) {
   if (ol[0].image && (ol[0].image.image_id || (ol[0].image.image_id_list || [])[0])) return null;   /* 🤖は足す前に test へ写真を付けてから足し、後で test を消す＝写真付きの test はその流れに任せる（触らない） */
   var m0 = models[0], sv = m0.stock_info_v2 || {}, ss = (sv.seller_stock || [])[0] || {};
   var st0 = parseInt(ss.stock != null ? ss.stock : ((sv.summary_info || {}).total_available_stock || 0), 10) || 0;
-  if (st0 > 0) return null;   /* 在庫のある test は仮の明細と見なさない */
+  if (st0 > 1) return null;   /* ★11/7 全体レビュー 中15：複製の test は在庫1（cloneItem_）＝在庫1までは仮の明細（名前 test・写真なし・明細1つだけ）。2以上は本物かもしれないので触らない。複製の在庫は変えない（🤖の複製・公開の流れをそのままにする） */
   var imgId = x.image_id ? String(x.image_id) : uploadImageUrl_(x.image);
   if (!imgId) throw new Error('写真を上げられませんでした（' + String(x.image || '').slice(0, 60) + '）');
   /* ★11/7 全体レビュー 高2（同じ型）：値段を先に（販促は updatePriceList_ が外して戻す）→ 名前・写真 → 在庫。在庫で止まったら名前を test に戻す */
