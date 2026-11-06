@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0045';
+var SRC_VER = '20261107-0130';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2074,6 +2074,40 @@ function doGetInner_(e) {
         var rqBase = function () { var b = callShop_(rqshop, '/api/v2/product/get_item_base_info', { item_id_list: String(rqitem) }, 'get'); var it = (((b || {}).response || {}).item_list || [])[0]; if (!it) throw new Error('Request page を Shopee から読めませんでした: ' + String((b && (b.message || b.error)) || '').slice(0, 80)); var po = it.pre_order || {}; return { pre: !!po.is_pre_order, dts: Number(po.days_to_ship) || 0, st: String(it.item_status || '') }; };
         var r0 = rqBase(); rqMk('読む');
         var fixed = [];
+        /* ★2026-11-07 事業本部・本人「エラーが出ないかまでチェックした上でやってくれないの？」：dry=1 は書き込みを一切せず、本番と同じ順で前提を全部読み、止まる所（blockers）と、
+           本番で自動で直す所（fixes）を返す。ポータル（SR・WA の 🛒）は本番の前にこれを1回回し、止まる所があれば押させずに理由を出す */
+        if (String(p.dry || '') === '1') {
+          var dB = [], dF = [], dN = [];
+          var dEx = null; try { var dexj = callShop_(rqshop, '/api/v2/product/get_item_extra_info', { item_id_list: String(rqitem) }, 'get'); dEx = (((dexj || {}).response || {}).item_list || [])[0] || null; } catch (eDx) {}
+          if (r0.st !== 'NORMAL') {
+            if (!dEx) dB.push('非公開のページの sold・いいねが読めない（自動では公開しない）');
+            else if ((Number(dEx.sale) || 0) > 0 || (Number(dEx.likes) || 0) > 0) dB.push('非公開のページに sold ' + (Number(dEx.sale) || 0) + '・いいね ' + (Number(dEx.likes) || 0) + '（自動では公開しない・本人の OK が要る）');
+            else dF.push('公開にする（今 ' + r0.st + '・公開に失敗しても明細は足し、足した後にもう一度公開を試す）');
+          }
+          if (!(r0.pre && r0.dts === 10)) dF.push('予約出品10日にする（今 予約' + (r0.pre ? 'あり' : 'なし') + '・' + r0.dts + '日）');
+          var dLive = (getModels_(rqshop, rqitem) || {}).models || [];
+          var dRef = String(p.ref || '').trim().toLowerCase();
+          var dDup = rqitems.map(function (x) { return String(x.option || '').trim(); }).filter(function (n) { return dLive.some(function (m) { return String(m.name || '').trim() === n; }); })[0];
+          if (dDup) dB.push('同じ名前の明細がもうある（足し済み）: ' + dDup);
+          if (dRef && dLive.some(function (m) { var sk = String(m.sku || '').toLowerCase(); return sk === 'req_' + dRef || sk.indexOf('req_' + dRef + '-') === 0 || String(m.name || '').trim().split(' ')[0].toLowerCase() === dRef; })) dB.push('同じ参照番号の明細がもうある（足し済み）: ' + p.ref);
+          if (dLive.length + rqitems.length > 100) dB.push('明細が100で満杯（今 ' + dLive.length + '・足すのは ' + rqitems.length + '）');
+          var dTestOnly = dLive.length === 1 && String(dLive[0].name || '').trim().toLowerCase() === 'test';
+          var dWithImg = dLive.filter(function (m) { return !!m.img; }).length, dNewImg = rqitems.filter(function (x) { return x.image || x.image_id; }).length;
+          if (dTestOnly && !dLive[0].img && dNewImg) dF.push('仮の明細 test に表紙の写真を付けてから足す（1段目は全部写真あり／全部なし）');
+          else if (dWithImg > 0 && dWithImg < dLive.length) dB.push('写真の無い明細が ' + (dLive.length - dWithImg) + '件ある（1段目は全部写真あり／全部なし）: ' + dLive.filter(function (m) { return !m.img; }).slice(0, 4).map(function (m) { return m.name; }).join(' / '));
+          else if (dWithImg === 0 && dLive.length && dNewImg && !dTestOnly) dB.push('このページの明細は全部写真なし＝写真付きの明細は足せない');
+          if (dTestOnly) dF.push('足した後に仮の明細 test を詰め直しで消す（' + (Number(dLive[0].stock) || 0) + '個の在庫・R$' + dLive[0].price + '）');
+          var dCc = ''; try { dCc = baCcOfShop_(rqshop); } catch (eCc2) {}
+          var dLim = dCc === 'BR' ? 4 : 5, dPs = dLive.filter(function (m) { return !(dTestOnly) || String(m.name || '').toLowerCase() !== 'test'; }).map(function (m) { return parseFloat(m.price) || 0; }).concat(rqitems.map(function (x) { return parseFloat(x.price) || 0; })).filter(function (v) { return v > 0; });
+          var dPsT = dLive.map(function (m) { return parseFloat(m.price) || 0; }).concat(rqitems.map(function (x) { return parseFloat(x.price) || 0; })).filter(function (v) { return v > 0; });   /* test が残っている間（足した直後）の差も見る */
+          if (dPsT.length && Math.max.apply(null, dPsT) / Math.min.apply(null, dPsT) > dLim) dB.push('値段の差が ' + dLim + '倍を超える（' + Math.min.apply(null, dPsT) + '〜' + Math.max.apply(null, dPsT) + '・test を含む）');
+          if (dCc === 'VN' && rqitems.some(function (x) { return parseFloat(x.price) > 909090; })) dB.push('VN の明細の上限 909,090 を超える');
+          try { var dpj = callShop_(rqshop, '/api/v2/product/get_item_promotion', { item_id_list: String(rqitem) }, 'get'); var dpi = (((dpj || {}).response || {}).success_list || [])[0]; var dpro = ((dpi || {}).promotion || []).map(function (x) { return String(x.promotion_type || ''); }); if (dpro.length) dN.push('販促に入っている（' + dpro.join('・') + '）＝足す時に断られたら外して足し、戻す'); } catch (eDp) { dN.push('販促が読めなかった'); }
+          rqitems.forEach(function (x) { if (!x.image || x.image_id) return; try { var hr = fetchRetry_(String(x.image), { muteHttpExceptions: true, __tag: '写真の確かめ' }); var hc = hr.getResponseCode(), hl = (hr.getBlob().getBytes() || []).length; if (hc >= 400 || hl < 1000) dB.push('写真が取れない（HTTP ' + hc + '・' + hl + 'バイト）: ' + String(x.option || '').slice(0, 30)); } catch (eIm) { dB.push('写真が取れない: ' + String((eIm && eIm.message) || eIm).slice(0, 60)); } });
+          rqMk('試し');
+          rqout = { ok: true, act: 'req_add', dry: true, pass: dB.length === 0, blockers: dB, fixes: dF, notes: dN, st: r0.st, pre: r0.pre, dts: r0.dts, models: dLive.length, testOnly: dTestOnly, sale: dEx ? (Number(dEx.sale) || 0) : null, likes: dEx ? (Number(dEx.likes) || 0) : null, t: rqTS, src: SRC_VER };
+          return ContentService.createTextOutput(rqcb + '(' + JSON.stringify(rqout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+        }
         if (r0.st !== 'NORMAL') {   /* ★2026-11-06 全体レビュー 中7：sold・いいねの確かめを予約出品の書き込みより先に（断る時に何も触っていない形） */
           /* ★2026-11-05 事業本部（レビュー (4)-1）：sold・いいねが付いた非公開の Request page は自動で公開しない。読めない時も公開しない */
           var ex = callShop_(rqshop, '/api/v2/product/get_item_extra_info', { item_id_list: String(rqitem) }, 'get');
@@ -2082,10 +2116,21 @@ function doGetInner_(e) {
           if ((Number(e0.sale) || 0) > 0 || (Number(e0.likes) || 0) > 0) throw new Error('非公開の Request page（' + rqitem + '）に sold ' + (Number(e0.sale) || 0) + '・いいね ' + (Number(e0.likes) || 0) + ' があるので、自動では公開しません（本人の OK が要ります）');
         }
         if (!(r0.pre && r0.dts === 10)) { var upo = updateItem_({ shop_id: rqshop, item_id: rqitem, pre_order: { is_pre_order: true, days_to_ship: 10 } }); if (!upo || upo.ok === false) throw new Error('Request page を予約出品10日にできませんでした: ' + String((upo && upo.error) || '返事なし').slice(0, 120)); fixed.push('予約出品10日'); rqMk('予約出品10日に直す'); }
-        if (r0.st !== 'NORMAL') {
-          unlistItem_(rqshop, rqitem, false); fixed.push('公開'); rqMk('公開');
+        var pubErr = '';
+        if (r0.st !== 'NORMAL') {   /* ★2026-11-07 公開に失敗しても止めずに明細を足し、足した後にもう一度公開を試す（BR 58222414980 で unlist_item_all_failed） */
+          try { unlistItem_(rqshop, rqitem, false); fixed.push('公開'); } catch (ePub) { pubErr = String((ePub && ePub.message) || ePub).slice(0, 200); }
+          rqMk('公開');
         }
         var live = (getModels_(rqshop, rqitem) || {}).models || []; rqMk('今の明細');
+        /* ★2026-11-07 本人「最初からカタログ作ったときにtestに画像を設定しておいたらいいんちゃう？」：中身が仮の明細 test だけで写真が無い時は、先に test に表紙の写真を付けてから写真付きで足す（🤖と同じ形）。
+           足した後に test を詰め直しで消す（下）。表紙の写真が無い・付けられない時は止める */
+        var testOnly = live.length === 1 && String(live[0].name || '').trim().toLowerCase() === 'test', testModel = testOnly ? live[0] : null;
+        if (testOnly && !live[0].img && rqitems.some(function (x) { return x.image || x.image_id; })) {
+          var cvj = callShop_(rqshop, '/api/v2/product/get_item_base_info', { item_id_list: String(rqitem) }, 'get'); var cvi = (((cvj || {}).response || {}).item_list || [])[0] || {};
+          var cvUrl = ((cvi.image || {}).image_url_list || [])[0] || '';
+          if (!cvUrl) throw new Error('仮の明細 test に付ける表紙の写真がありません（明細は足していません）');
+          setVariationImage_(rqshop, rqitem, 'test', cvUrl); fixed.push('test に表紙の写真'); rqMk('test に写真'); Utilities.sleep(1500);
+        }
         var rqref = String(p.ref || '').trim(), rqrefL = rqref.toLowerCase();
         var dupN = rqitems.map(function (x) { return String(x.option || '').trim(); }).filter(function (n) { return live.some(function (m) { return String(m.name || '').trim() === n; }); })[0];
         if (dupN) throw new Error('同じ名前の明細が Shopee にもうあります（足し済み）: ' + dupN);
@@ -2094,13 +2139,21 @@ function doGetInner_(e) {
         var ab = addVariationsBulk_(rqshop, rqitem, rqitems, null); rqMk('明細を足す');
         try { sbDelete_('app_kv', 'k=eq.' + encodeURIComponent(String(p.kv || ''))); } catch (eD) {}
         if (!ab || ab.ok === false || !(Number(ab.added) > 0)) throw new Error('明細を足せませんでした: ' + String((ab && (ab.error || JSON.stringify(ab))) || '返事なし').slice(0, 200));
+        var testDel = '';
+        if (testOnly && testModel && !ab.filledTest) {   /* test を詰め直しで消す（位置を動かさない消し方・消せなければ在庫0にして残す） */
+          try { Utilities.sleep(2500); var dvs = removeVariationShift_(rqshop, rqitem, String(testModel.model_id), ['test']); testDel = (dvs && dvs.ok !== false) ? 'test を消した' : ('test を消せなかった: ' + String((dvs && dvs.error) || '').slice(0, 80)); }
+          catch (eTd) { testDel = 'test を消せなかった: ' + String((eTd && eTd.message) || eTd).slice(0, 80); try { updateStock_(rqshop, rqitem, testModel.model_id, 0); testDel += '（在庫0にした）'; } catch (eTs) {} }
+          rqMk('test を消す');
+        }
+        if (pubErr) { try { unlistItem_(rqshop, rqitem, false); fixed.push('公開（足した後）'); pubErr = ''; } catch (ePub2) { pubErr = String((ePub2 && ePub2.message) || ePub2).slice(0, 200); } rqMk('公開をもう一度'); }
         var r1 = { pre: false, dts: 0, st: '?' }, live2 = [], rdErr = '';
         try { r1 = rqBase(); live2 = (getModels_(rqshop, rqitem) || {}).models || []; } catch (eRd) { rdErr = '足した後の読み直しができませんでした（' + String((eRd && eRd.message) || eRd).slice(0, 80) + '）'; }   /* ★2026-11-06 全体レビュー 中4：明細は入っている＝ok:true・verified:false で返す */
         rqMk('読み直し');
         var got = rqitems.map(function (x) { var n = String(x.option || '').trim(); var m = live2.filter(function (y) { return String(y.name || '').trim() === n; })[0]; return { name: n, model_id: m ? String(m.model_id) : '', img: m ? (m.img || '') : '', price: m ? m.price : null, stock: m ? m.stock : null, sku: m ? m.sku : '' }; });
         var bIn = null; if (p.promo === '1') { try { var gpj = callShop_(rqshop, '/api/v2/product/get_item_promotion', { item_id_list: String(rqitem) }, 'get'); var gpi = (((gpj || {}).response || {}).success_list || [])[0]; if (gpi) bIn = (gpi.promotion || []).some(function (x) { return /bundle/i.test(String(x.promotion_type || '')) && /ongoing/i.test(String(x.promotion_staging || 'ongoing')); }); } catch (eP) {} rqMk('まとめ買い割引を読む'); }
         var why = rdErr ? rdErr : [r1.pre && r1.dts === 10 ? '' : '予約出品10日になっていない（予約' + (r1.pre ? 'あり' : 'なし') + '・' + r1.dts + '日）', r1.st === 'NORMAL' ? '' : '公開になっていない（' + r1.st + '）', got.every(function (g) { return g.model_id; }) ? '' : '足した明細が読み直しで見つからない（' + got.filter(function (g) { return !g.model_id; }).map(function (g) { return g.name; }).join('・') + '）'].filter(Boolean).join('・');
-        rqout = { ok: true, act: 'req_add', added: Number(ab.added) || 0, verifyNote: ab.verifyNote || '', promo: ab.promo || null, fixed: fixed, pre: r1.pre, dts: r1.dts, st: r1.st, verified: !why, why: why, models: got, bundleIn: bIn, t: rqTS, src: SRC_VER };
+        if (r1.st !== 'NORMAL' && pubErr) why = [why, '公開できなかった理由: ' + pubErr].filter(String).join('・');
+        rqout = { ok: true, act: 'req_add', added: Number(ab.added) || 0, verifyNote: [ab.verifyNote || '', testDel].filter(String).join('／'), promo: ab.promo || null, fixed: fixed, testOnly: testOnly, testDel: testDel, pubErr: pubErr, pre: r1.pre, dts: r1.dts, st: r1.st, verified: !why, why: why, models: got, bundleIn: bIn, t: rqTS, src: SRC_VER };
         /* 操作ログはポータルが書く（秒数 t も入れる） */
       } catch (err) { rqout = { ok: false, act: 'req_add', error: String((err && err.message) || err), t: rqTS, src: SRC_VER }; }
       finally { try { if (rqHeld) CacheService.getScriptCache().remove(rqHeld); } catch (eC) {} }   /* 自分が置いた印だけ外す */

@@ -10980,6 +10980,13 @@
       const rImg = rImgs[0];
       msg.textContent = '追加しています…（1分ほど）';
       _mk('写真'); await sbUpsert('app_kv', [{ k: kv, v: { items: names.map((n, i) => ({ option: n, price: pList[i], stock: 1, sku: skuOf(i), image: rImgs[i] })) }, updated_at: new Date().toISOString() }]);
+      /* ★2026-11-07 事業本部・本人「エラーが出ないかまでチェックした上でやってくれないの？」：本番の前に GAS の試し（dry=1・書き込みなし）を1回回し、
+         止まる所（blockers）があれば足さずに理由を出す。自動で直す所（fixes）は本番の中で直す。古い GAS（dry を知らない）の時は今までどおり */
+      { _mk('試し'); msg.textContent = '足す前の確かめをしています…（書き込みはしません）';
+        let dr = null; try { dr = await gasSerial(() => gasCall({ action: 'req_add', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, kv: kv, ref: _rf, dry: '1' }, 120000)); } catch (eDr) { dr = null; }
+        if (dr && dr.act === 'req_add' && dr.ok === false) throw new Error('足す前の確かめで止まりました: ' + String(dr.error || '').slice(0, 200));
+        if (dr && dr.dry) { pcQuote.dry = dr; _TS.push('試し：' + (dr.pass ? '通る' : '止まる ' + (dr.blockers || []).length) + (dr.fixes && dr.fixes.length ? '・直す ' + dr.fixes.join('／') : ''));
+          if (!dr.pass) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(kv)); } catch (_) {} throw new Error('足していません（足す前の確かめで止まる所があります）：' + (dr.blockers || []).join('／')); } } }
       let one = null;
       try { one = await gasSerial(() => gasCall({ action: 'req_add', token: settings.writeToken, shop_id: pick.c.shop_id, item_id: pick.c.item_id, kv: kv, ref: _rf, promo: BQ ? '1' : '' }, 330000)); }
       catch (eO) { throw new Error('GAS から返事が来ませんでした（' + String((eO && eO.message) || eO).slice(0, 80) + '）。足されたかもしれないので、もう一度押す前に Seller Center か番号（req_find）で確かめてください'); }   /* 返事が無い時は前の手順で足し直さない（二重に入る） */
@@ -10995,7 +11002,7 @@
       if (!res || res.ok === false || !(Number(res.added) > 0)) throw new Error((res && (res.error || JSON.stringify(res).slice(0, 120))) || '返事がありません');
       const partialMsg = Number(res.added) < nAdd ? 'まとめ買いの明細が ' + nAdd + ' 件中 ' + Number(res.added) + ' 件しか入りませんでした（Seller Center で確かめてください。入った分は残っています・仕入れ目安の控えは書きました）' : '';   /* ★2026-11-06 全体レビュー 中5：控えを書いてから止める */
       pcQuote.verifyNote = String((res && res.verifyNote) || '');   /* ★2026-11-05 Shopee の返事は断り文だったが明細は入っていた（GAS が読み直して確かめた） */
-      if (madeNew) {   /* ★複製に付いてくる仮の明細 test を消す（位置を動かさない消し方）→ 写真を付け直す（test に画像が無いので足す時は画像なしで入る） */
+      if (madeNew && !(one && one.act === 'req_add' && (one.testOnly || one.testDel))) {   /* ★複製に付いてくる仮の明細 test を消す（位置を動かさない消し方）→ 写真を付け直す（test に画像が無いので足す時は画像なしで入る）。新しい GAS（20261107-0130〜）は req_add の中で test に表紙の写真を付けて足し、test を消す＝ここはしない */
         msg.textContent = '仮の明細（test）を消して、写真を付けています…';
         await new Promise(z => setTimeout(z, 3000));
         const gm = await gasCall({ action: 'get_models', shop_id: pick.c.shop_id, item_id: pick.c.item_id }, 60000);
@@ -25938,6 +25945,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-06', items: [
+      '🧪 <b>Request page に足す前に「試し」を1回回すようにしました</b>（本人「エラーが出ないかまでチェックした上でやってくれないの？」）：書き込みはせずに、ページの公開・予約出品10日・1段目の写真の有無・値段の差・明細の数・同じ照合番号・販促・写真が取れるかを本番と同じ順で読み、止まる所があれば足さずに理由を出します。仮の明細 test だけのページは、先に test に表紙の写真を付けてから足し、足した後に test を消します（本人「最初からtestに画像を設定しておいたらいいんちゃう？」）。公開に失敗しても止めずに足し、足した後にもう一度公開を試して、だめなら理由を出します。',
       '🧩 <b>仮の明細 test だけの Request page に足せなかったのを直しました</b>（本人「前も同じエラーなかった？」＝10/22・10/23 と同じ形）：複製で作ったページの test は写真が無く、写真付きの明細を足すと「全部に写真あり／全部なし」の決まりで断られていました。明細を足す口（🤖・フロント・Request page・まとめ買い）は全部、test だけ（在庫0・写真なし）の時は test をその明細に書き換えるようにしました（明細を増やさない）。あわせて、同じ照合番号の明細がもうその国の Request page にあれば、足さずに「✅ もう足してあります（リンク）」と返します。',
       '🛒 <b>Request page に入る物が無い時は、止めずに新しく作って足すようにしました</b>（本人「この場合は作っていいやろ」）：明細100個で満杯・値段の差（BR 4倍・他 5倍）を超える時は、既存の Request page と同じ名前の付け方で番号を進めて複製し、仮の明細の値段を今の値段にします（高い物用・安い物用に分かれて、次から入りやすくなります）。作る前にその店の出品の上限（TW 本店 100 など）を確かめ、当たる時だけ理由を出して止めます。足した後は仮の明細 test を消して写真を付け、公開まで自動です（▶ 公開する は出しません）。中身が test だけのページ（作った直後の物）にも同じ手順で足します。',
       '💴 <b>営業の画面に「見積もりを送った人」の一覧を足しました</b>（本人「見積送ったひとを把握できるようにしたい」）：Smart Reply・WhatsApp・Zalo・Viber の見積もりカードで「✅ 送った」を押した見積もりが、4つの道具共通で1件ずつ並びます（2台の PC で同じ）。日時・道具・国・相手（押すと会話）・品名・写真・値段・粗利・ROI・利益率・払い方・状態・返事なしの日数。状態（送った／返事あり／合意／Request page を作った／買ってもらった／断られた）は行で手で変えられ、Request page に足せた時と、注文の明細 SKU（REQ_照合番号）が合った時は自動で進みます。返事なしで3日以上の人が上に出ます。各道具が書き始めるのは、それぞれの版が入ってからです。',
