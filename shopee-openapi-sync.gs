@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0630';
+var SRC_VER = '20261107-0700';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -6811,14 +6811,28 @@ function refreshIncomeAfterReturn_(lim, deadlineSec, dry) {
   var im = {}; incs.forEach(function (x) { im[x.cc + ':' + x.sn] = x; });
   var want = {};
   (sbSelectAll_('orders', 'select=cc,sn&tab=eq.600') || []).forEach(function (o) { want[o.cc + ':' + o.sn] = 0; });
-  (sbSelectAll_('returns', 'select=cc,order_sn,update_time') || []).forEach(function (r) { if (!r.order_sn) return; var k = r.cc + ':' + r.order_sn; want[k] = Math.max(want[k] || 0, Number(r.update_time) || 0); });
+  var newOk = {};   /* 行を新しく足してよい注文＝返品のある注文と、配送失敗・紛失のキャンセルだけ（未払いのキャンセルなど千件超は足さない） */
+  (sbSelectAll_('returns', 'select=cc,order_sn,update_time') || []).forEach(function (r) { if (!r.order_sn) return; var k = r.cc + ':' + r.order_sn; want[k] = Math.max(want[k] || 0, Number(r.update_time) || 0); newOk[k] = 1; });
   var targets = [];
+  /* ★2026-11-07 02 の調べ（95件）：返品のある注文の半分（91件）は income に行が無かった＝補償（入金の調整）が入ったか・損が無いかが判らない。
+     返品のある注文と、配送失敗・紛失のキャンセルで income に行が無い物は、注文表から店を引いて取り直し、行を足す（_new） */
+  (sbSelectAll_('orders', 'select=cc,sn,shop_id,status,cancel_reason&or=(cancel_reason.ilike.*Failed%20Delivery*,cancel_reason.ilike.*parcel%20has%20been%20lost*)') || []).forEach(function (o) { var k = o.cc + ':' + o.sn; if (!(k in want)) want[k] = 0; newOk[k] = 1; });
+  var missK = Object.keys(newOk).filter(function (k) { return !im[k]; });
+  if (missK.length) {
+    var missSn = missK.map(function (k) { return k.split(':')[1]; });
+    for (var mi = 0; mi < missSn.length; mi += 80) {
+      (sbSelectAll_('orders', 'select=cc,sn,shop_id,status&sn=in.(' + missSn.slice(mi, mi + 80).map(encodeURIComponent).join(',') + ')') || []).forEach(function (o) {
+        var k = o.cc + ':' + o.sn; if (missK.indexOf(k) < 0 || !o.shop_id || !byShop[String(o.shop_id)]) return;
+        targets.push({ cc: o.cc, sn: o.sn, shop_id: String(o.shop_id), amount: null, adj: null, _new: true, _st: String(o.status || '') });
+      });
+    }
+  }
   Object.keys(want).forEach(function (k) { var cur = im[k]; if (!cur || !cur.shop_id || !byShop[String(cur.shop_id)]) return;
     var at = cur.adj && cur.adj.at ? Date.parse(cur.adj.at) / 1000 : 0;
     if (!cur.adj || (want[k] && at < want[k])) targets.push(cur); });
   var res = { targets: targets.length, done: 0, moved: 0, errs: 0, lost: 0, examples: [] };
   if (dry) return res;
-  var deadline = now_() + (deadlineSec || 150), out = [], now2 = new Date().toISOString();
+  var deadline = now_() + (deadlineSec || 150), out = [], outN = [], now2 = new Date().toISOString();
   for (var i = 0; i < targets.length && res.done < lim; i++) {
     if (now_() > deadline) break;
     if (!bgAllowed_()) { res.stop = '枠の予約線'; break; }
@@ -6829,6 +6843,10 @@ function refreshIncomeAfterReturn_(lim, deadlineSec, dry) {
     res.done++;
     var f_comm = parseFloat(inc.commission_fee) || 0, f_serv = parseFloat(inc.service_fee) || 0, f_txn = parseFloat(inc.seller_transaction_fee) || 0;
     var buyerPaid = parseFloat(inc.buyer_total_amount); if (isNaN(buyerPaid)) buyerPaid = null;
+    if (t._new) {   /* 行が無かった注文＝新しい行（列をそろえて別に書く） */
+      var nr = { cc: t.cc, sn: t.sn, amount: amt, pending: !/^COMPLETED$/i.test(t._st), category: 4, shop_id: String(t.shop_id), buyer_paid: buyerPaid, fee_total: f_comm + f_serv + f_txn,
+        fees: escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid), bundle: escrowBundle_(inc), adj: escrowAdj_(inc), amount_initial: amt, amount_initial_at: now2, amount_at: now2, synced_at: now2 };
+      outN.push(nr); res.added = (res.added || 0) + 1; if (nr.adj.seller_lost_compensation) res.lost++; continue; }
     var adj = escrowAdj_(inc), row = { cc: t.cc, sn: t.sn, amount: amt, fees: escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid), fee_total: f_comm + f_serv + f_txn, adj: adj, synced_at: now2 };
     if (amt !== parseFloat(t.amount)) { row.amount_at = now2; res.moved++; if (res.examples.length < 8) res.examples.push(t.cc + ' ' + t.sn + ' ' + t.amount + '→' + amt); }
     if (adj.seller_lost_compensation) res.lost++;
@@ -6836,7 +6854,7 @@ function refreshIncomeAfterReturn_(lim, deadlineSec, dry) {
   }
   /* 一度に書く行は列をそろえる（PostgREST は「All object keys must match」で断る）＝額が変わった行（amount_at あり）と変わらない行を分けて書く */
   var outA = out.filter(function (r) { return r.amount_at; }), outB = out.filter(function (r) { return !r.amount_at; });
-  [outA, outB].forEach(function (grp) { for (var k2 = 0; k2 < grp.length; k2 += 100) sbUpsert_('income', grp.slice(k2, k2 + 100), 'cc,sn'); });
+  [outA, outB, outN].forEach(function (grp) { for (var k2 = 0; k2 < grp.length; k2 += 100) sbUpsert_('income', grp.slice(k2, k2 + 100), 'cc,sn'); });
   try { ufPersist_(); } catch (eU) {}
   res.left = Math.max(0, targets.length - res.done);
   return res;
