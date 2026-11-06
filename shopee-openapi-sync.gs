@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0130';
+var SRC_VER = '20261107-0215';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -1195,6 +1195,8 @@ function doGetInner_(e) {
         if (!/^[A-Za-z0-9_-]{4,40}$/.test(rfref)) throw new Error('ref（照合番号）か sku（REQ_…）が要ります');
         var rfmax = Math.max(1, Math.min(8, parseInt(p.max, 10) || 3));
         var rfcats = sbSelectAll_('listings', 'select=item_id,shop_id,status,name,models&cc=eq.' + rfcc + '&or=(name.ilike.*Request%20page*,name.ilike.*Solicitar*)') || [];
+        /* ★2026-11-07 18項目の13：足した先（item_id・shop_id）が分かっている時は、表に無くても（作ったばかり）そのページを最初に読む */
+        if (p.item_id && p.shop_id) { var rfI = String(p.item_id).replace(/\D/g, ''); rfcats = rfcats.filter(function (c) { return String(c.item_id) !== rfI; }); rfcats.unshift({ item_id: rfI, shop_id: String(p.shop_id).replace(/\D/g, ''), status: 0, name: '', models: [{ sku: 'req_' + rfL }] }); }
         var rfL = rfref.toLowerCase();
         var rfHas = function (c) { return (c.models || []).some(function (m) { return m && (String(m.sku || '').toLowerCase() === ('req_' + rfL) || String(m.n || '').toLowerCase().indexOf(rfL) === 0); }); };
         rfcats.sort(function (a, b) { return (rfHas(b) ? 1 : 0) - (rfHas(a) ? 1 : 0) || (a.status === 1 ? 0 : 1) - (b.status === 1 ? 0 : 1); });
@@ -2091,7 +2093,7 @@ function doGetInner_(e) {
           if (dDup) dB.push('同じ名前の明細がもうある（足し済み）: ' + dDup);
           if (dRef && dLive.some(function (m) { var sk = String(m.sku || '').toLowerCase(); return sk === 'req_' + dRef || sk.indexOf('req_' + dRef + '-') === 0 || String(m.name || '').trim().split(' ')[0].toLowerCase() === dRef; })) dB.push('同じ参照番号の明細がもうある（足し済み）: ' + p.ref);
           if (dLive.length + rqitems.length > 100) dB.push('明細が100で満杯（今 ' + dLive.length + '・足すのは ' + rqitems.length + '）');
-          var dTestOnly = dLive.length === 1 && String(dLive[0].name || '').trim().toLowerCase() === 'test';
+          var dTestOnly = dLive.length === 1 && (String(dLive[0].name || '').trim().toLowerCase() === 'test' || (String(p.newpage || '') === '1' && !/^REQ_/i.test(String(dLive[0].sku || ''))));   /* ★2026-11-07 18項目の4 */
           var dWithImg = dLive.filter(function (m) { return !!m.img; }).length, dNewImg = rqitems.filter(function (x) { return x.image || x.image_id; }).length;
           if (dTestOnly && !dLive[0].img && dNewImg) dF.push('仮の明細 test に表紙の写真を付けてから足す（1段目は全部写真あり／全部なし）');
           else if (dWithImg > 0 && dWithImg < dLive.length) dB.push('写真の無い明細が ' + (dLive.length - dWithImg) + '件ある（1段目は全部写真あり／全部なし）: ' + dLive.filter(function (m) { return !m.img; }).slice(0, 4).map(function (m) { return m.name; }).join(' / '));
@@ -2105,7 +2107,7 @@ function doGetInner_(e) {
           try { var dpj = callShop_(rqshop, '/api/v2/product/get_item_promotion', { item_id_list: String(rqitem) }, 'get'); var dpi = (((dpj || {}).response || {}).success_list || [])[0]; var dpro = ((dpi || {}).promotion || []).map(function (x) { return String(x.promotion_type || ''); }); if (dpro.length) dN.push('販促に入っている（' + dpro.join('・') + '）＝足す時に断られたら外して足し、戻す'); } catch (eDp) { dN.push('販促が読めなかった'); }
           rqitems.forEach(function (x) { if (!x.image || x.image_id) return; try { var hr = fetchRetry_(String(x.image), { muteHttpExceptions: true, __tag: '写真の確かめ' }); var hc = hr.getResponseCode(), hl = (hr.getBlob().getBytes() || []).length; if (hc >= 400 || hl < 1000) dB.push('写真が取れない（HTTP ' + hc + '・' + hl + 'バイト）: ' + String(x.option || '').slice(0, 30)); } catch (eIm) { dB.push('写真が取れない: ' + String((eIm && eIm.message) || eIm).slice(0, 60)); } });
           rqMk('試し');
-          rqout = { ok: true, act: 'req_add', dry: true, pass: dB.length === 0, blockers: dB, fixes: dF, notes: dN, st: r0.st, pre: r0.pre, dts: r0.dts, models: dLive.length, testOnly: dTestOnly, sale: dEx ? (Number(dEx.sale) || 0) : null, likes: dEx ? (Number(dEx.likes) || 0) : null, t: rqTS, src: SRC_VER };
+          rqout = { ok: true, act: 'req_add', dry: true, dryVer: 2, pass: dB.length === 0, blockers: dB, fixes: dF, notes: dN, st: r0.st, pre: r0.pre, dts: r0.dts, models: dLive.length, testOnly: dTestOnly, sale: dEx ? (Number(dEx.sale) || 0) : null, likes: dEx ? (Number(dEx.likes) || 0) : null, t: rqTS, src: SRC_VER };
           return ContentService.createTextOutput(rqcb + '(' + JSON.stringify(rqout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
         }
         if (r0.st !== 'NORMAL') {   /* ★2026-11-06 全体レビュー 中7：sold・いいねの確かめを予約出品の書き込みより先に（断る時に何も触っていない形） */
@@ -2124,12 +2126,12 @@ function doGetInner_(e) {
         var live = (getModels_(rqshop, rqitem) || {}).models || []; rqMk('今の明細');
         /* ★2026-11-07 本人「最初からカタログ作ったときにtestに画像を設定しておいたらいいんちゃう？」：中身が仮の明細 test だけで写真が無い時は、先に test に表紙の写真を付けてから写真付きで足す（🤖と同じ形）。
            足した後に test を詰め直しで消す（下）。表紙の写真が無い・付けられない時は止める */
-        var testOnly = live.length === 1 && String(live[0].name || '').trim().toLowerCase() === 'test', testModel = testOnly ? live[0] : null;
+        var testOnly = live.length === 1 && (String(live[0].name || '').trim().toLowerCase() === 'test' || (String(p.newpage || '') === '1' && !/^REQ_/i.test(String(live[0].sku || '')))), testModel = testOnly ? live[0] : null;   /* ★2026-11-07 18項目の4：作ったページの仮の明細は名前が test でなくても */
         if (testOnly && !live[0].img && rqitems.some(function (x) { return x.image || x.image_id; })) {
           var cvj = callShop_(rqshop, '/api/v2/product/get_item_base_info', { item_id_list: String(rqitem) }, 'get'); var cvi = (((cvj || {}).response || {}).item_list || [])[0] || {};
           var cvUrl = ((cvi.image || {}).image_url_list || [])[0] || '';
           if (!cvUrl) throw new Error('仮の明細 test に付ける表紙の写真がありません（明細は足していません）');
-          setVariationImage_(rqshop, rqitem, 'test', cvUrl); fixed.push('test に表紙の写真'); rqMk('test に写真'); Utilities.sleep(1500);
+          setVariationImage_(rqshop, rqitem, String(live[0].name || 'test'), cvUrl); fixed.push('仮の明細に表紙の写真'); rqMk('test に写真'); Utilities.sleep(1500);
         }
         var rqref = String(p.ref || '').trim(), rqrefL = rqref.toLowerCase();
         var dupN = rqitems.map(function (x) { return String(x.option || '').trim(); }).filter(function (n) { return live.some(function (m) { return String(m.name || '').trim() === n; }); })[0];
@@ -2141,7 +2143,7 @@ function doGetInner_(e) {
         if (!ab || ab.ok === false || !(Number(ab.added) > 0)) throw new Error('明細を足せませんでした: ' + String((ab && (ab.error || JSON.stringify(ab))) || '返事なし').slice(0, 200));
         var testDel = '';
         if (testOnly && testModel && !ab.filledTest) {   /* test を詰め直しで消す（位置を動かさない消し方・消せなければ在庫0にして残す） */
-          try { Utilities.sleep(2500); var dvs = removeVariationShift_(rqshop, rqitem, String(testModel.model_id), ['test']); testDel = (dvs && dvs.ok !== false) ? 'test を消した' : ('test を消せなかった: ' + String((dvs && dvs.error) || '').slice(0, 80)); }
+          try { Utilities.sleep(2500); var dvs = removeVariationShift_(rqshop, rqitem, String(testModel.model_id), [String(testModel.name || 'test')]); testDel = (dvs && dvs.ok !== false) ? 'test を消した' : ('test を消せなかった: ' + String((dvs && dvs.error) || '').slice(0, 80)); }
           catch (eTd) { testDel = 'test を消せなかった: ' + String((eTd && eTd.message) || eTd).slice(0, 80); try { updateStock_(rqshop, rqitem, testModel.model_id, 0); testDel += '（在庫0にした）'; } catch (eTs) {} }
           rqMk('test を消す');
         }
