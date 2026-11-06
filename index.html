@@ -8823,6 +8823,10 @@
     'GAS以外のURLには接続しません': 'Only Google Apps Script URLs are allowed',
     'AI調査のURLがGASではありません': 'The AI research URL is not a Google Apps Script URL',
     '⚠ 倉庫へ発送済の印を読めていません（多めに出ます）・': '⚠ Warehouse-shipped marks could not be loaded (count is overstated) · ',
+    /* ★2026-11-07 アクセス（各国）の商品の表 */
+    '—（読めていない）': '— (not read)', '新': 'new',
+    '期間の始まりの記録が無い・統計が止まっている店など': 'No record at the start of the period, or the shop\'s stats have stopped',
+    '期間の途中で出した品＝出してからの累計': 'Listed during the period = total since listing',
   };
   const i18nOn = () => { try { return localStorage.getItem('smdLang') === 'en'; } catch (_) { return false; } };
   // ★【完全一致のみ】にする。単語の部分置換をやると「日本語に戻す」→「Day本語にUndo」のように
@@ -8876,6 +8880,11 @@
     [/^🧹 枠空け候補（公開中・売上0・閲覧0・いいね0・出品30日超）$/, '🧹 Free up slots (live · 0 sold · 0 views · 0 likes · listed 30+ days ago)'],
     [/^表示中を全部選ぶ$/, 'Select all shown'], [/^選択を外す$/, 'Clear selection'],
     [/^選んだ (\d+) 件を非公開にする（戻せます）$/, 'Unlist $1 selected (reversible)'],
+    [/^選んだ (\d+) 件を非公開にする$/, 'Unlist $1 selected'],
+    /* ★2026-11-07 アクセス（各国）の商品の表（点検役のレビュー 高1〜3・中4） */
+    [/^⚠ 統計が2日より古い店の品 (\d+) 件は候補から外しています（その後に sold・いいねが付いているかもしれないため）：(.+)。「📊 統計を取り直す」で新しくなれば候補に戻ります$/, '⚠ $1 item(s) from shops whose stats are older than 2 days are left out (they may have got sales or likes since): $2. They come back after "📊 Refresh stats".'],
+    [/^⚠ この期間の「＋期間」はまだ出せません（統計の記録は (.+) から）。もっと短い期間を選んでください$/, '⚠ "+period" cannot be shown for this period yet (stats are recorded from $1). Choose a shorter period.'],
+    [/^統計の日付：(.+)　※非公開＝消さない。売上・いいねの資産は残ります。枠が空いているうちは公開に戻せます（🤖 が空いた枠を埋めると戻せないことがあります）$/, 'Stats date: $1 — unlisting does not delete; sales and likes stay. You can relist while a slot is free (once 🤖 fills the slot, relisting may fail).'],
     [/^非公開にしています (\d+)\/(\d+)（成功(\d+)・失敗(\d+)）$/, 'Unlisting $1/$2 (ok $3 · failed $4)'],
     [/^📊 統計を取り直す（表示中の国・約1分）$/, '📊 Refresh stats (shown countries · ~1 min)'],
     [/^古い順に最大600件。見出しを押すと並べ替え（もう一度押すと逆順）。/, 'Oldest first, up to 600. Click a header to sort (again to reverse). '],
@@ -18373,8 +18382,8 @@
   const TA = { dim: 'cc', shops: [], period: 30, ccs: [], metric: 'uv', chart: 'line', gran: 'day', cmp: true, ma: false, pSort: 'views', pCc: '', pHw: '', pQ: '', pZero: false };
   try { Object.assign(TA, JSON.parse(localStorage.getItem('smdTrafficAna') || '{}')); } catch (_) {}
   /* ★2026-10-20 レビュー：選択の控え TA._sel（Set）が保存のたびに {} で書かれ、開き直すと .has が無くて枠空け候補の表が「読み込み中…」のまま止まっていた → 保存しない・読み戻した物は捨てる */
-  if (!(TA._sel instanceof Set)) TA._sel = new Set(); delete TA._statAt;
-  const taSave = () => { try { const o = Object.assign({}, TA); delete o._charts; delete o._d; delete o._prod; delete o._sel; delete o._statAt; delete o._deltaErr; delete o._restatMsg; delete o._prodSeq; delete o._unlistBad; localStorage.setItem('smdTrafficAna', JSON.stringify(o)); } catch (_) {} };
+  Object.keys(TA).forEach(k => { if (k.charAt(0) === '_') delete TA[k]; }); if (!(TA._sel instanceof Set)) TA._sel = new Set(); delete TA._statAt;
+  const taSave = () => { try { const o = Object.assign({}, TA); Object.keys(o).forEach(k => { if (k.charAt(0) === '_') delete o[k]; });   /* ★11/7 先頭が _ の物は画面の中だけの状態（控え・印）＝保存しない */ delete o._charts; delete o._d; delete o._prod; delete o._sel; delete o._statAt; delete o._deltaErr; delete o._restatMsg; delete o._prodSeq; delete o._unlistBad; localStorage.setItem('smdTrafficAna', JSON.stringify(o)); } catch (_) {} };
   const TA_METRICS = [
     ['uv', '訪問者', 'sum'], ['pv', 'ページビュー', 'sum'], ['nv', '新規の訪問者', 'sum'], ['ev', '既存の訪問者', 'sum'], ['nf', 'フォロワー増', 'sum'],
     ['ord', '注文数', 'sum'], ['gmv', '売上（円）', 'sum'], ['cvr', '注文率（注文÷訪問者）', 'ratio'], ['ppv', '1訪問あたりのページ数', 'ratio'],
@@ -18585,6 +18594,12 @@
     TA._charts.push(new Chart(document.getElementById('ta-nv'), { type: 'bar', data: { labels: buckets.map(b => TA.gran === 'month' ? b : b.slice(5)), datasets: [{ label: '新規', data: nvB.map(x => x[0] || null), backgroundColor: '#22c55e' }, { label: '既存', data: nvB.map(x => x[1] || null), backgroundColor: '#94a3b8' }] }, plugins: [taStackLabels(v => Math.round(v).toLocaleString())], options: Object.assign({}, baseOpt, { scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, grace: '12%' } } }) }));
     renderTrafficProd();
   }
+  /* ★2026-11-07 点検役のレビュー 中4・高3：「＋期間」の書き方。増え＝+3／減り＝−3（いいねは取り消される）／0＝0／読めていない＝—（読めていない）／期間の途中で出した品は累計（新） */
+  function taDelta(v, isNew) {
+    if (v == null) return '<span class="smd-dim" style="font-size:10.5px" title="期間の始まりの記録が無い・統計が止まっている店など">—（読めていない）</span>';
+    const s = v > 0 ? '+' + v.toLocaleString() : (v < 0 ? '−' + Math.abs(v).toLocaleString() : '0');
+    return (v < 0 ? '<span style="color:#c0392b">' + s + '</span>' : (v === 0 ? '<span class="smd-dim">0</span>' : s)) + (isNew ? '<span class="smd-dim" style="font-size:10.5px" title="期間の途中で出した品＝出してからの累計"> 新</span>' : '');
+  }
   async function renderTrafficProd() {
     const host = document.getElementById('ta-prod'); if (!host) return;
     if (!TA._prod) {
@@ -18593,8 +18608,9 @@
         const key = settings.sbKey || settings.sbSecret;
         /* ★2026-10-24 全体レビュー #4：読み始めに番号を振り、古い番号の結果は捨てる（期間を続けて押した時に古い期間の数字が後から上書きしていた）。期間はループの前に1回だけ取る */
         const _seq = TA._prodSeq = (TA._prodSeq || 0) + 1, _per = TA.period; let _dErr = '';
+        const _stF = !!TA._statsForce; TA._statsForce = false;   /* ★2026-11-07 点検役のレビュー 高1：「📊 統計を取り直す」・🔄 の後も30分の控え（lsStatsRows）が古い数字を返し、日付だけ新しくなっていた → その時は読み直す */
         const [cur, li, statAt, delta] = await Promise.all([
-          lsStatsRows(),
+          lsStatsRows(_stF),
           sbGetAll('listings', 'select=cc,item_id,shop_id,name,image,status,create_time'),   /* ★2026-10-19 枠空け候補の判定に 公開状態と出品日 */
           sbGetAll('app_kv', 'select=k,updated_at&k=like.listing_stats_*').catch(() => []),
           /* ★2026-10-24 全体レビュー #3：途中で失敗すると黙って打ち切り、後ろの品が全部「伸び無し」＝売れた品も👀に入っていた → 出品管理（rxLoadDelta）と同じく書き込み用の鍵で1回だけ読み直し、駄目なら全部捨てて画面に出す */
@@ -18604,8 +18620,14 @@
         TA._deltaErr = _dErr;
         const st = {}; (cur || []).forEach(r => Object.assign(st, (r.v && r.v.items) || {}));
         const dm = {}; (delta || []).forEach(r => { dm[r.item_id] = r; });
-        TA._prod = (li || []).map(l => { const s = st[l.item_id] || {}, d = dm[l.item_id] || {}; return { cc: l.cc, shop: String(l.shop_id || ''), id: String(l.item_id), name: String(l.name || ''), img: l.image || '', hw: (typeof hwOf === 'function' ? hwOf(l.name) : '') || '', views: s.views != null ? +s.views : null, likes: s.likes != null ? +s.likes : null, sale: s.sale != null ? +s.sale : null, dLikes: d.d_likes != null ? +d.d_likes : null, dSale: d.d_sale != null ? +d.d_sale : null, status: String(l.status == null ? '' : l.status), ct: Number(l.create_time) || 0 }; });
-        TA._statAt = {}; (statAt || []).forEach(r => { const m = String(r.k || '').match(/^listing_stats_(\d+)$/); if (m) TA._statAt[m[1]] = String(r.updated_at || '').slice(0, 10); });
+        TA._prod = (li || []).map(l => { const s = st[l.item_id] || {}, d = dm[l.item_id] || {}; return { cc: l.cc, shop: String(l.shop_id || ''), id: String(l.item_id), name: String(l.name || ''), img: l.image || '', hw: (typeof hwOf === 'function' ? hwOf(l.name) : '') || '', views: s.views != null ? +s.views : null, likes: s.likes != null ? +s.likes : null, sale: s.sale != null ? +s.sale : null, dLikes: d.d_likes != null ? +d.d_likes : null, dSale: d.d_sale != null ? +d.d_sale : null, dNew: false, status: String(l.status == null ? '' : l.status), ct: Number(l.create_time) || 0 }; });
+        TA._statAt = {}; TA._statAtT = {}; (statAt || []).forEach(r => { const m = String(r.k || '').match(/^listing_stats_(\d+)$/); if (m) { const t = Date.parse(r.updated_at || '') || 0; TA._statAt[m[1]] = t ? jstDate(t).slice(5).replace('-', '/') : '不明'; TA._statAtT[m[1]] = t; } });
+        /* ★2026-11-07 点検役のレビュー 高3：期間の始まりに控えが無い品は「＋期間」が null。期間の途中で出した品は、出品管理（statOfP）と同じく累計をそのまま「期間の増え」にする。それ以外の null は「—（読めていない）」で、👀 にも入れない */
+        const _pStart = Date.now() - _per * 86400000;
+        if (delta) TA._prod.forEach(p => { if (p.dSale == null && p.dLikes == null && p.ct && p.ct * 1000 >= _pStart && (p.sale != null || p.likes != null)) { p.dSale = p.sale; p.dLikes = p.likes; p.dNew = true; } });
+        TA._deltaAllNull = !!delta && TA._prod.length > 0 && TA._prod.every(p => p.dSale == null && p.dLikes == null);
+        TA._histFirst = '';
+        if (TA._deltaAllNull) { try { const _h = await sbGet('listing_stats_history', 'select=snap_date&order=snap_date.asc&limit=1'); TA._histFirst = String((_h && _h[0] && _h[0].snap_date) || ''); } catch (_) {} }
         TA._sel = new Set();   /* ★2026-10-24 全体レビュー #2：統計・期間を読み直したら選び直す（前の統計で選んだ品を、新しい統計で条件から外れても下げていた） */
       } catch (e) { host.innerHTML = '<div style="color:#d93025">⚠ 読めませんでした（' + esc(e.message) + '）</div>'; return; }
     }
@@ -18613,13 +18635,16 @@
     const hws = [...new Set(TA._prod.map(p => p.hw).filter(Boolean))].sort();
     const q = (TA.pQ || '').toLowerCase();
     let L = TA._prod.filter(p => (!TA.pCc || p.cc === TA.pCc) && (!TA.pShop || p.shop === TA.pShop) && (!TA.pHw || p.hw === TA.pHw) && (!q || p.name.toLowerCase().indexOf(q) >= 0));
-    if (TA.pZero && !TA._deltaErr) L = L.filter(p => (p.views || 0) >= 20 && !(p.dSale > 0));
+    if (TA.pZero && !TA._deltaErr) L = L.filter(p => (p.views || 0) >= 20 && p.dSale === 0);   /* ★11/7 高3：読めていない（null）は売れていないと言えない＝入れない */
     /* ★2026-10-19 本人「出品開始日が古く、いいねも閲覧数もついていなく、1回も売れていないカタログが優先」＝出品枠がいっぱいの国で、非公開にして枠を空ける候補。
        条件＝公開中・生涯売上0・閲覧0・いいね0・出品から30日超（出したばかりの閲覧0は除く）。古い順に並べる。Excel 非公開候補_PH_SG_TH_TW_20261019 と同じ条件 */
-    const _freeOk = (p) => String(p.status) === '1' && p.sale === 0 && p.views === 0 && p.likes === 0 && p.ct > 0   /* ★10/20 全体レビュー：統計が無い（null）のを0扱いして候補に入れていた＝売れているカタログを下げるおそれ */ && (Date.now() / 1000 - p.ct) > 30 * 86400;
+    /* ★2026-11-07 点検役のレビュー 高2：統計が止まっている店（例 TW 2店舗目 10/27）の品は、その後に sold・いいねが付いていても 0・0・0 のまま＝候補から外す（sold・いいねの付いた物は触らない＝本人の絶対の決め）。2日より古い・日付が無い店は外す */
+    const _statFresh = (p) => { const t = (TA._statAtT || {})[p.shop] || 0; return t > 0 && Date.now() - t <= 2 * 86400000; };
+    const _freeOk = (p) => _statFresh(p) && String(p.status) === '1' && p.sale === 0 && p.views === 0 && p.likes === 0 && p.ct > 0   /* ★10/20 全体レビュー：統計が無い（null）のを0扱いして候補に入れていた＝売れているカタログを下げるおそれ */ && (Date.now() / 1000 - p.ct) > 30 * 86400;
+    const _staleFree = TA.pFree ? L.filter(p => !_statFresh(p) && String(p.status) === '1' && p.sale === 0 && p.views === 0 && p.likes === 0) : [];
     if (TA.pFree) L = L.filter(_freeOk);
     /* ★2026-09-26 本人「昇順・降順で見れるように、プルダウンじゃなくて、その選択で選べるように」＝見出しを押すと並べ替え（もう一度押すと逆順）。絞り込みはボタン */
-    const KEYS = { ct: p => p.ct || 0, cc: p => p.cc, name: p => p.name.toLowerCase(), hw: p => p.hw, views: p => p.views == null ? -1 : p.views, likes: p => p.likes == null ? -1 : p.likes, dLikes: p => p.dLikes || 0, sale: p => p.sale == null ? -1 : p.sale, dSale: p => p.dSale || 0, rate: p => (p.views ? (p.dSale || 0) / p.views : -1) };
+    const KEYS = { ct: p => p.ct || 0, cc: p => p.cc, name: p => p.name.toLowerCase(), hw: p => p.hw, views: p => p.views == null ? -1 : p.views, likes: p => p.likes == null ? -1 : p.likes, dLikes: p => p.dLikes == null ? -1e9 : p.dLikes, sale: p => p.sale == null ? -1 : p.sale, dSale: p => p.dSale == null ? -1e9 : p.dSale, rate: p => (p.views && p.dSale != null ? p.dSale / p.views : -1) };
     if (!KEYS[TA.pSort]) TA.pSort = 'views';
     const dir = TA.pDir === 'asc' ? 1 : -1, kf = KEYS[TA.pSort];
     L.sort((a, b) => { const x = kf(a), y = kf(b); return (x < y ? -1 : x > y ? 1 : 0) * dir; });
@@ -18643,14 +18668,16 @@
         <b style="font-size:11.5px">🧹 枠空け</b>
         <button class="smd-btn" id="ta-selall" style="font-size:11px;padding:2px 8px">表示中を全部選ぶ</button>
         <button class="smd-btn" id="ta-selnone" style="font-size:11px;padding:2px 8px">選択を外す</button>
-        <button class="smd-btn" id="ta-unlist" style="font-size:11px;padding:2px 10px;background:#d93025;color:#fff;border-color:#d93025">選んだ ${_selN()} 件を非公開にする（戻せます）</button>
+        <button class="smd-btn" id="ta-unlist" style="font-size:11px;padding:2px 10px;background:#d93025;color:#fff;border-color:#d93025">選んだ ${_selN()} 件を非公開にする</button>
         <button class="smd-btn" id="ta-restats" style="font-size:11px;padding:2px 8px">📊 統計を取り直す（表示中の国・約1分）</button>
-        <span class="smd-dim" style="font-size:10.5px">統計の日付：${(() => { const ds = [...new Set(L.map(p => (TA._statAt || {})[p.shop] || '不明'))].sort(); return esc(ds.join('・') || '—'); })()}　※非公開＝消さない。売上・いいねの資産は残り、戻せます</span>
+        <span class="smd-dim" style="font-size:10.5px">統計の日付：${(() => { const ds = [...new Set(TA._prod.filter(p => !TA.pCc || p.cc === TA.pCc).map(p => p.shop).filter(Boolean))].map(id => ((TA._prod.find(p => p.shop === id) || {}).cc || '') + ' ' + shopLb(id) + '：' + ((TA._statAt || {})[id] || '不明')); return esc(ds.join('・') || '—'); })()}　※非公開＝消さない。売上・いいねの資産は残ります。枠が空いているうちは公開に戻せます（🤖 が空いた枠を埋めると戻せないことがあります）</span>
+        ${_staleFree.length ? `<div style="width:100%;font-size:11px;color:#c0392b;font-weight:700">⚠ 統計が2日より古い店の品 ${_staleFree.length} 件は候補から外しています（その後に sold・いいねが付いているかもしれないため）：${esc([...new Set(_staleFree.map(p => p.cc + ' ' + shopLb(p.shop) + '（' + ((TA._statAt || {})[p.shop] || '不明') + '）'))].join('・'))}。「📊 統計を取り直す」で新しくなれば候補に戻ります</div>` : ''}
         ${TA._unlistMsg ? `<div style="width:100%;font-size:11px;color:${TA._unlistBad ? '#c0392b' : '#1a7f37'}">${esc(TA._unlistMsg)}</div>` : ''}
         ${TA._restatMsg ? `<div style="width:100%;font-size:11px;color:${/^⚠/.test(TA._restatMsg) ? '#c0392b' : '#1a7f37'}">${esc(TA._restatMsg)}</div>` : ''}
       </div>` : ''}</div>
+      ${TA._deltaAllNull ? `<div style="background:#fff4e5;border:1px solid #ffd699;color:#b26a00;border-radius:8px;padding:6px 10px;margin:0 0 6px;font-size:11.5px">⚠ この期間の「＋期間」はまだ出せません（統計の記録は ${esc(TA._histFirst || '不明')} から）。もっと短い期間を選んでください</div>` : ''}
       ${TA._deltaErr ? `<div style="background:#fff4e5;border:1px solid #ffd699;color:#b26a00;border-radius:8px;padding:6px 10px;margin:0 0 6px;font-size:11.5px;font-weight:700">⚠ ${esc(TA._deltaErr)}。「＋期間」「閲覧→販売」は空欄、👀 の絞り込みは止めています（🔄で読み直してください）</div>` : ''}<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr>${TA.pFree ? '<th style="border-bottom:1px solid #e3e6ea">☑</th>' : ''}<th style="border-bottom:1px solid #e3e6ea"></th>${th('cc', '国', 'left')}${th('name', '商品', 'left')}${th('hw', '機種')}${TA.pFree ? th('ct', '出品日') : ''}${th('views', '閲覧')}${th('likes', 'いいね')}${th('dLikes', '＋期間')}${th('sale', '販売')}${th('dSale', '＋期間')}${th('rate', '閲覧→販売')}</tr>
-      ${_shownP.map(p => `<tr>${TA.pFree ? `<td style="padding:2px 4px"><input type="checkbox" class="ta-sel" data-id="${esc(p.id)}" ${TA._sel && TA._sel.has(p.id) ? 'checked' : ''}></td>` : ''}<td style="padding:2px 4px">${p.img ? `<img src="${esc(/^https?:/.test(p.img) ? p.img : 'https://down-cvs-sg.img.susercontent.com/' + p.img)}" loading="lazy" style="width:34px;height:34px;object-fit:cover;border-radius:4px">` : ''}</td><td style="padding:2px 6px"><b style="color:${(regionByCc(p.cc) || {}).color || '#888'}">${p.cc}</b></td><td style="padding:2px 6px;max-width:420px">${esc(p.name)}</td><td style="padding:2px 6px;text-align:right;white-space:nowrap">${esc(hwJa(p.hw))}</td>${TA.pFree ? `<td style="text-align:right;padding:2px 6px;white-space:nowrap">${p.ct ? new Date(p.ct * 1000).toISOString().slice(0, 10) : '—'}<span class="smd-dim"> ${p.ct ? Math.floor((Date.now() / 1000 - p.ct) / 86400) + '日' : ''}</span></td>` : ''}<td style="text-align:right;padding:2px 6px">${p.views == null ? '—' : p.views.toLocaleString()}</td><td style="text-align:right;padding:2px 6px">${p.likes == null ? '—' : p.likes.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;color:#1a7f37">${p.dLikes ? '+' + p.dLikes : ''}</td><td style="text-align:right;padding:2px 6px">${p.sale == null ? '—' : p.sale.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;color:#1a7f37">${p.dSale ? '+' + p.dSale : ''}</td><td style="text-align:right;padding:2px 6px">${p.views && !TA._deltaErr ? ((p.dSale || 0) / p.views * 100).toFixed(1) + '%' : '—'}</td></tr>`).join('')}</table></div>
+      ${_shownP.map(p => `<tr>${TA.pFree ? `<td style="padding:2px 4px"><input type="checkbox" class="ta-sel" data-id="${esc(p.id)}" ${TA._sel && TA._sel.has(p.id) ? 'checked' : ''}></td>` : ''}<td style="padding:2px 4px">${p.img ? `<img src="${esc(/^https?:/.test(p.img) ? p.img : 'https://down-cvs-sg.img.susercontent.com/' + p.img)}" loading="lazy" style="width:34px;height:34px;object-fit:cover;border-radius:4px">` : ''}</td><td style="padding:2px 6px"><b style="color:${(regionByCc(p.cc) || {}).color || '#888'}">${p.cc}</b></td><td style="padding:2px 6px;max-width:420px">${esc(p.name)}</td><td style="padding:2px 6px;text-align:right;white-space:nowrap">${esc(hwJa(p.hw))}</td>${TA.pFree ? `<td style="text-align:right;padding:2px 6px;white-space:nowrap">${p.ct ? new Date(p.ct * 1000).toISOString().slice(0, 10) : '—'}<span class="smd-dim"> ${p.ct ? Math.floor((Date.now() / 1000 - p.ct) / 86400) + '日' : ''}</span></td>` : ''}<td style="text-align:right;padding:2px 6px">${p.views == null ? '—' : p.views.toLocaleString()}</td><td style="text-align:right;padding:2px 6px">${p.likes == null ? '—' : p.likes.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;color:#1a7f37">${taDelta(p.dLikes, p.dNew)}</td><td style="text-align:right;padding:2px 6px">${p.sale == null ? '—' : p.sale.toLocaleString()}</td><td style="text-align:right;padding:2px 6px;color:#1a7f37">${taDelta(p.dSale, p.dNew)}</td><td style="text-align:right;padding:2px 6px">${p.views && !TA._deltaErr && p.dSale != null && TA.period <= 30 ? (p.dSale / p.views * 100).toFixed(1) + '%' : '—'}</td></tr>`).join('')}</table></div>
       <div class="smd-dim" style="font-size:10.5px;margin-top:4px">${TA.pFree ? '古い順に最大600件。' : '上位100件。'}見出しを押すと並べ替え（もう一度押すと逆順）。クリック数（商品の表示→クリック）は Business Insights の商品ページにしか無く、まだ取り込んでいません。</div>`;
     host.querySelectorAll('.ta-pchip').forEach(b => b.addEventListener('click', () => {
       const g = b.dataset.g, v = b.dataset.v;
@@ -18658,9 +18685,9 @@
       taSave(); renderTrafficProd();
     }));
     /* ★2026-10-19 枠空け：選ぶ→非公開（公式API unlist_item・1件ずつ・戻せる）。押した瞬間にボタンの文字が進む。失敗は件数と理由を出す */
-    host.querySelectorAll('.ta-sel').forEach(cb => cb.addEventListener('change', () => { if (!TA._sel) TA._sel = new Set(); const id = cb.dataset.id; if (cb.checked) TA._sel.add(id); else TA._sel.delete(id); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = `選んだ ${_selN()} 件を非公開にする（戻せます）`; }));
-    const _selAll = host.querySelector('#ta-selall'); if (_selAll) _selAll.addEventListener('click', () => { if (!TA._sel) TA._sel = new Set(); host.querySelectorAll('.ta-sel').forEach(cb => { cb.checked = true; TA._sel.add(cb.dataset.id); }); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = `選んだ ${_selN()} 件を非公開にする（戻せます）`; });
-    const _selNone = host.querySelector('#ta-selnone'); if (_selNone) _selNone.addEventListener('click', () => { TA._sel = new Set(); host.querySelectorAll('.ta-sel').forEach(cb => { cb.checked = false; }); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = '選んだ 0 件を非公開にする（戻せます）'; });
+    host.querySelectorAll('.ta-sel').forEach(cb => cb.addEventListener('change', () => { if (!TA._sel) TA._sel = new Set(); const id = cb.dataset.id; if (cb.checked) TA._sel.add(id); else TA._sel.delete(id); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = `選んだ ${_selN()} 件を非公開にする`; }));
+    const _selAll = host.querySelector('#ta-selall'); if (_selAll) _selAll.addEventListener('click', () => { if (!TA._sel) TA._sel = new Set(); host.querySelectorAll('.ta-sel').forEach(cb => { cb.checked = true; TA._sel.add(cb.dataset.id); }); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = `選んだ ${_selN()} 件を非公開にする`; });
+    const _selNone = host.querySelector('#ta-selnone'); if (_selNone) _selNone.addEventListener('click', () => { TA._sel = new Set(); host.querySelectorAll('.ta-sel').forEach(cb => { cb.checked = false; }); const b = host.querySelector('#ta-unlist'); if (b) b.textContent = '選んだ 0 件を非公開にする'; });
     const _unl = host.querySelector('#ta-unlist'); if (_unl) _unl.addEventListener('click', async () => {
       if (!TA._sel || !TA._sel.size) { _unl.textContent = '先に候補を選んでください'; return; }
       if (_unl.dataset.busy) return;
@@ -18686,7 +18713,7 @@
       for (const sid of shops) { _rst.textContent = `📊 取り直し中 ${done + 1}/${shops.length}`; try { const _rs = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + 'action=run_stats&shop_id=' + encodeURIComponent(sid) + '&token=' + encodeURIComponent(settings.writeToken || ''), 240000, true); if (!_rs || _rs.ok === false) throw new Error((_rs && _rs.error) || '応答がありませんでした'); } catch (e) { _rf.push(shopLb(sid) + '：' + String((e && e.message) || e).slice(0, 60)); console.warn('[枠空け] 統計の取り直しに失敗', sid, e && e.message); } done++; }
       /* ★2026-10-24 全体レビュー #11：失敗はコンソールだけ（GAS の ok:false も成功扱い）＝取り直せたと思って古い統計のまま下げていた → 失敗した店と理由を枠空けの欄に出す */
       TA._restatMsg = _rf.length ? ('⚠ 統計を取り直せなかった店 ' + _rf.length + '/' + shops.length + '（この店の数字は古いままです）：' + _rf.join('／')) : ('📊 統計を取り直しました（' + shops.length + '店）');
-      delete _rst.dataset.busy; TA._prod = null; renderTrafficProd();
+      delete _rst.dataset.busy; TA._prod = null; TA._statsForce = true; renderTrafficProd();
     });
     host.querySelectorAll('.ta-sort').forEach(h => h.addEventListener('click', () => {
       const k = h.dataset.k;
@@ -18826,7 +18853,7 @@
       <div class="smd-dim" style="font-size:10.5px;margin-top:6px">前日分は Shopee 側で 10:00 に確定し、各国のタブが 11:05（現地）に読み直して送ります。⚠＝2日以上届いていない国（そのタブが閉じているか、ログアウトしています）。<span>「⚠1店」＝その国の店のうち2日以上届いていない店がある（国の数字はその店の分が抜けて少なく出ます）。</span></div>
     </details>`;
     taFoldInit(host);
-    const rb = host.querySelector('#traffic-reload'); if (rb) rb.addEventListener('click', () => { TA._d = null; TA._prod = null; renderTraffic(); });
+    const rb = host.querySelector('#traffic-reload'); if (rb) rb.addEventListener('click', () => { TA._d = null; TA._prod = null; TA._statsForce = true; renderTraffic(); });
     (async () => {   /* 取り込み状況 → カートの日ごと（同じ目印の控えを使う＝読みは1回）。どちらも renderTraffic を呼び返さない */
       try { await renderTrafficIng(); } catch (e) { console.warn('[取り込み状況]', e); }
       try { await renderTrafficCart(); } catch (e) { console.warn('[カートの日ごと]', e); }
@@ -26084,6 +26111,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-07', items: [
+      '👣 <b>アクセス（各国）の商品の表：枠空けの守りと「＋期間」の直し</b>（点検役のレビュー 高1〜3・中4）：「📊 統計を取り直す」・🔄 の後は控えを使わず読み直す（日付だけ新しくて中身が古い、を無くした）／統計が2日より古い店（例 TW 2店舗目）の品は 🧹 枠空け候補から外し、外した件数と店・日付を出す・統計の日付は店の名前と並べる／「＋期間」が読めない品は「—（読めていない）」と出し 👀 に入れない・期間の途中で出した品は累計（新）／減った時は −3（+-3 と出ていた）／閲覧→販売は30日までの期間だけ／「戻せます」を「枠が空いているうちは戻せます」に。',
+    ] },
     { date: '2026-11-06', items: [
       '🧯 <b>全体レビュー（11/7）の残り</b>：Request page の公開は明細を足した後に（途中で止まっても仮の明細が買える形で出ない）／試しは別の口（req_add_dry）＝古い GAS が試しを本番として足さない／新しいページの印（newpage）でも在庫のある明細・照合番号で始まる明細は上書きしない／複製した直後の test（在庫1）にも写真付きで足せる／WA から押した時、入力欄に入ったかを最長10秒待ってから返す／JAN 台帳の付け替えを保存できなかった時は手元も戻す（後から2回当ててずれない）。',
       '🧯 <b>全体レビュー（11/7）の直し</b>：作り直しが止まった時に「成功」と返さない（作り直す所が無い時は「明細は今のまま」）／GAS の返事が来ず番号でも見つからない時は「足したか分からない」の印（unk）で返す（GAS がまだ足している途中なら待つ）／新しい Request page 作りに失敗した時に画面が止まる誤りを直した／仮の明細の書き換えは値段を先に（販促中でも名前だけ変わって止まらない）／まとめ買いで一部だけ入った時は、押し直すと入っていない分だけ足す／番号で探す時に足したばかりのページを最初に読む／試しで GAS が断った理由をそのまま出す／「足し済み」だけで止まる時は「もう足してあります」で返す／明細の打ちかけを別の明細に戻さない／SLS+ の申請日を件数だけで止めない／JAN の重複で続編（Galaxy と Galaxy 2）を同じ作品にしない／作ったばかりの Request page をすぐ控えに載せる・消したページは控えから外す。',
