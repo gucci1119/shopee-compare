@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0030';
+var SRC_VER = '20261107-0045';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -4944,6 +4944,9 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) 
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   optionName = String(optionName || '').trim();
   if (!optionName) throw new Error('追加するバリエ名が空です');
+  /* ★2026-11-07 1件だけ足す口も、仮の明細 test（写真なし・在庫0）だけのカタログなら test を書き換える（avFillPlaceholder_・chk.sh 7-11） */
+  { var _ph1 = null; try { _ph1 = avFillPlaceholder_(shopId, itemId, [{ option: optionName, price: price, stock: stock, sku: sku, image: imageUrl }]); } catch (ePh1) { throw new Error('仮の明細 test を書き換えられませんでした（明細は足していません）: ' + String((ePh1 && ePh1.message) || ePh1).slice(0, 160)); }
+    if (_ph1) return { ok: true, item_id: itemId, option: optionName, model_id: _ph1.model_id, tier_index: 0, filledTest: true, verifyNote: '仮の明細 test を「' + optionName + '」に書き換えました' }; }
   var newImageId = imageUrl ? uploadImageUrl_(imageUrl) : null; // 新バリエの画像（任意）
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];

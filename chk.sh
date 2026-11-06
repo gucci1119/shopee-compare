@@ -239,6 +239,11 @@ if [ -n "$B8" ]; then echo "NG  大物（product_ids・写真の控え・駿河�
 PK=$(grep -m1 "const PAGE_KEYS = \[" index.html | sed "s/.*\[\(.*\)\].*/\1/" | tr -d "' ")
 B9=""; for k in $(grep -o 'id="page-[a-z0-9]*"' index.html | sed 's/id="page-//;s/"//' | sort -u); do case ",$PK," in *",$k,"*) ;; *) B9="$B9 $k";; esac; done
 if [ -n "$B9" ]; then echo "NG  PAGE_KEYS に無い画面がある（押しても出ない）:$B9"; NG=1; else echo "OK  画面は全部 PAGE_KEYS にある"; fi
+# 7-11 ★2026-11-07 1段目の明細の写真の有無（「全部に写真あり／全部なし」）。仮の明細 test（写真なし）だけのカタログに写真付きの明細を足すと必ず断られる（10/22・10/23・11/6 の3回）。
+#      明細を足す口は全部 addVariationsBulk_ を通り、その入口で avFillPlaceholder_（test を1件目に書き換える）を呼ぶこと。addVariationsBulk0_ を外から直に呼ばないこと
+if ! grep -q '^function avFillPlaceholder_' shopee-openapi-sync.gs || ! awk '/^function addVariationsBulk_\(/,/^}/' shopee-openapi-sync.gs | grep -q 'avFillPlaceholder_(' || ! awk '/^function addVariation_\(/,/^}/' shopee-openapi-sync.gs | grep -q 'avFillPlaceholder_('; then echo "NG  明細を足す入口（addVariationsBulk_）が仮の明細 test の書き換え（avFillPlaceholder_）を通っていない"; NG=1;
+elif [ "$(grep -c 'addVariationsBulk0_(' shopee-openapi-sync.gs)" -gt 3 ] || [ "$(grep -c 'addVariationsBulkP_(' shopee-openapi-sync.gs)" -gt 3 ]; then echo "NG  addVariationsBulk0_／addVariationsBulkP_ を入口の外から呼んでいる（test の書き換えを飛ばす）"; NG=1;
+else echo "OK  明細を足す口は全部、仮の明細 test の書き換えを通る（1段目の写真の有無）"; fi
 # 7-10 ★2026-10-25 🕹 アーケードの種類の表は GAS とポータルの2か所にある。中身がずれると、片方だけ新しい種類を知っている＝カタログを作るのに画面に出ない等になる
 A1=$(awk '/\/\*ARC_KINDS_BEGIN\*\//,/\/\*ARC_KINDS_END\*\//' shopee-openapi-sync.gs | sed 's/^ *//; s/.*ARC_KINDS_BEGIN/BEGIN/; s/ARC_KINDS_END.*/END/')
 A2=$(awk '/\/\*ARC_KINDS_BEGIN\*\//,/\/\*ARC_KINDS_END\*\//' index.html | sed 's/^ *//; s/.*ARC_KINDS_BEGIN/BEGIN/; s/ARC_KINDS_END.*/END/')
