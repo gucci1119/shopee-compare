@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0215';
+var SRC_VER = '20261107-0230';
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -2098,7 +2098,8 @@ function doGetInner_(e) {
           if (dTestOnly && !dLive[0].img && dNewImg) dF.push('仮の明細 test に表紙の写真を付けてから足す（1段目は全部写真あり／全部なし）');
           else if (dWithImg > 0 && dWithImg < dLive.length) dB.push('写真の無い明細が ' + (dLive.length - dWithImg) + '件ある（1段目は全部写真あり／全部なし）: ' + dLive.filter(function (m) { return !m.img; }).slice(0, 4).map(function (m) { return m.name; }).join(' / '));
           else if (dWithImg === 0 && dLive.length && dNewImg && !dTestOnly) dB.push('このページの明細は全部写真なし＝写真付きの明細は足せない');
-          if (dTestOnly) dF.push('足した後に仮の明細 test を詰め直しで消す（' + (Number(dLive[0].stock) || 0) + '個の在庫・R$' + dLive[0].price + '）');
+          if (dTestOnly) dF.push('足した後に仮の明細を案内用の明細「' + REQ_GUIDE_NAME + '」（在庫0）にして残す＝明細が2つになり、お客さんのページに選ぶ欄が出る（今 ' + (Number(dLive[0].stock) || 0) + '個の在庫）');
+          if (!dTestOnly && dLive.length === 1) dN.push('今の明細は1つ＝足すと2つになる');
           var dCc = ''; try { dCc = baCcOfShop_(rqshop); } catch (eCc2) {}
           var dLim = dCc === 'BR' ? 4 : 5, dPs = dLive.filter(function (m) { return !(dTestOnly) || String(m.name || '').toLowerCase() !== 'test'; }).map(function (m) { return parseFloat(m.price) || 0; }).concat(rqitems.map(function (x) { return parseFloat(x.price) || 0; })).filter(function (v) { return v > 0; });
           var dPsT = dLive.map(function (m) { return parseFloat(m.price) || 0; }).concat(rqitems.map(function (x) { return parseFloat(x.price) || 0; })).filter(function (v) { return v > 0; });   /* test が残っている間（足した直後）の差も見る */
@@ -2142,10 +2143,21 @@ function doGetInner_(e) {
         try { sbDelete_('app_kv', 'k=eq.' + encodeURIComponent(String(p.kv || ''))); } catch (eD) {}
         if (!ab || ab.ok === false || !(Number(ab.added) > 0)) throw new Error('明細を足せませんでした: ' + String((ab && (ab.error || JSON.stringify(ab))) || '返事なし').slice(0, 200));
         var testDel = '';
-        if (testOnly && testModel && !ab.filledTest) {   /* test を詰め直しで消す（位置を動かさない消し方・消せなければ在庫0にして残す） */
-          try { Utilities.sleep(2500); var dvs = removeVariationShift_(rqshop, rqitem, String(testModel.model_id), [String(testModel.name || 'test')]); testDel = (dvs && dvs.ok !== false) ? 'test を消した' : ('test を消せなかった: ' + String((dvs && dvs.error) || '').slice(0, 80)); }
-          catch (eTd) { testDel = 'test を消せなかった: ' + String((eTd && eTd.message) || eTd).slice(0, 80); try { updateStock_(rqshop, rqitem, testModel.model_id, 0); testDel += '（在庫0にした）'; } catch (eTs) {} }
-          rqMk('test を消す');
+        /* ★2026-11-07 本人「最初から2つ作れば？」「どうせ後から足していくんだし」（03-12：明細が1つだとお客さんのページに選ぶ欄が出ない）：
+           仮の明細 test は消さずに、案内用の明細（REQ_GUIDE_NAME・在庫0・表紙の写真）に名前を変えて残す＝最初から明細が2つになる。位置は動かさない */
+        if (testOnly && testModel && !ab.filledTest) {
+          try {
+            Utilities.sleep(2000);
+            var gmj = callShop_(rqshop, '/api/v2/product/get_model_list', { item_id: rqitem }, 'get'), gmr = gmj.response || {}, gmt = (gmr.tier_variation || [])[0] || {};
+            var tIdx = -1; (gmr.model || []).forEach(function (m) { if (String(m.model_id) === String(testModel.model_id)) tIdx = (m.tier_index || [])[0]; });
+            if (tIdx == null || tIdx < 0) throw new Error('仮の明細の位置が読めません');
+            var gol = (gmt.option_list || []).map(function (o, ix) { return tierOpt_(o, ix === tIdx ? REQ_GUIDE_NAME : null); });
+            var grm = (gmr.model || []).map(function (m) { return { model_id: m.model_id, tier_index: m.tier_index }; });
+            updateTierVariation_(rqshop, rqitem, [{ name: gmt.name, option_list: gol }], grm);
+            try { updateStock_(rqshop, rqitem, testModel.model_id, 0); } catch (eGs) {}
+            testDel = '仮の明細を案内用の明細「' + REQ_GUIDE_NAME + '」（在庫0）にした';
+          } catch (eTd) { testDel = '仮の明細を案内用にできなかった（' + String((eTd && eTd.message) || eTd).slice(0, 80) + '）'; try { updateStock_(rqshop, rqitem, testModel.model_id, 0); testDel += '・在庫0にした'; } catch (eTs) {} }
+          rqMk('仮の明細を案内用に');
         }
         if (pubErr) { try { unlistItem_(rqshop, rqitem, false); fixed.push('公開（足した後）'); pubErr = ''; } catch (ePub2) { pubErr = String((ePub2 && ePub2.message) || ePub2).slice(0, 200); } rqMk('公開をもう一度'); }
         var r1 = { pre: false, dts: 0, st: '?' }, live2 = [], rdErr = '';
@@ -4728,6 +4740,8 @@ function bulkEditTier_(shopId, itemId, opts, imgs) {
    写真付きの明細を足すと必ず断られていた（11/6 BR 58272439042 の Request page）。
    → 中身が test 1つ（在庫0）だけの時は、test を1件目の明細に書き換える（明細を増やさない＝写真の有無がそろう・test を消す手間も無い）。
    名前・写真は枠で、値段・在庫・SKU は同じ model に書く。2件目からは今までどおり足す。明細を足す口（🤖・フロント・Request page・まとめ買い・add_variations_bulk）は全部ここを通る */
+/* ★2026-11-07 Request page の案内用の明細の名前（在庫0・買えない・明細が2つ以上になると Shopee が選ぶ欄を出す） */
+var REQ_GUIDE_NAME = 'Please send me a message';
 function avFillPlaceholder_(shopId, itemId, items) {
   if (!items || !items.length) return null;
   var x = items[0], nm = String((x && x.option) || '').trim();
