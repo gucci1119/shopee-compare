@@ -5240,6 +5240,11 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    /* ★2026-11-07 商品の行の 写真・カタログ名・明細名 */
+    "明細：—（在庫に明細の欄なし）": "Variation: — (stock has no variation field)", "明細：—（この注文はまだ読んでいない）": "Variation: — (this order is not loaded here)",
+    "明細：—（注文に明細名なし）": "Variation: — (no variation name on the order)", "明細：—（提出は商品ごと）": "Variation: — (submitted per product)",
+    "明細：—（カートの数は商品ごと）": "Variation: — (cart counts are per product)", "商品（写真・カタログ名・明細名）": "Item (photo, catalog, variation)",
+    "商品（写真・名前・明細名）": "Item (photo, name, variation)",
     "⛔ 為替を読めず既定のレートで計算した値段なので、入力欄に入れていません（コピーもしていません）。為替を読み直してから押してください": "⛔ The price was calculated with the default exchange rate (the rate could not be read), so it was not put into the chat box (not copied either). Reload the exchange rate and try again",
     "⛔ 為替を読めず既定のレートで計算した値段なので、Request page に足していません。為替を読み直してから押してください": "⛔ The price was calculated with the default exchange rate (the rate could not be read), so it was not added to the Request page. Reload the exchange rate and try again",
     "為替を読めず既定のレートで計算しています。為替を読み直してから押してください": "Calculated with the default exchange rate (the rate could not be read). Reload the exchange rate before pressing",
@@ -8953,6 +8958,9 @@
     'マスタを読み込めませんでした。通信を確かめて、もう一度開いてください。': 'Could not load the master list. Check your connection and open it again.',
   });
   const I18N_PAT = [
+    /* ★2026-11-07 商品の行の2行目（明細名） */
+    [/^注文の明細（(\d+)品）：(.+)$/, 'Order variations ($1 items): $2'], [/^売れた明細：(.+)$/, 'Variations sold: $1'],
+    [/^バリエ品（明細 (\d+)件）＝一括値下げは対象外$/, 'Variation listing ($1 variations) = not in the bulk price cut'],
     /* ★2026-11-07 アクセス（各国）：商品の表・明細ごと・「いま」の帯 */
     [/^注文 (\d+)$/, 'orders $1'], [/^明細ごと（(\d+)）$/, 'Per variation ($1)'], [/^店 (\d+)$/, 'shop $1'],
     [/^⚠ 明細を読めませんでした（(.*)）。もう一度行を押すと読み直します$/, '⚠ Could not read the variations ($1). Click the row again to retry'],
@@ -10171,7 +10179,7 @@
       try { renderAlerts._cache = null; } catch (_) {}
       try { productIds = null; kvOk.product_ids = false; } catch (_) {}   /* ★2026-10-24 全体レビュー（出品管理 #5）：読み直すまで保存させない（前は印が立ったまま＝空の控え＋数件で数千件の JAN を上書きできた） */
       try { lst._ledgerRows = undefined; lst._leakCat = null; lst._leakHtmlCache = null; lst.covCatData = {}; lst._ledgerImg = undefined; lst._ledgerCostMap = undefined; } catch (_) {}
-      try { stock.rows = null; stock.imgMap = null; } catch (_) {}   // 在庫台帳
+      try { stock.rows = null; stock.imgMap = null; stock.snItems = null; } catch (_) {}   // 在庫台帳
       try { repeatCache = null; repSnap = null; } catch (_) {}        // 🎯有在庫化候補（注文＋在庫の集計）＋📅今月のリスト（保存済みの月は上書きしない＝読み直すだけ）
       try { _dbRankCache = null; } catch (_) {}                       // 📊価格調整DBランキング
       try { renderTrend._orders = null; } catch (_) {}                // 売上・注文数の推移
@@ -10205,7 +10213,7 @@
         dataNote += ok(rps) ? ' ・利益表✓' : ' ・利益表△';
         openapiRunFetch('run_income').catch(() => {}); // 入金(escrow)だけは重い(GAS自己制限270秒)ので待たず背景実行＝サーバ側でDB更新。キャッシュ破棄済なので次に損益/入金を開くと反映
         dataNote += ' ・入金は背景取得';
-        try { stock.rows = null; stock.imgMap = null; renderReturns._cache = null; } catch (_) {} // 取り込んだ直後の分も読み直す
+        try { stock.rows = null; stock.imgMap = null; stock.snItems = null; renderReturns._cache = null; } catch (_) {} // 取り込んだ直後の分も読み直す
       }
       let listNote;
       // ★出品状況：公式API（GAS run_listings）があればそれを背景で使う。以前は「ライブPC＋書き込みキー」ならブリッジ（GM_xhr）で7か国を順に全件取りに行っており、
@@ -13289,18 +13297,21 @@
                   + (d.srcSc ? '\n　 内訳：' + d.srcSc : '') : '')
         + (d.lt ? '\n\n🆘 この日が最終期限 ' + d.lt + '件（超過で注文取消）' + (() => {
             const li = ltItemsOf[d.k] || [];
-            return li.slice(0, 12).map(r => { const it = (r.items || [])[0] || {}; return '\n　・' + r.cc + ' ' + r.sn + ' ' + String(it.name || '').replace(/^\[(Used|Usado|Usada|New|Novo|Nova)\]\s*/i, '').slice(0, 34) + '（📦 ' + md2(key(ordShipDeadline(r), r.cc)) + ' に家から出す）'; }).join('')
+            return li.slice(0, 12).map(r => { /* ★2026-11-07 全品・明細名つき・名前は切らない */ const nms = ((r.items && r.items.length) ? r.items : [{}]).map(it => String(it.name || '').replace(/^\[(Used|Usado|Usada|New|Novo|Nova)\]\s*/i, '') + ((it.variation || it.model_name) ? '（明細：' + (it.variation || it.model_name) + '）' : '')).join('＋'); return '\n　・' + r.cc + ' ' + r.sn + ' ' + nms + '（📦 ' + md2(key(ordShipDeadline(r), r.cc)) + ' に家から出す）'; }).join('')
               + (li.length > 12 ? '\n　…ほか ' + (li.length - 12) + '件' : '') + '\n　🆘の数字をクリックで一覧に表示';
           })() : '')
         + (d.nf ? '\n\n🛑 この日に自動キャンセル ' + d.nf + '件' : '')
         + (() => {
             const li = (itemsOf[d.k] || []);
             if (!li.length) return '';
+            /* ★2026-11-07 本人「カタログ名とか、明細名とか」：2品以上の注文は全品・名前は切らない（吹き出しは文字だけ＝写真は日を押した下の注文一覧に出る） */
             const line = (r) => {
-              const it = (r.items || [])[0] || {};
-              const nm2 = String(it.name || '').replace(/^\[(Used|Usado|Usada|New|Novo|Nova)\]\s*/i, '').slice(0, 40);
-              const va = it.variation ? '（' + String(it.variation).slice(0, 18) + '）' : '';
-              return '　・' + r.cc + ' ' + nm2 + va;
+              const its = (r.items && r.items.length) ? r.items : [{}];
+              return its.map((it, j) => {
+                const nm2 = String(it.name || '').replace(/^\[(Used|Usado|Usada|New|Novo|Nova)\]\s*/i, '');
+                const vr = String(it.variation || it.model_name || '');
+                return (j ? '　　＋' : '　・' + r.cc + ' ') + nm2 + (vr ? '（明細：' + vr + '）' : '') + ((Number(it.qty) || 1) > 1 ? ' ×' + it.qty : '');
+              }).join('\n');
             };
             return '\n\n― 対象商品 ―\n' + li.slice(0, 12).map(line).join('\n')
               + (li.length > 12 ? '\n　…ほか ' + (li.length - 12) + '件' : '');
@@ -14536,18 +14547,15 @@
       const due = document.getElementById('dash-due');
       due.innerHTML = notShipped.slice(0, 8).map(o => {
         const rg = regionByCc(o.cc);
-        const it = (o.items && o.items[0]) || {};
-        const img = it.image
-          ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:34px;height:34px;border-radius:6px;object-fit:cover;flex:none" loading="lazy">`
-          : `<span style="width:34px;height:34px;flex:none;background:#f4f4f4;border-radius:6px"></span>`;
+        /* ★2026-11-07 本人「こういうのぜんぶ画像欲しい」：写真・カタログ名・明細名（2品以上は全品）＝共通の itemCellHtml */
+        const img = `<div style="min-width:0;flex:1">${itemCellHtml(o.items, { size: 34, maxW: '360px' })}</div>`;
         const link = rg ? `https://${rg.host}/portal/sale/order${o.sn ? '#smdsn=' + encodeURIComponent(o.sn) : ''}` : null;
         const arr2 = ordArranged(o);   // ★2026-10-24 レビュー：②伝票発行済も並べるので印を付ける
         const body = `<b style="color:${rg ? rg.color : '#333'};flex:none">${o.cc}</b>` +
-          `<span style="flex:none;font-size:11px;font-weight:700;color:${arr2 ? '#1565c0' : '#b45309'}" title="${arr2 ? '②伝票発行済（手配は押した・まだ手元）' : '①未手配（Shopeeで発送手配をまだ押していない）'}">${arr2 ? '②' : '①'}</span>${img}` +
-          `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.name || '')}">${esc(it.name || '')}</span>`;
+          `<span style="flex:none;font-size:11px;font-weight:700;color:${arr2 ? '#1565c0' : '#b45309'}" title="${arr2 ? '②伝票発行済（手配は押した・まだ手元）' : '①未手配（Shopeeで発送手配をまだ押していない）'}">${arr2 ? '②' : '①'}</span>${img}`;
         return `<div class="dash-row" style="align-items:center">` +
-          (link ? `<a href="${link}" target="_blank" title="注文詳細を開く" style="display:flex;align-items:center;gap:8px;min-width:0;color:inherit;text-decoration:none">${body}</a>`
-                : `<span style="display:flex;align-items:center;gap:8px;min-width:0">${body}</span>`) +
+          (link ? `<a href="${link}" target="_blank" title="注文詳細を開く" style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;color:inherit;text-decoration:none">${body}</a>`
+                : `<span style="display:flex;align-items:center;gap:8px;min-width:0;flex:1">${body}</span>`) +
           `<span style="flex:none">${shipByBadge(o.ship_by, false, o.cc)}</span></div>`;
       }).join('') + (notShipped.length > 8 ? `<div class="dash-row"><span class="dash-due-more" style="color:#1a73e8;cursor:pointer;font-size:12px">ほか ${notShipped.length - 8}件 → 📦注文管理</span></div>` : '') || '<div class="smd-dim">未発送はありません🎉</div>';
       { const mo = due.querySelector('.dash-due-more'); if (mo) mo.addEventListener('click', () => showPage('orders')); }
@@ -15056,7 +15064,7 @@
   const invHwManual = r => !!((invCls.items[r.item_id] || {}).hw);
   const invCatManual = r => !!((invCls.items[r.item_id] || {}).cat);
 
-  const stock = { rows: null, imgMap: null, st: '', sup: '', origin: '', q: '', tak: '', hw: '', cat: '', bound: false, adding: false,
+  const stock = { rows: null, imgMap: null, snItems: null, st: '', sup: '', origin: '', q: '', tak: '', hw: '', cat: '', bound: false, adding: false,
     sortKey: (function () { try { return localStorage.getItem('smdStkSortK') || ''; } catch (_) { return ''; } })(),
     sortDir: (function () { try { return localStorage.getItem('smdStkSortD') || 'desc'; } catch (_) { return 'desc'; } })() };
   const stkOrigin = r => String(r.item_id || '').indexOf('PITM-') === 0 ? 'auto' : (String(r.item_id || '').indexOf('ITM-') === 0 ? 'sheet' : 'other');
@@ -15261,7 +15269,7 @@
       if (!window.__takWired) { window.__takWired = 1; document.addEventListener('keydown', e => { try { window.__takKeyHandler(e); } catch (_) {} }, true); window.addEventListener('resize', () => { try { window.__takFit && window.__takFit(); } catch (_) {} }); }
       document.getElementById('stock-refresh').addEventListener('click', async e => {
         e.target.disabled = true; e.target.textContent = '⏳ 更新中';
-        stock.rows = null; stock.imgMap = null;
+        stock.rows = null; stock.imgMap = null; stock.snItems = null;
         await renderStock();
         e.target.disabled = false; e.target.textContent = '🔄 更新';
       });
@@ -15283,6 +15291,7 @@
           const it = (o.items || [])[0];
           if (o.sn && it && it.image && !stock.imgMap.has(o.sn)) stock.imgMap.set(o.sn, it.image);
         });
+        stock.snItems = snItemsMapOf_(orders);   /* ★2026-11-07 明細名（在庫に明細の欄が無い）＝同じ応答から控えるだけ・読みは増やさない */
       } catch (e) { body.innerHTML = errBox(e); return; }
     } else if (!tak.ok || !invCls.ok) {
       await Promise.all([takLoad(), invClsLoad()]);   // 前に読めなかった分だけ読み直す（読めている方は何も読まない）
@@ -15385,10 +15394,10 @@
       }).slice(0, 200);
       wrap.querySelector('#op-list').innerHTML = list.length
         ? `<table class="pf-table"><tr><th>日付</th><th>国</th><th>商品</th><th>バイヤー</th><th>Order ID</th><th></th></tr>` +
-          list.map(o => { const rg = regionByCc(o.cc) || { color: '#333' }; const it = (o.items || [])[0] || {};
+          list.map(o => { const rg = regionByCc(o.cc) || { color: '#333' };
             return `<tr><td style="font-size:11px;white-space:nowrap">${esc((o.order_date || '').slice(5))}</td>` +
               `<td><b style="color:${rg.color}">${o.cc}</b></td>` +
-              `<td style="font-size:11px">${nm(it.name || '', '280px')}${it.variation ? `<br><span class="smd-dim" style="font-size:10px">${esc(it.variation)}</span>` : ''}</td>` +
+              `<td style="font-size:11px;min-width:220px">${itemCellHtml(o.items, { size: 32, maxW: '280px' })}</td>` +   /* ★2026-11-07 写真・カタログ名・明細名（2品以上は全品） */
               `<td style="font-size:11px">${esc(o.buyer || '')}</td>` +
               `<td style="font-size:10.5px;word-break:break-all">${esc(o.sn)}${linked.has(o.sn) ? '<br><span style="color:#e8710a;font-size:10px">既に別の在庫が紐付き</span>' : ''}</td>` +
               `<td><button class="smd-btn op-pick" data-sn="${esc(o.sn)}" style="font-size:11px;padding:2px 8px">割り当て</button></td></tr>`; }).join('') + `</table>`
@@ -16733,7 +16742,7 @@
           const sm = x.mates.reduce((a, m) => a + (Number(m.price) || 0), 0);
           return `<tr>
             <td style="text-align:center;color:#8a8f98">${i + 1}</td>
-            <td>${x.p.image ? `<img src="${esc(x.p.image)}" referrerpolicy="no-referrer" style="width:26px;height:26px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:5px">` : ''}${nm(x.p.name_supplier || x.p.name || '')}</td>
+            <td>${invItemCellHtml(Object.assign({}, x.p, { name: x.p.name_supplier || x.p.name || '' }), stock.snItems, { size: 32, maxW: '320px' })}</td>
             <td style="font-family:ui-monospace,monospace;font-size:10.5px;color:#b26a00">${esc(x.p.item_id)}</td>
             <td style="text-align:right">${yen(x.p.price)}</td>
             <td style="font-family:ui-monospace,monospace;font-size:10.5px;color:#1a7f37">${x.mates.map(m => esc(m.item_id)).join('<br>')}</td>
@@ -16750,7 +16759,7 @@
         <th style="width:34px"></th><th>商品</th><th style="width:180px">ポータルのID</th><th style="width:96px">仕入日</th><th style="width:80px">金額</th><th style="width:110px">仕入先</th><th style="width:110px">状態</th></tr>
         ${orphans.slice(0, 300).map((r, i) => `<tr>
           <td style="text-align:center;color:#8a8f98">${i + 1}</td>
-          <td>${r.image ? `<img src="${esc(r.image)}" referrerpolicy="no-referrer" style="width:26px;height:26px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:5px">` : ''}${nm(r.name_supplier || r.name || '')}</td>
+          <td>${invItemCellHtml(Object.assign({}, r, { name: r.name_supplier || r.name || '' }), stock.snItems, { size: 32, maxW: '320px' })}</td>
           <td style="font-family:ui-monospace,monospace;font-size:10.5px;color:#b26a00">${esc(r.item_id)}</td>
           <td>${esc(String(r.purchase_date || '').slice(0, 10))}</td>
           <td style="text-align:right">${yen(r.price)}</td><td>${esc(r.supplier || '')}</td><td>${esc(r.status || '')}</td></tr>`).join('')}
@@ -17051,9 +17060,9 @@
                 const img = x.r ? stockImg(x.r) : '';
                 return `<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-bottom:1px solid #f2f2f2;${i === 0 ? 'background:#eafaf0' : ''}">` +
                   `<span style="width:26px;text-align:right;color:#8a8f98;font-size:10px;flex:none">${marked.length - i}</span>` +
-                  (img ? `<img src="${esc(img)}" style="width:26px;height:26px;object-fit:cover;border-radius:4px;flex:none" loading="lazy" onerror="this.style.visibility='hidden'">` : `<span style="width:26px;flex:none"></span>`) +
                   `<span style="font-family:monospace;font-size:10.5px;flex:none;color:${x.unk ? '#b26a00' : '#1a7f37'};font-weight:700">${esc(x.k)}</span>` +
-                  `<span style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(nm2)}">${esc(nm2)}</span>` +
+                  /* ★2026-11-07 写真・名前・明細名（在庫に明細の欄なし＝注文SN が手元の注文に当たる時だけ） */
+                  `<span style="font-size:11px;flex:1;min-width:0">${x.r ? invItemCellHtml(x.r, stock.snItems, { size: 30, maxW: '420px' }) : itemCellHtml([{ name: nm2 }], { size: 30, maxW: '420px' })}</span>` +
                   `<span style="font-size:10.5px;color:#8a8f98;flex:none">${x.r && x.r.price != null ? fmtJpy(x.r.price) : ''}</span>` +
                   (x.unk ? `<button class="stk-takfix" data-id="${esc(x.k)}" title="ItemIDを直す（読み取りが化けた分をここで修正できます）" style="border:none;background:none;cursor:pointer;color:#e8710a;font-size:13px;flex:none">✏️</button>` : '') +
                   `<button class="stk-takundo" data-id="${esc(x.k)}" data-unk="${x.unk ? '1' : ''}" title="この1件を取り消す" style="border:none;background:none;cursor:pointer;color:#b0b0b0;font-size:13px;flex:none">×</button></div>`;
@@ -17130,14 +17139,14 @@
         const di = `data-id="${esc(r.item_id)}"`;
         return '<tr>' +
         `<td class="stkfix stkfix-1"><input type="checkbox" class="stk-sel" ${di}${stock.sel.has(r.item_id) ? ' checked' : ''}></td>` +
-        `<td class="stkfix stkfix-2">${img ? `<img src="${esc(img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.visibility='hidden'">` : ''}</td>` +
+        `<td class="stkfix stkfix-2">${itemPhHtml(img, 34)}</td>` +   /* ★2026-11-07 写真が無い時も灰色の箱（行の高さを崩さない）・拡大（zimg） */
         `<td class="stkfix stkfix-3" style="font-size:11px;white-space:nowrap">${(() => { const o = stkOrigin(r); return o === 'auto' ? '<span title="Gmailから自動登録" style="background:#e7f5ea;color:#1a7f37;font-size:8.5px;padding:1px 3px;border-radius:4px;margin-right:3px">自動</span>' : o === 'sheet' ? '<span title="スプシ(InventoryItem)由来" style="background:#eeeeee;color:#777;font-size:8.5px;padding:1px 3px;border-radius:4px;margin-right:3px">シート</span>' : ''; })()}` +
           `<input class="li stk-itemid" ${di} value="${esc(r.item_id || '')}" title="ItemID（編集可。印刷済みQRラベルがある場合は貼り替えが必要）" style="width:150px;font-size:10.5px;padding:2px 4px;color:#7a6ba7">` +
           `<button class="stk-split" ${di} title="まとめ仕入れを枝番で分割（仕入額を均等割り）" style="border:none;background:none;cursor:pointer;font-size:12px;padding:0 3px;vertical-align:middle">✂</button></td>` +
         `<td class="stkfix stkfix-4"><img class="stk-qr" src="https://api.qrserver.com/v1/create-qr-code/?size=54x54&margin=0&data=${encodeURIComponent(r.item_id || '')}" data-id="${esc(r.item_id || '')}" title="クリックで拡大（スキャン/印刷用）" style="width:40px;height:40px;cursor:zoom-in" loading="lazy"></td>` +
         `<td class="stkfix stkfix-5" style="font-size:11px;white-space:nowrap;min-width:96px" title="仕入日時（日本時間。メール登録分は時刻あり／シート由来は日付のみ）">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td>` +
         `<td class="stkfix stkfix-6" style="font-size:11px;white-space:nowrap;min-width:96px;color:#9a8fb5" title="ポータル追加日時（日本時間）">${esc(jstDateTime(r.created_at))}</td>` +
-        `<td class="stkfix stkfix-7" style="min-width:190px"><input class="li stk-name" ${di} value="${esc(r.name || '')}" title="商品名（編集可）" style="width:100%;min-width:180px;font-size:11px;padding:2px 4px">${r.name_supplier && String(r.name_supplier).trim() !== String(r.name || '').trim() ? `<div class="smd-dim" style="font-size:10px;word-break:break-word" title="仕入元での商品名">${esc(String(r.name_supplier).slice(0, 60))}</div>` : ''}</td>` +
+        `<td class="stkfix stkfix-7" style="min-width:190px"><input class="li stk-name" ${di} value="${esc(r.name || '')}" title="商品名（編集可）" style="width:100%;min-width:180px;font-size:11px;padding:2px 4px">${r.name_supplier && String(r.name_supplier).trim() !== String(r.name || '').trim() ? `<div class="smd-dim" style="font-size:10.5px;word-break:break-word" title="仕入元での商品名">${esc(String(r.name_supplier))}</div>` : ''}${(() => { const v = invVarLine_(r, stock.snItems); return `<div class="ord-itemsub${/^明細：—/.test(v) ? ' smd-dim' : ''}" title="${esc(v)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px">${esc(v)}</div>`; })()}</td>` +
         `<td style="white-space:nowrap"><select class="li stk-hw" ${di} title="ハード（機種）。空欄は商品名から自動判定。選ぶと手動で固定されます" style="padding:3px;font-size:11px;width:92px;${invHwManual(r) ? '' : 'color:#8a8f98'}">` +
           `<option value=""${invHwManual(r) ? '' : ' selected'}>${invHwAuto(invName(r)) ? '自動: ' + invHwAuto(invName(r)) : '自動: —'}</option>` +
           HW_LIST.map(h => `<option${invHwManual(r) && invHw(r) === h ? ' selected' : ''}>${h}</option>`).join('') + `</select></td>` +
@@ -18161,11 +18170,11 @@
     const orderRowHtml = (o) => {
       const items = o.items || [], rg = regionByCc(o.cc), qty = custItemQty(o);
       const amt = o.tab === 600 ? '' : (!(Number(o.total) > 0) ? '<span style="color:#e8770a;font-weight:400">金額未取得</span>' : (rg ? fmtLocal(rg, o.total) : Math.round(Number(o.total))));   // ★レビュー#4：空・0 を「₱0」と出さない
-      const thumbs = items.length ? items.map(it => { const im = it.image || it.image_url || ''; return im ? `<img src="${esc(resolveImgUrl(im))}" referrerpolicy="no-referrer" style="width:40px;height:40px;object-fit:cover;border-radius:6px;flex:none;border:1px solid #eee" onerror="this.style.opacity=.2;this.title='画像読込失敗'">` : '<span style="width:40px;height:40px;border:1px dashed #ccc;border-radius:6px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#6b7280">なし</span>'; }).join('') : '';
       return `<div style="display:flex;gap:9px;padding:6px 0;border-top:1px dashed #e5e5e5;align-items:flex-start">`
         + `<span style="flex:none;width:66px;color:#666;font-size:11px">${esc((o.order_date || snToDate(o.sn) || '').slice(0, 10) || '—')}</span>`
         + `<span style="flex:none">${ccBadge(o.cc)}</span>`
-        + `<div style="flex:1;min-width:0"><div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:3px">${thumbs}</div><div style="font-size:11.5px">${custItemsStr(o)}</div></div>`
+        /* ★2026-11-07 本人「カタログ名とか、明細名とか」：品物ごとに 写真・カタログ名・明細名（共通の itemCellHtml・2品以上は全品） */
+        + `<div style="flex:1;min-width:0">${items.length ? itemCellHtml(items.map(it => Object.assign({}, it, { name: it.name || it.item_name || '', image: it.image || it.image_url || '', qty: it.qty || it.quantity || it.model_quantity_purchased || 1 })), { size: 40, maxW: '520px' }) : `<div style="font-size:11.5px">${custItemsStr(o)}</div>`}</div>`
         + `<span style="flex:none;text-align:right;min-width:76px">${amt ? `<div style="font-weight:700;font-size:12px;color:#222">${amt}</div>` : ''}<div style="font-size:10px;color:#888">${qty}点</div>${o.tab === 600 ? '<div style="color:#d93025;font-size:10px;font-weight:700">❌ｷｬﾝｾﾙ</div>' : ''}${o.tab === 200 ? '<div style="color:#e8770a;font-size:10px;font-weight:700">⏳ 未払い</div>' : ''}</span>`
         + `</div>`;
     };
@@ -19211,7 +19220,7 @@
     const paint = () => {
       const nm = {}; (TA._prod || []).forEach(p => { nm[p.id] = p; });
       ns.innerHTML = `<div style="font-size:12px;margin-bottom:4px"><b>カートに入ったのに売れていない品（直近7日・カートに入れた人の多い順・上位40）</b> <span class="smd-dim" style="font-size:11px">値段・送料・在庫を見直す候補</span></div>`
-        + (L.length ? `<table style="border-collapse:collapse;font-size:11.5px;width:100%"><tbody>${L.map(o => { const p = nm[o.id] || {}; const rg = regionByCc(o.cc) || {}; return `<tr style="border-top:1px solid #f1f1f1"><td style="padding:2px 4px;width:34px">${p.img ? '<img src="' + (/^https?:/.test(p.img) ? esc(p.img) : IMG_CDN + esc(String(p.img).replace(/_tn$/, '')) + '_tn') + '" loading="lazy" style="width:28px;height:28px;object-fit:cover;border-radius:4px">' : ''}</td><td style="padding:2px 4px;white-space:nowrap"><b style="color:${rg.color || '#888'}">${esc(o.cc || '')}</b></td><td style="padding:2px 4px">${p.name ? esc(p.name) : '<span class="smd-dim">' + esc(o.id) + '</span>'}</td><td style="padding:2px 4px;text-align:right;white-space:nowrap"><b style="color:#e65100">${o.ab}人</b><span class="smd-dim">（${o.au}個）</span></td><td style="padding:2px 4px;text-align:right;white-space:nowrap" class="smd-dim">見た人 ${o.uv}</td><td style="padding:2px 4px;white-space:nowrap">${rg.buyer ? '<a href="https://' + rg.buyer + '/product/' + esc(o.shop) + '/' + esc(o.id) + '" target="_blank" rel="noopener" style="font-size:11px">開く</a>' : ''}</td></tr>`; }).join('')}</tbody></table>` : '<span class="smd-dim" style="font-size:11px">ありません（カートに入った品はすべて売れたか、まだ届いていません）</span>');
+        + (L.length ? `<table style="border-collapse:collapse;font-size:11.5px;width:100%"><tbody>${L.map(o => { const p = nm[o.id] || {}; const rg = regionByCc(o.cc) || {}; return `<tr style="border-top:1px solid #f1f1f1"><td style="padding:2px 4px;width:38px">${itemPhHtml(p.img ? String(p.img).replace(/_tn$/, '') : '', 32)}</td><td style="padding:2px 4px;white-space:nowrap"><b style="color:${rg.color || '#888'}">${esc(o.cc || '')}</b></td><td style="padding:2px 4px">${p.name ? esc(p.name) : '<span class="smd-dim">' + esc(o.id) + '</span>'}<div class="ord-itemsub smd-dim">明細：—（カートの数は商品ごと）</div></td><td style="padding:2px 4px;text-align:right;white-space:nowrap"><b style="color:#e65100">${o.ab}人</b><span class="smd-dim">（${o.au}個）</span></td><td style="padding:2px 4px;text-align:right;white-space:nowrap" class="smd-dim">見た人 ${o.uv}</td><td style="padding:2px 4px;white-space:nowrap">${rg.buyer ? '<a href="https://' + rg.buyer + '/product/' + esc(o.shop) + '/' + esc(o.id) + '" target="_blank" rel="noopener" style="font-size:11px">開く</a>' : ''}</td></tr>`; }).join('')}</tbody></table>` : '<span class="smd-dim" style="font-size:11px">ありません（カートに入った品はすべて売れたか、まだ届いていません）</span>');
     };
     paint();
     if (L.length && !(TA._prod || []).length) { let n = 0; const tm = setInterval(() => { n++; if ((TA._prod || []).length || n > 30) { clearInterval(tm); if (document.body.contains(ns)) paint(); } }, 2000); }   /* 名前と写真は下の商品別が読む出品の控え（TA._prod）から。読み終わったら描き直す */
@@ -21765,6 +21774,8 @@
     await loadDelAddrs();
     host.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…</div>';
     let rows; try { rows = await ensureInv(); } catch (e) { host.innerHTML = errBox(e); return; }
+    const wSn = snItemsAny_();   /* ★2026-11-07 明細名は手元にある注文に注文SN が当たる時だけ（新しく読まない） */
+    const wVar = r => { const v = invVarLine_(r, wSn); return `<div class="ord-itemsub${/^明細：—/.test(v) ? ' smd-dim' : ''}" title="${esc(v)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px">${esc(v)}</div>`; };
     const todayStr = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
     const daysTo = (from, to) => { const t = Date.parse(from); return isNaN(t) ? null : Math.round((Date.parse(to) - t) / 86400000); };
     // 🚚 自社倉庫→Shopee Japan倉庫へ発送済（③倉庫スキャン待ち=selfTransit 以降／④発送済=tab400）の注文に紐づく仕入れは「本日発送すべき物量」ではない＝既定で非表示。
@@ -21922,8 +21933,8 @@
         const txn = stkTxnUrl(r) || r.supplier_url;
         return `<tr>` +
           `<td style="text-align:center"><input type="checkbox" class="wcl-chk" data-id="${esc(r.item_id)}" style="width:16px;height:16px;cursor:pointer"></td>` +
-          `<td>${r.image ? `<img class="zimg" src="${esc(/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image)}" title="クリックで最大表示（ホバーで拡大プレビュー）" style="width:32px;height:32px;object-fit:cover;border-radius:4px;cursor:zoom-in" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>` +
-          `<td style="font-size:11px">${nm(r.name || r.name_supplier, '240px')}</td>` +
+          `<td>${itemPhHtml(r.image, 32)}</td>` +
+          `<td style="font-size:11px">${nm(r.name || r.name_supplier, '240px')}${wVar(r)}</td>` +
           `<td style="font-size:10.5px;white-space:nowrap">${esc(r.supplier || '')}${unrel ? ` <span title="追跡連携が弱い仕入元＝取引ページで配達状況を確認してください" style="background:#fff3e0;color:#e65100;font-weight:700;font-size:9.5px;padding:1px 5px;border-radius:8px">要確認</span>` : ''}${r.seller ? `<br><span class="smd-dim">${esc(r.seller)}</span>` : ''}</td>` +
           `<td style="font-size:10.5px;white-space:nowrap">${esc((x.pd || '').replace(/-/g, '/') || '—')}<br><b style="color:#d93025">${x.pdays}日経過</b></td>` +
           `<td style="font-size:11px;white-space:nowrap;text-align:right">${r.price != null ? fmtJpy(r.price) : ''}</td>` +
@@ -22054,9 +22065,9 @@
         return `<tr${needAtt(x) ? ' style="background:#fffaf0"' : ''}>` +
         `<td><span style="background:${ph.bg};color:${ph.c};font-weight:700;font-size:10.5px;padding:2px 7px;border-radius:10px;white-space:nowrap">${ph.t}</span></td>` +
         `<td style="font-size:12px;white-space:nowrap">${etaTxt(x)}</td>` +
-        `<td>${r.image ? `<img class="zimg" src="${esc(/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image)}" title="クリックで最大表示（ホバーで拡大プレビュー）" style="width:34px;height:34px;object-fit:cover;border-radius:4px;cursor:zoom-in" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td>` +
+        `<td>${itemPhHtml(r.image, 34)}</td>` +
         `<td style="font-size:10.5px;white-space:nowrap">${esc((x.pd || '').replace(/-/g, '/') || '—')}<br><b style="color:${(x.pdays || 0) >= (x.expDays || 6) ? '#d93025' : '#5f6368'}">${x.pdays == null ? '' : x.pdays + '日'}</b></td>` +
-        `<td style="font-size:11px">${nm(r.name || r.name_supplier, '260px')}</td>` +
+        `<td style="font-size:11px">${nm(r.name || r.name_supplier, '260px')}${wVar(r)}</td>` +
         `<td style="font-size:10.5px">${esc(r.supplier || '')}${r.seller ? `<br><span class="smd-dim">${esc(r.seller)}</span>` : ''}</td>` +
         `<td style="font-size:11px;white-space:nowrap;text-align:right">${r.price != null ? fmtJpy(r.price) : ''}</td>` +
         (addrMulti() ? `<td style="white-space:nowrap">${addrBadge(r) || '<span class="smd-dim" style="font-size:10.5px">—</span>'}</td>` : '') +
@@ -22088,7 +22099,7 @@
         try {
           const r = await invRunFetch('run_tracking', 240000);
           if (!r || r.ok === false) throw new Error((r && r.error) || '返事がありません');
-          stock.rows = null; stock.imgMap = null;
+          stock.rows = null; stock.imgMap = null; stock.snItems = null;
           toast('🔄 追跡を更新しました');
           await renderWaiting(host);
         } catch (e) { toast('⚠ 追跡を更新できませんでした: ' + ((e && e.message) || e), true); b.textContent = t0; b.disabled = false; }
@@ -22355,10 +22366,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const level = alertShipLv_(o);  // 2=超過／1=今日（📦注文管理の🚨遅延中と同じ日付の数え方・#5）
       const due = dl ? mdw_(dl, o.cc) : '—';
       const label = level === 2 ? '超過' : (level === 1 ? (dueBucketOf_(dl, o.cc) === 'd1' ? '明日' : '今日') : '');
-      const it = (o.items || [])[0] || {};
       const rg = regionByCc(o.cc);
-      const imgCell = it.image ? `<img src="${IMG_CDN}${esc(it.image)}" style="width:32px;height:32px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
-      return { level, cells: [`<b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b>`, imgCell, esc(o.sn), esc(o.buyer || ''), nm(it.name, '260px'), due, `<b style="color:${level === 2 ? '#d93025' : '#e8710a'}">${label}</b>`], link: rg ? `<a href="https://${rg.host}/portal/sale?sls_print=${encodeURIComponent(o.sn)}" target="_blank" title="伝票印刷" style="text-decoration:none">🖨️</a>` : '' };
+      /* ★2026-11-07 本人「こういうのぜんぶ画像欲しい」：写真・カタログ名・明細名（2品以上は全品）＝共通の itemCellHtml。「画像」の列は商品の欄へ入れた */
+      return { level, cells: [`<b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b>`, esc(o.sn), esc(o.buyer || ''), itemCellHtml(o.items, { size: 32, maxW: '260px' }), due, `<b style="color:${level === 2 ? '#d93025' : '#e8710a'}">${label}</b>`], link: rg ? `<a href="https://${rg.host}/portal/sale?sls_print=${encodeURIComponent(o.sn)}" target="_blank" title="伝票印刷" style="text-decoration:none">🖨️</a>` : '' };
     }).filter(r => r.level >= 1).sort((a, b) => b.level - a.level);
     // 1b) ★2026-10-24 レビュー #3：伝票は出したが家から出す期限を過ぎた注文。赤い件数には足すのに表が無く、開くと🎉になっていた
     const lateRows = alertLate_(orders);
@@ -22388,7 +22398,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const row = ((lst.byCc || {})[c.cc] || []).find(x => String(x.item_id) === String(c.product)) || null;
       const name = row ? row.name : '';
       const b = row ? batteryOfRow(row) : null;
-      return { c, days, name, b, level: days == null ? 1 : (days < 0 ? 2 : (days <= 2 ? 2 : 1)) };
+      return { c, days, name, row, b, level: days == null ? 1 : (days < 0 ? 2 : (days <= 2 ? 2 : 1)) };
     }).sort((a, b) => (a.days == null ? 999 : a.days) - (b.days == null ? 999 : b.days));
     // 🤖 不在中に自動で出した明細（まだ見ていない分）。本人 2026-09-18「私がいない間に質の高い出品を」＝戻ってきたら写真つきで一目で点検できるように
     const baStA = (renderAlerts._cache && renderAlerts._cache.ba) || null;
@@ -22427,14 +22437,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //    ※未入金(tab<300)は「買い手がまだ払っていない」通常状態なので不整合ではない（Shopeeが期限切れで自動キャンセル）→ここでは除外し偽アラートを出さない。
     //    ※tab400にはキャンセル/返品/完了も含まれ、それらは追跡が無くて当然＝偽アラートになるので実ステータスで除外する。
     const dataIssues = orders.filter(o => (o.tab === 400 && !o.tracking && !/(cancel|return|refund|complete|キャンセル|返品|返金|完了)/i.test(String(o.status || '')))).map(o => {
-      const rg = regionByCc(o.cc); const it = (o.items || [])[0] || {};
+      const rg = regionByCc(o.cc);
       const reason = '発送済だが追跡なし';
-      return { cells: [`<b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b>`, esc(o.sn), nm(it.name, '260px'), esc(o.order_date || ''), reason],
+      return { cells: [`<b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b>`, esc(o.sn), itemCellHtml(o.items, { size: 32, maxW: '260px' }), esc(o.order_date || ''), reason],
         link: rg ? `<a href="https://${rg.host}/portal/sale/order${o.sn ? '#smdsn=' + encodeURIComponent(o.sn) : ''}" target="_blank" title="Shopeeでこの注文を開く（userscript導入で詳細へ直行／未導入は一覧＋注文番号で検索）">📄</a>` : '' };
     });
 
-    const invName = r => nm(r.name || r.name_supplier || r.item_id || '', '260px');   /* ★2026-11-06 全体レビュー（UI）：名前を切らない（全文は吹き出し） */
-    const invImg = r => r.image ? `<img src="${esc(/^https?:/.test(r.image) ? r.image : IMG_CDN + r.image)}" style="width:32px;height:32px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : '';
+    /* ★2026-11-07 本人「こういうのぜんぶ画像欲しい」「カタログ名とか、明細名とか」：在庫の行は写真・名前・明細名を1つの欄に（invItemCellHtml）。
+       在庫には明細の欄が無い＝Shopee注文SN が、この画面で読んだ注文（tab<500）か在庫管理で読んだ注文に当たる時だけ明細名を出す（新しく読まない） */
+    const snItemsA = snItemsAny_(orders);
+    const invName = r => invItemCellHtml(r, snItemsA, { size: 32, maxW: '260px' });
+    const lstRowA = (cc, id) => { try { return (lst.loaded && lst.byCc && id) ? ((lst.byCc[cc] || []).find(x => String(x.item_id) === String(id)) || null) : null; } catch (_) { return null; } };   /* 出品を読んでいる時だけ（ensureListings を呼び足さない） */
     const dtxt = v => { const d = alertDaysSince(v); return d == null ? '—' : Math.floor(d) + '日'; };
     const card = (icon, title, color, count, headers, rowsHtml, note, anchorId) => count === 0 ? '' :
       `<details class="tool-card" open id="${anchorId || ''}" style="margin:0 0 12px;max-width:none;border-left:4px solid ${color};padding:11px 14px;scroll-margin-top:8px">` +
@@ -22448,36 +22461,36 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const deadVal = dead.reduce((s, r) => s + (r.price || 0), 0); // 滞留在庫に寝ている仕入額
     const html =
       card('📥', '到着済なのに入庫待ち（✓入荷し忘れ）', '#1a7f37', arrivedNotRecv.length,
-        ['画像', '商品名', '仕入元', 'セラー', '受取日時', '仕入から'],
-        arrivedNotRecv.slice(0, 100).map(r => `<tr style="background:#f6fbf7"><td>${invImg(r)}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#2e7d32">📥 ${esc(deliveredAt(r))}</b></td><td style="font-size:11px;white-space:nowrap">${dtxt(r.purchase_ts || r.purchase_date)}</td></tr>`).join(''),
+        ['商品（写真・名前・明細名）', '仕入元', 'セラー', '受取日時', '仕入から'],
+        arrivedNotRecv.slice(0, 100).map(r => `<tr style="background:#f6fbf7"><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#2e7d32">📥 ${esc(deliveredAt(r))}</b></td><td style="font-size:11px;white-space:nowrap">${dtxt(r.purchase_ts || r.purchase_date)}</td></tr>`).join(''),
         '配送業者は「配達完了/お届け済み」なのに在庫が入庫待ちのまま＝在庫・利益に未反映。🛒仕入れ管理→⏳入庫待ち・到着予定 の「✓入荷」／「見込みを一括入荷」で在庫保管中へ。長期に溜まっている分は同ページの「🧹 長期滞留の点検」で滞留日数ごとにまとめて一括受取できます。', 'al-arrived') +
       card('🚚', '発送期日（未発送）', '#d93025', shipRows.length,
-        ['国', '画像', '注文SN', 'バイヤー', '商品', '家から出す期限', '状態', '伝票'],
+        ['国', '注文SN', 'バイヤー', '商品（写真・カタログ名・明細名）', '家から出す期限', '状態', '伝票'],
         shipRows.slice(0, 100).map(r => `<tr${r.level === 2 ? ' style="background:#fff5f5"' : ''}>${r.cells.map(c => `<td style="font-size:11px;white-space:nowrap">${c}</td>`).join('')}<td>${r.link}</td></tr>`).join(''),
         '家から出す期限（📦注文管理と同じ数え方＝その国の現地の日付）が過ぎた／今日・明日のもの。🖨️で伝票印刷へ。', 'al-ship') +
       card('🚨', '伝票済みで家から出す期限を過ぎた注文', '#d93025', lateRows.length,
-        ['国', '注文SN', 'バイヤー', '商品', '家から出す期限', '追跡番号', '確認'],
-        lateRows.slice(0, 100).map(o => { const rg = regionByCc(o.cc); const it = (o.items || [])[0] || {}; const dl = alertDeadline_(o); return `<tr style="background:#fff5f5"><td style="font-size:11px;white-space:nowrap"><b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b></td><td style="font-size:11px;white-space:nowrap">${esc(o.sn)}</td><td style="font-size:11px">${esc(o.buyer || '')}</td><td style="font-size:11px">${nm(it.name, '260px')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#d93025">${dl ? esc(mdw_(dl, o.cc)) : '—'}</b></td><td style="font-size:11px;white-space:nowrap">${esc(o.tracking || '')}</td><td>${rg ? `<a href="https://${rg.host}/portal/sale/order${o.sn ? '#smdsn=' + encodeURIComponent(o.sn) : ''}" target="_blank" rel="noopener" title="Shopeeでこの注文を開く">📄</a>` : ''}</td></tr>`; }).join(''),
+        ['国', '注文SN', 'バイヤー', '商品（写真・カタログ名・明細名）', '家から出す期限', '追跡番号', '確認'],
+        lateRows.slice(0, 100).map(o => { const rg = regionByCc(o.cc); const dl = alertDeadline_(o); return `<tr style="background:#fff5f5"><td style="font-size:11px;white-space:nowrap"><b style="color:${rg ? rg.color : '#333'}">${esc(o.cc)}</b></td><td style="font-size:11px;white-space:nowrap">${esc(o.sn)}</td><td style="font-size:11px">${esc(o.buyer || '')}</td><td style="font-size:11px">${itemCellHtml(o.items, { size: 32, maxW: '260px' })}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#d93025">${dl ? esc(mdw_(dl, o.cc)) : '—'}</b></td><td style="font-size:11px;white-space:nowrap">${esc(o.tracking || '')}</td><td>${rg ? `<a href="https://${rg.host}/portal/sale/order${o.sn ? '#smdsn=' + encodeURIComponent(o.sn) : ''}" target="_blank" rel="noopener" title="Shopeeでこの注文を開く">📄</a>` : ''}</td></tr>`; }).join(''),
         '伝票は出したが、家から出す期限（その国の現地の日付）を過ぎて、まだ倉庫へ送っていない注文（📦注文管理の「🚨遅延中」と同じ数え方）。 <button class="al-goorders smd-btn b-open" style="font-size:11px;padding:1px 8px">📦 注文管理を開く</button>', 'al-late') +
       card('📦', '相手が未発送（発送待ち5日超）', '#e8710a', stuckShip.length,
-        ['画像', '仕入日時', '商品名', '仕入元', 'セラー', '経過'],
-        stuckShip.slice(0, 100).map(r => `<tr><td>${invImg(r)}</td><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : ''}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#e8710a">${dtxt(r.purchase_ts)}</b></td></tr>`).join(''),
+        ['仕入日時', '商品（写真・名前・明細名）', '仕入元', 'セラー', '経過'],
+        stuckShip.slice(0, 100).map(r => `<tr><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : ''}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#e8710a">${dtxt(r.purchase_ts)}</b></td></tr>`).join(''),
         '仕入れたが相手がまだ発送していない可能性。取引メッセージやキャンセルを検討。', 'al-stuck') +
       card('⏳', '入庫待ちが長い（14日超）', '#e8710a', stuckArrive.length,
-        ['画像', '仕入日時', '商品名', '仕入元', 'セラー', '経過'],
-        stuckArrive.slice(0, 100).map(r => `<tr><td>${invImg(r)}</td><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#e8710a">${dtxt(invPurDate(r) || r.created_at)}</b></td></tr>`).join(''),
+        ['仕入日時', '商品（写真・名前・明細名）', '仕入元', 'セラー', '経過'],
+        stuckArrive.slice(0, 100).map(r => `<tr><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : esc(gvizDate(r.purchase_date) || '')}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${esc(r.seller || '')}</td><td style="font-size:11px;white-space:nowrap"><b style="color:#e8710a">${dtxt(invPurDate(r) || r.created_at)}</b></td></tr>`).join(''),
         '買ったのに届いていない在庫。配送状況（在庫の配送列）や到着を確認。', 'al-arrive') +
       card('📸', '確証が未取得', '#7b52c4', noProof.length,
-        ['画像', '商品名', '仕入元', '仕入日時', '仕入状況'],
-        noProof.slice(0, 100).map(r => `<tr><td>${invImg(r)}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : ''}</td><td style="font-size:11px">${esc(r.purchase_status || '')}</td></tr>`).join(''),
+        ['商品（写真・名前・明細名）', '仕入元', '仕入日時', '仕入状況'],
+        noProof.slice(0, 100).map(r => `<tr><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px;white-space:nowrap">${r.purchase_ts ? esc(jstDateTime(r.purchase_ts)) : ''}</td><td style="font-size:11px">${esc(r.purchase_status || '')}</td></tr>`).join(''),
         '古物台帳用の仕入れ確証（proof）が無い自動登録品。メール確証は通常あとから付きます。', 'al-proof') +
       card('🏬', '長期在庫・滞留（仕入から90日超）', '#666', dead.length,
-        ['画像', '商品名', '仕入元', '仕入額', '仕入から'],
-        dead.slice(0, 100).map(r => `<tr><td>${invImg(r)}</td><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px;white-space:nowrap"><b>${Math.floor(holdDays(r))}日</b></td></tr>`).join(''),
+        ['商品（写真・名前・明細名）', '仕入元', '仕入額', '仕入から'],
+        dead.slice(0, 100).map(r => `<tr><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px;white-space:nowrap"><b>${Math.floor(holdDays(r))}日</b></td></tr>`).join(''),
         `在庫保管中のまま仕入から90日以上＝<b style="color:#c0392b">資金が寝ている</b>状態。滞留している仕入額の合計 <b>${fmtJpy(deadVal)}</b>。値下げ・損切り・再出品を検討 → <button class="al-godead smd-btn" style="font-size:10.5px;padding:1px 8px">🏚 在庫の死に筋一覧で対処</button>`, 'al-dead') +
       card('🔋', 'ELI（リチウム電池貨物）の情報提出', '#7b52c4', eliRows.length,
         ['期限', '国', 'Product ID', '商品', '電池', 'Case', 'フォーム', '済み'],
-        eliRows.map(r => `<tr${r.level === 2 ? ' style="background:#fff5f5"' : ''}><td style="font-size:11px;white-space:nowrap"><b style="color:${r.level === 2 ? '#d93025' : '#e8710a'}">${esc(r.c.deadline || '—')}</b><br>${r.days == null ? '' : (r.days < 0 ? '<b style="color:#d93025">' + (-r.days) + '日 超過</b>' : 'あと ' + r.days + '日')}</td><td style="font-size:11px">${esc(r.c.cc || '')}</td><td style="font-size:11px;white-space:nowrap">${esc(r.c.product || '')}</td><td style="font-size:11px">${r.name ? nm(r.name, '260px') : '<span class="smd-dim">（出品データを読むと名前が出ます）</span>'}</td><td style="font-size:10.5px">${r.b && r.b.wh ? `<b>${esc(r.b.batt)}</b> ${r.b.v}V・${r.b.mah}mAh・約${r.b.wh}Wh・${r.b.cells}セル<br>UN3481 / PI967 Section II` : (r.b ? '<span class="smd-dim">🔋 電池内蔵らしいが機種未特定（型番・Whは手で確認）</span>' : '<span class="smd-dim">機種を判定できず（申告書は手で）</span>')}</td><td style="font-size:10.5px;white-space:nowrap">${esc(r.c.case || '')}<br><span class="smd-dim">${esc(String(r.c.mailAt || '').slice(0, 10))} 着</span></td><td style="font-size:11px;white-space:nowrap">${r.c.form ? `<a href="${hrefOk(r.c.form)}" target="_blank" rel="noopener">📝 開く</a>` : ''}</td><td><button class="smd-btn eli-done" data-k="${av(r.c.case || '')}" style="font-size:10.5px;padding:1px 6px">✓ 済み</button></td></tr>`).join(''),
+        eliRows.map(r => `<tr${r.level === 2 ? ' style="background:#fff5f5"' : ''}><td style="font-size:11px;white-space:nowrap"><b style="color:${r.level === 2 ? '#d93025' : '#e8710a'}">${esc(r.c.deadline || '—')}</b><br>${r.days == null ? '' : (r.days < 0 ? '<b style="color:#d93025">' + (-r.days) + '日 超過</b>' : 'あと ' + r.days + '日')}</td><td style="font-size:11px">${esc(r.c.cc || '')}</td><td style="font-size:11px;white-space:nowrap">${esc(r.c.product || '')}</td><td style="font-size:11px">${r.name ? itemCellHtml([{ name: r.name, image: (r.row && r.row.image) || '' }], { size: 32, maxW: '260px', vrEmpty: '明細：—（提出は商品ごと）' }) : '<span class="smd-dim">（出品データを読むと名前が出ます）</span>'}</td><td style="font-size:10.5px">${r.b && r.b.wh ? `<b>${esc(r.b.batt)}</b> ${r.b.v}V・${r.b.mah}mAh・約${r.b.wh}Wh・${r.b.cells}セル<br>UN3481 / PI967 Section II` : (r.b ? '<span class="smd-dim">🔋 電池内蔵らしいが機種未特定（型番・Whは手で確認）</span>' : '<span class="smd-dim">機種を判定できず（申告書は手で）</span>')}</td><td style="font-size:10.5px;white-space:nowrap">${esc(r.c.case || '')}<br><span class="smd-dim">${esc(String(r.c.mailAt || '').slice(0, 10))} 着</span></td><td style="font-size:11px;white-space:nowrap">${r.c.form ? `<a href="${hrefOk(r.c.form)}" target="_blank" rel="noopener">📝 開く</a>` : ''}</td><td><button class="smd-btn eli-done" data-k="${av(r.c.case || '')}" style="font-size:10.5px;padding:1px 6px">✓ 済み</button></td></tr>`).join(''),
         'Shopee Japan CS から「ELI該当の可能性がある貨物に関する情報提出のお願い」が来ています。荷物は集荷拠点で保留中。期限内にフォームを出さないと注文キャンセル＋着払い返送。フォームは「UN3481/PI967/section II」を選び、SDS 欄には Desktop/shopee/ELI申告書 の申告書（無ければ同じ形で作る）。ファイル名は【UNタイプ／Shop ID／マーケット／Product ID】。<br>📦 <b>SLS の規定</b>（Shopee Japan 電池ガイド v1・2023-04-05）：🔋の商品は<b>外箱に赤字で「ELI」</b>と書いて発送（無いと着払い返送）・SDS を同梱・<b>電池入り商品は1注文1個まで</b>・電池だけ／モバイルバッテリーは発送不可。本来は出品前に <a href="https://docs.google.com/forms/d/e/1FAIpQLScHK5PKsHZ4H-H8BKzNGf1yZE3BGXwHTGojAcPzAMsaWqUKcw/viewform" target="_blank">配送可否確認フォーム</a>（回答 約15営業日）で承認を取る決まり。', 'al-eli') +
       card('🤖', '自動で出した明細（まだ見ていない分）' + (baBrake ? '　🛑 自動ブレーキ中' : ''), baBrake ? '#d93025' : '#1565c0', baNewRows.length + (baBrake && !baNewRows.length ? 1 : 0),
         ['入れた日時', '国', '写真', '明細名（英）／作品名', '価格', '在庫', '仕入の目安', '元の出品'],
@@ -22492,12 +22505,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ingRows.map(r => `<tr style="background:#fff5f5"><td style="font-size:11px;font-weight:700">${esc(r.cc)}</td><td style="font-size:11px">${esc(r.name)}</td><td style="font-size:11px">${esc(r.why)}</td><td style="font-size:11px;white-space:nowrap">${esc(r.last)}</td></tr>`).join(''),
         '各国の Seller Center のタブが1日1回（現地11:05すぎ）分析の画面へ行って読む数字（訪問者・商品ごとのカート）が届いていません。止まった分は次の回に続きから読みます（userscript「📈 アクセス取り込み」1.5.0〜）。2日続く時は、その国の Seller Center のタブが開いているか・ログインが切れていないかを見てください。<button class="smd-btn b-open" style="font-size:11px;padding:1px 8px" onclick="window.__smdGo && window.__smdGo(\'traffic\')">👣 アクセス（各国）で見る</button>', 'al-ing') +
       card('🏷', '値付けの提案（おすすめ・押すと書き込み）', '#5b3fd6', paRecN,
-        ['区分', '国', '商品 ▸ 明細', '今の価格 → 提案', '利益/個 今 → 提案'],
-        paTop.map(w => `<tr><td style="font-size:11px;white-space:nowrap">${esc(paCatJa[w.cat] || w.cat)}${w.front ? ' 🟢' : ''}</td><td style="font-size:11px">${esc(w.cc || '')}</td><td style="font-size:11px">${nm(w.name + (w.vari ? ' ▸ ' + w.vari : ''), 'wrap')}</td><td style="font-size:11px;white-space:nowrap">${esc(paLoc(w.cc, w.from))} → <b>${esc(paLoc(w.cc, w.to))}</b></td><td style="font-size:11px;white-space:nowrap">${esc(paYen(w.p))} → ${esc(paYen(w.pSug))}</td></tr>`).join(''),
+        ['区分', '国', '商品（写真・カタログ名・明細名）', '今の価格 → 提案', '利益/個 今 → 提案'],
+        paTop.map(w => `<tr><td style="font-size:11px;white-space:nowrap">${esc(paCatJa[w.cat] || w.cat)}${w.front ? ' 🟢' : ''}</td><td style="font-size:11px">${esc(w.cc || '')}</td><td style="font-size:11px">${(() => { const L = lstRowA(w.cc, String(w.key || '').split('|')[1]); return itemCellHtml([L ? lstItemOf_(L, w.vari, { name: w.name || L.name }) : { name: w.name, variation: w.vari }], { size: 32, maxW: '300px' }); })()}</td><td style="font-size:11px;white-space:nowrap">${esc(paLoc(w.cc, w.from))} → <b>${esc(paLoc(w.cc, w.to))}</b></td><td style="font-size:11px;white-space:nowrap">${esc(paYen(w.p))} → ${esc(paYen(w.pSug))}</td></tr>`).join(''),
         `${paD && paD.at ? esc(jstDateTime(paD.at)) + ' 時点の数え（内訳 🔴' + (paD.counts || {}).loss + '・🟠' + (paD.counts || {}).thin + '・🟡' + (paD.counts || {}).over + '・🔵' + (paD.counts || {}).room + '・おすすめ ' + paRecN + '件＝1回の幅 +40%／−15% の中の提案）。' : ''}<button class="al-paapply smd-btn b-write" style="font-size:11.5px;padding:2px 10px;font-weight:700">✅ おすすめ ${paRecN} 件をまとめて書き込む</button> <button class="al-pago smd-btn b-open" style="font-size:11px;padding:1px 8px">🏷 値付けの見直しで1件ずつ選ぶ</button> <span class="smd-dim">押すと読み直して、いまも条件を満たす明細だけを内容確認（1回）のうえ書きます。表は上位30件</span>`, 'al-price') +
       card('🔔', '売れて在庫0になった明細（確認待ち）', '#1565c0', rsReview.length,
-        ['0になった日時', '国', '明細', 'カタログ'],
-        rsReview.slice(0, 100).map(w => `<tr><td style="font-size:11px;white-space:nowrap">${esc(jstDateTime(w.at))}</td><td style="font-size:11px">${esc(w.cc || '')}</td><td style="font-size:11px">${nm(w.name, 'wrap')}</td><td style="font-size:11px">${nm(w.title || '', 'wrap')}</td></tr>`).join(''),
+        ['0になった日時', '国', '商品（写真・カタログ名・明細名）'],
+        rsReview.slice(0, 100).map(w => `<tr><td style="font-size:11px;white-space:nowrap">${esc(jstDateTime(w.at))}</td><td style="font-size:11px">${esc(w.cc || '')}</td><td style="font-size:11px">${(() => { const L = w.img ? null : lstRowA(w.cc, w.item_id); return itemCellHtml([{ name: w.title || w.name || (L && L.name) || '', variation: w.title ? w.name : '', image: w.img || (L && L.image) || '' }], { size: 32, maxW: '320px' }); })()}</td></tr>`).join(''),
         'まだ戻すか決めていない商品が売れて在庫0のままです。<button class="al-gorestock smd-btn b-open" style="font-size:11px;padding:1px 8px">🔁 在庫の自動復活で決める</button>（画像を見て「戻す（次も自動）／今回だけ／様子見」）', 'al-restock') +
       card('🧾', 'データ不整合の疑い', '#c2185b', dataIssues.length,
         ['国', '注文SN', '商品', '注文日', '内容', '確認'],
@@ -24588,22 +24601,68 @@ grant all on public.tasks to anon, authenticated, service_role;`;
      写真は resolveImgUrl（画像IDなら IMG_CDN を前に付ける）・class="zimg"＝全ページ共通の拡大（setupImageZoom）が効く。
      写真が無い時は灰色の箱「写真なし」（行の高さを崩さない）。名前は切らない（CSS の … と title に全文）。opts：{ size: 36, maxW: '260px', empty: 空の時の HTML } */
   function itemImgUrl_(s) { s = String(s || '').trim(); if (!s) return ''; try { return resolveImgUrl(s); } catch (_) { return /^(https?:|data:|blob:)/.test(s) ? s : IMG_CDN + s; } }
+  /* 写真の箱だけ（itemCellHtml と、名前が入力欄になっている表＝在庫台帳などで使う）。src は画像ID か URL。無い時は灰色の箱「写真なし」（同じ大きさ） */
+  function itemPhHtml(src, sz) {
+    sz = Number(sz) || 36; src = itemImgUrl_(src);
+    return src
+      ? `<img class="zimg" loading="lazy" src="${esc(src)}" referrerpolicy="no-referrer" onerror="this.style.opacity=.15" title="クリックで最大表示（ホバーで拡大プレビュー）" style="width:${sz}px;height:${sz}px;border-radius:6px;object-fit:cover;background:#eee;flex:none;cursor:zoom-in;vertical-align:middle">`
+      : `<span style="width:${sz}px;height:${sz}px;border-radius:6px;background:#eceff3;color:#8a94a3;flex:none;display:inline-flex;align-items:center;justify-content:center;text-align:center;font-size:10.5px;line-height:1.15;vertical-align:middle">写真<br>なし</span>`;
+  }
+  /* opts に足した物（無ければ返品画面の今の見た目のまま）：vrEmpty＝明細名が無い時に2行目へ出す字（例「明細：—（在庫に明細の欄なし）」）・noPh＝写真を出さない（写真が別の列の表） */
   function itemCellHtml(items, opts) {
     opts = opts || {};
     const sz = Number(opts.size) || 36, mw = opts.maxW || '260px';
     const list = (Array.isArray(items) ? items : []).filter(it => it && (it.name || it.image || it.img || it.variation || it.model_name));
     if (!list.length) return opts.empty != null ? opts.empty : '<span class="smd-dim">—</span>';
     const one = it => {
-      const src = itemImgUrl_(it.image || it.img), nmT = String(it.name || ''), vr = String(it.variation || it.model_name || ''), q = Number(it.qty) || 1;
-      const ph = src
-        ? `<img class="zimg" loading="lazy" src="${esc(src)}" referrerpolicy="no-referrer" onerror="this.style.opacity=.15" title="クリックで最大表示（ホバーで拡大プレビュー）" style="width:${sz}px;height:${sz}px;border-radius:6px;object-fit:cover;background:#eee;flex:none;cursor:zoom-in">`
-        : `<span style="width:${sz}px;height:${sz}px;border-radius:6px;background:#eceff3;color:#8a94a3;flex:none;display:inline-flex;align-items:center;justify-content:center;text-align:center;font-size:10.5px;line-height:1.15">写真<br>なし</span>`;
+      const nmT = String(it.name || ''), vr = String(it.variation || it.model_name || ''), q = Number(it.qty) || 1;
+      const ph = opts.noPh ? '' : itemPhHtml(it.image || it.img, sz);   /* noPh＝写真は別の列にある表（名前だけ2行で） */
       return `<div style="display:flex;align-items:center;gap:7px;min-width:0">${ph}<div style="min-width:0;flex:1;max-width:${mw}">`
         + `<div class="ord-itemname" title="${esc(nmT)}">${nmT ? esc(nmT) : '<span class="smd-dim">（名前なし）</span>'}${q > 1 ? ` <b style="color:#d93025">×${q}</b>` : ''}</div>`
-        + (vr ? `<div class="ord-itemsub" title="${esc(vr)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(vr)}</div>` : '')
+        + (vr ? `<div class="ord-itemsub" title="${esc(vr)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(vr)}</div>`
+              : (opts.vrEmpty ? `<div class="ord-itemsub smd-dim" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(opts.vrEmpty)}</div>` : ''))
         + `</div></div>`;
     };
     return list.map(one).join('<div style="border-top:1px dashed #e8e8e8;margin:3px 0"></div>');
+  }
+  /* ★2026-11-07 在庫から作る一覧の明細名：在庫（inventory）には明細の欄が無い。Shopee注文SN（shopee_sn）が、もう手元にある注文の items に当たる時だけ出す（新しく読まない）。
+     snItems＝Map(注文SN → items)。1品の注文はその明細名・2品以上はどれか決められないので全部を並べる */
+  function snItemsMapOf_(orders, into) {
+    const m = into || new Map();
+    (orders || []).forEach(o => { if (o && o.sn && Array.isArray(o.items) && o.items.length && !m.has(String(o.sn))) m.set(String(o.sn), o.items); });
+    return m;
+  }
+  function invVarOf_(r, snItems) {
+    const sn = r && r.shopee_sn ? String(r.shopee_sn).trim() : '';
+    const its = sn && snItems && snItems.get ? snItems.get(sn) : null;
+    if (!its || !its.length) return '';
+    const vs = its.map(it => String((it && (it.variation || it.model_name)) || '').trim());
+    if (its.length === 1) return vs[0] || '明細：—（注文に明細名なし）';
+    const u = [...new Set(vs.filter(Boolean))];
+    return u.length ? '注文の明細（' + its.length + '品）：' + u.join('／') : '明細：—（注文に明細名なし）';
+  }
+  /* 2行目に出す字：明細名／当たらない時は理由（SN が無い＝在庫に明細の欄なし・SN はあるがこの画面で読んだ注文に無い） */
+  function invVarLine_(r, snItems) {
+    const v = invVarOf_(r, snItems); if (v) return v;
+    return (r && String(r.shopee_sn || '').trim()) ? '明細：—（この注文はまだ読んでいない）' : '明細：—（在庫に明細の欄なし）';
+  }
+  /* 手元にある注文（この画面で読んだ分＋📦注文管理で読んだ分＋在庫管理で読んだ分）から 注文SN→items を引く入れ物。新しく読まない */
+  function snItemsAny_(extraOrders) {
+    const A = snItemsMapOf_(extraOrders || []);
+    try { ((state.orders && state.orders.perCountry) || new Map()).forEach(oc => snItemsMapOf_(oc && oc.rows, A)); } catch (_) {}
+    return { get: sn => A.get(String(sn)) || (stock.snItems ? stock.snItems.get(String(sn)) : null) };
+  }
+  function invItemCellHtml(r, snItems, opts) {
+    r = r || {};
+    let img = ''; try { img = stockImg(r) || ''; } catch (_) { img = r.image || ''; }
+    return itemCellHtml([{ name: r.name || r.name_supplier || r.item_id || '', image: img, variation: invVarOf_(r, snItems) }], Object.assign({ vrEmpty: invVarLine_(r, snItems) }, opts || {}));
+  }
+  /* 出品（listings の行）から作る一覧：写真は明細の写真（models[].img）→ 無ければカタログの写真。明細は名前で引く（番号は動くので名前を正にする） */
+  function lstItemOf_(L, vr, extra) {
+    L = L || {}; const v = String(vr || '').trim();
+    const nz = x => String(x == null ? '' : x).trim().toLowerCase().replace(/\s+/g, ' ');
+    const m = v && Array.isArray(L.models) ? (L.models.find(x => x && nz(x.n) === nz(v)) || null) : null;
+    return Object.assign({ name: L.name || '', image: (m && m.img) || L.image || '', variation: v }, extra || {});
   }
   /* 返品の品物＝returns.items（返された品だけ・img は URL・明細名は無い）を正にし、明細名と画像は注文の items（item_id＋model_id が同じ物）から足す。
      returns.items が無い（まだ取り直していない）時は注文の items 全部 */
@@ -26657,6 +26716,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-07', items: [
+      '🖼 <b>商品が並ぶ一覧に、写真・カタログ名・明細名を付けました（返品・キャンセル以外の画面も）</b>（本人「こういうのぜんぶ画像欲しい」「このページ以外も」「文字だけでわからないもん」「カタログ名とか、明細名とか」）：返品画面で作った部品（写真・1行目カタログ名・2行目明細名・2品以上の注文は全品・写真が無い時は灰色の「写真なし」）を、🏠ダッシュボードの⏰発送期限が近い注文、⚠️自動検知（🚚発送期日・🚨伝票済みで期限超過・🧾データ不整合・入庫待ちや滞留など在庫の5つ・🔋ELI・🏷値付けの提案・🔔売れて在庫0）、📦在庫台帳・棚卸しの読んだ一覧・🔁二重採番・在庫に注文を割り当てる窓、🛒入庫待ち（到着予定・長期滞留の点検）、出品管理（🩸マージン漏れ・👻誰にも見られていない・👀見られてるのに売れない・💸儲かっていない＝売れた明細・🖼同じ写真・🔁同じ作品・📋統合候補・🔥横展開・🔥売れ筋明細・📒値付けの記録と効果・💰利益台帳の明細の行・🔁在庫の自動復活の📜最近の動き）、💹利益明細のキャンセルの仕分け・🔎在庫候補、👣カートに入ったのに売れていない、👤顧客管理の購入履歴に使いました。📦発送スケジュールの日の吹き出しは、2品以上の注文の全品と明細名を文字で出します（写真は日を押した下の一覧）。<b>在庫には明細の欄が無い</b>ので、明細名は在庫の Shopee注文SN が、その画面で読んである注文に当たる時だけ出します（当たらない時は「明細：—（在庫に明細の欄なし）」）。読み込みは増やしていません（写真は見えている分だけ読みます）。',
       '↩️ <b>返品・キャンセル：一覧に写真・カタログ名・明細名、返金の理由、スキャン前のキャンセルを外す</b>（本人「こういうのぜんぶ画像欲しい」「カタログ名とか、明細名とか」「ここ返金の理由も欲しい」「これ、オーダーびは？」「倉庫でスキャンされる前のオーダーで返金依頼が来た場合はSLS+の保証はないし商品も戻ってくる」）：🛡 SLS+ の補償の申請・💸 返金・補償／🚫 キャンセル・↩️ 返品リクエスト・🩹 返金による損失の表の商品の欄を、小さい写真（押すと大きく）＋1行目カタログ名・2行目明細名に（2品以上は全品・写真が無い時は「写真なし」の箱）。理由は Shopee の区分を日本語に（実データの11種を全部・API が返す NOT_RECEIPT も）、その下に買い手が書いた文の原文と「訳は ▸」（押した1件だけ Google 翻訳・無料）、買い手の写真と ▶ 動画、Seller Center の返品の画面へのリンク（URL の形は推測）。文が無い時は「買い手は文を書いていない」／まだ取り直していない時はそう出します。キャンセルの行は Shopee の理由を日本語で入力欄の下にも。表の「日時」を「注文日」と「返品の申請日」に分けました（前は返品の行に申請日が入り、注文日の並べ替えも申請日で並んでいた）。SLS+ の表は「返金日」→「買い手への返金日」（補償が入った日ではない）・「✓ 入った」に入金日・入金の明細（income）の SLS+ の補償の項目でも「入った」に。倉庫でスキャンされる前のキャンセル・返金は「対象外（日本の中で戻る）」として申請の一覧・申請文・CSV から外し件数を出します。スキャンが分からない物は「スキャン不明」として残します。補償が入った注文・返品は段階の推定を「日本を出た後」に（前は補償だけの行が追跡番号を読まず「発送前（推）」）。段階の絞り込みに「スキャン後（日本を出た後）・返品を除く」「返品（配達後）」。🚨 補償の取りこぼしが NOT_RECEIPT に当たっていなかったのも直しました',
       '👣 <b>アクセス（各国）の商品の表に列を足し、明細ごとも開けるように</b>（本人「カートに入れられた商品、いいね数、sold数とかもここで見たい」「view数も」「明細ごとも欲しい」）：閲覧（いま）・±期間・見た人（30日）・🛒 入れた人・🛒 個数（7日・半月＝日の合計／1か月以上＝Shopee の30日の窓）・カート→注文・いいね・＋期間・sold（累計）・販売（期間＝注文表）。どの列も見出しで並べ替え・ⓘ に数の性質・表の下にも書いた。行を押すと明細ごと（値段・在庫・🛒・注文（BI）・sold（注文表を品番＋明細名で）・販売（期間））。閲覧・見た人・いいねは明細ごとには無い＝「—（カタログだけ）」。読めない店は「—（読めていない）」、控えが止まっている店は見出しに「⚠ 店名 の控えは 日付 で止まっています」。絞り込みに「🛒 カートに入っているのに売れていない（期間）」。見出しはスクロールしても上に残る。国の横に店の名前。🧹 で下げた品の一覧と「公開に戻す」。期間を変えても出品・統計は読み直さない（期間の分だけ）。',
       '👣 <b>アクセス（各国）のグラフの上の帯を詰めました</b>（本人「ここも見にくいんだよな」）：ふだんは「いま」の1行（例「🌏 すべての国・訪問者・1か月（1日ごと）・📈 折れ線・前の期間を重ねる」）、「⚙ 変える ▸」で開く（開いた・閉じたは覚える）。期間は区切りボタン・単位は2択・店は国ごとの選択欄（本店／2店舗目／両方）・指標はよく使う4つ＋その他・グラフはアイコンだけ・重ねる物は ☑。選んでいる国の訪問者が1店分抜けている時は「⚠ 訪問者が1店分抜けています」（注文率が高く出るため）。',
@@ -39270,7 +39330,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       <div style="overflow:auto;max-height:560px;margin-top:6px"><table style="border-collapse:collapse;font-size:12px;width:100%"><tr class="smd-dim" style="font-size:11px">${RS.f === 'many' ? '<th></th>' : ''}<th></th><th style="text-align:left;padding:2px 6px">商品（明細名／単品はタイトル）</th><th style="text-align:right;padding:2px 6px">価格（最高）</th>${CQ_CCS.map(cc => `<th style="text-align:center;padding:2px 4px">${cc}</th>`).join('')}<th style="text-align:left;padding:2px 6px">明細数</th><th style="text-align:left;padding:2px 6px">0になったら</th></tr>${shown.map(row).join('')}</table></div>
     </div>`;
     const lg = (state.log || []).slice(0, 40), RL = { restored: '✅ 戻した', watch: '🟡 様子見', no_listing: '出品が見つからない', not_live: '公開中でない', no_model: '明細が見つからない' };
-    const logHtml = `<details class="tool-card" id="rs-logcard" style="max-width:none;margin:0 0 12px"><summary style="cursor:pointer;font-weight:700;font-size:13px">📜 最近の動き（${rsNum(lg.length)}件）</summary>${lg.length ? `<table style="border-collapse:collapse;font-size:11.5px;width:100%;margin-top:6px">${lg.map(x => `<tr><td style="padding:1px 6px;white-space:nowrap">${esc(jstDateTime(x.at))}</td><td style="padding:1px 6px">${esc(x.cc)}</td><td style="padding:1px 6px">${nm(x.name, 'wrap')}</td><td style="padding:1px 6px;white-space:nowrap">${esc(RL[x.r] || x.r)}${x.qty ? '（' + x.qty + '個）' : ''}</td></tr>`).join('')}</table>` : '<div class="smd-dim" style="font-size:12px;margin-top:4px">まだありません</div>'}</details>`;
+    const logHtml = `<details class="tool-card" id="rs-logcard" style="max-width:none;margin:0 0 12px"><summary style="cursor:pointer;font-weight:700;font-size:13px">📜 最近の動き（${rsNum(lg.length)}件）</summary>${lg.length ? `<table style="border-collapse:collapse;font-size:11.5px;width:100%;margin-top:6px">${lg.map(x => `<tr><td style="padding:1px 6px;white-space:nowrap">${esc(jstDateTime(x.at))}</td><td style="padding:1px 6px">${esc(x.cc)}</td><td style="padding:1px 6px">${(() => { /* ★2026-11-07 写真・カタログ名・明細名＝読んである出品から item_id で引く（記録の name は明細名かカタログ名） */ const L = ((lst.byCc || {})[x.cc] || []).find(y => String(y.item_id) === String(x.item_id)) || null; return itemCellHtml([L ? lstItemOf_(L, String(x.name || '') !== String(L.name || '') ? x.name : '') : { name: x.name }], { size: 32, maxW: '360px' }); })()}</td><td style="padding:1px 6px;white-space:nowrap">${esc(RL[x.r] || x.r)}${x.qty ? '（' + x.qty + '個）' : ''}</td></tr>`).join('')}</table>` : '<div class="smd-dim" style="font-size:12px;margin-top:4px">まだありません</div>'}</details>`;
     host.innerHTML = head + wzHtml + setHtml + logHtml;
     rsWire(host);
   }
@@ -44435,11 +44495,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // ★明細の表は【開いた時に作る】（2026-09-19）。1,906件ぶんを畳んだまま全部作っていて、画面のHTMLが32MB・開くたびに数十秒固まっていた
       const mkRows = () => ccs.map(cc => {
         const e = econ[cc]; const rg = regionByCc(cc);
+        /* ★2026-11-07 明細の写真：読んである出品（lst.byCc）の同じ名前のカタログ→同じ名前の明細の写真（新しく読まない） */
+        const nzL = x => String(x || '').toLowerCase().trim(), rN = nzL(r.name || r.title);
+        const Lc = (lst.loaded && lst.byCc && rN) ? ((lst.byCc[cc] || []).find(x => nzL(x.name) === rN) || null) : null;
         return (e.vars || []).map((v, idx) => {
           const has = v.profit != null; const pc = (v.profit || 0) >= 0 ? '#1a7f37' : '#d93025';
           return `<tr style="${has && v.profit < 0 ? 'background:#fff4f4' : ''}">
             <td style="padding:3px 7px;white-space:nowrap"><span style="background:${(rg && rg.color) || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${cc}</span></td>
-            <td style="padding:3px 7px;font-size:11.5px">${v.name ? esc(v.name) : '<span class="smd-dim" title="明細なし（単品）">（単一）</span>'}${v.sku ? `<span style="font-family:monospace;font-size:9.5px;color:#7b52c4;margin-left:5px">🏷${esc(v.sku)}</span>` : ''}</td>
+            <td style="padding:3px 7px;font-size:11.5px"><span style="display:inline-flex;align-items:center;gap:6px">${itemPhHtml(Lc ? (((v.name && (Lc.models || []).find(m0 => m0 && nzL(m0.n) === nzL(v.name))) || {}).img || Lc.image) : '', 28)}<span>${v.name ? esc(v.name) : '<span class="smd-dim" title="明細なし（単品）">（単一）</span>'}</span></span>${v.sku ? `<span style="font-family:monospace;font-size:9.5px;color:#7b52c4;margin-left:5px">🏷${esc(v.sku)}</span>` : ''}</td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap">${(e.cur || '')}${(Number(v.local) || 0).toLocaleString()}</td>
             ${lst.ledgerSimple ? '' : `<td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#888">${jpy(v.buyerJpy)}</td>
             <td style="padding:3px 7px;text-align:right;white-space:nowrap;color:#c47" title="Shopee手数料">${jpy(v.feeJpy)} <span style="font-size:9.5px">(${v.feePct}%)</span></td>
@@ -46000,7 +46063,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const ps = e.prof.filter(p => p.p != null && p.t >= L.at).map(p => p.p); pa = ps.length ? paMed(ps) : null;
       }
       const rg = regionByCc(L.cc) || {};
-      return `<tr style="border-top:1px solid #eef0f3"><td style="white-space:nowrap">${new Date(L.at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}</td><td><span style="background:${rg.color || '#888'};color:#fff;border-radius:4px;padding:0 5px;font-size:10.5px">${L.cc}</span></td><td>${esc(L.name)}${L.vari ? `<div style="color:#5b3fd6;font-size:11px">▸ ${esc(L.vari)}</div>` : ''}</td><td style="white-space:nowrap">${esc((catOfLog(L.cat)))}</td><td style="text-align:right;white-space:nowrap">${paLoc(L.cc, L.from)} → <b>${paLoc(L.cc, L.to)}</b></td><td style="text-align:right">${bef == null ? '—' : bef}</td><td style="text-align:right">${aft == null ? '—' : (Math.round(aft * 10) / 10)}${days < 7 ? '<div class="smd-dim" style="font-size:10px">まだ' + Math.floor(days) + '日</div>' : ''}</td><td style="text-align:right">${paYen(L.pBefore)} → ${pa != null ? paYen(pa) : '<span class="smd-dim">売れ待ち</span>'}</td></tr>`;
+      return `<tr style="border-top:1px solid #eef0f3"><td style="white-space:nowrap">${new Date(L.at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })}</td><td><span style="background:${rg.color || '#888'};color:#fff;border-radius:4px;padding:0 5px;font-size:10.5px">${L.cc}</span></td><td>${itemCellHtml([{ name: L.name, variation: L.vari || '', image: (e && e.img) || '' }], { size: 32, maxW: '300px' })}</td><td style="white-space:nowrap">${esc((catOfLog(L.cat)))}</td><td style="text-align:right;white-space:nowrap">${paLoc(L.cc, L.from)} → <b>${paLoc(L.cc, L.to)}</b></td><td style="text-align:right">${bef == null ? '—' : bef}</td><td style="text-align:right">${aft == null ? '—' : (Math.round(aft * 10) / 10)}${days < 7 ? '<div class="smd-dim" style="font-size:10px">まだ' + Math.floor(days) + '日</div>' : ''}</td><td style="text-align:right">${paYen(L.pBefore)} → ${pa != null ? paYen(pa) : '<span class="smd-dim">売れ待ち</span>'}</td></tr>`;
     }).join('');
     return `<div class="tool-card" style="max-width:none;margin:0 0 10px"><b>📒 見直しの記録と効果</b> <span class="smd-dim" style="font-size:11px">（この画面から書き込んだ分・新しい順 ${logRows.length}件。販売は30日あたりに直した数）</span>
       <div style="overflow:auto;max-height:40vh;margin-top:6px"><table class="pf-table" style="width:100%;font-size:12px"><tr><th>日付</th><th>国</th><th>商品・明細</th><th>区分</th><th style="text-align:right">価格</th><th style="text-align:right">販売 前30日</th><th style="text-align:right">販売 後(30日換算)</th><th style="text-align:right">利益/個 前→後</th></tr>${rows}</table></div></div>`;
@@ -46579,7 +46642,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       its.forEach(it => {
         const k = o.cc + '|' + it.item_id;
         let a2 = agg.get(k);
-        if (!a2) { a2 = { cc: o.cc, item_id: it.item_id, name: it.name || '', image: it.image || '', n: 0, sum: 0, lineSum: 0, worst: Infinity, last: '', front: isFrontItem(o.cc, it.item_id) }; agg.set(k, a2); }
+        if (!a2) { a2 = { cc: o.cc, item_id: it.item_id, name: it.name || '', image: it.image || '', vars: new Set(), n: 0, sum: 0, lineSum: 0, worst: Infinity, last: '', front: isFrontItem(o.cc, it.item_id) }; agg.set(k, a2); }
+        { const v0 = String(it.variation || it.model_name || '').trim(); if (v0) a2.vars.add(v0); }   /* ★2026-11-07 売れた明細の名前（2行目） */
         a2.n++; a2.sum += share; a2.worst = Math.min(a2.worst, share);
         a2.lineSum += paLineOf({ front: a2.front, cost: cost / its.length });   /* この注文の仕入れでの線（値付けの見直しと同じ） */
         const d = ordYmd(o); if (d > a2.last) a2.last = d;
@@ -46621,7 +46685,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           return `<tr>
             <td style="text-align:center;color:#8a8f98">${i + 1}</td>
             <td><b style="color:${(regionByCc(a2.cc) || {}).color || '#333'}">${esc(a2.cc)}</b></td>
-            <td>${a2.image ? `<img src="${IMG_CDN}${esc(a2.image)}" referrerpolicy="no-referrer" style="width:26px;height:26px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:5px">` : ''}${nm(a2.name, '340px')}</td>
+            <td>${itemCellHtml([{ name: a2.name, image: a2.image, variation: a2.vars && a2.vars.size ? '売れた明細：' + [...a2.vars].join('／') : '' }], { size: 32, maxW: '340px' })}</td>
             <td style="text-align:right">${a2.n}</td>
             <td style="text-align:right;font-weight:700;color:${col}">${yen(a2.avg)}<div class="smd-dim" style="font-size:9.5px;font-weight:400">線 ${yen(a2.line)}${a2.front ? '（フロント）' : ''}</div></td>
             <td style="text-align:right;color:${a2.worst < 0 ? '#b71c1c' : '#8a8f98'}">${yen(a2.worst)}</td>
@@ -46740,7 +46804,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             const newPrice = roundLocal(priceLocalFor(l.cc, cm.cost, { weightG: cm.weightG, ignoreDraftRoi: true }), rg.priceUnit || 1); // 目標ROIに乗せる現地価格
             const newRoi = Math.round(priceProfitFor(l.cc, cm.cost, newPrice, { weightG: cm.weightG }).roi);
             const shopId = l.shop_id || (typeof shopIdOfListing === 'function' ? shopIdOfListing(l.cc, l.item_id) : null);
-            leaks.push({ byName: _cmByName, cc: l.cc, name: m.n || l.name, item_id: l.item_id, model_id: (m.id != null ? m.id : 0), shop_id: shopId, weightG: cm.weightG, host: rg.host, cur: rg.cur || '', price, newPrice, newRoi, cost: cm.cost, profit: pr.profit, roi: Math.round(pr.roi), sold: m.sold || 0, loss: pr.profit < 0 });
+            leaks.push({ byName: _cmByName, cc: l.cc, name: m.n || l.name, pname: l.name || '', vimg: m.img || l.image || '', item_id: l.item_id, model_id: (m.id != null ? m.id : 0), shop_id: shopId, weightG: cm.weightG, host: rg.host, cur: rg.cur || '', price, newPrice, newRoi, cost: cm.cost, profit: pr.profit, roi: Math.round(pr.roi), sold: m.sold || 0, loss: pr.profit < 0 });
           }
         });
       });
@@ -46755,7 +46819,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <h3 style="margin-top:0">🩸 マージン漏れ検知 <span class="smd-dim" style="font-weight:400;font-size:12px">（台帳の仕入 ×「今のライブ価格」で再計算。<b style="color:#d93025">赤字</b>／目標ROI(${targetRoi}%)割れで売れている生き出品）</span></h3>
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">💡 <b>仕入を入れた台帳商品だけ</b>が対象（${withCost}件）。<b>💰出品台帳</b>の🈳で仕入を埋めるほど精度UP。<b style="color:#d93025">${lossN}件が赤字</b>／計${leaks.length}件が要改善 → 価格を上げる or 取り下げの判断に。国チップ＝各国の編集ページ。</div>
         ${canApiFix && fixable.length ? `<div style="margin-bottom:8px"><button class="leak-fixall" style="border:1px solid #1a7f37;background:#eafaef;color:#1a7f37;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:700">🎯 目標ROI(${targetRoi}%)に一括修正（${fixable.length}件・値上げのみ）</button> <span class="smd-dim" style="font-size:11px">各出品の仕入×重量から目標ROI価格を算出→公式APIで一括値上げ（プレビュー＆確認あり）。値下げは回転を落とすため対象外です。</span></div>` : (fixable.length && !canApiFix ? `<div class="smd-dim" style="font-size:11px;margin-bottom:8px">🎯 一括修正は⚙️設定の公式API（OpenAPI URL＋WRITE_TOKEN）を入れると使えます</div>` : '')}
-        ${leaks.length ? `<div class="pf-scroll" style="max-height:44vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品/明細</th><th style="text-align:right">現価格</th><th style="text-align:right">仕入</th><th style="text-align:right">利益/個</th><th style="text-align:right">ROI</th><th style="text-align:right">→ 目標価格</th><th style="text-align:right">販売</th></tr>${leaks.slice(0, 100).map(x => { const rg = regionByCc(x.cc) || {}; return `<tr style="${x.loss ? 'background:#fff4f4' : ''}"><td style="white-space:nowrap"><a href="${editUrlFor(x.host, x.item_id)}" target="_blank" title="${x.cc}の編集ページ" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${x.cc}</span> ✏️</a></td><td style="font-size:11px">${nm(x.name, '240px')}</td><td style="text-align:right;white-space:nowrap">${x.cur}${x.price.toLocaleString()}</td><td style="text-align:right;white-space:nowrap;color:#888">${jpyL(x.cost)}</td><td style="text-align:right;white-space:nowrap;font-weight:700;color:${x.loss ? '#d93025' : '#e8710a'}">${x.profit >= 0 ? '+' : ''}${jpyL(x.profit)}</td><td style="text-align:right;color:${x.loss ? '#d93025' : '#e8710a'}">${x.roi}%</td><td style="text-align:right;white-space:nowrap">${(x.newPrice > x.price) ? `<b style="color:#1a7f37">${x.cur}${x.newPrice.toLocaleString()}</b> <span style="font-size:9px;color:#1a7f37">ROI${x.newRoi}%</span>` : (x.shop_id ? '<span class="smd-dim" title="目標より現価格が高い/同等">—</span>' : '<span class="smd-dim" title="shop_id未判明（各垢で再同期すると一括対象に）">?</span>')}</td><td style="text-align:right;color:#e8710a;font-weight:600">${x.sold || ''}</td></tr>`; }).join('')}</table></div>${leaks.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…上位100件（赤字が大きい順）</div>` : ''}` : `<div class="smd-dim" style="font-size:12px">${lst._leakCatErr ? `<span style="color:#d93025">⚠️ 台帳(listing_catalog)の読込に失敗しました：${esc(lst._leakCatErr)}（右上「🔄更新」で再取得してください）</span>` : (withCost ? '赤字/薄利の出品は見つかりませんでした 🎉' : 'まだ台帳に仕入(原価)が入っていません。<b>💰出品台帳</b>タブの🈳「仕入未入力のみ」から埋めると、ここに赤字/薄利の出品が出ます。')}</div>`}
+        ${leaks.length ? `<div class="pf-scroll" style="max-height:44vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品/明細</th><th style="text-align:right">現価格</th><th style="text-align:right">仕入</th><th style="text-align:right">利益/個</th><th style="text-align:right">ROI</th><th style="text-align:right">→ 目標価格</th><th style="text-align:right">販売</th></tr>${leaks.slice(0, 100).map(x => { const rg = regionByCc(x.cc) || {}; return `<tr style="${x.loss ? 'background:#fff4f4' : ''}"><td style="white-space:nowrap"><a href="${editUrlFor(x.host, x.item_id)}" target="_blank" title="${x.cc}の編集ページ" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${x.cc}</span> ✏️</a></td><td style="font-size:11px">${itemCellHtml([{ name: x.pname || x.name, variation: (x.pname && x.name !== x.pname) ? x.name : '', image: x.vimg }], { size: 32, maxW: '260px' })}</td><td style="text-align:right;white-space:nowrap">${x.cur}${x.price.toLocaleString()}</td><td style="text-align:right;white-space:nowrap;color:#888">${jpyL(x.cost)}</td><td style="text-align:right;white-space:nowrap;font-weight:700;color:${x.loss ? '#d93025' : '#e8710a'}">${x.profit >= 0 ? '+' : ''}${jpyL(x.profit)}</td><td style="text-align:right;color:${x.loss ? '#d93025' : '#e8710a'}">${x.roi}%</td><td style="text-align:right;white-space:nowrap">${(x.newPrice > x.price) ? `<b style="color:#1a7f37">${x.cur}${x.newPrice.toLocaleString()}</b> <span style="font-size:9px;color:#1a7f37">ROI${x.newRoi}%</span>` : (x.shop_id ? '<span class="smd-dim" title="目標より現価格が高い/同等">—</span>' : '<span class="smd-dim" title="shop_id未判明（各垢で再同期すると一括対象に）">?</span>')}</td><td style="text-align:right;color:#e8710a;font-weight:600">${x.sold || ''}</td></tr>`; }).join('')}</table></div>${leaks.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…上位100件（赤字が大きい順）</div>` : ''}` : `<div class="smd-dim" style="font-size:12px">${lst._leakCatErr ? `<span style="color:#d93025">⚠️ 台帳(listing_catalog)の読込に失敗しました：${esc(lst._leakCatErr)}（右上「🔄更新」で再取得してください）</span>` : (withCost ? '赤字/薄利の出品は見つかりませんでした 🎉' : 'まだ台帳に仕入(原価)が入っていません。<b>💰出品台帳</b>タブの🈳「仕入未入力のみ」から埋めると、ここに赤字/薄利の出品が出ます。')}</div>`}
       </div>`;
     } catch (e) { leakHtml = `<div class="tool-card" style="max-width:none"><h3 style="margin-top:0">🩸 マージン漏れ検知</h3><div style="color:#d93025;font-size:12px">⚠️ 計算中にエラーが発生しました：${esc((e && e.message) || e)}<br>データ形が想定外の可能性。右上「🔄更新」で再取得／直らなければ報告してください（黙って非表示にはしません）。</div></div>`; }
     lst._leakHtmlCache = leakHtml; lst._leakVer = _leakVer;
@@ -46878,7 +46942,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const unseenHtml = unseen.length ? `<div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">👻 誰にも見られていない出品 <span class="smd-dim" style="font-weight:400;font-size:12px">（出品から180日以上・累計販売0・<b>閲覧も0</b>）</span></h3>
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">💡 上の「見られてるのに売れない」とは<b>まったく別の問題</b>です。<b>値下げしても1件も動きません</b>（そもそも検索に出ていない）。疑うのは <b>①タイトル（検索語が入っていない）②カテゴリ違い ③二重出品で共食い ④在庫0で表示されない</b> の順。<br>該当 <b>${unseen.length}</b>件：${Object.keys(unseenByCc).sort((a2, b2) => unseenByCc[b2] - unseenByCc[a2]).map(cc => `<b style="color:${(regionByCc(cc) || {}).color || '#888'}">${cc} ${unseenByCc[cc]}</b>`).join(' ／ ')}</div>
-        <div class="pf-scroll" style="max-height:36vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品</th><th style="text-align:right">出品から</th><th style="text-align:right">明細</th><th style="text-align:right">在庫</th><th style="text-align:right">価格</th></tr>${unseen.sort((a2, b2) => b2.age - a2.age).slice(0, 100).map(x => { const l = x.l, rg = regionByCc(l.cc) || {}; const mn = (l.models || []).length; return `<tr><td style="white-space:nowrap"><a href="${editUrlFor(rg.host, l.item_id)}" target="_blank" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${l.cc}</span> ✏️</a></td><td style="font-size:11px">${nm(l.name, '300px')}</td><td style="text-align:right;color:#b26a00;font-weight:700">${x.age}日</td><td style="text-align:right">${mn || ''}</td><td style="text-align:right;color:${(l.stock || 0) <= 0 ? '#d93025' : '#555'}">${l.stock != null ? l.stock : '-'}</td><td style="text-align:right;white-space:nowrap;color:#1565c0">${rg.cur || ''}${(Number(l.price_min) || 0).toLocaleString()}</td></tr>`; }).join('')}</table></div>
+        <div class="pf-scroll" style="max-height:36vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品</th><th style="text-align:right">出品から</th><th style="text-align:right">明細</th><th style="text-align:right">在庫</th><th style="text-align:right">価格</th></tr>${unseen.sort((a2, b2) => b2.age - a2.age).slice(0, 100).map(x => { const l = x.l, rg = regionByCc(l.cc) || {}; const mn = (l.models || []).length; return `<tr><td style="white-space:nowrap"><a href="${editUrlFor(rg.host, l.item_id)}" target="_blank" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${l.cc}</span> ✏️</a></td><td style="font-size:11px">${itemCellHtml([{ name: l.name, image: l.image }], { size: 32, maxW: '300px' })}</td><td style="text-align:right;color:#b26a00;font-weight:700">${x.age}日</td><td style="text-align:right">${mn || ''}</td><td style="text-align:right;color:${(l.stock || 0) <= 0 ? '#d93025' : '#555'}">${l.stock != null ? l.stock : '-'}</td><td style="text-align:right;white-space:nowrap;color:#1565c0">${rg.cur || ''}${(Number(l.price_min) || 0).toLocaleString()}</td></tr>`; }).join('')}</table></div>
         ${unseen.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…古い順に100件</div>` : ''}
       </div>` : '';
       lst._unseenHtml = unseenHtml;
@@ -46887,7 +46951,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <h3 style="margin-top:0">👀 見られてるのに売れない → 値下げ/見直し <span class="smd-dim" style="font-weight:400;font-size:12px">（閲覧${VIEW_MIN}以上あるのに販売0の出品中＝注目は集めているのに買われていない。価格・タイトル・画像の見直しで売上に化ける候補）</span></h3>
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">💡 <b>いいねが多い順</b>（欲しいのに買っていない＝価格抵抗が濃い）→ 次に閲覧が多い順。<b>原価が台帳にある分</b>は「ROI${roiT}%を保てる下限価格」を提示＝<b>そこまでは安全に下げられます</b>。該当 <b>${cand.length}</b>件・累計閲覧 <b>${totalWastedViews.toLocaleString()}</b>回が未転換。国チップ＝編集ページ。</div>
         ${canApiCut && cuts.length ? `<div style="margin-bottom:8px"><button class="deal-cutall" style="border:1px solid #c2185b;background:#fdf0f5;color:#c2185b;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:700">🎯 ROI維持の下限まで一括値下げ（${cuts.length}件・単品のみ）</button> <span class="smd-dim" style="font-size:11px">原価判明の単品を、目標ROI${roiT}%を保てる下限価格へ公式APIで一括値下げ（プレビュー＆確認あり）。バリエ品・原価不明は対象外＝個別に。</span></div>` : (cuts.length && !canApiCut ? `<div class="smd-dim" style="font-size:11px;margin-bottom:8px">🎯 一括値下げは⚙️設定の公式API（OpenAPI URL＋WRITE_TOKEN）を入れると使えます</div>` : '')}
-        ${cand.length ? `<div class="pf-scroll" style="max-height:46vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品</th><th style="text-align:right">👁閲覧</th><th style="text-align:right">❤️</th><th style="text-align:right">在庫</th><th style="text-align:right">現価格</th><th style="text-align:right" title="台帳の原価×重量からROI${roiT}%を保てる最低価格。ここまでは下げても目標利益を確保できます">下げ余地(ROI維持)</th></tr>${rows.slice(0, 100).map(r => { const l = r.l, rg = r.rg; let floorTd = '<span class="smd-dim" title="台帳に原価が無い＝下限を出せません（💰出品台帳の🈳で仕入を埋めると出ます）">—</span>'; if (r.cm) { floorTd = (r.floor && r.floor < r.cur) ? `<b style="color:#1a7f37">${rg.cur || ''}${r.floor.toLocaleString()}</b> <span style="font-size:9px;color:#1a7f37">まで可</span>` : '<span class="smd-dim" title="現価格が既に下限付近＝値下げでなくタイトル/画像/需要を見直し">下げ余地小</span>'; } return `<tr><td style="white-space:nowrap"><a href="${editUrlFor(rg.host, l.item_id)}" target="_blank" title="${l.cc}の編集ページ" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${l.cc}</span> ✏️</a>${buyerUrlFor(l.cc, l.item_id) ? ` <a href="${buyerUrlFor(l.cc, l.item_id)}" target="_blank" style="text-decoration:none" title="販売ページ">🛍️</a>` : ''}</td><td style="font-size:11px">${nm(l.name, '260px')}${r.isSingle ? '' : ' <span class="smd-dim" style="font-size:9px" title="バリエ品＝一括値下げ対象外（個別に）">ﾊﾞﾘｴ</span>'}</td><td style="text-align:right;font-weight:700;color:#555">${r.x.views.toLocaleString()}</td><td style="text-align:right;color:#e8710a">${r.x.likes || ''}</td><td style="text-align:right;color:${(l.stock || 0) <= 0 ? '#d93025' : '#555'}">${l.stock != null ? l.stock : '-'}</td><td style="text-align:right;white-space:nowrap;color:#1565c0">${rg.cur || ''}${r.cur.toLocaleString()}</td><td style="text-align:right;white-space:nowrap">${floorTd}</td></tr>`; }).join('')}</table></div>${cand.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…上位100件（いいね→閲覧が多い順）</div>` : ''}` : `<div class="smd-dim" style="font-size:12px">閲覧${VIEW_MIN}以上で販売0の出品はありません（または閲覧データ未取得＝出品一覧の🔄更新で get_item_extra_info が入ります）。</div>`}
+        ${cand.length ? `<div class="pf-scroll" style="max-height:46vh"><table class="pf-table" style="width:100%"><tr><th>国</th><th>商品</th><th style="text-align:right">👁閲覧</th><th style="text-align:right">❤️</th><th style="text-align:right">在庫</th><th style="text-align:right">現価格</th><th style="text-align:right" title="台帳の原価×重量からROI${roiT}%を保てる最低価格。ここまでは下げても目標利益を確保できます">下げ余地(ROI維持)</th></tr>${rows.slice(0, 100).map(r => { const l = r.l, rg = r.rg; let floorTd = '<span class="smd-dim" title="台帳に原価が無い＝下限を出せません（💰出品台帳の🈳で仕入を埋めると出ます）">—</span>'; if (r.cm) { floorTd = (r.floor && r.floor < r.cur) ? `<b style="color:#1a7f37">${rg.cur || ''}${r.floor.toLocaleString()}</b> <span style="font-size:9px;color:#1a7f37">まで可</span>` : '<span class="smd-dim" title="現価格が既に下限付近＝値下げでなくタイトル/画像/需要を見直し">下げ余地小</span>'; } return `<tr><td style="white-space:nowrap"><a href="${editUrlFor(rg.host, l.item_id)}" target="_blank" title="${l.cc}の編集ページ" style="text-decoration:none"><span style="background:${rg.color || '#888'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px">${l.cc}</span> ✏️</a>${buyerUrlFor(l.cc, l.item_id) ? ` <a href="${buyerUrlFor(l.cc, l.item_id)}" target="_blank" style="text-decoration:none" title="販売ページ">🛍️</a>` : ''}</td><td style="font-size:11px">${itemCellHtml([{ name: l.name, image: l.image, variation: r.isSingle ? '' : 'バリエ品（明細 ' + (l.models || []).filter(m0 => m0 && !m0.ghost).length + '件）＝一括値下げは対象外' }], { size: 32, maxW: '260px' })}</td><td style="text-align:right;font-weight:700;color:#555">${r.x.views.toLocaleString()}</td><td style="text-align:right;color:#e8710a">${r.x.likes || ''}</td><td style="text-align:right;color:${(l.stock || 0) <= 0 ? '#d93025' : '#555'}">${l.stock != null ? l.stock : '-'}</td><td style="text-align:right;white-space:nowrap;color:#1565c0">${rg.cur || ''}${r.cur.toLocaleString()}</td><td style="text-align:right;white-space:nowrap">${floorTd}</td></tr>`; }).join('')}</table></div>${cand.length > 100 ? `<div class="smd-dim" style="font-size:11px;margin-top:4px">…上位100件（いいね→閲覧が多い順）</div>` : ''}` : `<div class="smd-dim" style="font-size:12px">閲覧${VIEW_MIN}以上で販売0の出品はありません（または閲覧データ未取得＝出品一覧の🔄更新で get_item_extra_info が入ります）。</div>`}
       </div>`;
     } catch (e) { dealHtml = ''; }
     if (opts.onlyPrice) return { leakHtml, dealHtml };
@@ -46927,7 +46991,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           <b>わざと1枚に揃えている出品を誤爆しないよう、仕入元URLが分かっている明細だけ</b>を数えています。行の ✎ で開いて差し替えてください。</div>
         <div class="pf-scroll" style="max-height:38vh"><table class="pf-table" style="width:100%">
           <tr><th></th><th>国</th><th style="text-align:left">商品</th><th>同じ写真</th><th>明細数</th></tr>
-          ${bad.slice(0, 60).map(b2 => `<tr><td style="width:40px">${b2.image ? `<img src="${IMG_CDN + esc(b2.image)}" referrerpolicy="no-referrer" style="width:30px;height:30px;object-fit:cover;border-radius:4px">` : ''}</td>
+          ${bad.slice(0, 60).map(b2 => `<tr><td style="width:40px">${itemPhHtml(b2.image, 32)}</td>
             <td><span class="ord-cc" style="background:${(regionByCc(b2.cc) || {}).color || '#333'}">${b2.cc}</span></td>
             <td style="text-align:left"><a href="#" class="an-badimg" data-cc="${b2.cc}" data-id="${b2.item_id}" style="color:#1565c0;text-decoration:none">${nm(String(b2.name || ''), 'wrap')}</a><div class="smd-dim" style="font-size:10px">item ${b2.item_id}</div></td>
             <td style="text-align:right;color:#c0392b;font-weight:700">${b2.n}件</td><td style="text-align:right">${b2.total}</td></tr>`).join('')}
@@ -46958,8 +47022,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const rows = dup.sort((a, b) => b[1].length - a[1].length).slice(0, 200).map(([k, v]) => {
         const p2 = k.split('\u0001'), cc = p2[0], rg2 = regionByCc(cc) || {};
         return `<tr><td style="white-space:nowrap"><span class="ord-cc" style="background:${rg2.color || '#888'}">${esc(cc)}</span></td>`
-          + `<td style="font-size:11px"><b>${esc(v[0].m.n || '')}</b><div class="smd-dim">${({ J: '📇JAN ', M: '型番 ', O: '自社 ', S: 'SKU ' })[p2[2].slice(0, 1)] || ''}${esc(p2[2].slice(2))}</div></td>`
-          + `<td style="font-size:11px">${v.map(o => `<div><a href="${hrefOk(editUrlFor(rg2.host, o.r.item_id))}" target="_blank" rel="noopener">${esc(String(o.r.name).replace('[Used] Variation ', '').slice(0, 34))}</a> <span class="smd-dim">在庫${o.m.stock != null ? o.m.stock : '-'}</span></div>`).join('')}</td></tr>`;
+          + `<td style="font-size:11px"><div style="display:flex;gap:7px;align-items:center">${itemPhHtml(v[0].m.img || v[0].r.image, 32)}<div><b>${esc(v[0].m.n || '')}</b><div class="smd-dim">${({ J: '📇JAN ', M: '型番 ', O: '自社 ', S: 'SKU ' })[p2[2].slice(0, 1)] || ''}${esc(p2[2].slice(2))}</div></div></div></td>`
+          + `<td style="font-size:11px">${v.map(o => `<div><a href="${hrefOk(editUrlFor(rg2.host, o.r.item_id))}" target="_blank" rel="noopener" title="${av(String(o.r.name || ''))}">${esc(String(o.r.name).replace('[Used] Variation ', ''))}</a> <span class="smd-dim">在庫${o.m.stock != null ? o.m.stock : '-'}</span></div>`).join('')}</td></tr>`;
       }).join('');
       return `<details class="tool-card" style="max-width:none;margin:0 0 10px"><summary style="cursor:pointer;font-weight:700">🔁 同じ作品が同じシリーズに2つ以上（${dup.length.toLocaleString()}組）`
         + ` <span class="smd-dim" style="font-weight:400;font-size:11.5px">${Object.entries(byCc).sort((a, b) => b[1] - a[1]).map(x => x[0] + ' ' + x[1]).join(' ／ ')}</span></summary>`
@@ -46982,13 +47046,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">ぶら下がる明細(ゲーム)が多く重なるカタログを束ねた候補。<b>同じならSKUを揃えて統一</b>。誤検出もあるので目視確認用。${mergeCands.length}組（上位40表示）。国名クリックでその国の商品ページ。</div>
         <div class="pf-scroll" style="max-height:52vh">${mergeCands.slice(0, 40).map(g => `<div style="border:1px solid #e6e6e6;border-radius:6px;padding:6px 8px;margin-bottom:6px">
           <div class="smd-dim" style="font-size:11px;margin-bottom:3px">同一候補：${new Set(g.map(c => c.cc)).size}か国 / ${g.length}カタログ</div>
-          ${g.map(c => `<div style="display:flex;gap:8px;align-items:center;font-size:11px;padding:2px 0">${c.img ? `<img src="${IMG_CDN}${esc(c.img)}" style="width:26px;height:26px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}<b style="color:${(regionByCc(c.cc) || {}).color || '#333'};width:24px">${c.cc}</b><a href="${editUrlFor(c.host, c.item_id)}" target="_blank" style="flex:1;min-width:0;color:#1565c0;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.name)}｜クリックで編集ページ">${esc(c.name)}</a>${buyerUrlFor(c.cc, c.item_id) ? `<a href="${buyerUrlFor(c.cc, c.item_id)}" target="_blank" style="text-decoration:none" title="販売(公開)ページ">🛍️</a>` : ''}<span class="smd-dim" style="white-space:nowrap">${c.nvar}ﾊﾞﾘｴ</span><span style="color:#e8710a;white-space:nowrap">売${c.sold}</span></div>`).join('')}
+          ${g.map(c => `<div style="display:flex;gap:8px;align-items:center;font-size:11px;padding:2px 0">${itemPhHtml(c.img, 30)}<b style="color:${(regionByCc(c.cc) || {}).color || '#333'};width:24px">${c.cc}</b><a href="${editUrlFor(c.host, c.item_id)}" target="_blank" style="flex:1;min-width:0;color:#1565c0;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.name)}｜クリックで編集ページ">${esc(c.name)}</a>${buyerUrlFor(c.cc, c.item_id) ? `<a href="${buyerUrlFor(c.cc, c.item_id)}" target="_blank" style="text-decoration:none" title="販売(公開)ページ">🛍️</a>` : ''}<span class="smd-dim" style="white-space:nowrap">${c.nvar}ﾊﾞﾘｴ</span><span style="color:#e8710a;white-space:nowrap">売${c.sold}</span></div>`).join('')}
         </div>`).join('') || '<span class="smd-dim">候補なし</span>'}</div>
       </div>
       <div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">🔥 横展開すべき商品 TOP<span class="smd-dim" style="font-weight:400;font-size:12px">（売れているのに未出品の国がある＝コピー出品候補）</span></h3>
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:6px">優先度＝<b>販売数×未出品国数</b>。<b style="color:#d93025">✗の国に出せば伸びしろ</b>。数字クリックでその国の商品ページ。SKU統一が進むほど精度UP。</div>
-        <div class="pf-scroll" style="max-height:56vh"><table class="pf-table"><tr><th></th><th>商品(明細)</th><th>シリーズ</th><th>推奨SKU</th><th>売</th>${cchA}<th title="未出品国数">欠</th></tr>${expand.map(p => `<tr><td>${p.img ? `<img src="${IMG_CDN}${esc(p.img)}" style="width:28px;height:28px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td style="font-size:11px">${nm(p.rep, '300px')}</td><td style="font-size:10px" class="smd-dim">${esc(p.fr)}</td><td style="font-size:10px;color:#7b52c4;font-family:monospace;white-space:nowrap">${esc(recommendSku(p.key))}</td><td style="color:#e8710a;font-weight:700">${p.sold}</td>${missCells(p)}<td style="font-weight:700;color:#d93025">${p.missing}</td></tr>`).join('')}</table></div>
+        <div class="pf-scroll" style="max-height:56vh"><table class="pf-table"><tr><th></th><th>商品(明細)</th><th>シリーズ</th><th>推奨SKU</th><th>売</th>${cchA}<th title="未出品国数">欠</th></tr>${expand.map(p => `<tr><td>${itemPhHtml(p.img, 32)}</td><td style="font-size:11px">${nm(p.rep, '300px')}</td><td style="font-size:10px" class="smd-dim">${esc(p.fr)}</td><td style="font-size:10px;color:#7b52c4;font-family:monospace;white-space:nowrap">${esc(recommendSku(p.key))}</td><td style="color:#e8710a;font-weight:700">${p.sold}</td>${missCells(p)}<td style="font-weight:700;color:#d93025">${p.missing}</td></tr>`).join('')}</table></div>
       </div>
       <div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">📦 国別の出品状況</h3>
@@ -47000,7 +47064,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       </div>
       <div class="tool-card" style="max-width:none">
         <h3 style="margin-top:0">🔥 売れ筋明細 TOP25</h3>
-        <div class="pf-scroll"><table class="pf-table"><tr><th>画像</th><th>国</th><th>商品/明細</th><th>価格</th><th>販売数</th><th>在庫</th></tr>${top.map(v => { const rc = regionByCc(v.cc) || { cur: '' }; return `<tr><td>${v.img ? `<img src="${IMG_CDN}${esc(v.img)}" style="width:34px;height:34px;object-fit:cover;border-radius:4px" loading="lazy" onerror="this.style.opacity=.15">` : ''}</td><td>${ccBadge(v.cc)}</td><td style="font-size:11px"><b>${esc(v.n || '（既定）')}</b> <span class="smd-dim">${nm(v.pname, '240px')}</span></td><td style="font-size:11px;color:#1565c0">${(rc.cur || '') + lfmt(v.price)}</td><td style="font-weight:700;color:#e8710a">${v.sold}</td><td>${v.stock}</td></tr>`; }).join('')}</table></div>
+        <div class="pf-scroll"><table class="pf-table"><tr><th>画像</th><th>国</th><th>商品/明細</th><th>価格</th><th>販売数</th><th>在庫</th></tr>${top.map(v => { const rc = regionByCc(v.cc) || { cur: '' }; return `<tr><td>${itemPhHtml(v.img, 34)}</td><td>${ccBadge(v.cc)}</td><td style="font-size:11px">${itemCellHtml([{ name: v.pname, variation: v.n || '（既定）' }], { noPh: 1, maxW: '300px' })}</td><td style="font-size:11px;color:#1565c0">${(rc.cur || '') + lfmt(v.price)}</td><td style="font-weight:700;color:#e8710a">${v.sold}</td><td>${v.stock}</td></tr>`; }).join('')}</table></div>
     // 💸儲かっていない出品 → その場でカタログ編集を開く（値上げ・原価の見直しに直行）
     host.querySelectorAll('.an-low-edit').forEach(b2 => b2.addEventListener('click', () => {
       const rg = regionByCc(b2.dataset.cc);
@@ -56508,8 +56572,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (!pop.isConnected) return;
           const col = v => v >= 0.75 ? '#1a7f37' : (v >= 0.55 ? '#e8710a' : '#8a8f98');
           const cardHtml = (x, showPct) => `<div style="display:flex;gap:7px;align-items:center;padding:4px 2px;border-top:1px solid #f2f2f2">
-                ${x.v.image ? `<img src="${esc(x.v.image)}" referrerpolicy="no-referrer" loading="lazy" style="width:44px;height:44px;object-fit:cover;border-radius:6px;background:#f2f2f2;flex:none" onerror="this.style.opacity=.15">`
-                  : '<span style="width:44px;height:44px;border:1px dashed #ddd;border-radius:6px;flex:none;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#bbb">画像なし</span>'}
+                ${itemPhHtml(x.v.image, 44)}
                 <span style="flex:1;min-width:0">
                   <span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${av(x.iname)}">${esc(x.iname)}</span>
                   <span class="smd-dim" style="font-size:10px">${x.vHw ? '<b style="color:#7b52c4">' + esc(x.vHw) + '</b> / ' : ''}🏷${esc(x.v.item_id)}${x.v.bin ? ' / 棚' + esc(x.v.bin) : ''}${x.v.price != null ? ' / ¥' + Number(x.v.price).toLocaleString() : ''}${x.pd ? ' / 仕入' + esc(x.pd) : ''}</span>
@@ -56737,10 +56800,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const btn = k => `<button class="smd-btn pf-cank" data-cc="${x.o.cc}" data-sn="${esc(x.o.sn)}" data-k="${k}" style="font-size:10px;padding:1px 7px;${(!x.guess && x.stage === k) ? `background:${PF_STAGE_COLOR[k]};color:#fff;border-color:${PF_STAGE_COLOR[k]};font-weight:700` : ''}">${k}</button>`;
       return `<tr><td><b style="color:${rg.color}">${x.o.cc}</b></td>` +
         `<td style="font-size:10.5px;word-break:break-all">${esc(x.o.sn)}</td>` +
+        `<td style="font-size:11px;min-width:200px">${itemCellHtml(x.o.items, { size: 32, maxW: '240px' })}</td>` +   /* ★2026-11-07 写真・カタログ名・明細名（2品以上は全品） */
         `<td style="font-size:10.5px">${esc(x.o.cancel_reason || '—')}</td>` +
         `<td style="font-size:10.5px">${x.its.length ? x.its.length + '件 ' + fmtJpy(x.cost) : '<span class="smd-dim">仕入紐付けなし</span>'}${x.o.tracking ? '<br><span style="color:#1a73e8">伝票発行済</span>' : ''}</td>` +
         `<td style="white-space:nowrap">${PF_STAGES.map(btn).join(' ')}${x.guess ? '<span title="キャンセル理由からの推定。ボタンを押して確定してください" style="color:#e8710a;font-size:10px;margin-left:4px">推定</span>' : ''}</td></tr>`;
-    }).join('') : `<tr><td colspan="5" class="smd-dim" style="font-size:11.5px">仕分けが必要なキャンセルはありません</td></tr>`;
+    }).join('') : `<tr><td colspan="6" class="smd-dim" style="font-size:11.5px">仕分けが必要なキャンセルはありません</td></tr>`;
     return `<div class="tool-card" style="margin:10px 0 0;max-width:960px">` +
       `<div style="font-weight:700;margin-bottom:4px">🚫 キャンセルの内訳と損失 <span class="smd-dim" style="font-weight:400;font-size:11px">（${cans.length}件・上の売上/粗利からは除外されています）</span></div>` +
       `<div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">キャンセルは売上・粗利から除外していますが、<b>仕入れて発送した後のキャンセルは仕入額がまるごと損失</b>になります。` +
@@ -56752,7 +56816,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       `<table class="pf-table"><tr><th>国</th><th style="text-align:right">キャンセル</th><th style="text-align:right">発送前</th><th style="text-align:right">日本国内</th><th style="text-align:right">日本を出た後</th><th style="text-align:right">未判定</th><th style="text-align:right">損失(仕入額)</th></tr>${rows}` +
       `<tr class="pf-total"><td>合計</td><td style="text-align:right">${cans.length}</td><td colspan="4" style="text-align:right">日本を出た後 ${lostN}件</td><td style="text-align:right;color:#d93025">${lostJpy ? '−' + fmtJpy(lostJpy) : '—'}</td></tr></table>` +
       `<div style="font-weight:700;font-size:12.5px;margin:12px 0 4px">要仕分け（${need.length}件）</div>` +
-      `<table class="pf-table"><tr><th>国</th><th>Order ID</th><th>キャンセル理由</th><th>仕入・伝票</th><th>段階（押して確定）</th></tr>${list}</table></div>`;
+      `<table class="pf-table"><tr><th>国</th><th>Order ID</th><th>商品（写真・カタログ名・明細名）</th><th>キャンセル理由</th><th>仕入・伝票</th><th>段階（押して確定）</th></tr>${list}</table></div>`;
   }
 
   // 💹 仕入額の帯ごとの採算。★2026-08-19 実測で【仕入が高いほど赤字率が跳ね上がる】と判明した。
