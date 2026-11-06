@@ -10589,6 +10589,7 @@
     const tm = (((gm || {}).data || {}).models || []).find(m => String(m.name || '').trim().toLowerCase() === 'test');
     if (tm) { try { await gasCall({ action: 'update_price_list', token: settings.writeToken, shop_id: src.c.shop_id, item_id: nid, list: JSON.stringify([{ model_id: tm.model_id, price: price }]) }, 60000); } catch (_) {} }
     try { logAct('出品', 'Request page を新しく作った', newName, L.cc + ' ' + nid + '（元 ' + src.c.item_id + '）'); } catch (_) {}
+    try { const kn = await sbGet('app_kv', 'select=v&k=eq.req_pages_known').catch(() => null); if (kn !== null && kn !== undefined) { const v = (((kn || [])[0] || {}).v) || { pages: [] }; v.pages = (v.pages || []).filter(x => String(x.item_id) !== String(nid)).concat([{ cc: L.cc, item_id: String(nid), shop_id: String(src.c.shop_id), name: newName, at: new Date().toISOString() }]).slice(-60); await sbUpsert('app_kv', [{ k: 'req_pages_known', v: v, updated_at: new Date().toISOString() }], 'k'); } } catch (_) {}   /* ★2026-11-07 表に載るまでの間も候補に入れる */
     return { c: { item_id: String(nid), shop_id: src.c.shop_id, name: newName, status: 8 }, ms: [] };
   }
   /* ★2026-10-24 本人「スマートリプライ、ワッツアップ、両方の画面で完結させたい」「わざわざポータルに飛びたくない」：
@@ -10889,6 +10890,11 @@
     msg.textContent = 'Request page を探しています…';
     let cats = [];
     try { cats = await sbGetAll('listings', 'select=item_id,shop_id,name,status,models&cc=eq.' + L.cc + '&or=(name.ilike.*Request%20page*,name.ilike.*Solicitar*)'); } catch (e) { msg.textContent = '❌ 読めませんでした: ' + String(e.message || e).slice(0, 60); return; }
+    /* ★2026-11-07 作ったばかり・手で作った Request page は、出品の表（listings）に載るまで間がある（11/7 BR 58272439042 が表から一時消えていた）。
+       控え app_kv req_pages_known に載っていて表に無いページは、Shopee から今の明細を読んで候補に足す＝「無いので新しく作る」「もう足してあるのに見つからない」を防ぐ */
+    try { const kn = await sbGet('app_kv', 'select=v&k=eq.req_pages_known').catch(() => null); const pg = ((((kn || [])[0] || {}).v || {}).pages || []).filter(x => x && x.cc === L.cc && x.item_id && !(cats || []).some(c => String(c.item_id) === String(x.item_id)));
+      for (const x of pg.slice(0, 4)) { try { const gk = await gasCall({ action: 'get_models', shop_id: x.shop_id, item_id: x.item_id }, 60000); const lm = ((gk || {}).data || {}).models; if (!Array.isArray(lm)) continue;
+        cats.push({ item_id: Number(x.item_id), shop_id: String(x.shop_id), name: String(x.name || 'Request page'), status: 8, models: lm.map(m => ({ id: m.model_id, n: m.name || '', sku: m.sku || m.model_sku || '', price: Number(m.price) || 0, img: m.img || '' })) }); } catch (_) {} } } catch (_) {}
     const price = L.shopL, lim = L.cc === 'BR' ? 4 : 5;
     /* ★2026-11-05 03-12（事業本部の決め）：まとめ買いを選んだ時は、品物ごとの明細で足す（まとめ買い割引が効く形）。
        値段は見積もりの Shopee の額（L.shopL）を仕入れ額の比で割り振り、最後の品で丸めの差を吸う＝合計は見積もりと同じ。明細名は「参照番号 品名」、SKU は REQ_番号-1・-2… */
