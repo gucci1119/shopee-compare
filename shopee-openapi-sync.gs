@@ -8,7 +8,11 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-0700';
+var SRC_VER = '20261107-1300'
+/* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
+   親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
+function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
+function pskuMark_(s) { var t = String(s == null ? '' : s).trim(); return (t && !pskuItemIdLike_(t)) ? t : ''; };
 var CC_TZ = { PH: 8, SG: 8, MY: 8, TW: 8, VN: 7, TH: 7, BR: -3, ID: 7, CO: -5, MX: -6, CL: -3, TWG: 8 };
 var REGION_TO_CC = { PH: 'PH', SG: 'SG', MY: 'MY', TW: 'TW', VN: 'VN', TH: 'TH', BR: 'BR' };
 
@@ -7315,7 +7319,7 @@ function cloneItem_(shopId, itemId, newName, publish) {
   out.attr_debug = acp.debug;
   if (acp.warn) out.attr_warn = acp.warn;
   if (acp.dropped && acp.dropped.length) out.attr_dropped = acp.dropped;
-  if (base.item_sku) {
+  if (base.item_sku && !pskuItemIdLike_(base.item_sku)) {   /* ★11/7 写した元の出品番号（数字だけ）が親SKUに入っている物は写さない（01 の調べ・437件の元） */
     try { callShop_(shopId, '/api/v2/product/update_item', null, 'post', { item_id: out.item_id, item_sku: String(base.item_sku).slice(0, 100) }); out.parent_sku = base.item_sku; }
     catch (e) { out.sku_warn = String((e && e.message) || e); }
   }
@@ -10829,9 +10833,9 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
   var _tcg = !!(opts && opts.tcg);   /* ★2026-10-12 トレカ用＝カードのカタログ（約195件）だけ読み、ゲーム用の候補作り・写真の控え6MB・product_ids・90日分の注文は読まない */
   // 出している（国別）＝listings の明細名とJAN
   var fam = cfg.family[hw]; var famRows = {}, listedByCc = {}, allRows = {};
-  var famSku = String(fam.sku || '').trim(), famNk = String(fam.nameKey || '').trim();   // 親SKUが無い群はカタログ名（①②を除く）で束ねる（ポータル baNameKey と同じ）
+  var famSku = pskuMark_(fam.sku), famNk = String(fam.nameKey || '').trim();   /* ★11/7 数字だけの親SKU（写した元の出品番号）は家族の印にしない */   // 親SKUが無い群はカタログ名（①②を除く）で束ねる（ポータル baNameKey と同じ）
   var byCc = fam.byCc || {};   // 国ごとの上書き（本人「その国のカタログを出せば良くない？」）
-  var famOf = function (cc) { var o = byCc[cc]; if (o && (o.sku || o.nameKey)) return { sku: String(o.sku || '').trim(), nk: String(o.nameKey || '').trim() }; return { sku: famSku, nk: famNk }; };
+  var famOf = function (cc) { var o = byCc[cc]; if (o && (pskuMark_(o.sku) || o.nameKey)) return { sku: pskuMark_(o.sku), nk: String(o.nameKey || '').trim() }; return { sku: famSku, nk: famNk }; };
   /* ★2026-09-25 20時 Supabase が応答しなくなった（負荷）。巡回は【候補のある機種が見つかるまで機種を順に試す】ので、試すたびにここで全出品（明細つき）と
      90日分の注文を丸ごと読み直していた＝候補切れの機種が多い日は1回の巡回で最大12回分の全件読み。同じ実行の中では1回だけ読む（国の組み合わせごと） */
   var _rowsKey = ccs.slice().sort().join(',');
@@ -11260,7 +11264,7 @@ function baCloneToSub_(cc, base, newName, st, hw, role) {
   if (!r || !r.item_id) { baLog_(st, cc + '：2店舗目にカタログを作れませんでした ' + lastErr.slice(0, 160)); return null; }
   /* ★2026-09-23 親SKUを家族のもの（SWITCH 等）にそろえる。付けないと次の回の🤖がこのカタログを家族と見分けられず、
      毎回あたらしい空カタログを作り直していた（実測：TH の2店舗目に親SKU空のカタログが5つ）。 */
-  var wantSku2 = String(base.parent_sku || '').trim();
+  var wantSku2 = pskuMark_(base.parent_sku);   /* ★11/7 数字だけの親SKUは写さない */
   if (wantSku2) { try { callShop_(sub, '/api/v2/product/update_item', null, 'post', { item_id: parseInt(r.item_id, 10), item_sku: wantSku2 }); } catch (eSk2) { baLog_(st, cc + '：2店舗目のカタログに親SKUを付けられませんでした（' + String(eSk2).slice(0, 160) + '）'); } }
   try { baCatalogMadeRec_(String(hw || base.hw || baHwsOf_(String(base.name || '') + ' ' + wantSku2)[0] || ''), cc, parseInt(r.item_id, 10), newName, sub, wantSku2, base.weight, pr, role); } catch (eRc) {}
   baLog_(st, '🏪 ' + cc + '：1店舗目が満杯 → 2店舗目にカタログを作りました（非公開・' + r.item_id + '）');
@@ -11269,7 +11273,7 @@ function baCloneToSub_(cc, base, newName, st, hw, role) {
 function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
   var fam = (cfg.family || {})[hw] || {};
   var byCc = fam.byCc || {}, o = byCc[cc] || {};
-  var wantSku = String(o.sku || fam.sku || '').trim();
+  var wantSku = pskuMark_(o.sku || fam.sku || '');
   /* 名前は【他の国の家族カタログ】から借りる（無ければ作らない） */
   /* ★2026-09-23 どの国にも家族カタログが無い機種（md/ss/ps5/xbox/xbox360）は、設定の name を使って作る。
      これが無いと「他の国にも家族カタログがありません」で永久に始まらない（＝その機種は一生出ない）。 */
@@ -11407,7 +11411,7 @@ function boshuDupWatch_(hours, dry, budgetMs) {
     var rows = sbSelect_('listings', 'select=item_id,shop_id,status,name,parent_sku&cc=eq.' + l.cc + '&models=cs.' + encodeURIComponent(JSON.stringify([{ sku: sku }]))) || [];
     if (rows.length < 2) return;
     var by = { gen: [], ser: [] };
-    rows.forEach(function (r) { var tcg = /CARD|TCG|MEDAL|MONCOLLE/i.test(String(r.parent_sku || '') + ' ' + String(r.name || '')); by[baCatKind_(r, /^[A-Z0-9_]+$/.test(String(r.parent_sku || '')) && BA_GEN_NAME_RE.test(String(r.name || '')), tcg)].push(r); });
+    rows.forEach(function (r) { var tcg = /CARD|TCG|MEDAL|MONCOLLE/i.test(String(r.parent_sku || '') + ' ' + String(r.name || '')); by[baCatKind_(r, /^[A-Z0-9_]+$/.test(String(r.parent_sku || '')) && !pskuItemIdLike_(r.parent_sku) && BA_GEN_NAME_RE.test(String(r.name || '')), tcg)].push(r); });
     ['gen', 'ser'].forEach(function (kd) { if (by[kd].length < 2) return; var ak = l.cc + '|' + sku.toUpperCase() + '|' + kd + '|' + by[kd].map(function (r) { return String(r.item_id); }).sort().join(','); if (ack[ak]) { acked.push(ak); return; } dups.push({ cc: l.cc, sku: sku, kind: kd, at: l.created_at, item: String(l.item_id), items: by[kd].map(function (r) { return { item_id: String(r.item_id), shop_id: String(r.shop_id), status: r.status, name: String(r.name || '').slice(0, 80) }; }) }); });
   });
   var out = { ok: true, at: new Date().toISOString(), hours: hours, logs: logs.length, checked: checked, dups: dups, acked: acked, cut: cut, paused: [] };
