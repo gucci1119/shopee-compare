@@ -5165,13 +5165,15 @@
   const smdSortGet = (t) => { try { const v = JSON.parse(localStorage.getItem(smdSortKey(t)) || 'null'); return v && typeof v.c === 'number' ? v : null; } catch (_) { return null; } };
   /* 見出しの行：thead があればその最後の行、無ければ tbody の先頭の「全部 th」の行（<table><tr><th>… と書いた表） */
   function smdSortHeadRow(t) { if (t.tHead && t.tHead.rows.length) return t.tHead.rows[t.tHead.rows.length - 1]; const tb = t.tBodies[0]; const r = tb && tb.rows[0]; return r && r.cells.length && [...r.cells].every(c => c.tagName === 'TH') ? r : null; }
-  const SMD_DATE_RE = /^[^\d¥$]{0,4}(\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}|\d{1,2}[/月]\d{1,2})/;   /* 頭の絵文字（📥 2026/11/06）・11月7日 も日付に */
+  const SMD_DATE_RE = /^[^\d¥$]{0,4}(\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}|\d{1,2}[-/月]\d{1,2}(?![\d.]))/;   /* 11-03（経費の日付）も */
+  /* セルの文字。金額を入力欄に入れて出す表（経費）は、入力欄の値を読む */
+  const smdCellTxt = (td) => { const t = (td.textContent || '').trim(); if (t) return t; const f = td.querySelector('input:not([type=checkbox]):not([type=radio]),select,textarea'); return f ? String(f.value || '') : ''; };   /* 頭の絵文字（📥 2026/11/06）・11月7日 も日付に */
   const SMD_NOSORT_TH = /SN|ID|番号|Product|SKU|JAN|型番|item/i;   /* 注文SN・商品ID は数字に見えても並べ替えの列にしない */
   function smdSortVal(td, kind) {
     if (!td) return null; const sv = td.getAttribute('data-sv');
-    if (kind === 'text' || kind === 'date') { const t = (sv != null ? sv : td.textContent || '').trim(); if (!t) return null; if (kind === 'date') { const m = t.match(SMD_DATE_RE); if (!m) return null; const p = m[1].split(/[-/.年月]/).filter(Boolean).map(Number); return p.length === 3 ? p[0] * 10000 + p[1] * 100 + p[2] : p[0] * 100 + p[1]; } return t; }
+    if (kind === 'text' || kind === 'date') { const t = (sv != null ? sv : smdCellTxt(td)).trim(); if (!t) return null; if (kind === 'date') { const m = t.match(SMD_DATE_RE); if (!m) return null; const p = m[1].split(/[-/.年月]/).filter(Boolean).map(Number);   /* 2026-11-03 → 20261103・11-03 → 1103 */ return p.length === 3 ? p[0] * 10000 + p[1] * 100 + p[2] : p[0] * 100 + p[1]; } return t; }
     if (sv != null && sv !== '') { const n = Number(sv); return isFinite(n) ? n : null; }
-    const m = String(td.textContent || '').replace(/[,，]/g, '').replace(/[−–—]/g, '-').match(/-?\s*(?:¥|\$|₱|₫|฿|RM|NT\$|R\$|S\$)?\s*-?\d+(?:\.\d+)?/);
+    const m = String(smdCellTxt(td)).replace(/[,，]/g, '').replace(/[−–—]/g, '-').match(/-?\s*(?:¥|\$|₱|₫|฿|RM|NT\$|R\$|S\$)?\s*-?\d+(?:\.\d+)?/);
     if (!m) return null; const neg = /-/.test(m[0]); const n = Number(m[0].replace(/[^\d.]/g, '')); return isFinite(n) ? (neg ? -n : n) : null;
   }
   const smdSortRows = (t, hr) => { const tb = t.tBodies[0]; if (!tb) return []; const n = hr ? hr.cells.length : 0; return [...tb.rows].filter(r => r !== hr); };
@@ -5180,7 +5182,7 @@
   function smdSortAuto(t, hr) {
     if (!t.hasAttribute('data-smdauto') || !hr || t.__smdAutoDone === hr) return; const rows = smdSortRows(t, hr).filter(r => !smdSortFixed(r, hr.cells.length)).slice(0, 60); if (!rows.length) return;
     [...hr.cells].forEach((th, i) => { if (th.hasAttribute('data-sk') || th.hasAttribute('data-nosort') || th.colSpan > 1 || !(th.textContent || '').trim() || SMD_NOSORT_TH.test(th.textContent || '')) return;
-      let num = 0, dt = 0, any = 0; rows.forEach(r => { const c = r.cells[i]; const x = c ? (c.textContent || '').trim() : ''; if (!x || x === '—' || x === '-') return; any++; if (SMD_DATE_RE.test(x) && !/^\s*\d{1,2}\/\d{1,2}\s*(件|点|個)/.test(x)) dt++; else if (/^[+\-−–]?\s*(?:¥|\$|₱|₫|฿|RM|NT\$|R\$|S\$)?\s*[+\-−]?[\d,]+(?:\.\d+)?/.test(x) && smdSortVal(c, 'num') != null) num++; });   /* 商品名の中の数字（マリオ64 等）で名前の列を数字の列にしない＝先頭が数字の値だけ数える */
+      let num = 0, dt = 0, any = 0; rows.forEach(r => { const c = r.cells[i]; const x = c ? smdCellTxt(c).trim() : ''; if (!x || x === '—' || x === '-') return; any++; if (SMD_DATE_RE.test(x) && !/^\s*\d{1,2}\/\d{1,2}\s*(件|点|個)/.test(x)) dt++; else if (/^[+\-−–]?\s*(?:¥|\$|₱|₫|฿|RM|NT\$|R\$|S\$)?\s*[+\-−]?[\d,]+(?:\.\d+)?/.test(x) && smdSortVal(c, 'num') != null) num++; });   /* 商品名の中の数字（マリオ64 等）で名前の列を数字の列にしない＝先頭が数字の値だけ数える */
       if (any && dt / any >= 0.6) th.setAttribute('data-sk', 'date'); else if (any && num / any >= 0.6) th.setAttribute('data-sk', 'num'); });
     t.__smdAutoDone = hr;
   }
