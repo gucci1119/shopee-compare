@@ -14197,6 +14197,7 @@
     }
   }
   async function sbUpsert(table, rows, onConflict) {
+    try { sbBootDrop(table); } catch (_) {}
     if (!rows.length) return 0;
     if (table === 'app_kv') { try { if (typeof lst !== 'undefined') lst._baView = null; } catch (_) {} }
     demoWriteGuard('upsert', table, rows);
@@ -14271,6 +14272,7 @@
     return out;
   }
   async function sbDelete(table, qs) {
+    try { sbBootDrop(table); } catch (_) {}
     demoWriteGuard('delete', table, qs);
     const key = settings.sbSecret;
     if (!key) throw new Error('書き込みキー未設定');
@@ -14280,7 +14282,8 @@
     });
     if (!r.ok) { const e = new Error(`${table}削除 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`); sbWriteFail('delete', table, e); throw e; }
   }
-  async function sbPatch(table, qs, patch) { // 主キー(item_id)自体の変更など、キー指定での更新
+  async function sbPatch(table, qs, patch) {
+    try { sbBootDrop(table); } catch (_) {} // 主キー(item_id)自体の変更など、キー指定での更新
     demoWriteGuard('patch', table, patch);
     const key = settings.sbSecret;
     if (!key) throw new Error('書き込みキー未設定');
@@ -14454,6 +14457,25 @@
     const add = pk.filter(c => cols.indexOf(c) < 0);
     if (!add.length) return qs;
     return qs.replace(m[0], m[1] + 'order=' + m[2] + ',' + add.map(c => c + '.asc').join(','));
+  }
+  /* ★2026-11-07 egress（事業本部・11/1〜11/6 で 54GB＝1日約9GB）：ポータルを開くたびに出品の表（listings select=*・約7,900行）と在庫の表（inventory select=*）を丸ごと読んでいた
+     （1日 1,124回・881回の読み。公開のたびに開いている全部のタブが読み直す）。→【開いてから90秒の間の読みだけ】、この端末の控え（IndexedDB）が新しければ使う
+     （出品10分・在庫5分まで）。開いた後の画面の中の読み直しは今までどおり毎回 DB を読む。ポータルから書いた時（sbUpsert・sbPatch・sbDelete）はその表の控えを捨てる。🎭デモでは使わない */
+  const SB_BOOT_TTL = { listings: 10 * 60e3, inventory: 5 * 60e3 };
+  const sbBootKey = (table, qs) => 'boot|' + table + '|' + String(state && state.acct || '') + '|' + qs;
+  async function sbGetAllBoot(table, qs) {
+    const ttl = SB_BOOT_TTL[table], k = sbBootKey(table, qs);
+    const boot = (typeof performance !== 'undefined' ? performance.now() : 0) < 90000;
+    if (ttl && boot && !demoOn()) {
+      try { const c = await idbKv('readonly', st => st.get(k)); if (c && Array.isArray(c.rows) && Date.now() - c.at < ttl) { try { window.__smdBootHit = (window.__smdBootHit || 0) + 1; } catch (_) {} return c.rows; } } catch (_) {}
+    }
+    const rows = await sbGetAll(table, qs);
+    if (ttl && !demoOn() && Array.isArray(rows)) { idbKv('readwrite', st => st.put({ at: Date.now(), rows }, k)).catch(() => {}); }
+    return rows;
+  }
+  function sbBootDrop(table) {
+    if (!SB_BOOT_TTL[table]) return;
+    idbKv('readwrite', st => { const r = st.openCursor(); r.onsuccess = () => { const c = r.result; if (!c) return; if (String(c.key).indexOf('boot|' + table + '|') === 0) c.delete(); c.continue(); }; return r; }).catch(() => {});
   }
   async function sbGetAll(table, qs) {
     qs = sbStableOrder(table, acctQs(table, qs));
@@ -15385,7 +15407,7 @@
         // ★2026-10-24 レビュー#3：棚卸の記録（stocktake）と機種・カテゴリの手直し（inv_class）は ensureInv でしか読んでいなかった。
         //   在庫管理を開いたまま再読み込みすると在庫だけ読んで描き、棚卸バーが「✓あり 0／全部未確認」・手直しが自動判定に見えた。
         //   → 一緒に待つ（読めていれば takLoad / invClsLoad は何も読まない）。どちらも中で例外を拾うので、ここは止まらない
-        const [invRows] = await Promise.all([sbGetAll('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'), takLoad(), invClsLoad()]);
+        const [invRows] = await Promise.all([sbGetAllBoot('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'), takLoad(), invClsLoad()]);
         stock.rows = invRows;
         // 画像: Shopee注文SN → 注文明細の画像（在庫名は日本語で商品名照合できないため、SN一致が確実）
         stock.imgMap = new Map();
@@ -16810,7 +16832,7 @@
     const host = document.getElementById('stock-dupid'); if (!host) return;
     host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     if (!stock.rows) {
-      try { stock.rows = await sbGetAll('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'); }
+      try { stock.rows = await sbGetAllBoot('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'); }
       catch (e) { host.innerHTML = errBox(e); return; }
     }
     const { pairs, orphans } = dupIdScan(stock.rows);
@@ -16903,7 +16925,7 @@
     }
     alert('まとめました：' + del + '件を統合' + (moved ? '（うち' + moved + '件は情報をスプシ側へ移動）' : '') + (ng ? '／失敗 ' + ng + '件' : ''));
     stock.rows = null;
-    try { stock.rows = await sbGetAll('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'); } catch (_) {}
+    try { stock.rows = await sbGetAllBoot('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'); } catch (_) {}
     try { pf._invAt = 0; plan._cache = null; } catch (_) {}   // 行が消えた・紐付けが移った＝💹📈を読み直させる
     renderDupId();
   }
@@ -17499,7 +17521,7 @@
   async function ensureInv() {
     if (stock.rows) return stock.rows;
     // 棚卸の✓記録とハード/カテゴリの手直しも一緒に読む（在庫台帳の描画で必ず要る）
-    const [rows] = await Promise.all([sbGetAll('inventory', 'select=*&order=item_id.desc'), takLoad(), invClsLoad()]);
+    const [rows] = await Promise.all([sbGetAllBoot('inventory', 'select=*&order=item_id.desc'), takLoad(), invClsLoad()]);
     stock.rows = rows;
     return stock.rows;
   }
@@ -27176,6 +27198,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-07', items: [
+      '📶 <b>通信量を減らした（Supabase の egress・1日約9GB）</b>：①ポータルを開いてすぐの出品の表・在庫の表の丸ごと読みは、この端末の控えが新しければ使う（出品10分・在庫5分まで・開いた後の画面の中の読み直しは今までどおり毎回読む・ポータルから書いたら控えを捨てる）②🤖の写真の控え（8つ・約6MB）は、更新時刻が変わった物だけ読む。画面の動きは変えていない。',
       '💬 <b>ガイドの言葉の表</b>：よく出るボタン・見出し（閉じる・読み直す・全部選ぶ・CSV・在庫の自動復活の戻す／様子見・アクセスのタブ・オーダー数（件）／商品数（点）など）に、同じ説明を全画面で付ける（4つの道具と同じ言葉）。見積もりを送った人の一覧の状態の札と列の見出しにも付けた。',
       '🔗 <b>在庫の自動復活：商品のカタログへのリンク</b>（本人「ここ実際の設定結果を確かめられるように、その商品カタログへのリンクも欲しいですね。編集ページと販売ページの両方でいいです。」）：🔔 売れて在庫0になった明細の各行（注文の横）に「✏️ 編集ページ（店の名前）」「🛒 販売ページ」。⚙️ 商品ごとの決めは、国の在庫の数字を押すとその国の編集画面・数字の下に小さく ✏️／🛒（2店舗目の明細は2店舗目の店のページ）。マウスを乗せると何が開くかの説明が出る。',
       '📣 <b>営業の画面を「営業の流れと段階」の1つの表に</b>（本人「これもこんなずっとしたまでスクロールできないでしょ？」「なんでこれワッツアップとブラジルが同じ粒度なん？」・事業本部の8点）：流れの数（送った→返事→見積もり→購入）と段階の表を1つの箱に（段階の表に「ここまで来た人（累計）」「送った人のうち」）。期間（全部・30日・7日）と分け方（アプリごと・国ごと・国×アプリ）は表の上で切り替え・流れの表は国とアプリを混ぜない（国×アプリは国の下にアプリを字下げ）。見積もりの記録・注文・PayPal 受取で段階を自動で進める（⑥ 購入済みに買った人が入る・手で付けた段階より前には戻さない）。数が違う理由（送っていない人の内訳）を表の下に1行。人の一覧は画面の65%の箱の中でスクロール・初めは「🔴 停滞」（停滞の長い順）・× 対象外は別の札。各行に 💬 会話を開く・次にやること・勧めた物（見積もりの記録の写真と名前）。最後の動きは短く、細かい事はマウスを乗せると出る。見積もりの記録が何件残っているかも出す。',
@@ -31901,7 +31924,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   const lst = { tab: (function () { try { const t = localStorage.getItem('smdListTab') || 'status'; return t === 'plan' ? 'status' : t; } catch (_) { return 'status'; } })(), grid: (function () { try { return localStorage.getItem('smdListGrid') === '1'; } catch (_) { return false; } })(), started: false, wired: false, syncing: false, byCc: {}, filter: 'all', search: '', open: (function () { try { const a = JSON.parse(localStorage.getItem('smdListOpen') || '[]'); return new Set(Array.isArray(a) ? a : []); } catch (_) { return new Set(); } })(), costOpen: new Set(), covOpen: new Set(), note: '', ccs: (function () { try { const a = JSON.parse(localStorage.getItem('smdLstCcs') || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } })() };
   function listingsFromDb() {
-    return sbGetAll('listings', 'select=*&order=create_time.desc.nullslast').then(rows => {
+    return sbGetAllBoot('listings', 'select=*&order=create_time.desc.nullslast').then(rows => {
       const byCc = {}; (rows || []).forEach(r => (byCc[r.cc] = byCc[r.cc] || []).push(r)); return byCc;
     });
   }
@@ -38615,8 +38638,23 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   async function baPreReadRaw() {
     try {
       /* ★2026-10-24 古い1本 boshu_auto_pre は 9/25 から更新されていない（9/26 から8分割）のに毎回一緒に読んでいた。分割を先に読み、そろっていない時だけ古い1本を読む */
-      const r = await sbGetAll('app_kv', 'select=k,v&k=in.(' + baPreShardKeys().join(',') + ')');
-      const by = {}; (r || []).forEach(x => { by[x.k] = x.v; });
+      /* ★2026-11-07 egress：8つ（約6MB）を毎回まとめて読んでいた（ポータルから1日133回）。→ 先に更新時刻だけ読み（小さい）、この端末の控え（IndexedDB）と時刻が違う塊だけ読む。
+         app_kv の updated_at は DB のトリガー（app_kv_touch_updated_at）が必ず付ける＝GAS や別のタブが書いても時刻が変わる。時刻が読めなければ今までどおり全部読む */
+      const by = {};
+      let need = baPreShardKeys(), cache = {};
+      try {
+        const ts = await sbGetAll('app_kv', 'select=k,updated_at&k=in.(' + baPreShardKeys().join(',') + ')');
+        if (Array.isArray(ts) && ts.length === BA_PRE_SHARDS) {
+          const u = {}; ts.forEach(x => { u[x.k] = String(x.updated_at || ''); });
+          await Promise.all(baPreShardKeys().map(k => idbKv('readonly', st => st.get('pre|' + k)).then(c => { if (c && c.u && c.u === u[k] && c.v) cache[k] = c.v; }).catch(() => {})));
+          need = baPreShardKeys().filter(k => !cache[k]);
+          Object.keys(cache).forEach(k => { by[k] = cache[k]; });
+        }
+      } catch (_) { need = baPreShardKeys(); }
+      if (need.length) {
+        const r = await sbGetAll('app_kv', 'select=k,v,updated_at&k=in.(' + need.join(',') + ')');
+        (r || []).forEach(x => { by[x.k] = x.v; if (x.v && x.updated_at) idbKv('readwrite', st => st.put({ u: String(x.updated_at), v: x.v }, 'pre|' + x.k)).catch(() => {}); });
+      }
       if (baPreShardKeys().every(k => by[k] != null)) { _baPreSharded = true; const out = {}; baPreShardKeys().forEach(k => Object.assign(out, by[k] || {})); return out; }
       const r1 = await sbGetAll('app_kv', 'select=k,v&k=eq.boshu_auto_pre'); (r1 || []).forEach(x => { by[x.k] = x.v; });
       _baPreSharded = false; return by['boshu_auto_pre'] || null;
