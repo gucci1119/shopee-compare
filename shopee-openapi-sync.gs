@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261108-0900'
+var SRC_VER = '20261108-1000'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -203,6 +203,19 @@ function ufBump_(n, tag) {
 /* ★2026-11-05 レビュー（推測・中）：by: を今の入れ物（ufCount の tag）に混ぜると、1つ 9KB の上限を超えて数えの保存が毎回失敗するおそれ。
    別の入れ物 ufBy（{d, m}・多い順に60件まで）に分ける。目安の数なので鍵は取らない（同時の実行で少し落ちることがある）。urlfetch は使わない */
 var _ufBy = {};
+var _sbLenBy = {};
+function sbLenFlush_() {
+  var ks = Object.keys(_sbLenBy); if (!ks.length) return;
+  try {
+    var d = ufToday_(), o = null; try { o = JSON.parse(P_().getProperty('sbLenBy') || 'null'); } catch (e1) { o = null; }
+    if (!o || o.d !== d) o = { d: d, m: {} };
+    ks.forEach(function (k) { o.m[k] = (o.m[k] || 0) + _sbLenBy[k]; });
+    var top = Object.keys(o.m).sort(function (a, b) { return o.m[b] - o.m[a]; });
+    if (top.length > 40) { var keep = {}; top.slice(0, 39).forEach(function (k) { keep[k] = o.m[k]; }); keep['（その他）'] = top.slice(39).reduce(function (t, k) { return t + o.m[k]; }, 0) + (o.m['（その他）'] || 0); o.m = keep; }
+    P_().setProperty('sbLenBy', JSON.stringify(o));
+    _sbLenBy = {};
+  } catch (e) {}
+}
 function ufByFlush_() {
   var ks = Object.keys(_ufBy); if (!ks.length) return;
   try {
@@ -344,6 +357,7 @@ function priceLogFlush_() {
 }
 function ufPersist_() {
   try { ufByFlush_(); } catch (eBy) {}
+  try { sbLenFlush_(); } catch (eLn) {}
   try { priceLogFlush_(); } catch (ePl) {}
   if (!_ufRun && !Object.keys(_ufTag).length) return;
   var lock = null, got = false;
@@ -2028,9 +2042,10 @@ function doGetInner_(e) {
         var tg = st.tag || {}, top = Object.keys(tg).filter(function (k) { return k.indexOf('by:') !== 0; }).map(function (k) { return { k: k, n: tg[k] }; })
           .sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40);
         var topBy = []; try { ufByFlush_(); var _ub = JSON.parse(P_().getProperty('ufBy') || 'null'); if (_ub && _ub.d === ufToday_()) topBy = Object.keys(_ub.m || {}).map(function (k) { return { k: k, n: _ub.m[k] }; }).sort(function (a2, b2) { return b2.n - a2.n; }).slice(0, 40); } catch (eUb) {}   /* ★2026-11-05 どの処理から呼んだか（ufBump_ → ufBy） */
+        var topLen = []; try { sbLenFlush_(); var _ul = JSON.parse(P_().getProperty('sbLenBy') || 'null'); if (_ul && _ul.d === ufToday_()) topLen = Object.keys(_ul.m || {}).map(function (k) { return { k: k, mb: Math.round(_ul.m[k] / 10485.76) / 100 }; }).sort(function (a2, b2) { return b2.mb - a2.mb; }).slice(0, 30); } catch (eUl) {}   /* ★2026-11-08 処理×表ごとの読んだ量（圧縮前の文字数・MB） */
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, src: SRC_VER, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, topBy: topBy, aiSpend: aiSpendLoad_() };
+        ufo = { ok: true, src: SRC_VER, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, topBy: topBy, topLen: topLen, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -8067,7 +8082,7 @@ function sbSelect_(table, query) {
   var _hd = { apikey: key, Authorization: 'Bearer ' + key, 'X-Client-Info': sbClientInfo_() }; if (sbGzipOn_()) _hd['Accept-Encoding'] = 'gzip';   /* ★2026-10-29 Supabase の通信量（egress）を減らす試し：SB_GZIP=1 の台だけ圧縮を頼む（事業本部「1台で試して確かめてから」） */
   var res; try { res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'get', muteHttpExceptions: true, headers: _hd }); } catch (e) { ufNoteErr_(e); throw e; }
   if (res.getResponseCode() >= 300) throw new Error('Supabase select ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
-  var _txt = res.getContentText(); SB_LAST_LEN = _txt.length;   /* ★2026-10-24 返事の長さ（文字数）を控える＝どの鍵が太ったかを、読む量を増やさずに数える（BA_KV_SZ） */
+  var _txt = res.getContentText(); SB_LAST_LEN = _txt.length;   /* ★2026-11-08 egress（事業本部）：処理×表ごとに読んだ文字数を1日分貯める（sbLenBy・uf_status の topLen）＝どの処理が Supabase をどれだけ読んだかを台ごとに数える */ try { var _lk = ufEntryName_() + '｜' + table; _sbLenBy[_lk] = (_sbLenBy[_lk] || 0) + _txt.length; } catch (eLb) {}   /* ★2026-10-24 返事の長さ（文字数）を控える＝どの鍵が太ったかを、読む量を増やさずに数える（BA_KV_SZ） */
   return JSON.parse(_txt);
 }
 var SB_LAST_LEN = 0, BA_KV_SZ = {};
