@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-1500'
+var SRC_VER = '20261107-1600'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -3009,6 +3009,9 @@ function getModels_(shopId, itemId) {
   var priceOf = function (o) { var pi = (o.price_info || [])[0] || {}; return pi.original_price != null ? pi.original_price : (pi.current_price != null ? pi.current_price : 0); };
   var stockOf = function (o) { var sv = o.stock_info_v2 || {}; var ss = (sv.seller_stock || [])[0] || {}; if (ss.stock != null) return ss.stock; var su = sv.summary_info || {}; return su.total_available_stock != null ? su.total_available_stock : 0; };
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
+  /* ★2026-11-07 本人「明細の画像じゃないの？」（SG 2店舗目 49118838191 ⑭）：Shopee が get_model_list でエラーを返した時も「明細の無い商品」の形（model_id 0）にして返していた
+     → 出品の同期がその形で台帳に保存し（失敗は catch でしか止めていなかった）、出品ログに明細0の行が出た。エラーは失敗として投げる */
+  if (j && j.error) throw new Error('get_model_list ' + String(j.error) + ' ' + String(j.message || '').slice(0, 80));
   var resp = j.response || {}, tiers = resp.tier_variation || [], models = resp.model || [];
   var out = models.map(function (m) {
     var idx = m.tier_index || [];
@@ -3021,6 +3024,8 @@ function getModels_(shopId, itemId) {
   if (!out.length) {
     var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(itemId) }, 'get');
     var it = ((b.response || {}).item_list || [])[0] || {};
+    if (b && b.error) throw new Error('get_item_base_info ' + String(b.error));
+    if (it.has_model || tiers.length) throw new Error('明細を読めない（明細のある商品なのに get_model_list が空）');   /* ★11/7 明細のある商品を「明細0」にしない */
     out = [{ model_id: 0, tier_index: [], name: '', sku: it.item_sku || '', price: priceOf(it), stock: stockOf(it) }];
   }
   return { item_id: itemId, tier_variation: tiers, models: out };
@@ -7770,7 +7775,8 @@ function syncListingsForShop_(tok, sinceSec) {
       var _prev = prevById[String(it.item_id)];
       var _sameTime = !!(_prev && it.update_time && _prev.update_time
         && Number(_prev.update_time) === Number(it.update_time)
-        && Array.isArray(_prev.models) && _prev.models.length);
+        && Array.isArray(_prev.models) && _prev.models.length
+        && !(it.has_model && _prev.models.some(function (m) { return m && !m.ghost && !Number(m.id); })));   /* ★11/7 明細のある商品の控えに「明細0」が混ざっていたら取り直す（前の失敗で壊れた控えを使い続けない） */
       if (_sameTime && _rotOn && it.has_model && (Number(String(it.item_id).slice(-6)) % 7) === (_rotDay % 7)) { _sameTime = false; _rotN++; }   // 今日の組は取り直す
       if (it.has_model && _sameTime) {
         // ★前回と同じ更新時刻＝中身は変わっていない。保存済みの明細をそのまま使う（APIを叩かない）
