@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-1300'
+var SRC_VER = '20261107-1500'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -1470,6 +1470,18 @@ function doGetInner_(e) {
         else pjout = { ok: true, job: baKv_('promo_job') || {}, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) };
       } catch (err) { pjout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(pjcb + '(' + JSON.stringify(pjout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'cancel_watch_on' || p.action === 'cancel_watch_off' || p.action === 'cancel_watch_status' || p.action === 'cancel_watch_run') {   /* ★2026-11-07 キャンセルの15分おきの巡回（本体で回す） */
+      var cwcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), cwo;
+      try {
+        var cwwt = P_().getProperty('WRITE_TOKEN'); if (!cwwt || p.token !== cwwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        if (p.action === 'cancel_watch_on') { cancelWatchTriggerOff_(); ScriptApp.newTrigger('cancelWatchTick').timeBased().everyMinutes(15).create(); cwo = { ok: true, on: true }; }
+        else if (p.action === 'cancel_watch_off') { cancelWatchTriggerOff_(); cwo = { ok: true, on: false }; }
+        else if (p.action === 'cancel_watch_run') { cwo = { ok: true, out: cancelWatchTick() }; }
+        else cwo = { ok: true, state: baKv_(CANCEL_WATCH_KEY) || null, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }).filter(function (h) { return h === 'cancelWatchTick'; }).length };
+        cwo.src = SRC_VER;
+      } catch (err) { cwo = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(cwcb + '(' + JSON.stringify(cwo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'dnote_start' || p.action === 'dnote_stop' || p.action === 'dnote_status' || p.action === 'dnote_apply' || p.action === 'dnote_peek' || p.action === 'dbody_scan' || p.action === 'dnote_body_on' || p.action === 'dnote_body_off') {   /* ★2026-09-26 BR 説明文の先頭に到着目安 */
       var dncb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), dno;
@@ -6528,11 +6540,12 @@ function cancelStockGuard_() {
   /* ★2026-10-22 本人「在庫の自動復活機能と、キャンセルで在庫を戻さない機能、バッティングしてないかな？」：
      ①前は本体だけで動いた＝本体の枠が尽きた日（10/22）は1日止まっていた → 取り札（syncGate_）を取れた台が動く（二重に引かない）
      ②「自動で戻す」に決めた商品は、戻す前にキャンセルされると 0 まで引いていた（自動復活は発送待ち以降の注文しか見ない＝誰も戻さない）
-       → 決めた数より下げない。限定版（Limited・限定・特装…）は決めがあっても引き戻す */
-  if (!syncGate_('cancelStockGuard', 900)) return { skip: 'gate' };
-  var srBy = {}; try { (sbSelect_('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules,req_items)') || []).forEach(function (r) { srBy[r.k] = r.v; }); } catch (eSr) { return { skip: '自動で戻す決めが読めない' }; }
-  var srRules = srBy.stock_restore_rules || {}, srQ = Math.max(1, parseInt((srBy.stock_restore_cfg || {}).qty, 10) || 1);
-  var keepOf = function (name, sku) { if (/\blimited\b|限定|特装|豪華|collector|black\s*box|premium\s*box/i.test(String(name || ''))) return 0; var sk = String(sku || '').trim(); if (!sk) return 0; var r = srRules[srRuleKey_('', '', sk)]; if (!r) return 0; if (parseInt(r.q, 10) > 0) return Math.min(99, parseInt(r.q, 10)); return r.m === 'auto' ? srQ : 0; };
+       → 決めた数より下げない。限定版（Limited・限定・特装…）は決めがあっても引き戻す
+     ★2026-11-07 本人「強制的に戻さないように」（PH 261103ATH12D2X：11:39 に買い手がキャンセル→次の同期 12:15 まで在庫1のまま見えた）：
+       15分おきの軽い巡回 cancelWatchTick が Shopee のキャンセルを直接拾って先に引き戻す。ここ（1時間ごと）はその取りこぼしの受け皿。
+       同じ取り札 'cancelStockGuard' を使う＝2つが同時に同じ注文を引かない */
+  if (!syncGate_('cancelStockGuard', 600)) return { skip: 'gate' };
+  var ctx = cancelGuardCtx_(); if (ctx.err) return { skip: ctx.err };
   var rows = sbSelect_('app_kv', 'select=v&k=eq.cancel_stock_done');
   if (!Array.isArray(rows)) return { skip: '控えが読めない' };
   var since = Utilities.formatDate(new Date(Date.now() - 40 * 86400000), 'Asia/Tokyo', 'yyyy-MM-dd');
@@ -6546,46 +6559,125 @@ function cancelStockGuard_() {
   }
   var cur = rows[0].v || {}; cur.items = cur.items || {};
   var todo = cancels.filter(function (o) { return !cur.items[String(o.sn)]; }).slice(0, 20);
-  var out = { checked: cancels.length, todo: todo.length, fixed: [], errors: [] };
+  var out = { checked: cancels.length, todo: todo.length, fixed: [], errors: [] }, done = {}, recs = [], skips = [];
   todo.forEach(function (o) {
-    var shop = parseInt(o.shop_id, 10), res = [];
-    if (!shop) { out.errors.push(o.sn + ' shop_id なし'); return; }
-    var byItem = {};
-    (o.items || []).forEach(function (it) { var iid = String(it.item_id || ''); if (!iid) return; (byItem[iid] = byItem[iid] || []).push({ mid: Number(it.model_id) || 0, q: Math.max(1, Number(it.qty) || 1), vn: String(it.variation || it.model_name || ''), cn: String(it.name || '') }); });
-    Object.keys(byItem).forEach(function (iid) {
-      try {
-        var list = [], g = null;
-        byItem[iid].forEach(function (x) {
-          var now;
-          var keep = 0;
-          /* ★2026-11-03 全体レビュー 10/22 高：番号（model_id）だけで照らすと、詰め直し削除で同じ番号に入った別の作品の在庫を0にする（BR NieR の取り消し→Elden Ring を 1→0）。
-             注文に残っている明細名でも照らす。名前が違えば同じカタログの中で名前が1つだけ合う明細に当て、無い・2つ以上なら触らない */
-          if (x.mid) { if (!g) g = getModels_(shop, iid); var m = (g.models || []).filter(function (mm) { return Number(mm.model_id) === x.mid; })[0];
-            if (x.vn && (!m || vnBare_(m.name) !== vnBare_(x.vn))) { var byNm = (g.models || []).filter(function (mm) { return vnBare_(mm.name) === vnBare_(x.vn); });
-              if (byNm.length === 1) { res.push(iid + '#' + x.mid + ' 番号が入れ替わっていた→名前で ' + byNm[0].model_id + ' に当てた'); m = byNm[0]; x.mid = Number(m.model_id); }
-              else { res.push(iid + '#' + x.mid + ' 今の名前「' + String((m && m.name) || 'なし').slice(0, 30) + '」が注文の「' + x.vn.slice(0, 30) + '」と違う＝触らない'); return; } }
-            if (!m) { res.push(iid + '#' + x.mid + ' 明細がもう無い'); return; } now = Number(m.stock) || 0; keep = (isReqModel_(x.cn, m.sku) || isReqItem_(srBy.req_items, o.cc, iid)) ? 0 : keepOf(m.name, m.sku); }   /* ★2026-11-03 リクエスト品は0まで引き戻す */
-          else { var b = callShop_(shop, '/api/v2/product/get_item_base_info', { item_id_list: iid }, 'get'); var it0 = (((b.response || {}).item_list) || [])[0]; if (!it0) { res.push(iid + ' 出品がもう無い'); return; } now = stockOfV2_(it0.stock_info_v2); }
-          var nv = Math.max(0, now - x.q);
-          if (keep > 0) nv = Math.min(now, Math.max(nv, keep));   /* 自動で戻す決めの数は残す */
-          if (nv !== now) list.push({ model_id: x.mid, stock: nv }); res.push(iid + '#' + x.mid + ' ' + now + '→' + nv);
-        });
-        if (list.length) updateStockList_(shop, iid, list);
-      } catch (e) { res.push(iid + ' 失敗 ' + String((e && e.message) || e).slice(0, 80)); out.errors.push(o.cc + ' ' + o.sn + ' ' + iid); }
-    });
-    cur.items[String(o.sn)] = { at: nowIso, r: res.join(' / ').slice(0, 300) };   // 一部失敗でも「済み」＝引いた分を二重に引かない（失敗は r と errors に残す）
-    /* ★2026-11-04 全体レビュー 新-7：名前が合わず触らなかった（＝Shopee が戻した在庫がそのまま残る）件は、ポータルの⚠️自動検知に出す控え cancel_stock_skip に残す */
-    { var skp = res.filter(function (t) { return /触らない|もう無い/.test(t); }); if (skp.length) { try { var cs0 = baKvFresh_('cancel_stock_skip') || {}; var arr = Array.isArray(cs0.items) ? cs0.items : []; arr.unshift({ at: nowIso, cc: o.cc, sn: String(o.sn), r: skp.join(' / ').slice(0, 240) }); baKvSet_('cancel_stock_skip', { items: arr.slice(0, 30), at: nowIso }); } catch (eSk) {} } }
-    out.fixed.push(o.cc + ' ' + o.sn + '：' + res.join(' / ').slice(0, 120));
+    var g = cancelGuardOrder_(o, ctx, nowIso);
+    done[String(o.sn)] = { at: nowIso, r: g.res.join(' / ').slice(0, 300), by: 'sync' };   // 一部失敗でも「済み」＝引いた分を二重に引かない（失敗は🔔に出す）
+    recs = recs.concat(g.fixed); skips = skips.concat(g.skip);
+    if (g.err) out.errors.push(o.cc + ' ' + o.sn);
+    out.fixed.push(o.cc + ' ' + o.sn + '：' + g.res.join(' / ').slice(0, 120));
   });
-  if (todo.length) {
-    var cutoff = Date.now() - 60 * 86400000;
-    Object.keys(cur.items).forEach(function (k) { var t = Date.parse((cur.items[k] || {}).at || ''); if (t && t < cutoff) delete cur.items[k]; });
-    cur.at = nowIso;
-    sbUpsert_('app_kv', [{ k: 'cancel_stock_done', v: cur, updated_at: nowIso }], 'k');
-  }
+  if (todo.length) cancelGuardSave_(done, recs, skips, nowIso);
   return out;
 }
+/* 引き戻しに要る決め（自動で戻す数・リクエスト品・手で戻した記録）を1回だけ読む。読めない時は何もしない */
+function cancelGuardCtx_() {
+  var srBy = {}; try { (sbSelect_('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules,req_items,stock_restore_manual)') || []).forEach(function (r) { srBy[r.k] = r.v; }); } catch (eSr) { return { err: '自動で戻す決めが読めない' }; }
+  var srRules = srBy.stock_restore_rules || {};
+  var keepOf = function (name, sku) { if (/\blimited\b|限定|特装|豪華|collector|black\s*box|premium\s*box/i.test(String(name || ''))) return 0; var sk = String(sku || '').trim(); if (!sk) return 0; var r = srRules[srRuleKey_('', '', sk)]; if (!r) return 0; if (parseInt(r.q, 10) > 0) return Math.min(99, parseInt(r.q, 10)); return 0; };
+  return { srBy: srBy, keepOf: keepOf, man: srBy.stock_restore_manual || {} };
+}
+/* 1つのキャンセルの注文を引き戻す。o = {cc, sn, shop_id, items:[{item_id, model_id, qty, variation, name}], cancelAt(ISO・分かる時だけ)}
+   返す物：res（文の記録）・fixed（引き戻した明細：国・注文番号・明細・前→後・時刻）・skip（🔔に出す物：名前違い・もう無い・手で変えた跡・失敗）
+   ★2026-11-07 手で変えた跡：①今の在庫がキャンセルの数より少ない（Shopee が戻しただけならキャンセルの数以上ある）②キャンセルの後に、ポータルで「手で戻した」記録がある → 減らさずに🔔
+   今の在庫が0なら、もう誰かが引き戻した＝何もしない（🔔にも出さない） */
+function cancelGuardOrder_(o, ctx, nowIso) {
+  var shop = parseInt(o.shop_id, 10), res = [], fixed = [], skip = [], err = false;
+  if (!shop) return { res: ['shop_id なし'], fixed: [], skip: [{ at: nowIso, cc: o.cc, sn: String(o.sn), r: '店が分からない（shop_id なし）＝引き戻していません' }], err: true };
+  var byItem = {};
+  (o.items || []).forEach(function (it) { var iid = String(it.item_id || ''); if (!iid) return; (byItem[iid] = byItem[iid] || []).push({ mid: Number(it.model_id) || 0, q: Math.max(1, Number(it.qty) || 1), vn: String(it.variation || it.model_name || ''), cn: String(it.name || '') }); });
+  Object.keys(byItem).forEach(function (iid) {
+    try {
+      var list = [], g = null, pend = [];
+      byItem[iid].forEach(function (x) {
+        var now, keep = 0, mname = '';
+        /* ★2026-11-03 全体レビュー 10/22 高：番号（model_id）だけで照らすと、詰め直し削除で同じ番号に入った別の作品の在庫を0にする（BR NieR の取り消し→Elden Ring を 1→0）。
+           注文に残っている明細名でも照らす。名前が違えば同じカタログの中で名前が1つだけ合う明細に当て、無い・2つ以上なら触らない */
+        if (x.mid) { if (!g) g = getModels_(shop, iid); var m = (g.models || []).filter(function (mm) { return Number(mm.model_id) === x.mid; })[0];
+          if (x.vn && (!m || vnBare_(m.name) !== vnBare_(x.vn))) { var byNm = (g.models || []).filter(function (mm) { return vnBare_(mm.name) === vnBare_(x.vn); });
+            if (byNm.length === 1) { res.push(iid + '#' + x.mid + ' 番号が入れ替わっていた→名前で ' + byNm[0].model_id + ' に当てた'); m = byNm[0]; x.mid = Number(m.model_id); }
+            else { res.push(iid + '#' + x.mid + ' 今の名前「' + String((m && m.name) || 'なし').slice(0, 30) + '」が注文の「' + x.vn.slice(0, 30) + '」と違う＝触らない'); return; } }
+          if (!m) { res.push(iid + '#' + x.mid + ' 明細がもう無い'); return; } now = Number(m.stock) || 0; mname = String(m.name || ''); keep = (isReqModel_(x.cn, m.sku) || isReqItem_(ctx.srBy.req_items, o.cc, iid)) ? 0 : ctx.keepOf(m.name, m.sku); }   /* ★2026-11-03 リクエスト品は0まで引き戻す */
+        else { var b = callShop_(shop, '/api/v2/product/get_item_base_info', { item_id_list: iid }, 'get'); var it0 = (((b.response || {}).item_list) || [])[0]; if (!it0) { res.push(iid + ' 出品がもう無い'); return; } now = stockOfV2_(it0.stock_info_v2); mname = String(it0.item_name || ''); }
+        var mk = o.cc + '|' + iid + '|' + x.mid, manAt = String((ctx.man || {})[mk] || '');
+        if (now <= 0) { res.push(iid + '#' + x.mid + ' もう0（引き戻し済み）'); return; }
+        if (now < x.q) { res.push(iid + '#' + x.mid + ' 今 ' + now + '＜キャンセルの数 ' + x.q + '＝手で変えた跡・触らない'); skip.push({ at: nowIso, cc: o.cc, sn: String(o.sn), r: '手で変えた跡があるので引き戻していません：' + (x.cn || iid).slice(0, 40) + (mname ? '／' + mname.slice(0, 30) : '') + '（今の在庫 ' + now + '・キャンセルの数 ' + x.q + '）' }); return; }
+        if (o.cancelAt && manAt && manAt >= String(o.cancelAt)) { res.push(iid + '#' + x.mid + ' キャンセルの後に手で戻した記録＝触らない'); skip.push({ at: nowIso, cc: o.cc, sn: String(o.sn), r: '手で変えた跡があるので引き戻していません：' + (x.cn || iid).slice(0, 40) + (mname ? '／' + mname.slice(0, 30) : '') + '（キャンセルの後にポータルで手で戻した記録 ' + manAt.slice(0, 16) + '）' }); return; }
+        var nv = Math.max(0, now - x.q);
+        if (keep > 0) nv = Math.min(now, Math.max(nv, keep));   /* 自動で戻す決めの数は残す */
+        if (nv !== now) { list.push({ model_id: x.mid, stock: nv }); pend.push({ at: nowIso, cc: o.cc, sn: String(o.sn), item_id: iid, model_id: x.mid, name: (x.cn || '').slice(0, 80), vn: (mname || x.vn || '').slice(0, 60), before: now, after: nv }); }
+        res.push(iid + '#' + x.mid + ' ' + now + '→' + nv);
+      });
+      if (list.length) { updateStockList_(shop, iid, list); fixed = fixed.concat(pend); }
+    } catch (e) { err = true; var em = String((e && e.message) || e).slice(0, 80); res.push(iid + ' 失敗 ' + em); skip.push({ at: nowIso, cc: o.cc, sn: String(o.sn), r: '引き戻しに失敗しました：' + iid + ' ' + em }); }
+  });
+  /* ★2026-11-04 全体レビュー 新-7：名前が合わず触らなかった（＝Shopee が戻した在庫がそのまま残る）件も🔔へ */
+  var skp = res.filter(function (t) { return /触らない|もう無い/.test(t) && !/手で/.test(t); }); if (skp.length) skip.push({ at: nowIso, cc: o.cc, sn: String(o.sn), r: skp.join(' / ').slice(0, 240) });
+  return { res: res, fixed: fixed, skip: skip, err: err };
+}
+/* 済みの印（cancel_stock_done）・引き戻しの記録（log）・🔔（cancel_stock_skip）を書く。書く直前に読み直して重ねる（ほかの台・1時間ごとの分を消さない） */
+function cancelGuardSave_(done, recs, skips, nowIso) {
+  var r0 = sbSelect_('app_kv', 'select=v&k=eq.cancel_stock_done'); if (!Array.isArray(r0) || !r0.length) throw new Error('cancel_stock_done を読み直せない＝書きません');
+  var cur = r0[0].v || {}; cur.items = cur.items || {};
+  Object.keys(done).forEach(function (sn) { if (!cur.items[sn]) cur.items[sn] = done[sn]; });
+  var cutoff = Date.now() - 60 * 86400000;
+  Object.keys(cur.items).forEach(function (k) { var t = Date.parse((cur.items[k] || {}).at || ''); if (t && t < cutoff) delete cur.items[k]; });
+  cur.at = nowIso;
+  sbUpsert_('app_kv', [{ k: 'cancel_stock_done', v: cur, updated_at: nowIso }], 'k');
+  if (recs.length) { try { var lg0 = baKvFresh_('cancel_stock_log') || {}; var la = Array.isArray(lg0.items) ? lg0.items : []; baKvSet_('cancel_stock_log', { items: recs.concat(la).slice(0, 300), at: nowIso }); } catch (eL) { Logger.log('cancel_stock_log を書けませんでした ' + String(eL).slice(0, 100)); } }   /* 引き戻しの記録（ポータルの🔔の画面で見る・小さい控えに分ける） */
+  if (skips.length) { try { var cs0 = baKvFresh_('cancel_stock_skip') || {}; var arr = Array.isArray(cs0.items) ? cs0.items : []; baKvSet_('cancel_stock_skip', { items: skips.concat(arr).slice(0, 100), at: nowIso }); } catch (eS) { Logger.log('cancel_stock_skip を書けませんでした ' + String(eS).slice(0, 100)); } }
+}
+/* ★2026-11-07 本人「基本的にキャンセルされた時に在庫は戻さないようにしてほしいです。Shopee の仕様がそうなっていても、強制的に戻さないようにしてください」：
+   15分おきに、全部の店（13）で「update_time が前回から変わったキャンセルの注文」だけを Shopee から読み、まだ済みでない物をすぐ引き戻す。
+   1店1回（get_order_list・order_status=CANCELLED）＝1日 約1,250回。新しいキャンセルがあった時だけ get_order_detail（50件で1回）と明細の読み（getModels_）が増える。
+   注文の台帳（orders）を待たない＝同じ時間に注文してキャンセルした物も拾う。push（Shopee の知らせ）は GAS が署名のヘッダを読めず、Shopee 側の登録も要るので使わない */
+var CANCEL_WATCH_KEY = 'cancel_watch_state';
+function cancelWatchTick() {
+  try { return cancelWatchRun_(); } finally { try { ufPersist_(); } catch (_) {} }
+}
+function cancelWatchRun_() {
+  if (!coreAllowed_()) return { skip: 'uf_budget' };   /* 業務（注文）と同じ線まで止めない */
+  if (!syncGate_('cancelStockGuard', 600)) return { skip: 'gate' };
+  var st = baKvFresh_(CANCEL_WATCH_KEY); if (BA_KV_FAIL[CANCEL_WATCH_KEY]) return { skip: '前回の時刻が読めない' };
+  st = (st && typeof st === 'object' && !Array.isArray(st)) ? st : {}; st.last = st.last || {};
+  var rows = sbSelect_('app_kv', 'select=v&k=eq.cancel_stock_done'); if (!Array.isArray(rows) || !rows.length) return { skip: '済みの印が読めない' };
+  var doneNow = (rows[0].v || {}).items || {};
+  var ctx = cancelGuardCtx_(); if (ctx.err) return { skip: ctx.err };
+  var now = now_(), nowIso = new Date().toISOString(), out = { shops: 0, cancels: 0, todo: 0, fixed: 0, skip: 0, errors: [] }, done = {}, recs = [], skips = [];
+  listTokens_().forEach(function (tok) {
+    if (!tok || !tok.shop_id) return;
+    var sid = String(tok.shop_id), from = Math.max(now - 14 * 86400, (parseInt(st.last[sid], 10) || (now - 1800)) - 180);
+    try {
+      var sns = [], cursor = '';
+      for (var pg = 0; pg < 5; pg++) {
+        var j = callShop_(tok.shop_id, '/api/v2/order/get_order_list', { time_range_field: 'update_time', time_from: from, time_to: now, page_size: 100, cursor: cursor, order_status: 'CANCELLED' }, 'get');
+        if (j.error) throw new Error(String(j.error) + ' ' + String(j.message || '').slice(0, 80));
+        var r = j.response || {}; (r.order_list || []).forEach(function (x) { if (x && x.order_sn) sns.push(String(x.order_sn)); });
+        if (!r.more || !r.next_cursor) break; cursor = r.next_cursor;
+      }
+      out.shops++; out.cancels += sns.length;
+      var nw = sns.filter(function (sn) { return !doneNow[sn] && !done[sn]; });
+      for (var i = 0; i < nw.length; i += 50) {
+        var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: nw.slice(i, i + 50).join(','), response_optional_fields: 'item_list,order_status,update_time' }, 'get');
+        (((jd.response || {}).order_list) || []).forEach(function (od) {
+          if (String(od.order_status || '') !== 'CANCELLED') return;
+          out.todo++;
+          var o = { cc: tok.cc, sn: String(od.order_sn), shop_id: tok.shop_id, cancelAt: od.update_time ? new Date(od.update_time * 1000).toISOString() : '',
+            items: (od.item_list || []).map(function (it) { return { item_id: it.item_id, model_id: it.model_id, qty: it.model_quantity_purchased || 1, variation: it.model_name || '', name: it.item_name || '' }; }) };
+          var g = cancelGuardOrder_(o, ctx, nowIso);
+          done[o.sn] = { at: nowIso, r: g.res.join(' / ').slice(0, 300), by: 'watch' };
+          recs = recs.concat(g.fixed); skips = skips.concat(g.skip); out.fixed += g.fixed.length; out.skip += g.skip.length;
+          if (g.err) out.errors.push(o.cc + ' ' + o.sn);
+        });
+      }
+      st.last[sid] = now;   /* 読めた店だけ時刻を進める（読めなかった店は次の回にまた同じ窓から） */
+    } catch (e) { out.errors.push(String(tok.cc || '') + ' ' + sid + ' ' + String((e && e.message) || e).slice(0, 100)); }
+  });
+  if (Object.keys(done).length) cancelGuardSave_(done, recs, skips, nowIso);
+  st.lastAt = nowIso; st.lastOut = out; baKvSet_(CANCEL_WATCH_KEY, st);
+  return out;
+}
+function cancelWatchTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'cancelWatchTick') ScriptApp.deleteTrigger(t); }); }
 /* ★2026-10-25 注文の同期の店ごとの結果を app_kv orders_sync_last に残す（00 事業本部→05 の依頼：2店舗目の注文が少ない時に「同期が通っているのか」を後から見られるように）。
    中身 { <店ID>: { at, cc, n（この回に同期した注文の数・update_time の窓）, err, win（窓の日数）, force, runner } }。
    書く直前に読み直し、この回に回った店の分だけを重ねる（他の台・他の店の分は残す）。読めなかった時は書かない（空で上書きしない）。
