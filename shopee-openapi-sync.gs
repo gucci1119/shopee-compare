@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261107-1600'
+var SRC_VER = '20261108-0900'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9113,6 +9113,16 @@ function baKvPrefetch_(keys) {
 }
 var BA_KV_PREFETCH_ERR = '';
 var BA_KV_AT = 0;   /* ★2026-10-24 全体レビュー（出品管理 #6）：先読みを始めた時刻（0＝分からない）。書く前に「この後に誰かが書いたか」を比べる */
+/* ★2026-11-08 先読みの後から鍵を足す（読めた鍵だけ BA_KV_CACHE に入れる・行が無い鍵は null＝1本ずつ読んだ時と同じ答え）。失敗したら何もしない＝今までどおり1本ずつ読む */
+function baKvPrefetchMore_(keys) {
+  if (!BA_KV_CACHE) return;
+  var need = (keys || []).filter(function (k) { return k && !Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k); }); if (!need.length) return;
+  try {
+    var r = bkcSelect_(need) || [], got = {};
+    r.forEach(function (x) { got[x.k] = 1; BA_KV_CACHE[x.k] = x.v; delete BA_KV_FAIL[x.k]; });
+    need.forEach(function (k) { if (!got[k]) BA_KV_CACHE[k] = null; });
+  } catch (e) {}
+}
 function baKv_(k) {
   if (BA_KV_CACHE && Object.prototype.hasOwnProperty.call(BA_KV_CACHE, k)) return BA_KV_CACHE[k];
   if (k === 'boshu_auto_pre' && baPreHwMode_()) { var _ho = baPreHObj_(); if (BA_KV_CACHE) BA_KV_CACHE[k] = _ho; return BA_KV_FAIL[k] ? null : _ho; }   /* ★2026-10-25 機種の鍵の台 */
@@ -10672,6 +10682,7 @@ function gameJudgeCands_(p) {
     var hw = hws[hi]; var fam = (cfg.family || {})[hw]; if (!fam) { out.skipped[hw] = 'nofam'; continue; }
     var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice(); if (!ccs.length) { out.skipped[hw] = 'noccs'; continue; }
     var hwWord = BA_HW_WORD[hw] || hw.toUpperCase(); var ctx;
+    baKvPrefetchMore_(['titles_' + hw, 'sg_' + hw, 'jan_master_' + hw, 'boshu_auto_done_' + hw]);   /* ★2026-11-08 egress：機種ごとの4本を1本ずつ読んでいた（1回約90本・1日約51回）＝まとめて読み、BKC（変わっていない大きな控えは手元から）を効かせる */
     try { ctx = baLoadCtx_(cfg, hw, ccs); } catch (eC) { out.skipped[hw] = 'ctx:' + String((eC && eC.message) || eC).slice(0, 80); continue; }
     var pre = ctx.pre || {}; var sk = { cand: (ctx.cand || []).length, nopre: 0, cost: 0, judgedOk: 0, allJudged: 0, out: 0 };
     for (var i = 0; i < ctx.cand.length && sk.out < n; i++) {
