@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261108-1130'
+var SRC_VER = '20261108-1200'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -8966,6 +8966,49 @@ function baSnapGet_(key, maxAgeMs) {
     return (Array.isArray(rows) && rows.length) ? rows : null;
   } catch (e) { return null; }
 }
+/* ★2026-11-08 (ウ)（本人「両方OK」・事業本部）：🤖巡回の出品の表を「前の回から変わった行だけ」読む。
+   listings.row_updated_at（DB のトリガー listings_touch_row_updated_at が、models・status・name・parent_sku・shop_id・weight・model_count が変わった時だけ進める）を使う。
+   前の回の表はその台の Drive に置く（'delta|' の控え・{t: 読んだ行の row_updated_at の最大（ミリ秒）, rows}）。次の回は
+   ①row_updated_at > t − 2分 の行（明細つき）②cc・item_id の一覧（消えた行を落とす）だけを読み、控えに重ねる。
+   控えが無い・60分を過ぎた・壊れた・一覧にあるのに控えにも①にも無い行がある時は、今までどおり丸ごと読む。並びは丸ごと読みと同じ（cc → item_id）。
+   止める鍵＝スクリプト プロパティ BA_DELTA='0'。読んだ形は BA_DELTA_INFO（巡回の状態 st.delta に残す） */
+var BA_DELTA_INFO = null;
+function baDeltaOn_() { try { return P_().getProperty('BA_DELTA') !== '0'; } catch (e) { return false; } }
+function baListingsDelta_(rowsKey, ccs) {
+  var COLS = 'cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count,row_updated_at';
+  var inCc = 'cc=in.(' + ccs.join(',') + ')', key = 'delta|' + rowsKey, prev = null;
+  var tOf = function (r) { var x = Date.parse(String((r && r.row_updated_at) || '')); return isNaN(x) ? 0 : x; };
+  try { var it = baSnapFolder_().getFilesByName(baSnapName_(key)); if (it.hasNext()) { var f = it.next(); if (Date.now() - f.getLastUpdated().getTime() < 60 * 60000) prev = JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(f.getBlob().getDataAsString()), 'application/x-gzip')).getDataAsString()); } } catch (eP) { prev = null; }
+  var rows = null, t = 0, mode = 'full', nCh = 0;
+  /* レビュー高1：丸ごと読みは「最後に丸ごと読んだ時刻」（fullAt）から60分で必ず（控えは毎回書き直すのでファイルの更新時刻では判定しない） */
+  if (prev && Array.isArray(prev.rows) && prev.rows.length && Number(prev.t) > 0 && Number(prev.fullAt) > 0 && Date.now() - Number(prev.fullAt) < 60 * 60000) {
+    try {
+      var since = new Date(Number(prev.t) - 120000).toISOString();
+      var ch = sbSelectAll_('listings', 'select=' + COLS + '&' + inCc + '&row_updated_at=gt.' + encodeURIComponent(since));
+      var ids = sbSelectAll_('listings', 'select=cc,item_id&' + inCc);
+      var live = {}; (ids || []).forEach(function (r) { live[r.cc + '|' + r.item_id] = 1; });
+      var by = {}; prev.rows.forEach(function (r) { by[r.cc + '|' + r.item_id] = r; });
+      (ch || []).forEach(function (r) { by[r.cc + '|' + r.item_id] = r; });
+      var miss = Object.keys(live).some(function (k) { return !by[k]; });
+      if (!miss && (ids || []).length) {
+        rows = Object.keys(live).map(function (k) { return by[k]; });
+        rows.sort(function (a, b) { return a.cc < b.cc ? -1 : a.cc > b.cc ? 1 : (Number(a.item_id) - Number(b.item_id)); });
+        t = Number(prev.t); (ch || []).forEach(function (r) { var x = tOf(r); if (x > t) t = x; });
+        mode = 'delta'; nCh = (ch || []).length;
+      }
+    } catch (eD) { rows = null; }
+  }
+  var fullAt = (mode === 'delta') ? Number(prev.fullAt) : Date.now();
+  if (!rows) {
+    try { rows = sbSelectAll_('listings', 'select=' + COLS + '&' + inCc); t = 0; rows.forEach(function (r) { var x = tOf(r); if (x > t) t = x; }); mode = 'full'; nCh = rows.length; fullAt = Date.now(); }
+    catch (eF) {   /* レビュー高2：row_updated_at が無い（戻し方の SQL を流した後など）時も止めない＝今までの列で読み、控えは書かない */
+      rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&' + inCc); t = 0; mode = 'full-old'; nCh = rows.length;
+    }
+  }
+  if (t > 0) baSnapPut_(key, { t: t, fullAt: fullAt, rows: rows });
+  BA_DELTA_INFO = { at: new Date().toISOString(), mode: mode, rows: rows.length, changed: nCh };
+  return rows;
+}
 function baSnapGetT_(key, maxAgeMs) {
   try {
     var it = baSnapFolder_().getFilesByName(baSnapName_(key)); if (!it.hasNext()) return null;
@@ -10650,7 +10693,8 @@ function boshuAutoTick(manual) {
   }
   function finish_(msg) {
     st.src = SRC_VER;   /* ★2026-09-25 どの版で動いたか（ポータルで3台の版ズレを見る） */
-    try { st.tickReuse = { at: new Date().toISOString(), hit: BA_TICK_REUSE_HIT || 0 }; } catch (eTr2) {}   /* ★11/8 使い回しが効いたか（レビュー低5） */
+    try { st.tickReuse = { at: new Date().toISOString(), hit: BA_TICK_REUSE_HIT || 0 }; } catch (eTr2) {}
+    try { if (BA_DELTA_INFO) st.delta = BA_DELTA_INFO; } catch (eDl) {}   /* ★11/8 (ウ) 読んだ形（full／delta・変わった行の数） */   /* ★11/8 使い回しが効いたか（レビュー低5） */
     try { st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eKs) {}
     try { if (UF_PROBE_NOTE) { baLog_(st, UF_PROBE_NOTE); UF_PROBE_NOTE = ''; } } catch (ePn) {}   /* ★2026-10-24 鍵ごとの返事の長さ（文字数・負＝読めなかった）。Mac から大物を読まずに数えるため */
     try { if (st.added.length > 400) st.added.length = 400; if (st.skipped.length > 300) st.skipped.length = 300; } catch (e0) {}
@@ -11011,6 +11055,7 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
         if (_tAt >= 0 && _sT.t > _tAt + 1000) { _snap = _sT.rows; BA_TICK_REUSE_HIT = (BA_TICK_REUSE_HIT || 0) + 1; } }
     }
     if (_snap) { BA_CTX_ROWS[_rowsKey] = _snap; BA_SNAP_HIT = (BA_SNAP_HIT || 0) + 1; }
+    else if (!BA_SNAP_USE && !_tcg && !_tickReuse && baDeltaOn_()) { BA_CTX_ROWS[_rowsKey] = baListingsDelta_(_rowsKey, ccs); }   /* ★11/8 (ウ)：変わった行だけ＋cc・item_id の一覧 */
     else { var _rdT0 = Date.now(); BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*)' : '')); if (BA_SNAP_USE && !_tcg) baSnapPut_(_rowsKey, BA_CTX_ROWS[_rowsKey]); else if (_tickReuse) baSnapPut_('tick|' + _rowsKey, { t0: _rdT0, rows: BA_CTX_ROWS[_rowsKey] }); }   /* 追いのレビュー B：控えの時刻＝DB を読み始めた時刻 */
   }
   var rows = BA_CTX_ROWS[_rowsKey];   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
