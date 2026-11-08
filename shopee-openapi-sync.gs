@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261108-1200'
+var SRC_VER = '20261108-1300'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -8979,11 +8979,11 @@ function baListingsDelta_(rowsKey, ccs) {
   var inCc = 'cc=in.(' + ccs.join(',') + ')', key = 'delta|' + rowsKey, prev = null;
   var tOf = function (r) { var x = Date.parse(String((r && r.row_updated_at) || '')); return isNaN(x) ? 0 : x; };
   try { var it = baSnapFolder_().getFilesByName(baSnapName_(key)); if (it.hasNext()) { var f = it.next(); if (Date.now() - f.getLastUpdated().getTime() < 60 * 60000) prev = JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(f.getBlob().getDataAsString()), 'application/x-gzip')).getDataAsString()); } } catch (eP) { prev = null; }
-  var rows = null, t = 0, mode = 'full', nCh = 0;
+  var rows = null, t = 0, mode = 'full', nCh = 0, readAt = Date.now();   /* ★11/8 13時：起点は「前の回に読み始めた時刻 − 2分」（列を足した時に全行が同じ時刻になり、行の時刻の最大を起点にすると毎回全行を読んでいた＝12:15・12:35 の delta で 7,090行） */
   /* レビュー高1：丸ごと読みは「最後に丸ごと読んだ時刻」（fullAt）から60分で必ず（控えは毎回書き直すのでファイルの更新時刻では判定しない） */
   if (prev && Array.isArray(prev.rows) && prev.rows.length && Number(prev.t) > 0 && Number(prev.fullAt) > 0 && Date.now() - Number(prev.fullAt) < 60 * 60000) {
     try {
-      var since = new Date(Number(prev.t) - 120000).toISOString();
+      var since = new Date((Number(prev.readAt) > 0 ? Number(prev.readAt) : Number(prev.t)) - 120000).toISOString();
       var ch = sbSelectAll_('listings', 'select=' + COLS + '&' + inCc + '&row_updated_at=gt.' + encodeURIComponent(since));
       var ids = sbSelectAll_('listings', 'select=cc,item_id&' + inCc);
       var live = {}; (ids || []).forEach(function (r) { live[r.cc + '|' + r.item_id] = 1; });
@@ -9005,7 +9005,7 @@ function baListingsDelta_(rowsKey, ccs) {
       rows = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&' + inCc); t = 0; mode = 'full-old'; nCh = rows.length;
     }
   }
-  if (t > 0) baSnapPut_(key, { t: t, fullAt: fullAt, rows: rows });
+  if (t > 0) baSnapPut_(key, { t: t, readAt: readAt, fullAt: fullAt, rows: rows });
   BA_DELTA_INFO = { at: new Date().toISOString(), mode: mode, rows: rows.length, changed: nCh };
   return rows;
 }
