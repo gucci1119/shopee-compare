@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261108-1000'
+var SRC_VER = '20261108-1100'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2308,7 +2308,7 @@ function doGetInner_(e) {
         var vwt = P_().getProperty('WRITE_TOKEN');
         if (!vwt || p.token !== vwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
         var vshop = parseInt(p.shop_id, 10); if (!getToken_(vshop)) throw new Error('未認可 shop_id=' + p.shop_id);
-        vout = addVariation_(vshop, p.item_id, p.option, p.price, p.stock, p.sku, p.image);
+        vout = addVariation_(vshop, p.item_id, p.option, p.price, p.stock, p.sku, p.image); try { if (vout && vout.ok) baTickTouch_(); } catch (eTt1) {}   /* ★11/8 1件ずつ足す口も印を付ける */
       } catch (err) { vout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(vcb + '(' + JSON.stringify(vout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -4924,15 +4924,16 @@ function avFillPlaceholder_(shopId, itemId, items) {
   return { option: nm, model_id: m0.model_id };
 }
 function addVariationsBulk_(shopId, itemId, items, jobKey) {
+  var _tt = function (r) { try { if (r && r.ok !== false && Number(r.added) > 0) baTickTouch_(); } catch (eTt) {} return r; };   /* ★11/8 どの口から足しても巡回の使い回しを止める */
   var ph = null;
   try { ph = avFillPlaceholder_(parseInt(shopId, 10), parseInt(itemId, 10), items); }
   catch (ePh) { throw new Error('仮の明細 test を書き換えられませんでした（明細は足していません）: ' + String((ePh && ePh.message) || ePh).slice(0, 160)); }
-  if (!ph) return addVariationsBulkP_(shopId, itemId, items, jobKey);
+  if (!ph) return _tt(addVariationsBulkP_(shopId, itemId, items, jobKey));
   var rest = items.slice(1), base = { ok: true, added: 1, models: [ph], filledTest: true, opt_count: 1, model_count: 1, verifyNote: '仮の明細 test を「' + ph.option + '」に書き換えました' };
-  if (!rest.length) return base;
+  if (!rest.length) return _tt(base);
   var r2 = addVariationsBulkP_(shopId, itemId, rest, jobKey);
   r2.added = (Number(r2.added) || 0) + 1; r2.models = [ph].concat(r2.models || []); r2.filledTest = true; r2.verifyNote = [base.verifyNote, r2.verifyNote].filter(String).join('／');
-  return r2;
+  return _tt(r2);
 }
 function addVariationsBulkP_(shopId, itemId, items, jobKey) {
   /* ★2026-10-22 レビュー：①外せない／再送も失敗した時に元の文言（in_promotion）を残すと、🤖が「販促中＝見送らない」と扱い30分ごとに外す・戻すを繰り返した
@@ -8954,7 +8955,7 @@ var BA_KV_ERR = false;
    GAS は【8つ全部そろっていれば】それを合わせて読み、そろっていなければ今までの1本（boshu_auto_pre）を読む（移行の途中でも壊れない） */
 var BA_PRE_SHARDS = 8;
 var BA_CTX_ROWS = null, BA_CTX_SOLD = null;
-var BA_SNAP_USE = false, BA_SNAP_HIT = 0;   /* ★2026-11-05 見るだけの口（game_judge_cands・boshu_auto_preview）だけ、出品の表の控えを使い回す */
+var BA_SNAP_USE = false, BA_SNAP_HIT = 0, BA_TICK_REUSE_HIT = 0;   /* ★2026-11-05 見るだけの口（game_judge_cands・boshu_auto_preview）だけ、出品の表の控えを使い回す */
 function baSnapName_(key) { return 'ba_ctx_rows_' + String(key).replace(/[^A-Za-z0-9]/g, '_') + '.b64gz'; }
 function baSnapFolder_() { var fs = DriveApp.getFoldersByName('Shopee 自動出品の控え（消してよい）'); return fs.hasNext() ? fs.next() : DriveApp.createFolder('Shopee 自動出品の控え（消してよい）'); }
 function baSnapGet_(key, maxAgeMs) {
@@ -8965,9 +8966,23 @@ function baSnapGet_(key, maxAgeMs) {
     return (Array.isArray(rows) && rows.length) ? rows : null;
   } catch (e) { return null; }
 }
+function baSnapGetT_(key, maxAgeMs) {
+  try {
+    var it = baSnapFolder_().getFilesByName(baSnapName_(key)); if (!it.hasNext()) return null;
+    var f = it.next(), t = f.getLastUpdated().getTime(); if (Date.now() - t > maxAgeMs) return null;
+    var o = JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(f.getBlob().getDataAsString()), 'application/x-gzip')).getDataAsString());
+    if (!o || !Array.isArray(o.rows) || !o.rows.length || !Number(o.t0)) return null;   /* 読み始めた時刻の無い控えは使わない */
+    return { rows: o.rows, t: Number(o.t0) };
+  } catch (e) { return null; }
+}
+/* ★2026-11-08 出品の表を変えた（明細を足した・カタログを作った）印。巡回の使い回し（'tick|' の控え）はこの時刻より後に書いた控えだけ使う。
+   控えは時刻の比べで使わなくなる（消さない）。失敗しても足した処理は止めない */
+function baTickTouch_() {
+  try { sbUpsert_('app_kv', [{ k: 'ba_touch_at', v: { at: Date.now(), by: baRunnerId_() }, updated_at: new Date().toISOString() }], 'k'); } catch (e1) {}
+}
 function baSnapPut_(key, rows) {
   try {
-    if (!Array.isArray(rows) || !rows.length) return;
+    if (!(Array.isArray(rows) ? rows.length : (rows && Array.isArray(rows.rows) && rows.rows.length))) return;
     var txt = Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(JSON.stringify(rows), 'application/json')).getBytes());
     var fo = baSnapFolder_(), it = fo.getFilesByName(baSnapName_(key));
     if (it.hasNext()) it.next().setContent(txt); else fo.createFile(baSnapName_(key), txt, 'text/plain');
@@ -9937,6 +9952,7 @@ function baRound_(v, unit) { unit = Number(unit) || 1; if (unit >= 1) return Mat
    あわせて listings に仮の行を入れる＝出品同期（各店を数時間ごと）を待たずに次の巡回が見つける。
    実測 2026-09-25：同期待ちの間に「カタログ群なし」→もう1つ作る→ duplicates で落ちる、をくり返していた */
 function baCatalogMadeRec_(hw, cc, itemId, name, shopId, sku, weight, price, role, extra) {
+  try { baTickTouch_(); } catch (eTt0) {}   /* ★11/8 追いのレビュー：カタログを作っただけ（明細を足さない）の回も、巡回の使い回しを止める */
   try { var m = baKvFresh_('boshu_fam_made'); if (!m || typeof m !== 'object') { if (BA_KV_ERR) throw new Error('boshu_fam_made を読めなかったので控えを書かない（空で上書きすると控えが丸ごと消える・Codex指摘 2026-10-07）'); m = {}; } var _rec = { item_id: itemId, name: String(name || ''), at: new Date().toISOString(), shop_id: String(shopId || ''), sku: String(sku || ''), role: String(role || 'fam') }; if (extra && typeof extra === 'object') Object.keys(extra).forEach(function (k) { _rec[k] = extra[k]; }); m[hw + '|' + cc + '|' + itemId] = _rec; baKvSet_('boshu_fam_made', m); } catch (e1) {}   /* ★2026-10-07 extra＝{coverTmp:1} 表紙が仮（本人が後で差し替える） */
   /* ★2026-10-07 status は 8（非公開）で控える。0 だと入れ先の候補（status !== 0）から外れ、一覧の同期が来るまでの間に
      次の回がまた新しいカタログを作っていた（VN DS ⑩⑪⑫ が test だけで並んだ・本人「なぜtestで残ってるの？」） */
@@ -10615,8 +10631,10 @@ function boshuAutoTick(manual) {
     }
     st.lastMsg = hw + '：' + picks.length + '件 → 明細 ' + out.added + '件追加（' + Object.keys(out.ccs).map(function (c) { var x = out.ccs[c]; return c + ' ' + (x.added || 0) + (x.note ? '(' + x.note + ')' : ''); }).join('・') + '）';
     baLog_(st, st.lastMsg + '  例: ' + picks.slice(0, 3).map(function (p) { return p.en + (p.stock ? '' : '(在庫0)'); }).join(' / '));
+    if (Object.keys(touchedShops).length || BA_FAM_TICK > 0) baTickTouch_();   /* ★11/8 使い回しの控えを古いと分かるように */
     // 触った店の出品行を取り直す（次回の「出している」判定と、ポータルの一覧のため）
     try { var toks = listTokens_(); toks.forEach(function (tk) { if (touchedShops[String(tk.shop_id)] && Date.now() - t0 < DEADLINE + 40000) { try { syncListingsForShop_(tk, now_() - 3 * 3600); } catch (e) {} } }); } catch (e) {}
+    if (Object.keys(touchedShops).length || BA_FAM_TICK > 0) baTickTouch_();   /* 追いのレビュー B：取り直しの間に読んだ控えも古いと分かるように、取り直しの後にもう1回 */
     return finish_(null);
   } catch (e) {
     st.lastErr = String((e && e.message) || e).slice(0, 300); st.lastMsg = '❌ ' + st.lastErr; baLog_(st, st.lastMsg); st.errStreak = (st.errStreak || 0) + 1; st.errAt = new Date().toISOString();
@@ -10625,6 +10643,7 @@ function boshuAutoTick(manual) {
   }
   function finish_(msg) {
     st.src = SRC_VER;   /* ★2026-09-25 どの版で動いたか（ポータルで3台の版ズレを見る） */
+    try { st.tickReuse = { at: new Date().toISOString(), hit: BA_TICK_REUSE_HIT || 0 }; } catch (eTr2) {}   /* ★11/8 使い回しが効いたか（レビュー低5） */
     try { st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eKs) {}
     try { if (UF_PROBE_NOTE) { baLog_(st, UF_PROBE_NOTE); UF_PROBE_NOTE = ''; } } catch (ePn) {}   /* ★2026-10-24 鍵ごとの返事の長さ（文字数・負＝読めなかった）。Mac から大物を読まずに数えるため */
     try { if (st.added.length > 400) st.added.length = 400; if (st.skipped.length > 300) st.skipped.length = 300; } catch (e0) {}
@@ -10973,8 +10992,19 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
      本番の巡回（出品する方）は今までどおり毎回 DB から読む。控えが読めない・古い時は DB から読む */
   if (!BA_CTX_ROWS[_rowsKey]) {
     var _snap = (BA_SNAP_USE && !_tcg) ? baSnapGet_(_rowsKey, 60 * 60000) : null;   /* 見るだけの口なので60分（game_judge_cands は1時間に数回＝15分では効かない・レビュー9） */
+    /* ★2026-11-08 egress（事業本部の②）：本番の巡回も、同じ台で5分以内に読んだ出品の表を使い回す（時刻の巡回 boshuAutoTick とポータルから呼ぶ tick_bg が重なる・1回 12.78MB）。
+       控えはその台の Drive（台ごとの Google アカウント）＝他の台が足した物は見えない＝今までどおり、足す直前に Shopee の明細の一覧を読み直して同じ名前を飛ばす守り（addVariationsBulk0_ の skipped）と足した印（boshu_auto_done）で止める。
+       止める時はスクリプト プロパティ BA_TICK_REUSE='0' */
+    var _tickReuse = !BA_SNAP_USE && !_tcg && (function () { try { return P_().getProperty('BA_TICK_REUSE') !== '0'; } catch (eTr) { return false; } })();
+    if (!_snap && _tickReuse) {
+      /* ★レビュー（11/8 review-yaku 高1・中2〜4）：前の回（この台・他の台・手の一括・Request page）が明細を足した／カタログを作った後の控えは使わない。
+         足した口が app_kv ba_touch_at に時刻を置く（baTickTouch_）＝控えの時刻がそれより新しい時だけ使う。印が読めない時は使わない */
+      var _sT = baSnapGetT_('tick|' + _rowsKey, 5 * 60000);
+      if (_sT) { var _tAt = -1, _errB = BA_KV_ERR; try { var _tv = baKvFresh_('ba_touch_at'); _tAt = _tv ? Number(_tv.at || 0) : 0; if (BA_KV_FAIL['ba_touch_at']) _tAt = -1; } catch (eTa) { _tAt = -1; } BA_KV_ERR = _errB;   /* 追いのレビュー A：読めない時（null）は使わない・後ろの処理に読み失敗を残さない */
+        if (_tAt >= 0 && _sT.t > _tAt + 1000) { _snap = _sT.rows; BA_TICK_REUSE_HIT = (BA_TICK_REUSE_HIT || 0) + 1; } }
+    }
     if (_snap) { BA_CTX_ROWS[_rowsKey] = _snap; BA_SNAP_HIT = (BA_SNAP_HIT || 0) + 1; }
-    else { BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*)' : '')); if (BA_SNAP_USE && !_tcg) baSnapPut_(_rowsKey, BA_CTX_ROWS[_rowsKey]); }
+    else { var _rdT0 = Date.now(); BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*)' : '')); if (BA_SNAP_USE && !_tcg) baSnapPut_(_rowsKey, BA_CTX_ROWS[_rowsKey]); else if (_tickReuse) baSnapPut_('tick|' + _rowsKey, { t0: _rdT0, rows: BA_CTX_ROWS[_rowsKey] }); }   /* 追いのレビュー B：控えの時刻＝DB を読み始めた時刻 */
   }
   var rows = BA_CTX_ROWS[_rowsKey];   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
   var itemCc = {}, modelNames = {};
