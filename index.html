@@ -6363,6 +6363,8 @@
     "。選択した月の営業利益を先頭に出し、月次内訳は開いて確認できます。": ". The selected month’s operating profit appears first, with an expandable monthly breakdown.",
     "利益管理表のAY列から取り込んだ円額です。実際の受取額はPayPalの取引明細で確認してください。空欄や「—」の注文もPayPalを併用している場合があります。": "Amounts in yen come from column AY of the profit spreadsheet. Check PayPal transaction details for the actual net amount. A blank or dash can also appear on orders with PayPal payments.",
     "損益明細の上バーを操作しやすく": "Improved the top scrollbar in profit details",
+    "Shopeeで確認（第三SG）": "Check on Shopee (third SG shop)",
+    "第三SGの新品候補に公式の読み取り照会を追加": "Added official read-only checks for third SG shop candidates",
     "損益明細の横スクロールを修正": "Fixed horizontal scrolling in profit details",
     "。上下どちらのバーでも右端まで表示でき、描き直したときも位置を保ちます。PayPal欄に利益管理表のAY列が出典であることを表示します。": ". Both scrollbars reach the last column and retain their position on redraw. The PayPal column identifies column AY of the profit spreadsheet as its source.",
     "Payoneer入金予定": "Payoneer payout due",
@@ -27440,6 +27442,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-09', items: ['<b>第三SGの新品候補に公式の読み取り照会を追加</b>。'] },
     { date: '2026-11-09', items: ['<b>損益明細の上バーを操作しやすく</b>。'] },
     { date: '2026-11-09', items: ['<b>照合済みのPayPal円受取を損益に反映</b>。', '<b>VNのまとめ買いで各商品の個別掲載額を計算</b>。', '<b>第三店のAmazon新品候補を下見</b>。'] },
     { date: '2026-11-09', items: ['<b>第三SGの新品公開を準備する入口を追加</b>。', '<b>初回の見積もりに、購入か見送りかの返信をお願いする文を追加</b>。'] },
@@ -42395,6 +42398,67 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     return { market, shopId: shops[market], title: text(input.title), currency: rg?.cur || '', condition:'NEW', packing, catalogIssues, rows };
   }
 
+  async function shop3CheckOfficial(input, preview, stillCurrent) {
+    if (state.mode !== 'live' || demoOn()) throw new Error('ライブ表示で照会してください。');
+    if (preview.market !== 'SG' || preview.shopId !== SHOP3_SG_PILOT_ID ||
+        (input.shopId != null && String(input.shopId) !== preview.shopId)) throw new Error('今回の公式照会は第三SGだけです。');
+    const model = String(input.model || '').trim();
+    const asins = preview.rows.map(r => r.asin);
+    const categoryId = String(input.categoryId || '');
+    const categoryTerm = String(input.categoryTerm || '').trim().toLowerCase();
+    const brand = String(input.brand || '').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9 -]{2,39}$/.test(model) || asins.length > 10 ||
+        new Set(asins).size !== asins.length || asins.some(a => !/^[A-Z0-9]{10}$/.test(a))) {
+      throw new Error('照会には半角の型番と子ASIN2〜10件が必要です。');
+    }
+    const read = (action, args = {}) => {
+      if (!stillCurrent()) throw new Error('候補が変わったため照会を終了しました。');
+      return gasCall({ action, shop_id:preview.shopId, _url:settings.openapiUrlMain || settings.openapiUrl, ...args }, 90000);
+    };
+    const core = await read('shop3_candidate_read_sg', { market:'SG', model, asins:asins.join(',') });
+    if (!core?.ok || String(core.shop_id) !== preview.shopId) throw new Error('第三SGの照会結果を確認できません。');
+    const lines = [
+      '公式照会 · 第三SG · ' + new Date(core.checkedAt).toLocaleString('ja-JP', {timeZone:'Asia/Tokyo'}) + ' JST',
+      core.cap != null && core.used != null ? '照合済み・公開枠 ' + core.used + ' / ' + core.cap : '未確認・公開枠' + (core.cap != null ? '（上限 ' + core.cap + '）' : ''),
+      core.duplicate === 'confirmed' ? '保留・同じ子ASINの既存出品あり' : core.duplicate === 'review' ? '保留・重複候補あり' : '未確認・同じ市場に重複がないことは未確定',
+      ...core.matches.map(x => '  ' + x.shop_id + ' / ' + x.item_id + ' / ' + x.status),
+    ];
+    if (!/^\d{1,12}$/.test(categoryId) || categoryTerm.length < 3 || categoryTerm.length > 70) {
+      lines.push('未確認・カテゴリIDと用途（categoryId / categoryTerm）を入力してください。');
+      return lines;
+    }
+    try {
+      const cats = await read('get_categories');
+      const cat = cats.map?.[categoryId];
+      if (String(cats.shop_id) !== preview.shopId || cat?.hc !== 0 || !String(cat.n).toLowerCase().includes(categoryTerm)) {
+        lines.push('保留・指定カテゴリが末端または用途と一致しません。');
+        return lines;
+      }
+      lines.push('照合済み・カテゴリ ' + categoryId + ' ' + cat.p);
+    } catch (_) {
+      lines.push('未確認・カテゴリの公式応答を取得できません。');
+      return lines;
+    }
+    try {
+      const r = await read('get_attributes', { category_id:categoryId, language:'en', strict:'1' });
+      if (!Array.isArray(r.data) || r.data.some(a => !Number.isSafeInteger(Number(a.attribute_id)) || typeof a.mandatory !== 'boolean')) throw new Error();
+      const missing = r.data.filter(a => a.mandatory && !(a.options || []).some(o =>
+        String(o.id) === String(input.attributes?.[a.attribute_id] ?? '')));
+      lines.push(missing.length ? '保留・必須属性 ' + missing.map(a => a.name + ' (#' + a.attribute_id + ')').join(' / ') :
+        '照合済み・必須属性 ' + r.data.filter(a => a.mandatory).length + '件');
+    } catch (_) { lines.push('未確認・必須属性'); }
+    if (brand && brand.length <= 60) {
+      try {
+        const r = await read('get_brand_list', { category_id:categoryId, q:brand });
+        const exact = (r.brands || []).filter(b => String(b.n).trim().toLowerCase() === brand.toLowerCase() && Number(b.id) > 0);
+        lines.push(exact.length === 1 ? '照合済み・ブランド ' + exact[0].n + ' #' + exact[0].id : '保留・ブランドの一意一致なし');
+      } catch (_) { lines.push('未確認・ブランド'); }
+    } else lines.push('未確認・ブランド名（brand）を入力してください。');
+    const warnings = countryListingWarnings({cc:'SG', title:preview.title, prices:preview.rows.map(r => r.price), varNames:preview.rows.map(r => r.label)});
+    lines.push(...warnings.map(w => '保留・' + w));
+    return lines;
+  }
+
   function renderShop3Candidate() {
     const host = document.getElementById('list-shop3candidate');
     if (!host || host.firstElementChild) return;
@@ -42403,6 +42467,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       <p>商品・仕入れ・発送の根拠を入力し、価格を下見します。確認用のJSONはこの画面から持ち出せます。</p>
       <label><span>候補と確認根拠（JSON）</span><textarea class="s3c-input" rows="15" maxlength="200000" style="display:block;width:100%;box-sizing:border-box"></textarea></label>
       <button type="button" class="smd-btn s3c-preview" title="入力内容だけで確認し、ShopeeやKeepaに照会しません。">候補プレビュー</button>
+      <button type="button" class="smd-btn s3c-official">Shopeeで確認（第三SG）</button>
       <button type="button" class="smd-btn s3c-export" title="確認根拠を含む入力をJSONファイルに保存します。">候補のJSONを保存</button>
       <pre class="s3c-result" style="white-space:pre-wrap;overflow-wrap:anywhere" aria-live="polite"></pre>
     </div>`;
@@ -42417,6 +42482,21 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
             (r.issues.length ? r.issues.join(' / ') : (r.price != null ? p.currency + r.price + ' / ¥' + r.profit : '入力済み')))];
         result.textContent = lines.join('\n');
       } catch (e) { result.textContent = e.message; }
+    };
+    const official = host.querySelector('.s3c-official');
+    let revision = 0;
+    input.addEventListener('input', () => { revision++; });
+    official.onclick = async () => {
+      const expected = revision;
+      const current = () => expected === revision;
+      official.disabled = true;
+      result.textContent = '照会中…';
+      try {
+        const data = JSON.parse(input.value), preview = shop3CandidatePreview(data, Date.now());
+        const lines = await shop3CheckOfficial(data, preview, current);
+        if (current()) result.textContent = lines.join('\n');
+      } catch (e) { if (current()) result.textContent = e.message; }
+      finally { official.disabled = false; }
     };
     host.querySelector('.s3c-export').onclick = () => {
       try {
