@@ -27354,6 +27354,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-08', items: [
+      '🎰 <b>一番くじのカタログが「重複」で作れない件を直しました</b>。トレカの巡回が設定の親SKU（ICHIBAN_KUJI_… 等）も読むようにし、既にあるカタログに足します。重複で断られた国はその日は作り直しません。',
+      '⏸ <b>Yahoo に弾かれにくく</b>。検索の間を空け、休みの終わりを台ごとにずらしました。弾かれた時刻・台・番号と、枠で見送った時刻・台を別に残します。休み中の台の機種は写真集めで先に集めます。',
       '💳 <b>PayPalリンクの商品名に照合番号を残す</b>。商品名が長い場合も照合番号を省略しません。',
       '💹 <b>依頼品の出品前に粗利を確認</b>。合意額のずれや粗利の不足、確認できないPayPal受取は出品前に止めます。',
       '🧺 <b>値付けの見直しでまとめ買いの表示を明確に</b>。単一明細の実績と、まとめ買い時の1個の見込みを区別しました。',
@@ -39480,9 +39482,21 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       /* ★2026-10-12 本人「ゲームよりトレカ優先して」：トレカ優先の間（cfg.tcg.on・cfg.tcg.prio が false でない）はゲームを1回2機種（cfg.tcg.gameSlots）に絞る＝1回が約30分→約8分になり、トレカの写真が10分ごとに増える */
       const _tcgPrio = !!(cfg.tcg && cfg.tcg.on && cfg.tcg.prio !== false);
       const _gameSlots = !hws.length ? 0 : _tcgPrio ? Math.max(0, Math.min(8, Number(cfg.tcg.gameSlots != null ? cfg.tcg.gameSlots : 2))) : 8;
-      for (let t = 0; t < _gameSlots; t++) {   /* ★2026-09-24 5機種→8機種（本人「もっと出品ペース上げてもいい」＝詰まりは写真） */
+      /* ★2026-11-08 事業本部の決め（01 の調べ：Yahoo に弾かれた休みの間は、メルカリの写真の控えがある作品しか出せない＝見送り yahoowait が 2,814→3,186・3,916→6,532 に増えた）：
+         休み中の台（app_kv boshu_auto_status* の blockedUntil が今より先）がある時は、その台の機種を毎回2枠ぶん先に集める（普段の枠に足す）。読むのは各台の blockedUntil の数字だけ */
+      let _restHws = [];
+      if (hws.length) try {
+        const _bk = await sbGetAll('app_kv', 'select=k,b:v->blockedUntil&k=in.(boshu_auto_status,boshu_auto_status_child2,boshu_auto_status_child3)');
+        const _restR = (_bk || []).filter(x => Number(x && x.b) > Date.now()).map(x => x.k === 'boshu_auto_status' ? 'child' : String(x.k).replace('boshu_auto_status_', ''));
+        if (_restR.length) _restHws = hws.filter(h => _restR.includes(baRunnerOfHw(h) || 'child'));
+        if (_restHws.length) msgs.push('⏸ Yahoo の休み中の台（' + _restR.join('・') + '）の機種を先に集める');
+      } catch (_) { _restHws = []; }
+      let _restUsed = 0;
+      const _gameSlotsX = _gameSlots + (_restHws.length ? 2 : 0);
+      for (let t = 0; t < _gameSlotsX; t++) {   /* ★2026-09-24 5機種→8機種（本人「もっと出品ペース上げてもいい」＝詰まりは写真） */
         let hw = null, _isPrio = false;
         if (!_prioUsed && _prio.length) { _prioUsed = true; _isPrio = true; hw = _prio[(Number(lst._baPrioIdx) || 0) % _prio.length]; lst._baPrioIdx = (Number(lst._baPrioIdx) || 0) + 1; }
+        if (!hw && _restHws.length && _restUsed < Math.min(2, _restHws.length)) { _restUsed++; hw = _restHws[(Number(lst._baRestIdx) || 0) % _restHws.length]; lst._baRestIdx = (Number(lst._baRestIdx) || 0) + 1; }
         if (!hw) {
           hw = hws[(ci++) % hws.length];
           try { localStorage.setItem('smdBaCollectIdx', String(ci)); } catch (_) {}

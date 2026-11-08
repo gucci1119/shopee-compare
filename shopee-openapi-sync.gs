@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261108-1400'
+var SRC_VER = '20261108-2330'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -8974,6 +8974,20 @@ function baSnapGet_(key, maxAgeMs) {
    止める鍵＝スクリプト プロパティ BA_DELTA='0'。読んだ形は BA_DELTA_INFO（巡回の状態 st.delta に残す） */
 var BA_DELTA_INFO = null;
 function baDeltaOn_() { try { return P_().getProperty('BA_DELTA') !== '0'; } catch (e) { return false; } }
+/* ★2026-11-08 事業本部（01 の調べ：一番くじ kuji_mini・kuji_chibi の汎用カタログが6か国とも「重複」で断られ、15分ごとに作り直していた）：
+   原因＝トレカの巡回は出品の表を「名前か親SKUに card/tcg/medal/moncolle・ARCADE_KINDS の sku（KUJIMINI 等）・amiibo」で絞って読む。
+   一番くじの実物のカタログの親SKUは設定の ICHIBAN_KUJI_MINI_FIGURE_SERIES 等で KUJIMINI を含まない＝巡回から見えず「カタログが無い」と思って作り、Shopee に断られていた。
+   → 設定（cfg.family[シリーズ].sku）の親SKUもそのまま読む */
+var BA_TCG_SKU_OR_CUT = 0;   /* 長すぎて切った時の件数（状態に残す） */
+function baTcgFamSkuOr_(cfg) {
+  var a = [], pats = ['card', 'medal', 'moncolle', 'amiibo'];   /* 親SKU で ilike しているものだけ（tcg は名前だけ・review-yaku 低） */
+  try { ARCADE_KINDS.forEach(function (x) { pats.push(String(x.sku).toLowerCase()); }); } catch (e0) {}
+  var add = function (v) { var k = String(v || '').replace(/[^A-Za-z0-9_\-]/g, ''); if (!k || a.indexOf(k) >= 0) return; var lk = k.toLowerCase(); if (pats.some(function (p) { return p && lk.indexOf(p) >= 0; })) return; a.push(k); };   /* 既存の ilike で読める物は足さない（URL を短く・review-yaku 中2） */
+  try { Object.keys((cfg && cfg.family) || {}).forEach(function (h) { if (!TCG_HW_JA[h]) return; var f = cfg.family[h] || {}; add(f.sku); Object.keys(f.byCc || {}).forEach(function (c) { add(((f.byCc || {})[c] || {}).sku); }); }); } catch (e) {}   /* 国ごとの親SKU（byCc[cc].sku）も（中3） */
+  var out = a.length ? ',parent_sku.in.(' + a.join(',') + ')' : '';
+  if (out.length > 900) { BA_TCG_SKU_OR_CUT = a.length; out = ',parent_sku.in.(' + a.slice(0, 30).join(',') + ')'; }   /* URL の長さの守り（2KB）。超えたら先頭30件だけ＝巡回は止めない */
+  return out;
+}
 function baListingsDelta_(rowsKey, ccs, extra) {
   var COLS = 'cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count,row_updated_at';
   var inCc = 'cc=in.(' + ccs.join(',') + ')' + (extra ? '&' + extra : ''), key = 'delta|' + rowsKey, prev = null;   /* extra＝トレカの絞り込み（差分・一覧・丸ごとの3つ全部に同じ物を付ける） */
@@ -10018,6 +10032,19 @@ function baSeriesNo_(name) { var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬
    トリガーは間隔を読み出せないので、BA_TICK_MIN の印が違えば作り直す（同じ関数のトリガーを2本にしない）。
    Haikuで1日 約$1→$2〜3・接続枠は2台目の中で収まる（1作品 約7回）。ヤフオクは1回あたりの叩き方は同じ・遮断時は既存の6時間休みが効く */
 var BA_TICK_MIN = 60;   /* ★2026-09-25 主はポータルからの巡回（15分ごと・枠を使わない）。時間トリガーは保険で60分（gmail の3台目は90分/日の枠しか無い） */
+/* ★2026-11-08 事業本部の決め（01 の調べ：11/8 朝に本体側 4時台・3台目 1時台に Yahoo に弾かれ、6時間の休みで出品が細った）：
+   ①1回の巡回の中で Yahoo の検索を続けて叩かない（ゲーム 20〜30秒・トレカ 8〜14秒の間）②休みの終わりを台ごとにずらす（2台目 0分・3台目 +40分・4台目 +80分＋0〜10分のゆらぎ）＝同じ時刻に揃って叩き直さない
+   ③弾かれた記録（時刻・台・HTTP の番号・いつまで休むか）は st.blockLog に別に残す（st.log は直近120行で消える）④枠で見送った時刻・台も st.quotaSkips に残す */
+var BA_YAHOO_GAP_MS = 20000, BA_YAHOO_GAP_TCG_MS = 8000;
+var BA_REST_OFFSET_MIN = { main: 0, child: 0, child2: 40, child3: 80 };
+function baYhRestUntil_(restH) { var off = 0; try { off = BA_REST_OFFSET_MIN[baRunnerId_()] || 0; } catch (e) {} return Date.now() + restH * 3600000 + off * 60000 + Math.floor(Math.random() * 10 * 60000); }
+/* 前の検索から gapMs（＋0〜10秒）経っていなければ待つ。待つと budgetLeftMs を超える時は待たずに false（その回は叩かない） */
+var BA_RECHECK_YMAX = 8;
+var BA_YH_LAST_MEMO = null;   /* その実行の中で1回だけプロパティを読む（review-yaku 低） */
+function baYhGap_(st, gapMs, budgetLeftMs) { if (BA_YH_LAST_MEMO === null) { BA_YH_LAST_MEMO = 0; try { BA_YH_LAST_MEMO = Number(P_().getProperty('BA_YH_LAST') || 0) || 0; } catch (eP) {} } var pl = BA_YH_LAST_MEMO; var last = Math.max(Number(st.yhLast || 0), pl), need = last ? (gapMs + Math.floor(Math.random() * 10000) - (Date.now() - last)) : 0; if (need > 0) { if (budgetLeftMs != null && need > budgetLeftMs) return false; Utilities.sleep(need); } st.yhLast = Date.now(); BA_YH_LAST_MEMO = st.yhLast; try { P_().setProperty('BA_YH_LAST', String(st.yhLast)); } catch (eS) {} return true; }   /* 同じ台のゲーム・トレカ・見直しで共通（review-yaku 低7） */
+function baBlockRec_(st, src, code, until, where) { try { st.blockLog = [{ at: new Date().toISOString(), jst: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'M/d HH:mm'), runner: baRunnerId_(), src: src, code: code, until: new Date(until).toISOString(), where: where }].concat(st.blockLog || []).slice(0, 40); } catch (e) {} }
+function baQuotaSkipRec_(st, used, line, where) { try { var h = new Date().toISOString().slice(0, 13), L = st.quotaSkips || [], nowI = new Date().toISOString(); if (L[0] && L[0].h === h && L[0].where === where) { L[0].n = (L[0].n || 1) + 1; L[0].last = nowI; L[0].used = used; } else L.unshift({ h: h, at: nowI, jst: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'M/d HH:mm'), runner: baRunnerId_(), used: used, line: line, probeCap: ufProbeCap_(), where: where, n: 1 }); st.quotaSkips = L.slice(0, 40); } catch (e) {} }
+function baQuotaSkipMsg_(used, line) { var why = (ufProbeCap_() > 0) ? '・Shopee に断られた印で今日の線を下げている' : ''; return '🛡 Shopee枠の残りが少ないので見送り（' + baRunnerId_() + '・' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'M/d HH:mm') + ' JST・' + used + '／' + line + why + '）。' + ufResetJstStr_() + '(JST)に戻ります'; }
 var BA_YAHOO_PER_HOUR = 6;   /* ヤフオク検索は1時間6回まで（30分ごとだった頃の実測 約5回/時に合わせる） */
 function setupBoshuAutoTrigger() {
   var tr = ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'boshuAutoTick'; });
@@ -10051,16 +10078,20 @@ function boshuAutoRecheck() {
     list.sort(function (a, b) { return (a.lastChk || 0) - (b.lastChk || 0); });
     var shopByItem = {};
     try { var ids = list.slice(0, 40).map(function (a) { return a.item_id; }); if (ids.length) sbSelect_('listings', 'select=item_id,shop_id&item_id=in.(' + ids.join(',') + ')').forEach(function (r) { shopByItem[String(r.item_id)] = r.shop_id; }); } catch (e) {}
-    var byTitle = {};
+    var byTitle = {}, _rvY = 0;   /* ★2026-11-08 review-yaku 高1：11/8 04:39 の弾かれはここ（1回に最大40回・1.2〜2.4秒おき・1時間の上限なし）。1回の検索は BA_RECHECK_YMAX 回まで・間は baYhGap_・1時間の数（st.yh）にも入れる */
     for (var i = 0; i < list.length && out.checked < 40; i++) {
       if (Date.now() - t0 > 240000) break;
       var a = list[i]; if (a.lastChk && Date.now() - a.lastChk < 6 * 86400000) continue;   // 週1回でよい
       var tk = (a.ja || a.en) + '|' + a.hw; var hits;
       if (byTitle[tk] != null) hits = byTitle[tk];
       else {
+        if (_rvY >= BA_RECHECK_YMAX) break;
+        var _yhR = new Date().toISOString().slice(0, 13); if (!st.yh || st.yh.h !== _yhR) st.yh = { h: _yhR, n: 0 };
+        if (!baYhGap_(st, BA_YAHOO_GAP_MS, 240000 - (Date.now() - t0))) break;   /* 1時間6回では止めない（巡回と取り合って0回になる・review-yaku 中）。数には入れる＝同じ時間の巡回が譲る */
+        st.yh.n++; _rvY++;
         var y = baYahoo_(((a.ja ? baCleanJa_(a.ja) : a.en) + ' ' + (BA_HW_WORD[a.hw] || '')).trim());
-        if (y.blocked) { st.blockedUntil = Date.now() + 6 * 3600 * 1000; baLog_(st, '🛑 見直し中にヤフオクに弾かれた→6時間休む'); break; }
-        hits = baMatch_(y.items, a.ja || a.en, a.hw).length; byTitle[tk] = hits; Utilities.sleep(1200 + Math.floor(Math.random() * 1200));
+        if (y.blocked) { st.blockedUntil = baYhRestUntil_(6); baBlockRec_(st, 'ヤフオク', y.code, st.blockedUntil, '見直し'); baLog_(st, '🛑 見直し中にヤフオクに弾かれた（HTTP ' + y.code + '）→約6時間休む'); break; }
+        hits = baMatch_(y.items, a.ja || a.en, a.hw).length; byTitle[tk] = hits;
       }
       a.lastChk = Date.now(); a.lastHits = hits; out.checked++;
       if (hits < minHits) {
@@ -10376,7 +10407,7 @@ function boshuAutoTick(manual) {
     /* ★2026-09-20「絶対に止まらないように」：停止線(15,000)の【手前 2,000】で🤖は自分から降りる。
        🤖は1回で数十回使うので、ぎりぎりまで回すと注文・入金・発送の枠を食う */
     var ufNow = ufTotal_();
-    if (ufNow > ufStopLine_() - 2000) { st.lastMsg = '🛡 Shopee枠の残りが少ないので今回は見送り（' + ufNow + '／停止線 ' + ufStopLine_() + '）。' + ufResetJstStr_() + '(JST)に戻ります'; baLog_(st, st.lastMsg); return finish_(st.lastMsg); }
+    if (ufNow > ufStopLine_() - 2000) { st.lastMsg = baQuotaSkipMsg_(ufNow, ufStopLine_()); baQuotaSkipRec_(st, ufNow, ufStopLine_(), 'game'); baLog_(st, st.lastMsg); return finish_(st.lastMsg); }
     if (!bgAllowed_()) { st.lastMsg = 'urlfetch 予約枠を確保するため今回は見送り'; return finish_(st.lastMsg); }
     /* ★v187 ヤフオクに弾かれても全体は止めない（2026-09-18 実測：ON の2回目で HTTP 500→6時間まるごと休み。メルカリの写真は187件集まっているのに1件も出なくなった）。休むのはヤフオクの検索だけ＝その間はメルカリの写真がある作品だけを進める */
     var yahooOk = !(st.blockedUntil && Date.now() < st.blockedUntil);
@@ -10608,10 +10639,11 @@ function boshuAutoTick(manual) {
       var _yhH = new Date().toISOString().slice(0, 13);
       if (!st.yh || st.yh.h !== _yhH) st.yh = { h: _yhH, n: 0 };
       if (st.yh.n >= BA_YAHOO_PER_HOUR) { out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
+      if (!baYhGap_(st, BA_YAHOO_GAP_MS, DEADLINE * 0.55 - (Date.now() - t0))) { out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }   /* ★11/8 間を空ける時間が残っていなければ次の回へ */
       st.yh.n++;
       var y = baPhotoSrc_(q, cfg);   /* ★2026-09-23 既定は Yahoo!フリマ（ヤフオクは Google の IP から弾かれ続けて2時間休みの繰り返しだった） */
       var _srcNm = (y.src === 'yahoo') ? 'ヤフオク' : 'Yahoo!フリマ';
-      if (y.blocked) { var restH = (y.code === 403 || y.code === 429) ? 6 : 2; st.blockedUntil = Date.now() + restH * 3600 * 1000; yahooOk = false; baLog_(st, '🛑 ' + _srcNm + 'に弾かれた（HTTP ' + y.code + '）→' + _srcNm + 'の検索だけ ' + restH + '時間休む（メルカリの写真がある作品は続ける）'); out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
+      if (y.blocked) { var restH = (y.code === 403 || y.code === 429) ? 6 : 2; st.blockedUntil = baYhRestUntil_(restH); baBlockRec_(st, _srcNm, y.code, st.blockedUntil, 'game:' + hw); yahooOk = false; baLog_(st, '🛑 ' + _srcNm + 'に弾かれた（HTTP ' + y.code + '）→' + _srcNm + 'の検索だけ ' + restH + '時間休む（メルカリの写真がある作品は続ける）'); out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
       var hits = baMatch_(y.items, c.ja || c.en, hw);
       var img = null, srcId = '', srcUrl = '', triedY = 0;
       var sameNgY = 0; if (typeof sameUnj !== 'number') sameUnj = 0;
@@ -11055,8 +11087,8 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
         if (_tAt >= 0 && _sT.t > _tAt + 1000) { _snap = _sT.rows; BA_TICK_REUSE_HIT = (BA_TICK_REUSE_HIT || 0) + 1; } }
     }
     if (_snap) { BA_CTX_ROWS[_rowsKey] = _snap; BA_SNAP_HIT = (BA_SNAP_HIT || 0) + 1; }
-    else if (!BA_SNAP_USE && !_tickReuse && baDeltaOn_()) { BA_CTX_ROWS[_rowsKey] = baListingsDelta_(_rowsKey, ccs, _tcg ? ('or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*)') : ''); }   /* ★11/8 (ウ)：変わった行だけ＋cc・item_id の一覧（14時：トレカの巡回も・事業本部の決め。絞り込みは丸ごと読みと同じ文字） */
-    else { var _rdT0 = Date.now(); BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*)' : '')); if (BA_SNAP_USE && !_tcg) baSnapPut_(_rowsKey, BA_CTX_ROWS[_rowsKey]); else if (_tickReuse) baSnapPut_('tick|' + _rowsKey, { t0: _rdT0, rows: BA_CTX_ROWS[_rowsKey] }); }   /* 追いのレビュー B：控えの時刻＝DB を読み始めた時刻 */
+    else if (!BA_SNAP_USE && !_tickReuse && baDeltaOn_()) { BA_CTX_ROWS[_rowsKey] = baListingsDelta_(_rowsKey, ccs, _tcg ? ('or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*' + baTcgFamSkuOr_(cfg) + ')') : ''); }   /* ★11/8 (ウ)：変わった行だけ＋cc・item_id の一覧（14時：トレカの巡回も・事業本部の決め。絞り込みは丸ごと読みと同じ文字） */
+    else { var _rdT0 = Date.now(); BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*' + baTcgFamSkuOr_(cfg) + ')' : '')); if (BA_SNAP_USE && !_tcg) baSnapPut_(_rowsKey, BA_CTX_ROWS[_rowsKey]); else if (_tickReuse) baSnapPut_('tick|' + _rowsKey, { t0: _rdT0, rows: BA_CTX_ROWS[_rowsKey] }); }   /* 追いのレビュー B：控えの時刻＝DB を読み始めた時刻 */
   }
   var rows = BA_CTX_ROWS[_rowsKey];   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
   var itemCc = {}, modelNames = {};
@@ -11476,7 +11508,14 @@ function baCloneToSub_(cc, base, newName, st, hw, role) {
   baLog_(st, '🏪 ' + cc + '：1店舗目が満杯 → 2店舗目にカタログを作りました（非公開・' + r.item_id + '）');
   return { cc: cc, item_id: r.item_id, name: newName || r.name, shop_id: sub, weight: base.weight, models: [{ n: 'test', price: pr || 0 }], status: 0, isNew: true };
 }
+/* ★2026-11-08 事業本部：「This product duplicates another」で断られた シリーズ×国 は、その日（JST）は作り直さない（15分ごとに6か国の add_item を投げていた）。
+   印は st.famFail（台ごとの状態）。表紙を変えて作り直すのは catalog-create の決まりどおり（本人の表紙を使う・限定版の写真は使わない）＝自動ではしない */
+var BA_FAMFAIL_LOGGED = {};   /* その実行の中で1回だけ記録に書く */
+function baFamFailKey_(hw, cc, famName) { return hw + '|' + cc + '|' + String(famName || '').replace(/[①-⑳]/g, '').slice(0, 40); }   /* 家族と大シリーズで印を分ける（review-yaku 低4） */
+function baFamFailToday_(st, hw, cc, famName) { try { var f = (st && st.famFail) || {}, e = f[baFamFailKey_(hw, cc, famName)]; return !!(e && e.d === Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd')); } catch (e2) { return false; } }
+function baFamFailMark_(st, hw, cc, err, famName) { try { if (!/duplicat/i.test(String(err || ''))) return; var d = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), f = st.famFail || {}; Object.keys(f).forEach(function (k) { if (!f[k] || f[k].d !== d) delete f[k]; }); f[baFamFailKey_(hw, cc, famName)] = { d: d, at: new Date().toISOString(), why: 'duplicate', err: String(err || '').slice(0, 120) }; st.famFail = f; } catch (e) {} }
 function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
+  if (baFamFailToday_(st, hw, cc, famName)) { if (!BA_FAMFAIL_LOGGED[baFamFailKey_(hw, cc, famName)]) { BA_FAMFAIL_LOGGED[baFamFailKey_(hw, cc, famName)] = 1; baLog_(st, cc + '：' + hw + ' の汎用カタログは今日「重複」で断られたので、今日はもう作りません（表紙を変えて作り直すかは catalog-create の決まりで）'); } return null; }
   var fam = (cfg.family || {})[hw] || {};
   var byCc = fam.byCc || {}, o = byCc[cc] || {};
   var wantSku = pskuMark_(o.sku || fam.sku || '');
@@ -11521,7 +11560,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
       var pr0 = 0;
       try { pr0 = (other.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (eP) {}
       var sd = seedShopCatalog_({ src_shop_id: other.shop_id, dst_shop_id: dst, item_id: other.item_id, price: pr0, category_id: baCatForCc_(hw, cc) || undefined });
-      if (!sd || !sd.ok || !sd.item_id) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（他の国から: ' + String((sd && sd.error) || '').slice(0, 160) + '）'); return null; }
+      if (!sd || !sd.ok || !sd.item_id) { baFamFailMark_(st, hw, cc, sd && sd.error, famName); baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（他の国から: ' + String((sd && sd.error) || '').slice(0, 160) + '）'); return null; }
       var _nmLim2 = 120; try { var _mx2 = shopNameLimit_(dst); if (_mx2 > 0) _nmLim2 = Math.min(_mx2, 120); } catch (eNl2) {}
       var _fitName2 = baFitName_(srcName, _nmLim2);
       /* ★2026-09-25 ここが黙って失敗すると、親SKUも名前も付かない＝次の巡回で「カタログ群なし」→もう1つ作ろうとして duplicates で落ちる（実測 TW sfc 45218399069）。失敗はログに残し、作ったカタログは app_kv に控える */
@@ -11557,7 +11596,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
       /* ★2026-10-12 VN は値段 1,000 VND 未満を受け付けない（既定の仮の値段 300 で毎回「price … must be between 1000.00 and …」）。型のカタログの明細の値段（その国の通貨）を仮の値段にする */
       var _pr2 = 0; try { _pr2 = (_any.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (ePr2) {}
       var sd2 = seedShopCatalog_({ src_shop_id: _any.shop_id, dst_shop_id: dst2, item_id: _any.item_id, price: _pr2, category_id: baCatForCc_(hw, cc) || undefined, image_urls: [cover], name: srcName, weight: _wKg, rename_desc: 1, desc_swap: _dsw });
-      if (!sd2 || !sd2.ok || !sd2.item_id) { baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（仮の表紙で: ' + String((sd2 && sd2.error) || '').slice(0, 160) + '）'); return null; }
+      if (!sd2 || !sd2.ok || !sd2.item_id) { baFamFailMark_(st, hw, cc, sd2 && sd2.error, famName); baLog_(st, cc + '：' + hw + ' の汎用カタログを作れませんでした（仮の表紙で: ' + String((sd2 && sd2.error) || '').slice(0, 160) + '）'); return null; }
       var _nmLim3 = 120; try { var _mx3 = shopNameLimit_(dst2); if (_mx3 > 0) _nmLim3 = Math.min(_mx3, 120); } catch (eNl3) {}
       var _fitName3 = baFitName_(srcName, _nmLim3);
       try { callShop_(dst2, '/api/v2/product/update_item', null, 'post', { item_id: sd2.item_id, item_name: _fitName3, item_sku: wantSku || undefined }); } catch (eU3) { baLog_(st, cc + '：作ったカタログ ' + sd2.item_id + ' に名前/親SKUを付けられませんでした ' + String((eU3 && eU3.message) || eU3).slice(0, 120)); }
@@ -13318,10 +13357,10 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
   /* ★2026-10-12 ゲーム（7744行）と同じく Yahoo!フリマは1時間 BA_YAHOO_PER_HOUR 回まで・間を1.2〜2.7秒あける（上限が無く、120秒の間に次々叩いて弾かれていた） */
   var _yhK = new Date().toISOString().slice(0, 13); if (!st.yh || st.yh.h !== _yhK) st.yh = { h: _yhK, n: 0 };
   if (st.yh.n >= BA_YAHOO_PER_HOUR) return { nosrc: 1, cap: 1 };
-  if (st.yh.n > 0) Utilities.sleep(1200 + Math.floor(Math.random() * 1500));
+  if (!baYhGap_(st, BA_YAHOO_GAP_TCG_MS, 30000)) return { nosrc: 1, cap: 1 };   /* ★11/8 事業本部：1.2〜2.7秒 → 8〜18秒（待ちが長すぎる時は叩かない） */
   st.yh.n++;
   var y = baPhotoSrc_(q, cfg);
-  if (y.blocked) return { blocked: 1 };
+  if (y.blocked) return { blocked: 1, code: y.code, src: (y.src === 'yahoo') ? 'ヤフオク' : 'Yahoo!フリマ' };
   var numN = String(c.num).replace(/\s+/g, '').toLowerCase();
   var hits = (y.items || []).filter(function (it) {
     var t = String(it.t || '').normalize('NFKC').toLowerCase();
@@ -13374,7 +13413,7 @@ function tcgTick(manual) {
      実測：tcg_auto_status_child3 に _sgJan={}・_sgJanN=20 ＝次の実行も「上限20に達した」で駿河屋を一度も読まず、空の {} のせいで jan_sg_cache も読み直さない（グッズの JAN が埋まらない）。その実行の中だけで使う */
   try { delete st._sgJan; delete st._sgJanN; delete st._vng; } catch (eSj) {}
   var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {}, runner: rid0 };
-  var finish_ = function (msg) { try { if (BA_DELTA_INFO) st.delta = BA_DELTA_INFO; } catch (eDl2) {}   /* ★11/8 トレカの巡回も読み方（full／delta）を残す（レビュー低） */ try { if (UF_PROBE_NOTE) { baLog_(st, UF_PROBE_NOTE); UF_PROBE_NOTE = ''; } } catch (ePn2) {} try { delete st._sgJan; delete st._sgJanN; delete st._vng; st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eSj2) {} try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
+  var finish_ = function (msg) { try { if (BA_DELTA_INFO) st.delta = BA_DELTA_INFO; st.skuOrCut = BA_TCG_SKU_OR_CUT || 0; } catch (eDl2) {}   /* ★11/8 トレカの巡回も読み方（full／delta）を残す（レビュー低） */ try { if (UF_PROBE_NOTE) { baLog_(st, UF_PROBE_NOTE); UF_PROBE_NOTE = ''; } } catch (ePn2) {} try { delete st._sgJan; delete st._sgJanN; delete st._vng; st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eSj2) {} try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
   try {
     var cfg = baKv_(BA_CFG) || {};
     if (BA_KV_ERR) { ufPersist_(); try { lock.releaseLock(); } catch (e0) {} return { ok: false, skipped: 'cfg_unreadable' }; }
@@ -13382,7 +13421,7 @@ function tcgTick(manual) {
     var rid = rid0;   /* 担当の判定は上（設定だけ読んだ時点）で済ませた */
     if (!tc.on && manual !== true) return finish_('OFF（cfg.tcg.on）');
     if (!cfg.on && manual !== true) return finish_('🤖がOFFなので🃏も休み');
-    var ufNow = ufTotal_(); if (ufNow > ufStopLine_() - 2000) return finish_('🛡 Shopee枠の残りが少ないので見送り（' + ufNow + '／' + ufStopLine_() + '）');
+    var ufNow = ufTotal_(); if (ufNow > ufStopLine_() - 2000) { baQuotaSkipRec_(st, ufNow, ufStopLine_(), 'tcg'); return finish_(baQuotaSkipMsg_(ufNow, ufStopLine_())); }
     /* ★2026-10-12【最重要】トレカは在庫1で7か国に出すのに、売れた時に他国の在庫を0にする処理（ゲームの boshuAutoTick 7530行の baSoldSync_）を呼んでいなかった＝同じ1枚が二重に売れうる。
        baSoldSync_ は渡した状態の added（直近3日の注文と突き合わせ）を見るので、トレカの状態をそのまま渡す */
     try { baSoldSync_(st); } catch (eSold) { baLog_(st, '売れたカードの見直しに失敗: ' + String(eSold).slice(0, 160)); }
@@ -13508,7 +13547,7 @@ function tcgTick(manual) {
       tried++;
       var ph = tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk);
       if (ph.nosrc) { nosrc++; tried--; continue; }
-      if (ph.blocked) { blocked = true; yahooOk = false; st.blockedUntil = Date.now() + 2 * 3600000; baLog_(st, 'Yahoo!フリマの検索に弾かれた→2時間はメルカリの写真の控えがあるカードだけ続ける'); tried--; continue; }
+      if (ph.blocked) { blocked = true; yahooOk = false; st.blockedUntil = baYhRestUntil_(2); baBlockRec_(st, ph.src || 'Yahoo!フリマ', ph.code, st.blockedUntil, 'tcg:' + hw); baLog_(st, (ph.src || 'Yahoo!フリマ') + 'の検索に弾かれた（HTTP ' + ph.code + '）→約2時間はメルカリの写真の控えがあるカードだけ続ける'); tried--; continue; }
       if (ph.stop) { baLog_(st, 'AI判定が止まった（' + ph.stop + '）→この回はここまで'); break; }
       if (!ph.img) { miss++; st.tried[c.key] = tr + 1; continue; }
       if (c.noname) {   /* 写真が通ったので、ここで初めて英語名を聞く（1枚1回・控え tcg_names_ai に残る） */
