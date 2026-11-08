@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261109-0010'
+var SRC_VER = '20261109-0242'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -937,6 +937,15 @@ function doGetInner_(e) {
       catch (err) { dwo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dwcb + '(' + JSON.stringify(dwo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    if (p.action === 'shop3_candidate_read_sg') {
+      var scb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), sout;
+      try {
+        var srk = P_().getProperty('WRITE_TOKEN');
+        if (!srk || p.rk !== srk) throw new Error('読み取り鍵がありません');
+        sout = shop3CandidateReadSg_(p);
+      } catch (err) { sout = { ok:false, error:String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(scb + '(' + JSON.stringify(sout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'item_limit_refresh') {
       /* ★2026-10-18 全店の出品枠（get_item_limit の item_count_limit.max_limit）を取り直して app_kv shop_item_limit に保存。
          9/23 の控え（TH 2店舗目 1,000）が古く、実際は 172 件で「listing limit に達した」と断られていた。1店1回＝13回の urlfetch */
@@ -1648,7 +1657,7 @@ function doGetInner_(e) {
           try { rawT = callShop_(gashop, '/api/v2/product/get_attribute_tree', { category_id_list: String(p.category_id), language: p.language || 'en' }, 'get'); } catch (e2) { rawT = { _error: String(e2 && e2.message || e2) }; }
           gaout = { ok: true, raw: { get_attributes: rawA, get_attribute_tree: rawT } };
         } else
-        gaout = { ok: true, data: getAttributeTree_(gashop, p.category_id, p.language) };
+        gaout = { ok: true, data: getAttributeTree_(gashop, p.category_id, p.language, p.strict === '1') };
       } catch (err) { gaout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(gacb + '(' + JSON.stringify(gaout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -3047,6 +3056,89 @@ function getModels_(shopId, itemId) {
 }
 // ★商品まるごと読み（get_item_base_info＋get_model_list）＝ブリッジproductRead代替。カタログ編集エディタの「開く」用。読み取り専用・token不要。
 // 返す: { base: get_item_base_info の item, model: getModels_ の {tier_variation,models} }。ポータル側 apiPiFromFull が内部v3形へ変換。
+// 第3SGの候補照会。出品同期・共有キャッシュ更新から独立させる。
+function shop3CandidateReadSg_(p) {
+  var id = '1938012197';
+  if (p.market !== 'SG' || p.shop_id !== id) throw new Error('第三SGの店指定が一致しません');
+  var asins = String(p.asins || '').split(',');
+  var model = String(p.model || '').trim();
+  if (asins.length < 2 || asins.length > 10 ||
+      asins.some(function (x, i) { return !/^[A-Z0-9]{10}$/.test(x) || asins.indexOf(x) !== i; }) ||
+      !/^[A-Za-z0-9][A-Za-z0-9 -]{2,39}$/.test(model)) throw new Error('照会には半角の型番と子ASIN2〜10件が必要です');
+  if (!bgAllowed_()) throw new Error('接続枠を確保するため照会を見送ります');
+
+  var started = Date.now();
+  var probe = sbSelect_('orders', 'select=sn&limit=1');
+  if (!Array.isArray(probe) || Date.now() - started > 2000) throw new Error('DBの応答が遅いため照会を見送ります');
+  Utilities.sleep(5000);
+  var accounts = sbSelect_('accounts', 'select=cc,shop_id,status,label&cc=eq.SG&status=in.(main,sub,new)&limit=20');
+  var target = accounts.filter(function (a) { return String(a.shop_id) === id; });
+  if (target.length !== 1 || target[0].status !== 'new' || String(target[0].label).toLowerCase() !== 'maneki_neko_japan.sg' || !getToken_(Number(id))) {
+    throw new Error('第三SGの登録と認可が一致しません');
+  }
+  var out = { ok:true, shop_id:id, checkedAt:new Date().toISOString(), cap:null, used:null, matches:[], duplicate:'unverified' };
+  try {
+    var lr = callShop_(Number(id), '/api/v2/product/get_item_limit', {}, 'get');
+    var cap = Number(((lr.response || {}).item_count_limit || {}).max_limit);
+    if (lr.error || !Number.isSafeInteger(cap) || cap < 1) throw new Error('公式上限を取得できません');
+    out.cap = cap;
+    var offset = 0, seen = Object.create(null);
+    for (var page = 0; page < 12 && bgAllowed_(); page++) {
+      var r = callShop_(Number(id), '/api/v2/product/get_item_list', {offset:offset,page_size:100,item_status:'NORMAL'}, 'get');
+      var list = r.response || {};
+      if (r.error || !Array.isArray(list.item) || typeof list.has_next_page !== 'boolean') break;
+      var count = list.total_count;
+      if (Number.isSafeInteger(count) && count >= list.item.length &&
+          (list.has_next_page ? count > list.item.length : count === list.item.length) && page === 0) {
+        out.used = count;
+        break;
+      }
+      if (list.item.some(function (x) { return !x || !/^\d+$/.test(String(x.item_id)) || seen[x.item_id] || !(seen[x.item_id] = true); })) break;
+      if (!list.has_next_page) {
+        out.used = Object.keys(seen).length;
+        break;
+      }
+      if (!Number.isSafeInteger(list.next_offset) || list.next_offset <= offset || !list.item.length) break;
+      offset = list.next_offset;
+    }
+  } catch (_) { out.used = null; }
+
+  if (!bgAllowed_()) return out;
+  var ids = accounts.filter(function (a) { return /^(main|sub)$/.test(a.status) || String(a.shop_id) === id; })
+    .map(function (a) { return String(a.shop_id); }).filter(function (x) { return /^\d+$/.test(x); });
+  if (ids.length !== 3 || new Set(ids).size !== 3 ||
+      !accounts.some(function (a) { return a.status === 'main'; }) ||
+      !accounts.some(function (a) { return a.status === 'sub'; })) return out;
+  var skus = asins.map(function (a) { return 'AMZ_' + a; });
+  var terms = ['name.ilike.*' + model + '*', 'parent_sku.in.(' + skus.join(',') + ')'];
+  skus.forEach(function (sku) {
+    var filter = JSON.stringify([{sku:sku}]).replace(/"/g, '\\"');
+    terms.push('models.cs."' + filter + '"');
+  });
+  try {
+    Utilities.sleep(5000);
+    var matches = sbSelect_('listings', 'select=item_id,shop_id&cc=eq.SG&shop_id=in.(' + ids.join(',') +
+      ')&or=' + encodeURIComponent('(' + terms.join(',') + ')') + '&order=shop_id,item_id&limit=4');
+    if (!Array.isArray(matches)) return out;
+    out.indexHits = matches.length;
+    for (var i = 0; i < Math.min(3, matches.length) && bgAllowed_(); i++) {
+      var hit = matches[i], item = String(hit.item_id), shop = String(hit.shop_id);
+      if (ids.indexOf(shop) < 0 || !/^\d+$/.test(item) || !getToken_(Number(shop))) continue;
+      try {
+        var data = getItemFull_(Number(shop), Number(item));
+        if (String(data.base.item_id) !== item || !Array.isArray(data.model.models)) continue;
+        var skuHit = data.model.models.some(function (v) { return skus.indexOf(String(v.sku).toUpperCase()) >= 0; }) ||
+          skus.indexOf(String(data.base.item_sku || '').toUpperCase()) >= 0;
+        var modelHit = new RegExp('(^|[^A-Z0-9])' + model + '([^A-Z0-9]|$)', 'i').test(String(data.base.item_name || ''));
+        if (skuHit || modelHit) out.matches.push({shop_id:shop,item_id:item,status:String(data.base.item_status || ''),sku:skuHit,model:modelHit});
+      } catch (_) {}
+    }
+  } catch (_) {}
+  if (out.matches.some(function (x) { return x.sku && /^(NORMAL|UNLIST)$/.test(x.status); })) out.duplicate = 'confirmed';
+  else if (out.matches.length || out.indexHits > 0) out.duplicate = 'review';
+  return out;
+}
+
 function getItemFull_(shopId, itemId) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(itemId), need_tax_info: 'false', need_complaint_policy: 'false' }, 'get');
@@ -3056,7 +3148,7 @@ function getItemFull_(shopId, itemId) {
 }
 // ★属性(specifics)の選択肢を公式APIで読む（ブリッジの内部v3 get_attribute_tree 代替）。カタログ編集の属性ドロップダウン用。
 // 返す: [{attribute_id, name, mandatory, multi, options:[{id,name}]}]（ポータル attrTree と同形）。フィールド名は版差があるため防御的に読む。
-function getAttributeTree_(shopId, catId, lang) {
+function getAttributeTree_(shopId, catId, lang, strict) {
   shopId = parseInt(shopId, 10); catId = parseInt(catId, 10);
   // ★まず get_attributes（カテゴリ単位の旧API）を使う。こちらは original_attribute_name / display_attribute_name が
   //   必ず入っており、属性名が '#100130' のような数字表示になる問題が起きない。
@@ -3082,6 +3174,10 @@ function getAttributeTree_(shopId, catId, lang) {
   var resp = j.response || {};
   var list = resp.list || [];
   var tree = (list[0] && (list[0].attribute_tree || list[0].attribute_list)) || resp.attribute_list || (Array.isArray(list) && list[0] && list[0].attribute_id ? list : []);
+  if (strict && (j.error || !(Array.isArray(resp.attribute_list) ||
+      (Array.isArray(resp.list) && resp.list.some(function (x) {
+        return x && (Array.isArray(x.attribute_tree) || Array.isArray(x.attribute_list) || x.attribute_id);
+      }))))) throw new Error('公式の属性データを確認できません');
   var fromTree = (tree || []).map(function (a) {
     var info = a.attribute_info || {};
     var maxv = info.max_input_value_number || info.max_value_count || a.max_input_value_number || 1;
