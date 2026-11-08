@@ -5367,6 +5367,7 @@
     "入力内容だけで確認し、ShopeeやKeepaに照会しません。": "Preview using the entered data without requesting Shopee or Keepa.",
     "確認根拠を含む入力をJSONファイルに保存します。": "Save the inputs and evidence as a JSON file.",
     "第三店のAmazon新品候補を下見": "Preview third-shop Amazon candidates",
+    "VNのまとめ買いで各商品の個別掲載額を計算": "Calculate individual listing prices for VN bundle quotes",
     "初回の見積もりに、購入か見送りかの返信をお願いする文を追加": "Initial quotes now ask customers to reply whether they want to buy or pass",
     "第三SG・新品1カタログ": "Third SG shop — one new listing",
     "対象は maneki_neko_japan.sg（1938012197）の Tombow MONO PE-01A です。": "Target: Tombow MONO PE-01A at maneki_neko_japan.sg (1938012197).",
@@ -11186,9 +11187,9 @@
           if (w4.length) out.warn = [out.warn].concat(w4).filter(Boolean).join(' ／ ');
         }
         /* ★2026-11-04 まとめ買い（quote-card-spec 17）：品物ごとの英語名・仕入れ先・写真を items[] で返す。文面（plans の stages）は N点用。
-           VN は①の total か②の shop が上限（PRICE_CEIL）を超えたら warn と分け方の案（split＝組の番号の配列・1組は上限の95%まで・仕入れ額の比で見積もる） */
+           VN は①の total か②の shop が上限（PRICE_CEIL）を超えたら、各品物の①の掲載額も計算する。 */
         if (window._pcBundle && !window._pcBundle.err) {
-          const B1 = window._pcBundle, sumC = B1.items.reduce((a, x) => a + x.cost, 0) || 1;
+          const B1 = window._pcBundle;
           out.bundleDeal = pcBundleDealPct();   /* ★2026-11-05 03-12：Bundle Deal を入れた率（0＝入れていない＝その国の Request page が割引に入っていない・&bd=0）。カードと英文に出す用 */
           out.bundleDealWhy = B1.noDeal ? (p.get('bd') === '0' ? 'bd=0' : 'この国の Request page はまとめ買い割引に入っていない（控え ' + String(B1.mapAt || '').slice(0, 10) + '）') : (B1.dealIds ? '割引に入っている Request page ' + B1.dealIds.length + '件（控え ' + String(B1.mapAt || '').slice(0, 10) + '）' : '控えを読めなかったので入れた（安全側）');
           { const cs = B1.items.map(x => x.cost).filter(v => v > 0), limR = cc === 'BR' ? 4 : 5; if (cs.length > 1 && Math.max.apply(null, cs) / Math.min.apply(null, cs) > limR) out.warn = [out.warn, '品物どうしの仕入れの差が ' + limR + '倍を超えています（' + cs.join(' / ') + '円）。品物ごとの明細で足すと、Request page の値段の差の上限（' + limR + '倍）でどのページにも入らないことがあります（その時は品物ごとに見積もってください）'].filter(Boolean).join(' ／ '); }
@@ -11197,14 +11198,15 @@
           if (capV) {
             const p1 = out.plans['1'] || {}, p2 = out.plans['2'] || {}, big = Math.max(Number(p1.total) || 0, Number(p2.shop) || 0);
             if (big > capV) {
-              const ratio = big / sumC, lim = capV * 0.95, groups = [];
-              B1.items.map((x, i) => ({ i, c: x.cost })).sort((a, b) => b.c - a.c).forEach(o => { let g = groups.find(g => (g.c + o.c) * ratio <= lim); if (!g) { g = { c: 0, ix: [] }; groups.push(g); } g.c += o.c; g.ix.push(o.i); });
-              out.bundle.split = groups.map(g => g.ix.sort((a, b) => a - b));
+              const quotes = pcBundleSplitQuotes(cc, r.rg, capV, B1.items, cx);
+              out.bundle.splitQuotes = quotes;
+              out.bundle.split = quotes.ok ? quotes.items.map(item => [item.index]) : [];
               out.bundle.overCap = true;
-              /* 1点だけでも上限を超えそうな品物（仕入れ額の比で見積もり・送料などの固定分は比例しないので目安） */
-              out.bundle.singleOver = B1.items.map((x, i) => ({ i, v: x.cost * ratio })).filter(o => o.v > lim).map(o => o.i);
-              out.warn = [out.warn, cc + ' の出品価格の上限（' + capV.toLocaleString() + '）を超えます（①の合計 ' + Math.round(Number(p1.total) || 0).toLocaleString() + '）。' + groups.length + '件に分けてください（案：' + out.bundle.split.map(g => g.map(i => B1.items[i].en).join(' + ')).join(' ／ ') + '・仕入れ額の比で見積もった目安）'
-                + (out.bundle.singleOver.length ? '。1点でも上限を超えそうな物：' + out.bundle.singleOver.map(i => B1.items[i].en).join('・') + '（1点ずつ見積もり直して確かめてください）' : '')].filter(Boolean).join(' ／ ');
+              out.bundle.singleOver = quotes.items.filter(item => item.reason === 'over_cap').map(item => item.index);
+              const splitNote = quotes.ok ? '個別掲載の合計は ' + quotes.total.toLocaleString() + ' VNDです。' : '全品を個別に掲載する案は成立しません。';
+              const over = Number(p1.total) > capV ? '①の掲載額 ' + Number(p1.total).toLocaleString() : '②のShopee掲載額 ' + Number(p2.shop).toLocaleString();
+              out.warn = [out.warn, cc + ' の出品価格の上限（' + capV.toLocaleString() + '）を超えます（' + over + '）。' + splitNote
+                + (quotes.items.some(item => item.estimatedWeight) ? '一部の品物は暫定重量で計算しています。' : '')].filter(Boolean).join(' ／ ');
             }
           }
         }
@@ -11681,13 +11683,48 @@
   }
   function pcBundleDealPct() { const B = window._pcBundle; if (!pcBundleLive() || B.noDeal) return 0; const t = PC_BD_TIERS.find(x => B.n >= x[0]); return t ? t[1] : 0; }
   function pcDiscPctNow() { const s0 = Number(settings.priceDiscountPct) || 0, b = pcBundleDealPct(); return b ? Math.max(s0, b) : s0; }
+  const PC_DEFAULT_WEIGHT_G = 500;   // 品物の重さが未入力のときの価格計算と同じ値
+  function pcBundleSplitQuotes(cc, rg, cap, items, cx) {
+    const unit = rg.priceUnit || 1;
+    const knownWeight = items.reduce((sum, item) => sum + Math.max(0, item.w), 0);
+    const remainingWeight = (cx.weightEntered || 0) - knownWeight;
+    const baseProfit = items.reduce((sum, item) => sum + item.lineProfit, 0);
+    const extraProfit = Math.max(0, (cx.grossT || 0) - baseProfit);
+    const totalCost = items.reduce((sum, item) => sum + item.cost, 0);
+    // 個別掲載でも同じ注文に入る可能性があるため、適用しうる値引きはまとめ見積もりと揃える。
+    const discountPct = pcDiscPctNow();
+    let cumulativeCost = 0, allocatedProfit = 0;
+    const quotes = items.map((item, index) => {
+      const estimatedWeight = !(item.w > 0);
+      // 合計重量しか分からないときは残りを各不明品の上限として扱い、送料を過小に見積もらない。
+      const weight = estimatedWeight ? Math.max(PC_DEFAULT_WEIGHT_G, remainingWeight) : item.w;
+      const opt = { weightG: weight, dimW: 0, dimH: 0, dimD: 0, discountPct, ignoreDraftRoi: true };
+      cumulativeCost += item.cost;
+      const allocated = Math.round(extraProfit * (cumulativeCost / totalCost));
+      const targetProfit = Math.max(item.lineProfit + allocated - allocatedProfit, Math.ceil(item.cost * (cx.roiT || 0) / 100));
+      allocatedProfit = allocated;
+      const quote = { index, weight, estimatedWeight };
+      const floor = pcSolvePrice(cc, item.cost, targetProfit, opt, unit);
+      const marginPrice = cx.marginT ? pcSolveMargin(cc, item.cost, cx.marginT, opt, unit, rg.rateJpy) : 0;
+      const shop = Math.max(floor, marginPrice);
+      const profit = priceProfitFor(cc, item.cost, shop, opt).profit;
+      const meetsMargin = !cx.marginT || (marginPrice && profit >= shop * rg.rateJpy * (cx.marginT / 100));
+      if (!Number.isSafeInteger(shop) || !(shop > 0) || !(profit >= targetProfit) || !meetsMargin) {
+        return { ...quote, ok: false, reason: 'unquotable' };
+      }
+      if (shop > cap) return { ...quote, ok: false, reason: 'over_cap', minimumShop: shop };
+      return { ...quote, ok: true, shop, profit };
+    });
+    const ok = quotes.every(item => item.ok);
+    return { ok, currency: 'VND', cap, items: quotes, total: ok ? quotes.reduce((sum, item) => sum + item.shop, 0) : null };
+  }
   function priceCalcRun() {
     const out = document.getElementById('pc-out'), msg = document.getElementById('pc-msg');
     const num = (id) => { const v = String((document.getElementById(id) || {}).value || '').replace(/,/g, ''); const n = Number(v); return (v === '' || isNaN(n)) ? null : n; };
     // ★表は最初から出す：仕入額が空のときは「例（¥1,500・150g）」で描いておき、打ち替えたら即座に本物へ差し替わる
     const sample = !(num('pc-cost') > 0);
     const cost = sample ? 1500 : num('pc-cost');
-    const wg = num('pc-weight') != null ? num('pc-weight') : 500;   // 実務上ほとんど500g（本人確認）
+    const wg = num('pc-weight') != null ? num('pc-weight') : PC_DEFAULT_WEIGHT_G;   // 実務上ほとんど500g（本人確認）
     const dW = num('pc-w'), dH = num('pc-h'), dD = num('pc-d'), roi = num('pc-roi');
     msg.textContent = '';
     const ratio = Math.min(1, Math.max(0.05, (num('pc-ratio') || 50) / 100));   // ②でShopeeに載せる割合
@@ -27390,7 +27427,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
-    { date: '2026-11-09', items: ['<b>第三店のAmazon新品候補を下見</b>。'] },
+    { date: '2026-11-09', items: ['<b>VNのまとめ買いで各商品の個別掲載額を計算</b>。', '<b>第三店のAmazon新品候補を下見</b>。'] },
     { date: '2026-11-09', items: ['<b>第三SGの新品公開を準備する入口を追加</b>。', '<b>初回の見積もりに、購入か見送りかの返信をお願いする文を追加</b>。'] },
     { date: '2026-11-08', items: [
       '🎰 <b>一番くじのカタログが「重複」で作れない件を直しました</b>。トレカの巡回が設定の親SKU（ICHIBAN_KUJI_… 等）も読むようにし、既にあるカタログに足します。重複で断られた国はその日は作り直しません。',
