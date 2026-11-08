@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261108-1100'
+var SRC_VER = '20261108-1130'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -8977,7 +8977,13 @@ function baSnapGetT_(key, maxAgeMs) {
 }
 /* ★2026-11-08 出品の表を変えた（明細を足した・カタログを作った）印。巡回の使い回し（'tick|' の控え）はこの時刻より後に書いた控えだけ使う。
    控えは時刻の比べで使わなくなる（消さない）。失敗しても足した処理は止めない */
+function baTickReuseOn_() { try { return P_().getProperty('BA_TICK_REUSE') === '1'; } catch (e) { return false; } }
+/* ★11/8 使い回しを止めた時に、その台の Drive に置いた控え（ba_ctx_rows_tick_*）を1回だけゴミ箱へ（BA_TICK_CLEANED で1回きり） */
+function baTickCleanOnce_() {
+  try { if (baTickReuseOn_() || P_().getProperty('BA_TICK_CLEANED') === '1') return; var n = 0, it = baSnapFolder_().getFiles(); while (it.hasNext()) { var f = it.next(); if (/^ba_ctx_rows_tick_/.test(f.getName())) { f.setTrashed(true); n++; } } P_().setProperty('BA_TICK_CLEANED', '1'); try { Logger.log('使い回しの控えを ' + n + '件ゴミ箱へ'); } catch (eL) {} } catch (e) {}
+}
 function baTickTouch_() {
+  if (!baTickReuseOn_()) return;   /* 使い回しが切の間は印も書かない */
   try { sbUpsert_('app_kv', [{ k: 'ba_touch_at', v: { at: Date.now(), by: baRunnerId_() }, updated_at: new Date().toISOString() }], 'k'); } catch (e1) {}
 }
 function baSnapPut_(key, rows) {
@@ -10632,6 +10638,7 @@ function boshuAutoTick(manual) {
     st.lastMsg = hw + '：' + picks.length + '件 → 明細 ' + out.added + '件追加（' + Object.keys(out.ccs).map(function (c) { var x = out.ccs[c]; return c + ' ' + (x.added || 0) + (x.note ? '(' + x.note + ')' : ''); }).join('・') + '）';
     baLog_(st, st.lastMsg + '  例: ' + picks.slice(0, 3).map(function (p) { return p.en + (p.stock ? '' : '(在庫0)'); }).join(' / '));
     if (Object.keys(touchedShops).length || BA_FAM_TICK > 0) baTickTouch_();   /* ★11/8 使い回しの控えを古いと分かるように */
+    baTickCleanOnce_();
     // 触った店の出品行を取り直す（次回の「出している」判定と、ポータルの一覧のため）
     try { var toks = listTokens_(); toks.forEach(function (tk) { if (touchedShops[String(tk.shop_id)] && Date.now() - t0 < DEADLINE + 40000) { try { syncListingsForShop_(tk, now_() - 3 * 3600); } catch (e) {} } }); } catch (e) {}
     if (Object.keys(touchedShops).length || BA_FAM_TICK > 0) baTickTouch_();   /* 追いのレビュー B：取り直しの間に読んだ控えも古いと分かるように、取り直しの後にもう1回 */
@@ -10995,7 +11002,7 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
     /* ★2026-11-08 egress（事業本部の②）：本番の巡回も、同じ台で5分以内に読んだ出品の表を使い回す（時刻の巡回 boshuAutoTick とポータルから呼ぶ tick_bg が重なる・1回 12.78MB）。
        控えはその台の Drive（台ごとの Google アカウント）＝他の台が足した物は見えない＝今までどおり、足す直前に Shopee の明細の一覧を読み直して同じ名前を飛ばす守り（addVariationsBulk0_ の skipped）と足した印（boshu_auto_done）で止める。
        止める時はスクリプト プロパティ BA_TICK_REUSE='0' */
-    var _tickReuse = !BA_SNAP_USE && !_tcg && (function () { try { return P_().getProperty('BA_TICK_REUSE') !== '0'; } catch (eTr) { return false; } })();
+    var _tickReuse = !BA_SNAP_USE && !_tcg && baTickReuseOn_();   /* ★11/8 事業本部の決め：効き目0（10:43 hit 0）なので既定は切。BA_TICK_REUSE='1' の時だけ */
     if (!_snap && _tickReuse) {
       /* ★レビュー（11/8 review-yaku 高1・中2〜4）：前の回（この台・他の台・手の一括・Request page）が明細を足した／カタログを作った後の控えは使わない。
          足した口が app_kv ba_touch_at に時刻を置く（baTickTouch_）＝控えの時刻がそれより新しい時だけ使う。印が読めない時は使わない */
