@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261108-1300'
+var SRC_VER = '20261108-1400'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -8974,9 +8974,9 @@ function baSnapGet_(key, maxAgeMs) {
    止める鍵＝スクリプト プロパティ BA_DELTA='0'。読んだ形は BA_DELTA_INFO（巡回の状態 st.delta に残す） */
 var BA_DELTA_INFO = null;
 function baDeltaOn_() { try { return P_().getProperty('BA_DELTA') !== '0'; } catch (e) { return false; } }
-function baListingsDelta_(rowsKey, ccs) {
+function baListingsDelta_(rowsKey, ccs, extra) {
   var COLS = 'cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count,row_updated_at';
-  var inCc = 'cc=in.(' + ccs.join(',') + ')', key = 'delta|' + rowsKey, prev = null;
+  var inCc = 'cc=in.(' + ccs.join(',') + ')' + (extra ? '&' + extra : ''), key = 'delta|' + rowsKey, prev = null;   /* extra＝トレカの絞り込み（差分・一覧・丸ごとの3つ全部に同じ物を付ける） */
   var tOf = function (r) { var x = Date.parse(String((r && r.row_updated_at) || '')); return isNaN(x) ? 0 : x; };
   try { var it = baSnapFolder_().getFilesByName(baSnapName_(key)); if (it.hasNext()) { var f = it.next(); if (Date.now() - f.getLastUpdated().getTime() < 60 * 60000) prev = JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(f.getBlob().getDataAsString()), 'application/x-gzip')).getDataAsString()); } } catch (eP) { prev = null; }
   var rows = null, t = 0, mode = 'full', nCh = 0, readAt = Date.now();   /* ★11/8 13時：起点は「前の回に読み始めた時刻 − 2分」（列を足した時に全行が同じ時刻になり、行の時刻の最大を起点にすると毎回全行を読んでいた＝12:15・12:35 の delta で 7,090行） */
@@ -11055,7 +11055,7 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
         if (_tAt >= 0 && _sT.t > _tAt + 1000) { _snap = _sT.rows; BA_TICK_REUSE_HIT = (BA_TICK_REUSE_HIT || 0) + 1; } }
     }
     if (_snap) { BA_CTX_ROWS[_rowsKey] = _snap; BA_SNAP_HIT = (BA_SNAP_HIT || 0) + 1; }
-    else if (!BA_SNAP_USE && !_tcg && !_tickReuse && baDeltaOn_()) { BA_CTX_ROWS[_rowsKey] = baListingsDelta_(_rowsKey, ccs); }   /* ★11/8 (ウ)：変わった行だけ＋cc・item_id の一覧 */
+    else if (!BA_SNAP_USE && !_tickReuse && baDeltaOn_()) { BA_CTX_ROWS[_rowsKey] = baListingsDelta_(_rowsKey, ccs, _tcg ? ('or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*)') : ''); }   /* ★11/8 (ウ)：変わった行だけ＋cc・item_id の一覧（14時：トレカの巡回も・事業本部の決め。絞り込みは丸ごと読みと同じ文字） */
     else { var _rdT0 = Date.now(); BA_CTX_ROWS[_rowsKey] = sbSelectAll_('listings', 'select=cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count&cc=in.(' + ccs.join(',') + ')' + (_tcg ? '&or=(name.ilike.*card*,parent_sku.ilike.*card*,name.ilike.*tcg*,parent_sku.ilike.*medal*,parent_sku.ilike.*moncolle*,' + BA_ARC_SKU_OR + ',parent_sku.ilike.*amiibo*)' : '')); if (BA_SNAP_USE && !_tcg) baSnapPut_(_rowsKey, BA_CTX_ROWS[_rowsKey]); else if (_tickReuse) baSnapPut_('tick|' + _rowsKey, { t0: _rdT0, rows: BA_CTX_ROWS[_rowsKey] }); }   /* 追いのレビュー B：控えの時刻＝DB を読み始めた時刻 */
   }
   var rows = BA_CTX_ROWS[_rowsKey];   // ★引用符を付けると UrlFetchApp が「無効な引数」で弾く（2026-09-13 実測）
@@ -13374,7 +13374,7 @@ function tcgTick(manual) {
      実測：tcg_auto_status_child3 に _sgJan={}・_sgJanN=20 ＝次の実行も「上限20に達した」で駿河屋を一度も読まず、空の {} のせいで jan_sg_cache も読み直さない（グッズの JAN が埋まらない）。その実行の中だけで使う */
   try { delete st._sgJan; delete st._sgJanN; delete st._vng; } catch (eSj) {}
   var out = { ok: true, src: SRC_VER, hw: '', added: 0, skipped: 0, ccs: {}, runner: rid0 };
-  var finish_ = function (msg) { try { if (UF_PROBE_NOTE) { baLog_(st, UF_PROBE_NOTE); UF_PROBE_NOTE = ''; } } catch (ePn2) {} try { delete st._sgJan; delete st._sgJanN; delete st._vng; st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eSj2) {} try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
+  var finish_ = function (msg) { try { if (BA_DELTA_INFO) st.delta = BA_DELTA_INFO; } catch (eDl2) {}   /* ★11/8 トレカの巡回も読み方（full／delta）を残す（レビュー低） */ try { if (UF_PROBE_NOTE) { baLog_(st, UF_PROBE_NOTE); UF_PROBE_NOTE = ''; } } catch (ePn2) {} try { delete st._sgJan; delete st._sgJanN; delete st._vng; st.kvSz = { at: new Date().toISOString(), err: String(BA_KV_PREFETCH_ERR || '').slice(0, 80), sz: BA_KV_SZ }; } catch (eSj2) {} try { if (st._yHw && st.yieldD) { var _y = st.yieldD.h[st._yHw] = st.yieldD.h[st._yHw] || { j: 0, a: 0 }; _y.j += Math.max(0, (Number((st.today || {}).judged) || 0) - (Number(st._yJ0) || 0)); _y.a += Number(out.added) || 0; if (_y.j >= 12 && !_y.a) baLog_(st, '🩹 ' + st._yHw + '：AI判定 ' + _y.j + '回で0明細＝今日はこのシリーズを止めます（AI料金の無駄を止める）'); } delete st._yHw; delete st._yJ0; } catch (eY) {} st.lastAt = new Date().toISOString(); st.lastMsg = msg || st.lastMsg || ''; try { baKvSet_(SK, st); } catch (e) {} try { tcgAiSpendPublish_(rid0); } catch (eP) {} ufPersist_(); try { lock.releaseLock(); } catch (e2) {} out.msg = st.lastMsg; return out; };
   try {
     var cfg = baKv_(BA_CFG) || {};
     if (BA_KV_ERR) { ufPersist_(); try { lock.releaseLock(); } catch (e0) {} return { ok: false, skipped: 'cfg_unreadable' }; }
