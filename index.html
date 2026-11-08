@@ -3256,6 +3256,22 @@
     if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
     const q = Object.assign({ action: 'add_item', token: settings.writeToken }, params);
+    if (params.dimension || params.attribute_list) {
+      // GET の互換経路では dimension / attribute_list を受けない。既存の JSON POST を使う。
+      const url = settings.openapiUrlMain || settings.openapiUrl;
+      if (!gasUrlOk(url)) throw new Error('OpenAPI同期GAS URLが不正です');
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 120000);
+      try {
+        const response = await fetch(url, {
+          method: 'POST', credentials: 'omit', signal: ac.signal,
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(q),
+        });
+        const data = await response.json();
+        if (!response.ok || !data || !data.ok) throw new Error((data && data.error) || '公式API出品に失敗');
+        return data;
+      } finally { clearTimeout(timer); }
+    }
     const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
     // ★出品作成は【投げ直さない】。gasCall は書き込みを1回に制限しているのに、ここだけ jsonp を直に呼んでいて2回投げていた。
     //   1回目でShopeeに出品が作られ、返事だけが120秒以内に戻らなかった場合、2回目で同じ商品がもう一つできる。
@@ -3324,12 +3340,12 @@
       return true;
     } catch (e) { alert('削除に失敗: ' + e.message); return false; }
   }
-  async function openapiUnlistItem(shopId, itemId, unlist) {
-    if (!settings.openapiUrl) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
+  async function openapiUnlistItem(shopId, itemId, unlist, url = settings.openapiUrl) {
+    if (!url) throw new Error('⚙️設定に「OpenAPI同期GAS URL」を入れてください');
     if (!settings.writeToken) throw new Error('⚙️設定に「WRITE_TOKEN」を入れてください');
     const q = { action: 'unlist_item', token: settings.writeToken, shop_id: shopId, item_id: itemId, unlist: unlist ? 1 : 0 };
     const qs = Object.keys(q).map(k => k + '=' + encodeURIComponent(q[k])).join('&');
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000, true);
+    const res = await jsonp(url + (url.includes('?') ? '&' : '?') + qs, 60000, true);
     if (!res || !res.ok) throw new Error((res && res.error) || '公開/非公開の切替に失敗');
     return res;
   }
@@ -5340,6 +5356,15 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "第三SG・新品1カタログ": "Third SG shop — one new listing",
+    "対象は maneki_neko_japan.sg（1938012197）の Tombow MONO PE-01A です。": "Target: Tombow MONO PE-01A at maneki_neko_japan.sg (1938012197).",
+    "カテゴリ・ブランド・必須属性を確認": "Check category, brand and required attributes",
+    "確認済みの出品データ（JSON）": "Verified listing data (JSON)",
+    "公開内容を確認": "Review listing details",
+    "第三SGで1カタログ公開": "Publish one listing in the third SG shop",
+    "通常の出品入力を残したまま第三SGの新品を準備します。": "Prepare a new item for the third SG shop without replacing the current composer inputs.",
+    "第三SGの新品公開": "Publish a new item in the third SG shop",
+    "第三SGの新品公開を準備する入口を追加": "Add a preparation path for publishing a new item in the third SG shop",
     "。商品名が長い場合も照合番号を省略しません。": ". The reference is kept even when the item name is long.",
     "PayPalリンクの商品名に照合番号を残す": "Keep the reference number in PayPal link item names",
     "この価格で今回だけ続ける": "Continue at this price once",
@@ -27353,6 +27378,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-09', items: ['<b>第三SGの新品公開を準備する入口を追加</b>。'] },
     { date: '2026-11-08', items: [
       '🎰 <b>一番くじのカタログが「重複」で作れない件を直しました</b>。トレカの巡回が設定の親SKU（ICHIBAN_KUJI_… 等）も読むようにし、既にあるカタログに足します。重複で断られた国はその日は作り直しません。',
       '⏸ <b>Yahoo に弾かれにくく</b>。検索の間を空け、休みの終わりを台ごとにずらしました。弾かれた時刻・台・番号と、枠で見送った時刻・台を別に残します。休み中の台の機種は写真集めで先に集めます。',
@@ -53559,6 +53585,217 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return w;
   }
 
+  // 初回の第三SGだけ。通常コンポーザーの listState / 自動保存とは共有しない。
+  const SHOP3_SG_PILOT_ID = '1938012197';
+  const SHOP3_SG_PILOT_RECEIPT = 'smdShop3SgTombowPilot';
+  async function shop3SgPilotMeta() {
+    const registry = await acctReadAll();
+    const matches = (registry.rows || []).filter(row => String(row.shop_id) === SHOP3_SG_PILOT_ID);
+    if (matches.length !== 1 || matches[0].cc !== 'SG' || matches[0].status !== 'new' ||
+        String(matches[0].label).toLowerCase() !== 'maneki_neko_japan.sg') throw new Error('第三SGの登録を照合できません');
+    const read = (action, args = {}) => gasCall({ action, shop_id: SHOP3_SG_PILOT_ID, _url: settings.openapiUrlMain || settings.openapiUrl, ...args }, 35000);
+    const cats = await read('get_categories');
+    const normalize = (s) => String(s).toLowerCase().replace(/&amp;/g, '&').replace(/\s*>\s*/g, ' > ').trim();
+    const path = 'Home & Living > Stationery & Supplies > Eraser & Correction Supplies';
+    const rows = Object.entries(cats.map || {}).filter(([, c]) => c.hc === 0 && normalize(c.p) === normalize(path));
+    if (String(cats.shop_id) !== SHOP3_SG_PILOT_ID || rows.length !== 1 || !/^\d+$/.test(rows[0][0])) throw new Error('第三SGで対象の末端カテゴリを照合できません');
+    const categoryId = Number(rows[0][0]);
+    const attrs = await read('get_attributes', { category_id: categoryId, language: 'en' });
+    if (!Array.isArray(attrs.data) || attrs.data.some(a => !Number.isSafeInteger(Number(a.attribute_id)) || typeof a.mandatory !== 'boolean')) throw new Error('必須属性を読み取れません');
+    const brands = await read('get_brand_list', { category_id: categoryId, q: 'Tombow' });
+    const tombow = (brands.brands || []).filter(b => /^tombow(?:\s|$)/i.test(String(b.n).trim()) && Number(b.id) > 0);
+    if (!tombow.length) throw new Error('TombowのブランドIDを確認できません');
+    return { categoryId, path, attrs: attrs.data, brands: tombow };
+  }
+
+  function shop3SgPilotPayload(input, meta, now) {
+    const title = String(input.title || '').trim(), desc = String(input.description || '').trim();
+    const used = /\bused\b|\bpre[\s-]*owned\b|\bsecond[\s-]*hand\b|中古|二手|usad[oa]/i;
+    if (!/\bTombow\b/i.test(title) || !/\bMONO\b/i.test(title) || !/\bPE-01A\b/i.test(title) || title.length > 100 ||
+        desc.length < 20 || desc.length > 2800 || used.test(title) || used.test(desc)) throw new Error('新品のTombow MONO PE-01Aの英語タイトルと説明を確認してください');
+    const brand = meta.brands.find(b => Number(b.id) === input.brandId);
+    if (!brand) throw new Error('確認済みのTombowブランドIDを指定してください');
+    const defs = new Map(meta.attrs.map(a => [Number(a.attribute_id), a]));
+    const attrs = input.attributes;
+    if (!Array.isArray(attrs)) throw new Error('属性を配列で入力してください');
+    const usedAttrs = new Set();
+    for (const a of attrs) {
+      const d = defs.get(a.attribute_id), values = a.attribute_value_list;
+      if (!d || usedAttrs.has(a.attribute_id) || !Array.isArray(values) || !values.length ||
+          values.length > (Number(d.max_values) || (d.multi ? 2 : 1))) throw new Error('属性の番号・件数を確認してください');
+      usedAttrs.add(a.attribute_id);
+      for (const v of values) {
+        const options = (d.options || []).filter(o => Number(o.id) > 0);
+        if (options.length ? !options.some(o => Number(o.id) === v.value_id) :
+          v.value_id !== 0 || !String(v.original_value_name || '').trim()) throw new Error('属性の値を確認してください');
+        if (v.value_unit && !(d.units || []).some(unit => String(unit.unit || unit.name || unit) === v.value_unit)) throw new Error('属性の単位を確認してください');
+      }
+    }
+    if (meta.attrs.some(a => a.mandatory && !usedAttrs.has(Number(a.attribute_id)))) throw new Error('Shopeeの必須属性が不足しています');
+    const { weightG, length, width, height, basis, evidence } = input.package || {};
+    const dims = [length, width, height];
+    if (!['measured', 'estimated'].includes(basis) || !String(evidence || '').trim() ||
+        !Number.isFinite(weightG) || weightG <= 0 || weightG > 500 ||
+        dims.some(d => !Number.isInteger(d) || d <= 0 || d > 30) || length + width + height > 60 ||
+        (basis === 'estimated' && (weightG >= 450 || Math.max(...dims) >= 27 || length + width + height >= 54))) throw new Error('梱包寸法と重量・根拠を確認してください');
+    const source = input.photo || {};
+    const https = (s) => { try { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password; } catch (_) { return false; } };
+    if (!https(source.url) || !https(source.source) || !https(source.license) || !String(source.credit || '').trim()) throw new Error('写真のURL・出典・ライセンス・作者表示が必要です');
+    if (input.checks?.slot !== true || input.checks?.dispatch !== true || input.checks?.duplicate !== true || input.checks?.photoRights !== true)
+      throw new Error('出品枠・SLS期限・重複・写真の利用権を確認してください');
+    const rows = input.models;
+    if (!Array.isArray(rows) || rows.length !== 2 || rows.map(r => r.pack).sort((a,b)=>a-b).join(',') !== '10,20')
+      throw new Error('10個入りと20個入りの2明細を入力してください');
+    const rg = regionByCc('SG');
+    if (!rg || !(rg.rateJpy > 0) || !settings.priceFees?.SG || !settings.priceSls?.SG) throw new Error('SGの為替・手数料・SLS設定を確認してください');
+    const seen = new Set();
+    const variations = rows.map(row => {
+      const asin = String(row.asin || '').trim().toUpperCase();
+      const checked = Date.parse(row.checkedAt);
+      if (!/^[A-Z0-9]{10}$/.test(asin) || seen.has(asin) || row.newAvailable !== true ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?\+09:00$/.test(String(row.checkedAt || '')) ||
+          !Number.isFinite(checked) || checked > now || now - checked >= 86400000 ||
+          !Number.isSafeInteger(row.costJpy) || row.costJpy <= 0 || row.stock !== 1)
+        throw new Error('各明細の子ASIN・直近の新品在庫・送料込み仕入額・在庫1を確認してください');
+      seen.add(asin);
+      const target = row.costJpy <= 1000 ? 500 : 1500;
+      const opts = { weightG, dimW: width, dimH: height, dimD: length };
+      const price = row.price === undefined ? pcSolvePrice('SG', row.costJpy, target, opts, rg.priceUnit || 1) : row.price;
+      if (!Number.isFinite(price) || price <= 0 || Math.abs(price * 100 - Math.round(price * 100)) > 1e-8 ||
+          !(priceProfitFor('SG', row.costJpy, price, opts).profit >= target))
+        throw new Error('各明細の粗利基準を満たすSGD価格を確認してください');
+      return { name: row.pack + ' Pieces', price, stock: row.stock, sku: 'AMZ_' + asin };
+    });
+    const prices = variations.map(v => v.price);
+    if (Math.max(...prices) > Math.min(...prices) * 5) throw new Error('バリエーションの価格差が5倍を超えています');
+    const description = desc + '\n\nPhoto: ' + source.credit + '\nSource: ' + source.source + '\nLicense: ' + source.license;
+    if (description.length > 3000) throw new Error('写真の出典込みの説明を3000文字以下にしてください');
+    return { shop_id: SHOP3_SG_PILOT_ID, item_name: title, description, price: Math.min(...prices),
+      stock: variations[0].stock, weight: weightG / 1000, images: [source.url], condition: 'NEW', publish: false,
+      category_id: meta.categoryId, brand_id: Number(brand.id), dimension: { package_length: length, package_width: width, package_height: height },
+      attribute_list: attrs, promo: false, tier_name: 'Pack size', variations };
+  }
+
+  function shop3SgPilotVerified(full, itemId, draft, status, coverId) {
+    const base = full?.base;
+    const models = full?.model?.models;
+    const dim = base?.dimension || {};
+    const weightMatches = Math.abs(Number(base?.weight) - draft.weight) < 0.0001;
+    const normalize = (text) => String(text || '').trim().replace(/\s+/g, ' ');
+    const attrsMatch = draft.attribute_list.every(sent => {
+      const values = (base?.attribute_list || []).find(a => Number(a.attribute_id) === sent.attribute_id)?.attribute_value_list || [];
+      return sent.attribute_value_list.every(v => values.some(a => Number(a.value_id || 0) === v.value_id &&
+        (v.value_id !== 0 || normalize(a.original_value_name) === normalize(v.original_value_name)) &&
+        (!v.value_unit || a.value_unit === v.value_unit)));
+    });
+    return String(base?.item_id) === String(itemId) && base?.condition === 'NEW' && base?.item_status === status &&
+      Number(base.category_id) === draft.category_id && Number(base.brand?.brand_id) === draft.brand_id && weightMatches &&
+      normalize(base.item_name) === normalize(draft.item_name) && normalize(base.description) === normalize(draft.description) && attrsMatch &&
+      (base.image?.image_id_list || []).includes(coverId) &&
+      Object.keys(draft.dimension).every(k => Number(dim[k]) === draft.dimension[k]) &&
+      Array.isArray(models) && models.length === draft.variations.length &&
+      draft.variations.every(v => models.some(m => Number(m.model_id) > 0 && m.sku === v.sku && m.name === v.name &&
+        Number(m.stock) === v.stock && Math.abs(Number(m.price) - v.price) < 0.0001));
+  }
+
+  async function shop3SgPublishPilot(draft, progress) {
+    if (!navigator.locks?.request || !settings.writeToken || !gasUrlOk(settings.openapiUrlMain || settings.openapiUrl) ||
+        draft.shop_id !== SHOP3_SG_PILOT_ID || draft.condition !== 'NEW' || draft.publish !== false)
+      throw new Error('第三SGの安全条件を確認できません');
+    shopeeWriteGuard('第三SGの新品を公開', draft);
+    return navigator.locks.request(SHOP3_SG_PILOT_RECEIPT, { ifAvailable: true }, async lock => {
+      if (!lock || localStorage.getItem(SHOP3_SG_PILOT_RECEIPT)) throw new Error('送信済み、または結果の照合が必要です');
+      const record = (step, id = '') => localStorage.setItem(SHOP3_SG_PILOT_RECEIPT, JSON.stringify({ step, id, at: Date.now() }));
+      const verify = async (id, status, coverId) => {
+        const request = { action: 'get_item_full', shop_id: SHOP3_SG_PILOT_ID, item_id: id, _url: settings.openapiUrlMain || settings.openapiUrl };
+        const first = await gasCall(request, 45000);
+        if (shop3SgPilotVerified(first.data, id, draft, status, coverId)) return;
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        const second = await gasCall(request, 45000);
+        if (!shop3SgPilotVerified(second.data, id, draft, status, coverId)) throw new Error('Shopeeの商品・明細・梱包情報が一致しません');
+      };
+      record('create_requested');
+      progress('第三SGへ送信中…');
+      const created = await openapiAddItem(draft);
+      const id = String(created.item_id || '');
+      if (!/^\d+$/.test(id) || String(created.shop_id) !== SHOP3_SG_PILOT_ID) throw new Error('作成結果の店または商品IDを照合できません');
+      record('created', id);
+      if (created.tier_init !== 'ok') throw new Error('明細の設定に失敗しました。商品ID ' + id);
+      const coverId = created.image_ids?.[0];
+      if (!coverId) throw new Error('表紙画像のIDを確認できません');
+      progress('公開前にShopeeの明細を照合中…');
+      await verify(id, 'UNLIST', coverId);
+      record('publish_requested', id);
+      await openapiUnlistItem(SHOP3_SG_PILOT_ID, id, false, settings.openapiUrlMain || settings.openapiUrl);
+      await verify(id, 'NORMAL', coverId);
+      record('published', id);
+      return id;
+    });
+  }
+
+  function openShop3SgPilot() {
+    const dialog = document.createElement('dialog');
+    dialog.style.cssText = 'width:min(740px,92vw);max-height:85vh;overflow:auto;padding:16px;border:1px solid #aaa;border-radius:8px';
+    dialog.innerHTML = `<h3>第三SG・新品1カタログ</h3>
+      <p>対象は maneki_neko_japan.sg（1938012197）の Tombow MONO PE-01A です。</p>
+      <button type="button" class="smd-btn sg-meta">カテゴリ・ブランド・必須属性を確認</button>
+      <pre class="sg-meta-result" style="white-space:pre-wrap;max-height:180px;overflow:auto"></pre>
+      <label><span>確認済みの出品データ（JSON）</span><textarea class="sg-data" rows="11" style="display:block;width:100%;box-sizing:border-box"></textarea></label>
+      <button type="button" class="smd-btn sg-review">公開内容を確認</button>
+      <button type="button" class="smd-btn sg-publish" disabled>第三SGで1カタログ公開</button>
+      <button type="button" class="smd-btn sg-close">閉じる</button>
+      <pre class="sg-result" style="white-space:pre-wrap" aria-live="polite"></pre>`;
+    document.body.appendChild(dialog);
+    const $d = s => dialog.querySelector(s);
+    const publish = $d('.sg-publish'), result = $d('.sg-result'), data = $d('.sg-data');
+    const metaButton = $d('.sg-meta'), review = $d('.sg-review'), close = $d('.sg-close');
+    let meta, prepared, busy = false;
+    dialog.onclose = () => dialog.remove();
+    close.onclick = () => dialog.close();
+    dialog.oncancel = e => { if (busy) e.preventDefault(); };
+    data.oninput = () => { prepared = null; publish.disabled = true; result.textContent = ''; };
+    metaButton.onclick = async () => {
+      metaButton.disabled = true; publish.disabled = true; meta = null; prepared = null;
+      const out = $d('.sg-meta-result');
+      out.textContent = '確認中…';
+      try {
+        meta = await shop3SgPilotMeta();
+        out.textContent = JSON.stringify({ categoryId: meta.categoryId, path: meta.path, brands: meta.brands,
+          mandatoryAttributes: meta.attrs.filter(a => a.mandatory) }, null, 2);
+      } catch (e) { out.textContent = e.message; }
+      finally { metaButton.disabled = false; }
+    };
+    review.onclick = () => {
+      prepared = null; publish.disabled = true;
+      try {
+        if (!meta) throw new Error('カテゴリ・ブランド・必須属性を先に確認してください');
+        prepared = shop3SgPilotPayload(JSON.parse(data.value), meta, Date.now());
+        result.textContent = JSON.stringify(prepared, null, 2);
+        publish.disabled = false;
+      } catch (e) { result.textContent = e.message; }
+    };
+    publish.onclick = async (event) => {
+      if (!event.isTrusted || busy || !prepared) return;
+      const before = JSON.stringify(prepared);
+      busy = true; publish.disabled = true; close.disabled = true; data.disabled = true; metaButton.disabled = true; review.disabled = true;
+      try {
+        const current = shop3SgPilotPayload(JSON.parse(data.value), meta, Date.now());
+        if (JSON.stringify(current) !== before) throw new Error('入力が変わりました。公開内容を確認し直してください');
+        const id = await shop3SgPublishPilot(current, msg => { result.textContent = msg; });
+        const buyer = document.createElement('a');
+        buyer.href = 'https://shopee.sg/product/' + SHOP3_SG_PILOT_ID + '/' + id;
+        buyer.target = '_blank'; buyer.rel = 'noopener noreferrer';
+        buyer.textContent = '購入者ページを開く';
+        result.textContent = '第三SGで公開を確認しました。商品ID ' + id + '\n';
+        result.append(buyer);
+      } catch (e) {
+        let receipt = null; try { receipt = JSON.parse(localStorage.getItem(SHOP3_SG_PILOT_RECEIPT)); } catch (_) {}
+        result.textContent = e.message + (receipt ? '\n送信控え ' + receipt.step + ' / ' + (receipt.id || '商品ID未確認') + '\n再送せず、第三SGの出品一覧で結果を確認してください。' : '');
+      } finally { busy = false; close.disabled = false; }
+    };
+    dialog.showModal();
+  }
+
   function renderList() {
     const body = document.getElementById('list-composer');
     if (!listState.built) {
@@ -53568,6 +53805,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <div style="flex:1 1 540px;min-width:0">
         <div class="pagehelp" style="margin-bottom:8px">
           <b>この画面：新しい商品をShopeeに出品する下書きを作ります。</b>
+          <button class="smd-btn b-write" id="li-sg-pilot" type="button" title="通常の出品入力を残したまま第三SGの新品を準備します。">第三SGの新品公開</button>
           <span class="step">1</span>出品タイプを選ぶ　<span class="step">2</span>「1〜4」を入力（<span class="req">必須</span>＝入れないと出せません）　<span class="step">3</span>下の「5.各国へ転記」で出品。
           <span style="color:#5a6b8c;font-size:11px">（入力は自動保存＝ポータル内の下書き。Shopee発行は各国転記から）</span>
         </div>
@@ -53812,6 +54050,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       applyZoom();
       // 下書き（ポータル内保存）
       listDraftDropdown();
+      document.getElementById('li-sg-pilot').addEventListener('click', openShop3SgPilot);
       document.getElementById('li-draftsave').addEventListener('click', () => {
         const def = listState.name || '無題';
         const title = prompt('下書きの名前:', def); if (title == null) return;
