@@ -12900,8 +12900,11 @@
           rows.forEach(x => { if (!x.shopId) x.shopId = presumed; });
           /* 同期（syncAll）の最中は今までどおりライブの行だけ＝syncAll はこの国の行を全部 orders へ書くので、重ねた DB の行（古いことがある）を書き戻させない */
           const liveSn = new Set(rows.map(x => x.sn));
-          const merged = (state.orders.dbSeedOk && !syncRunning) ? rows.concat(seed.filter(d => !d._live && !liveSn.has(d.sn))) : rows;
-          state.orders.perCountry.set(region.cc, { status: 'ok', msg: '', rows: merged });
+          /* ★2026-11-08 本人「thで括ったときに出てこない」（TH 2店舗目 261103C67EBS4H・期日超過）：同期（syncAll）の最中はライブの行（ログイン中の本店の分だけ）で国の行を置き換えていたので、
+             同期の後は2店舗目の注文・ライブに出ない古い行が画面から消え、帯も「本日の発送は完了しました」になっていた。
+             → 画面の行はいつも DB の行を重ねた形（merged）にし、DB へ書き戻す行（syncAll）はライブの行だけ（liveRows）に分けて持つ */
+          const merged = state.orders.dbSeedOk ? rows.concat(seed.filter(d => !d._live && !liveSn.has(d.sn))) : rows;
+          state.orders.perCountry.set(region.cc, { status: 'ok', msg: '', rows: merged, liveRows: rows });
           state.orders.liveAt = new Date().toISOString(); updateOrdNote(false);
           renderOrders();
         }).catch(e => {
@@ -27201,6 +27204,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-08', items: [
+      '🐛 <b>注文管理：同期の後に2店舗目の注文が消えていたのを直した</b>（本人「thで括ったときに出てこない」・TH 2店舗目の期日を過ぎた注文）：同期の最中はライブで取れた本店の分だけで国の行を置き換えていたので、同期の後は2店舗目の注文が画面から消え、上の帯も「本日の発送は完了しました」になっていた。画面には DB の行を重ねた形を出し、DB へ書き戻すのはライブの行だけにした（全部の国）。',
+    ]},
     { date: '2026-11-07', items: [
       '⚠ <b>AI の料金のバー：実績が24時間より古い時は「⚠ 実績 N時間前」を赤で出す</b>（事業本部・実績の取り込みが 11/5 22時から止まっていた）：止まっている間の分は今月の額に入らないので、古いと分かるように。',
       '📶 <b>通信量を減らした（Supabase の egress・1日約9GB）</b>：①ポータルを開いてすぐの出品の表・在庫の表の丸ごと読みは、この端末の控えが新しければ使う（出品10分・在庫5分まで・開いた後の画面の中の読み直しは今までどおり毎回読む・ポータルから書いたら控えを捨てる）②🤖の写真の控え（8つ・約6MB）は、更新時刻が変わった物だけ読む。画面の動きは変えていない。',
@@ -57799,7 +57805,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const orderRows = [];
       targets.forEach(region => {
         const oc = state.orders.perCountry.get(region.cc);
-        if (oc && oc.status === 'ok') oc.rows.forEach(o => orderRows.push(orderRowToDb(o)));
+        if (oc && oc.status === 'ok') (oc.liveRows || oc.rows).forEach(o => orderRows.push(orderRowToDb(o)));   /* ★11/8 書き戻すのはライブの行だけ（画面の行には DB の行を重ねている） */
       });
       await upsertOrdersPreservingShop(orderRows, targets); // 判定できた国だけshop_idを刻む＋pre_order列フォールバック（未判別国は既存shop_id保持）
       log[log.length - 1] = `📦 注文 ${orderRows.length}件 保存 ✅`; st(log.join('\n'));
