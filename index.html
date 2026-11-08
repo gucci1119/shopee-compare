@@ -5367,6 +5367,11 @@
     "入力内容だけで確認し、ShopeeやKeepaに照会しません。": "Preview using the entered data without requesting Shopee or Keepa.",
     "確認根拠を含む入力をJSONファイルに保存します。": "Save the inputs and evidence as a JSON file.",
     "第三店のAmazon新品候補を下見": "Preview third-shop Amazon candidates",
+    "照合済みのPayPal円受取を損益に反映": "Include reconciled PayPal receipts in profit",
+    "利益管理表のAY列から、照合済みの円額を注文ごとに一度だけ計上します。": "Only reconciled JPY amounts from column AY are counted, once per order.",
+    "PayPalの照合・円換算待ち等（粗利から除外）": "Orders with pending PayPal reconciliation or conversion (excluded from gross profit)",
+    "PayPalの照合・円換算待ち等（PayPal分は売上に未計上）": "Pending PayPal reconciliation or conversion (PayPal amounts excluded from sales)",
+    "Shopeeのみ": "Shopee only",
     "VNのまとめ買いで各商品の個別掲載額を計算": "Calculate individual listing prices for VN bundle quotes",
     "初回の見積もりに、購入か見送りかの返信をお願いする文を追加": "Initial quotes now ask customers to reply whether they want to buy or pass",
     "第三SG・新品1カタログ": "Third SG shop — one new listing",
@@ -20111,7 +20116,6 @@
     const costBySn = {}; costs.forEach(c => { costBySn[c.cc + ':' + c.sn] = c; });
     // ★PayPal差分＝Shopeeの入金とは別に買主から受け取った円（主にBR）。利益明細では既に粗利へ足しているので、月次でも同じにする
     const shMap = (shKv && shKv[0] && shKv[0].v && shKv[0].v.items) || {};
-    const pplOf = o => Number((shMap[o.cc + ':' + o.sn] || {}).paypal_yen) || 0;
     const M = {}, M2 = {}; // M2[ym][cc] = 国×月の {n,dep,cost,gn}（純マージンヒートマップ用・同じ突合ロジック）
     orders.forEach(o => {
       if (o.tab === 600) return; // キャンセル除外
@@ -20139,8 +20143,10 @@
       // ★入金は【仕入が分からなくても】足す。両方そろった分だけで数えていたため、
       //   「入金は分かっているが仕入が未紐付け」の注文は入金までまるごと0になり、
       //   週次報告の「売上（入金ベース）」が月初ほど過少に出ていた（2026-09-06に発覚）。
-      if (dep != null) { m.depAll = (m.depAll || 0) + dep * rate + pplOf(o); m.depN = (m.depN || 0) + 1; }
-      if (dep != null && cost != null) { const dj = dep * rate + pplOf(o); m.dep += dj; m.cost += cost; m.gn++; cc2.dep += dj; cc2.cost += cost; cc2.gn++; }
+      const paypal = orderPayPalReceipt(shMap[key], o);
+      const dj = dep * rate + (paypal.yen ?? 0);
+      if (dep != null) { m.depAll = (m.depAll || 0) + dj; m.depN = (m.depN || 0) + 1; }
+      if (dep != null && cost != null && !paypal.pending) { m.dep += dj; m.cost += cost; m.gn++; cc2.dep += dj; cc2.cost += cost; cc2.gn++; }
     });
     // 国×月 純マージン(粗利率=粗利/入金)ヒートマップHTML（直近6か月・データのある国のみ・信頼度低いセルは薄く）
     const heatMonths = [...new Set(Object.keys(M2))].sort().reverse().slice(0, 6);
@@ -23549,7 +23555,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function plCtx(ym, expRows, extras) {
     const ok = pf.grossYm === ym && typeof pf.grossTotal === 'number';
     const c = { ym, ok, gross: ok ? pf.grossTotal : null, grossN: pf.grossN || 0, fixN: pf.grossFixN || 0, provN: pf.grossProvN || 0, cxl: ok ? (Number(pf.cxlLoss) || 0) : 0, cxlN: pf.cxlN || 0 };
-    let units = 0, sales = 0, depFix = 0, depProv = 0, depInit = 0, cost = 0, pp = 0, n = 0, noCost = 0, noDep = 0, mvN = 0, mvJpy = 0, mvBase = 0, lateN = 0, flatN = 0, provAllN = 0;
+    let units = 0, sales = 0, depFix = 0, depProv = 0, depInit = 0, cost = 0, pp = 0, n = 0, noCost = 0, noDep = 0, paypalPending = 0, mvN = 0, mvJpy = 0, mvBase = 0, lateN = 0, flatN = 0, provAllN = 0;
     if (ok) (pf.orders || []).forEach(o => {
       if (o.tab === 200 || o.tab === 600 || !regionByCc(o.cc)) return;
       n++; units += (o.items || []).reduce((t, it) => t + (Number(it && it.qty) || 1), 0); const r = ordRate(o); sales += pfSales(o) * r;
@@ -23558,9 +23564,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (di && di.init != null && di.amt != null) { const a0 = Number(di.init), a1 = Number(di.amt); depInit += a0 * r;
         if (a1 !== a0) { mvN++; mvJpy += (a1 - a0) * r; mvBase += a0 * r; } else if (di.initLate) lateN++; else flatN++; }
       const co = pfCost(o); if (co == null) noCost++; else cost += co;
-      pp += pfPaypal(o);
+      const paypal = pfPaypal(o);
+      pp += paypal.yen ?? 0;
+      if (paypal.pending) paypalPending++;
     });
-    Object.assign(c, { n, units, sales, depFix, depProv, depInit, cost, pp, noCost, noDep, mvN, mvJpy, mvBase, lateN, flatN, provAllN });   /* provAllN＝仕入の有無に関係なく暫定の注文数（grossProvN は粗利が出せた分だけ） */
+    Object.assign(c, { n, units, sales, depFix, depProv, depInit, cost, pp, noCost, noDep, paypalPending, mvN, mvJpy, mvBase, lateN, flatN, provAllN });   /* provAllN＝仕入の有無に関係なく暫定の注文数（grossProvN は粗利が出せた分だけ） */
     const rows = Array.isArray(expRows) ? expRows : [];
     const g = { ship: 0, pack: 0, labor: 0, place: 0, tool: 0, sell: 0, other: 0, invest: 0 };
     rows.forEach(r => { g[plGroupOf(r.category)] += Number(r.amount) || 0; });
@@ -23668,6 +23676,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const warn = [];
     if (c.noCost) warn.push(`仕入額が未入力の注文 ${c.noCost}件（粗利に入っていません）`);
     if (c.noDep) warn.push(`入金がまだ無い注文 ${c.noDep}件`);
+    if (c.paypalPending) warn.push(L_('PayPalの照合・円換算待ち等（粗利から除外）') + ' ' + c.paypalPending);
     if (!c.expOk) warn.push('経費を読み込めませんでした（経費0円のまま出ています）');
     c.remind.forEach(r => warn.push(`「${esc(r.name)}」（${esc(r.ecat)}）が未登録${r.amount ? '・見込み ' + y(r.amount) : ''}`));
     const gm = c.g;
@@ -26614,11 +26623,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     //   つまり手で入れた時点の値のまま固まる。**いつの値かを画面に出す**（申告に使う数字なので）。
     const amtAt = (amtKv && amtKv[0] && amtKv[0].updated_at) || '';
     const amtOld = amtAt ? (Date.now() - Date.parse(amtAt) > 35 * 86400000) : false;
-    let sales = 0, buyerPaid = 0, feeTotal = 0, ppl = 0, nOrd = 0, nDep = 0, nFromSheet = 0;
+    let sales = 0, buyerPaid = 0, feeTotal = 0, ppl = 0, paypalPending = 0, nOrd = 0, nDep = 0, nFromSheet = 0;
     orders.forEach(o => {
       const d = ymdOf(o);
       if (d.slice(0, 4) !== Y || o.tab === 600 || o.tab === 200) return;
       nOrd++;
+      const paypal = orderPayPalReceipt(shMap[o.cc + ':' + o.sn], o);
+      if (paypal.pending) paypalPending++;
       const r = fxRate(o.cc, d) || 0;
       const i = incBySn[o.cc + ':' + o.sn];
       let local = (i && i.amount != null) ? Number(i.amount) : null;
@@ -26631,7 +26642,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       }
       if (local == null) return;
       sales += local * r; nDep++;
-      ppl += Number((shMap[o.cc + ':' + o.sn] || {}).paypal_yen) || 0;
+      ppl += paypal.yen ?? 0;
     });
     sales += ppl;
 
@@ -26719,7 +26730,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <button class="smd-btn" id="tax-csv" data-guide-name="⬇ CSV（税理士へ渡す用）" data-guide="選んだ年の損益の内訳をCSVで保存します。為替データが未読込、または店を絞り込み中は出力できません。" style="margin-left:8px">⬇ CSV（税理士へ渡す用）</button>
         <span class="smd-dim" style="font-size:11.5px;margin-left:8px">円換算は<b>注文日のレート</b>（💱為替の日次レート）</span></div>` +
 
-      coverBox +
+      coverBox + (paypalPending ? `<div class="smd-dim">${L_('PayPalの照合・円換算待ち等（PayPal分は売上に未計上）')} ${paypalPending}</div>` : '') +
       `<div class="tool-card" style="margin:0 0 12px;max-width:760px">
         <div style="font-weight:800;font-size:15px;margin-bottom:6px">📊 ${Y}年 損益計算書</div>
         <table class="pf-table">
@@ -26782,7 +26793,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!FXD.days || !Object.keys(FXD.days).length) { alert('日次の為替レートを読めていないので出しません（古い既定のレートで換算した数字になるため）。💱為替を開くか、画面を更新してください'); return; }   /* ★レビュー#16 */
       if (plAcctFiltered()) { alert('上のアカウント選択で店を絞り込み中は出しません（売上は1店・仕入と経費は全店で混ざるため）。アカウントを「すべて」に戻してください'); return; }   /* ★レビュー#1 */
       const rows = [['項目', '科目', '金額(円)', '備考']];
-      rows.push(['売上高', '売上高', Math.round(sales), 'Shopee入金(注文日レート換算)＋PayPal差分 / ' + nDep + '件']);
+      rows.push(['売上高', '売上高', Math.round(sales), 'Shopee入金(注文日レート換算)＋照合済みPayPal / ' + nDep + '件' + (paypalPending ? ' / PayPal照合・円換算待ち等 ' + paypalPending + '件' : '')]);
       rows.push(['返金（手で記録した分）', '売上高(控除)', -Math.round(refund), '正式返品はShopee入金の減額として売上高に反映済み']);
       rows.push(['期首棚卸高', '期首商品棚卸高', Math.round(openVal), tax.cfg.open[Y] != null && tax.cfg.open[Y] !== '' ? '実地棚卸(手入力)' : (openFromPrev != null ? '前年の期末棚卸高(手入力)を引継ぎ' : '在庫台帳から自動計算')]);
       rows.push(['当期仕入高', '仕入金額', Math.round(buys), nBuy + '件']);
@@ -27427,7 +27438,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
-    { date: '2026-11-09', items: ['<b>VNのまとめ買いで各商品の個別掲載額を計算</b>。', '<b>第三店のAmazon新品候補を下見</b>。'] },
+    { date: '2026-11-09', items: ['<b>照合済みのPayPal円受取を損益に反映</b>。', '<b>VNのまとめ買いで各商品の個別掲載額を計算</b>。', '<b>第三店のAmazon新品候補を下見</b>。'] },
     { date: '2026-11-09', items: ['<b>第三SGの新品公開を準備する入口を追加</b>。', '<b>初回の見積もりに、購入か見送りかの返信をお願いする文を追加</b>。'] },
     { date: '2026-11-08', items: [
       '🎰 <b>一番くじのカタログが「重複」で作れない件を直しました</b>。トレカの巡回が設定の親SKU（ICHIBAN_KUJI_… 等）も読むようにし、既にあるカタログに足します。重複で断られた国はその日は作り直しません。',
@@ -46720,10 +46731,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function paIsReq(e) { return /request\s*page|solicitar/i.test(String((e && e.name) || '')) || /^REQ_/i.test(String((e && e.sku) || '').trim()) || !!(e && PA.reqKeys && PA.reqKeys[e.cc + '|' + e.item_id]); }
   const PA_SHOPEE_STATES = { before: '倉庫スキャン前', pending: 'スキャン後・入金確定待ち', confirmed: 'Shopee入金確定' };
   const PA_PAYPAL_STATES = { expected: 'PayPal併用予定・未照合', conversion_pending: 'PayPal円換算待ち', received: 'PayPal正味受取を照合済み', unverified: 'PayPal受取の照合待ち', recorded: 'AY記録あり・照合待ち', unknown_method: '支払方法未確認' };
-  const paPayPalState = (sheet, request) => {
-    if (sheet?.paypal_state === 'shopee_only') return '';
-    return sheet?.paypal_state || (Number(sheet?.paypal_yen) > 0 ? 'recorded' : request ? 'unknown_method' : '');
-  };
+  function payPalReceipt(sheet, request = false) {
+    const amount = Number(sheet?.paypal_yen);
+    const positive = Number.isFinite(amount) && amount > 0;
+    const state = sheet?.paypal_state;
+    if (state === 'received' && positive) return { state, yen: amount, pending: false };
+    if (state === 'shopee_only' && !positive) return { state, yen: 0, pending: false };
+    // 古い取込や、状態と円額が矛盾するデータは実績に足さない。
+    if (state || positive) return { state: state === 'received' || state === 'shopee_only' ? 'unverified' : (state || 'recorded'), yen: null, pending: true };
+    return { state: request ? 'unknown_method' : '', yen: null, pending: request };
+  }
+  function orderPayPalReceipt(sheet, order) {
+    const request = (order.items || []).some(it => /^REQ_/i.test(String(it.sku || it.model_sku || '').trim()) || /request\s*page|solicitar/i.test(String(it.name || '')));
+    return payPalReceipt(sheet, request);
+  }
   const pfPayoutConfirmed = (dep, income, order) => ordScanned(order) && dep?.amt != null && (dep.observed || (income?.pending === false && ordStatusKey(order.status) === 'completed'));
   function paOrderReceipt(order, income, meta, sheet, cost, rate, request) {
     const scanned = ordScanned(order);
@@ -46731,12 +46752,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // pending=false は注文完了で再取得した控え。pending=true でも金額の変動が観測されれば確定に使う。
     const confirmed = pfPayoutConfirmed(dep, income, order);
     const shopee = confirmed ? 'confirmed' : scanned ? 'pending' : 'before';
-    const paypal = paPayPalState(sheet, request);
+    const receipt = payPalReceipt(sheet, request);
+    const paypal = receipt.state === 'shopee_only' ? '' : receipt.state;
     const shopeeYen = confirmed && rate > 0 ? Number(dep.amt) * rate : null;
-    const paypalYen = paypal === 'received' && Number(sheet.paypal_yen) > 0 ? Number(sheet.paypal_yen) : null;
-    const profit = shopeeYen != null && cost != null && (!paypal || paypalYen != null) ? shopeeYen + (paypalYen || 0) - cost : null;
+    const profit = shopeeYen != null && cost != null && !receipt.pending ? shopeeYen + (receipt.yen ?? 0) - cost : null;
     const recordedYen = (paypal === 'recorded' || paypal === 'unverified') && Number(sheet?.paypal_yen) > 0 ? Number(sheet.paypal_yen) : null;
-    return { shopee, paypal, shopeeYen, paypalYen, recordedYen, paypalLocal: sheet?.paypal_local, paypalCurrency: sheet?.paypal_currency, profit, cost, request };
+    return { shopee, paypal, shopeeYen, paypalYen: receipt.yen, recordedYen, paypalLocal: sheet?.paypal_local, paypalCurrency: sheet?.paypal_currency, profit, cost, request };
   }
   function paReceiptBadges(rows) {
     const counts = (key, labels) => Object.entries(labels).map(([k, label]) => {
@@ -56810,13 +56831,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const rate = ordRate(o) || 0, salesL = pfSales(o), sales = salesL * rate;
       let est = null;
       if (dep == null && cost != null && salesL > 0) { try { const pr = priceProfitFor(o.cc, cost, salesL); if (pr && isFinite(pr.profit)) { est = pr.profit; src = 'est'; } } catch (_) {} }
-      const known = (dep != null || est != null) && cost != null;
+      const paypal = pfPaypal(o);
+      const known = (dep != null || est != null) && cost != null && !paypal.pending;
       /* ★2026-11-05 本人「確定分だけか、概算含むか」：確定＝入金明細で入金が確定（倉庫スキャンの後）・または古い月の利益管理表の値。概算を含む（既定）＝期間に売れた全部（入金がまだ・仕入れが分からない物は概算） */
       const confirmed = known && ((src === 'real' && di && di.fixed) || src === 'sheet');
       const inMode = PR.basis === 'fixed' ? confirmed : true;
-      if (inP && !known && PR.basis !== 'fixed') { if (cost == null) tot.noCost++; else tot.noDep++; }
+      if (inP && !known && PR.basis !== 'fixed') { if (cost == null) tot.noCost++; else if (!paypal.pending) tot.noDep++; }
       if (inP && PR.basis === 'fixed' && !confirmed) tot.unconf = (tot.unconf || 0) + 1;
-      const pp = pfPaypal(o), g = !known ? 0 : (dep != null ? dep * rate + pp - cost : est + pp);
+      const pp = paypal.yen ?? 0, g = !known ? 0 : (dep != null ? dep * rate + pp - cost : est + pp);
       const ded = known ? sales - (g - pp + cost) - pp : 0;   /* 差し引き（手数料・送料など）＝売り値 − 入金 − PayPal差分 ⇒ 売り値 − 差し引き − 仕入れ ＝ 粗利 */
       if (inP && known && inMode) { tot[src] = (tot[src] || 0) + 1; if (src === 'real') tot.grossReal = (tot.grossReal || 0) + g; }
       const its = (o.items || []).length ? o.items : [{ name: '（品名なし）', qty: 1 }];
@@ -57315,7 +57337,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 仕入額: 手入力(costs) > 在庫連携(InventoryItemのPurchasePrice合計) の優先順
   const pfInv = o => (pf.invMap && pf.invMap.get(o.sn)) || [];
   const pfSheet = o => (pf.sheetMap && pf.sheetMap[o.cc + ':' + o.sn]) || null;  // 📗利益計算表の取り込み値（Order ID突合）
-  const pfPaypal = o => { const s = pfSheet(o); return (s && Number(s.paypal_yen)) || 0; };  // PayPal差分(円)＝追加入金。大半0
+  const pfPaypal = o => orderPayPalReceipt(pfSheet(o), o);
   // ★優先順位：①手入力 → ②在庫台帳（紐付けた在庫の仕入額）→ ③スプシ取込。
   //   以前は②と③が逆で、スプシに値があると在庫台帳を見ないため、🔎在庫候補で紐付けても数字が変わらなかった。
   //   スプシは将来切り離す方針なので、ポータル自前のデータ（在庫台帳）を先に見る。
@@ -57455,7 +57477,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const rg = regionByCc(o.cc); if (!rg) return;
       const di = pfDepInfo(o), dep = di ? di.amt : null, cost = pfCost(o);
       // ★会計値(純利益/確定申告CSVの元)は PayPal差分を含め、"表示専用"の🔒到着済トグル(strictCost)では絞らない（税額を静かに変えない）
-      if (dep != null && cost != null) { g += dep * ordRate(o) + pfPaypal(o) - cost; n++; if (di.fixed) fixN++; else provN++; }
+      const paypal = pfPaypal(o);
+      if (dep != null && cost != null && !paypal.pending) { g += dep * ordRate(o) + (paypal.yen ?? 0) - cost; n++; if (di.fixed) fixN++; else provN++; }
     });
     return { total: g, n: n, fixN: fixN, provN: provN };
   }
@@ -57499,8 +57522,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         case 'dep_prov': { const d = pfDepInfo(o); const v = d ? (d.init != null ? d.init : (!d.fixed ? d.amt : null)) : null; return v == null ? -1e15 : v * rgRate(o); }
         case 'dep_fix': { const d = pfDepInfo(o); return (d && d.fixed) ? d.amt * rgRate(o) : -1e15; }
         case 'cost': { const c = pfCost(o); return c == null ? -1e15 : c; }
-        case 'profit': { const d = pfDep(o), c = pfCost(o); return (d != null && c != null) ? d * rgRate(o) - c : -1e15; }
-        case 'rate': { const d = pfDep(o), c = pfCost(o); return (d != null && c != null && c) ? (d * rgRate(o) - c) / c : -1e15; }
+        case 'profit':
+        case 'rate': {
+          const d = pfDep(o), c = pfCost(o), paypal = pfPaypal(o);
+          if (d == null || c == null || paypal.pending || (key === 'rate' && !c)) return -1e15;
+          const profit = d * rgRate(o) + (paypal.yen ?? 0) - c;
+          return key === 'rate' ? profit / c : profit;
+        }
         case 'status': return ordStatusKey(o.status);
         default: return '';
       }
@@ -57553,7 +57581,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       `<div class="smd-dim" style="font-size:10.5px;margin-top:4px">手数料＝販売手数料＋サービス料＋決済手数料。入金＝手数料を引いた後にShopeeから受け取る額。粗利＝入金−仕入。${anyTax ? '<br>⚠️税込＝買主支払に<b>輸入税・送料（パススルー）</b>を多く含む国。率(手数料÷買主支払)が実態より低く出ますが、<b>手数料の実額は正しい値</b>です（特にBRの輸入税/Remessa Conforme）。' : ''}</div></details>`;
   }
 
-  const PF_PAYPAL_NOTE = '利益管理表のAY列から取り込んだ円額です。実際の受取額はPayPalの取引明細で確認してください。空欄や「—」の注文もPayPalを併用している場合があります。';
+  const PF_PAYPAL_NOTE = '利益管理表のAY列から、照合済みの円額を注文ごとに一度だけ計上します。';
+  function pfPayPalCell(receipt) {
+    if (receipt.state === 'received') return `<b style="color:#0f9d58">+${fmtJpy(receipt.yen)}</b>`;
+    if (receipt.state === 'shopee_only') return `<span class="smd-dim">${L_('Shopeeのみ')} ${fmtJpy(0)}</span>`;
+    if (!receipt.pending) return '<span class="smd-dim">—</span>';
+    const label = receipt.state === 'recorded' ? PA_PAYPAL_STATES.unverified : (PA_PAYPAL_STATES[receipt.state] || PA_PAYPAL_STATES.unverified);
+    return `<span style="color:#9a5800">${esc(L_(label))}</span>`;
+  }
   const pfMinColWidth = key => key === 'paypal' ? 108 : 32;
   let pfDetailScrollObserver = null;
 
@@ -57586,7 +57621,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function pfMonthlyProfitHtml(c, detailsOpen) {
     const ready = c.ok && c.expOk;
     const negative = c.net < 0;
-    const incomplete = ready && (c.noCost || c.noDep || c.provAllN || pf._failSheet || pf._failReturns || pf._failIssues || c.refund == null);
+    const incomplete = ready && (c.noCost || c.noDep || c.paypalPending || c.provAllN || pf._failSheet || pf._failReturns || pf._failIssues || c.refund == null);
     return `<div class="tool-card" style="margin:0 0 10px;max-width:none;padding:10px 14px">
       <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><b>月の経費差引後利益</b><span class="smd-dim">${esc(c.ym)}</span>
         <strong style="font-size:24px;color:${negative ? '#c5221f' : '#137333'};font-variant-numeric:tabular-nums">${ready ? (negative ? '▲ ' : '') + fmtJpy(Math.abs(c.net)) : '—'}</strong>
@@ -57677,7 +57712,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const _r2 = ordRate(o);
         if (d2) t.dep += d2.amt * _r2;
         if (c2 != null) t.cost += c2;
-        if (d2 && c2 != null) { t.profit += d2.amt * _r2 + pfPaypal(o) - c2; t.pairN++; }
+        const paypal = pfPaypal(o);
+        if (d2 && c2 != null && !paypal.pending) { t.profit += d2.amt * _r2 + (paypal.yen ?? 0) - c2; t.pairN++; }
       });
     }
     let _lastCc = null;
@@ -57700,14 +57736,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (depProv != null) tProv += depProv * _fr;
       if (depFix != null) tFix += depFix * _fr;
       // 真の売上＝Shopee入金＋PayPal差分（主にBR。差分をPayPalで別途徴収した分を上乗せ。大半は0）※ppl/depJpyは合算より前に宣言（TDZ回避）
-      const ppl = pfPaypal(o);
+      const paypal = pfPaypal(o), ppl = paypal.yen ?? 0;
       const depJpy = dep != null ? dep * _fr : null;
       if (cost != null) tCost += cost;
       if (ppl > 0) tPpl += ppl;
       // 粗利・ROIは仕入額と入金額の両方が判明した注文だけ計算。全く無い注文は利益計算未完了＝空欄。
       // 🔒到着済のみモード＝在庫Noが無い注文（＝仕入れた実物が到着待ち）は粗利計算から除外
       const stockOk = !pf.strictCost || pfStock(o);
-      const profit = (dep != null && cost != null && stockOk) ? (depJpy + ppl - cost) : null;
+      const profit = (dep != null && cost != null && stockOk && !paypal.pending) ? (depJpy + ppl - cost) : null;
       if (profit != null) { pairProfit += profit; pairN++; pairDep += depJpy + ppl; pairCost += cost; if (depInfo && depInfo.fixed) pairFixN++; else pairProvN++; }
       // 🔒到着済のみモードで「入金も原価も判明しているのに、在庫No無し(到着待ち)のため除外した」注文数
       else if (pf.strictCost && dep != null && cost != null && !pfStock(o)) strictSkipN++;
@@ -57812,7 +57848,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               return '<span class="smd-dim" style="font-size:10px" title="在庫紐付け・利益計算表の取込ともに未反映">—</span>'
                 + `<br><button class="pf-invsug" data-sn="${av(o.sn)}" data-cc="${av(o.cc)}" data-nm="${av(it.name || it.item_name || '')}" data-var="${av(it.variation || '')}" style="margin-top:3px;font-size:9.5px;padding:2px 7px;border:1px solid #cbbdf0;background:#faf8ff;color:#7a6ba7;border-radius:6px;cursor:pointer" title="この商品に充てられそうな在庫を、商品名の似具合と仕入日から探します">🔎 在庫候補</button>`;
             })()}</td>`,
-          paypal: () => `<td class="pf-paypal" style="font-size:11px">${first ? (ppl > 0 ? `<b style="color:#0f9d58">+${fmtJpy(ppl)}</b>` : '<span class="smd-dim">—</span>') : ''}</td>`,
+          paypal: () => first ? `<td${rs} class="pf-paypal" style="font-size:11px">${pfPayPalCell(paypal)}</td>` : '',
           cost: () => { const scost = Number((pfSheet(o) || {}).cost) || 0; return `<td>` +
             (first ? `<input type="number" class="pf-cost" data-cc="${o.cc}" data-sn="${esc(o.sn)}" value="${manual != null ? manual : ''}"` +
               ` placeholder="${invs.length && invSum ? (n > 1 ? '計 ' : '在庫: ') + invSum : (scost > 0 ? '📗表 ' + scost : '未入力')}"` +
@@ -58222,7 +58258,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const dep = pfDep(o), cost = pfCost(o);
       if (dep == null || cost == null || !cost) return;
       const fr = ordRate(o) || 0;
-      const d = dep * fr + (pfPaypal(o) || 0);
+      const paypal = pfPaypal(o);
+      if (paypal.pending) return;
+      const d = dep * fr + (paypal.yen ?? 0);
       if (d <= 0) return;                                  // 返金起因は値付けの話ではないので外す
       rows.push({ g: d - cost, cost: cost });
     });
@@ -58273,9 +58311,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (_di && _di.observed) p.obsN++;         // 実際に金額が動いたのを観測できた件数
       const dep = pfDep(o), cost = pfCost(o); // 仕入額は手入力/確定 or 在庫連携の自動算出
       if (dep != null) { p.depJpy += dep * _fr; p.depN++; }
-      p.pplJpy += pfPaypal(o);   // PayPal差分＝Shopee入金とは別に買主から受け取った円（主にBR）
+      const paypal = pfPaypal(o), paypalYen = paypal.yen ?? 0;
+      p.pplJpy += paypalYen;
       if (cost != null) { p.costJpy += cost; p.costN++; }
-      if (dep != null && cost != null && (!pf.strictCost || pfStock(o))) { p.pair += dep * _fr + pfPaypal(o) - cost; p.pairN++; }
+      if (dep != null && cost != null && !paypal.pending && (!pf.strictCost || pfStock(o))) { p.pair += dep * _fr + paypalYen - cost; p.pairN++; }
     });
     let rowsHtml = '';
     let tN = 0, tUnits = 0, tDep = 0, tCost = 0, tSalesJpy = 0, tPair = 0, tPairN = 0, tScan = 0, tObs = 0, tCostN = 0;
