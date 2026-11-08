@@ -1177,6 +1177,7 @@
         <button data-k="rank" title="売れた注文の実際の利益から、値上げ・値下げの候補と提案価格を出す（赤字・利益が薄い／上げすぎて売れなくなった／値上げの余地）。選んで一括で書き込み">🏷 値付けの見直し</button>
         <button data-k="titles" title="ハードごとに「世の中に何本あって、自分は何本出しているか」。出品の母数を増やすための一覧">📚 母数（ハード別の網羅）</button>
         <button data-k="auto" title="母数の空白（まだ出していない作品）を、🤖が写真を探して自動で出品する（設定・進み具合・公開待ち・写真を直す）。母数の画面からも開けます">🤖 自動出品</button>
+        <button data-k="shop3candidate" title="第三店のAmazon新品候補を価格と確認根拠で下見します。">第三店のAmazon新品候補</button>
         <button data-k="quality" title="いま出している出品の足りないもの（動画・商品写真・お店の画像・タイトルの長さ・重量・在庫0・非公開）を国×カタログの表で見る。読むだけ（Shopeeには書きません）">🧹 カタログの質</button>
         <button data-k="restock" title="注文で在庫0になった明細を自動で1（商品ごとに5なども可）に戻す。すぐ仕入れられない商品は様子見にして、0のままの一覧から手で戻す">🔁 在庫の自動復活</button>
         <button data-k="react" title="出しているカタログに反応（👁閲覧・❤️いいね・🛒販売）があるかを、区分（トレカ・ゲーム・グッズ）×国、作ってからの日数ごとに見る。読むだけ">👀 反応（閲覧・いいね）</button>
@@ -1190,6 +1191,7 @@
     <div id="list-status" style="padding:12px 20px"></div>
     <div id="list-titles" style="display:none;padding:12px 20px"></div>
     <div id="list-auto" style="display:none;padding:12px 20px"></div>
+    <div id="list-shop3candidate" style="display:none;padding:12px 20px"></div>
     <div id="list-quality" style="display:none;padding:12px 20px"></div>
     <div id="list-restock" style="display:none;padding:12px 20px"></div>
     <div id="list-spinoff" style="display:none;padding:12px 20px"></div>
@@ -5356,6 +5358,15 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "第三店のAmazon新品候補": "Third-shop Amazon candidates",
+    "第三店のAmazon新品候補を価格と確認根拠で下見します。": "Preview prices and sourcing evidence for third-shop Amazon candidates.",
+    "商品・仕入れ・発送の根拠を入力し、価格を下見します。確認用のJSONはこの画面から持ち出せます。": "Enter product, sourcing, and dispatch evidence to preview prices. Export the evidence as JSON.",
+    "候補と確認根拠（JSON）": "Candidate and evidence (JSON)",
+    "候補プレビュー": "Preview candidate",
+    "候補のJSONを保存": "Export candidate JSON",
+    "入力内容だけで確認し、ShopeeやKeepaに照会しません。": "Preview using the entered data without requesting Shopee or Keepa.",
+    "確認根拠を含む入力をJSONファイルに保存します。": "Save the inputs and evidence as a JSON file.",
+    "第三店のAmazon新品候補を下見": "Preview third-shop Amazon candidates",
     "初回の見積もりに、購入か見送りかの返信をお願いする文を追加": "Initial quotes now ask customers to reply whether they want to buy or pass",
     "第三SG・新品1カタログ": "Third SG shop — one new listing",
     "対象は maneki_neko_japan.sg（1938012197）の Tombow MONO PE-01A です。": "Target: Tombow MONO PE-01A at maneki_neko_japan.sg (1938012197).",
@@ -27379,6 +27390,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-09', items: ['<b>第三店のAmazon新品候補を下見</b>。'] },
     { date: '2026-11-09', items: ['<b>第三SGの新品公開を準備する入口を追加</b>。', '<b>初回の見積もりに、購入か見送りかの返信をお願いする文を追加</b>。'] },
     { date: '2026-11-08', items: [
       '🎰 <b>一番くじのカタログが「重複」で作れない件を直しました</b>。トレカの巡回が設定の親SKU（ICHIBAN_KUJI_… 等）も読むようにし、既にあるカタログに足します。重複で断られた国はその日は作り直しません。',
@@ -42260,9 +42272,116 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   }
 
   /* ★2026-10-03 出品管理のタブを大分類にまとめる（本人「色々増えてきたからスリムにして」）。中身の並びは #list-tab のボタン（data-k）そのもの */
+  function shop3CandidatePreview(input, now) {
+    const shops = { SG: '1938012197', TW: '1938012095', MY: '1938012258', PH: '1938012303', TH: '1938012329' };
+    const market = String(input?.market || '').toUpperCase();
+    if (!Object.hasOwn(shops, market)) throw new Error('第三店の対象国を選んでください。');
+    const variants = input.variants;
+    if (!Array.isArray(variants) || variants.length < 2 || variants.length > 100) throw new Error('子ASINを2〜100件入力してください。');
+    const text = v => typeof v === 'string' ? v.trim() : '';
+    const secureUrl = v => { try { const u = new URL(v); return u.protocol === 'https:' && !u.username && !u.password; } catch (_) { return false; } };
+    const timestamp = v => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?\+09:00$/.test(text(v)) ? Date.parse(v) : NaN;
+    const fresh = v => { const time = timestamp(v); return Number.isFinite(time) && time <= now && now - time < 86400000; };
+    const packageOK = p => !!p && ['estimated','measured'].includes(p.basis) && !!text(p.evidence) &&
+      [p.weightG,p.length,p.width,p.height].every(v => Number.isFinite(v) && v > 0) &&
+      p.weightG <= 500 && Math.max(p.length,p.width,p.height) <= 30 && p.length+p.width+p.height <= 60 &&
+      (p.basis === 'measured' || (p.weightG < 450 && Math.max(p.length,p.width,p.height) < 27 && p.length+p.width+p.height < 54));
+    const catalogIssues = [];
+    if (!text(input.title) || !text(input.model) || !text(input.shape)) catalogIssues.push('商品名・共通型番・形状が不足');
+    if (/\bused\b|\bpre[\s-]*owned\b|中古|二手/i.test(text(input.title))) catalogIssues.push('商品名に中古表記がある');
+    if (!['color','pack'].includes(input.axis)) catalogIssues.push('色または入数のバリエーション軸が不足');
+    const photo = input.photo;
+    if (!photo || !secureUrl(photo.url) || !text(photo.evidence) ||
+        !['owned','licensed','permission'].includes(photo.rights) ||
+        (photo.rights !== 'owned' && (!secureUrl(photo.source) || !text(photo.credit))) ||
+        (photo.rights === 'licensed' && !secureUrl(photo.license))) catalogIssues.push('写真の利用根拠が不足');
+    const duplicate = input.duplicate;
+    if (!duplicate || duplicate.clear !== true || duplicate.market !== market || !fresh(duplicate.checkedAt) ||
+        !text(duplicate.evidence)) catalogIssues.push('同じ市場での重複確認が不足');
+    const labels = new Set(), asins = new Set(), packs = new Set();
+    const rows = variants.map(v => {
+      v = v || {};
+      const asin = text(v.asin).toUpperCase(), label = text(v.label);
+      const issues = [];
+      if (!/^[A-Z0-9]{10}$/.test(asin) || asins.has(asin)) issues.push('子ASINが無効または重複');
+      asins.add(asin);
+      if (!label || label.length > 30 || labels.has(label.toUpperCase())) issues.push('明細名が空・長すぎる・重複');
+      labels.add(label.toUpperCase());
+      if (!text(v.model) || !text(v.shape) || text(v.model).toUpperCase() !== text(input.model).toUpperCase() ||
+          text(v.shape).toUpperCase() !== text(input.shape).toUpperCase()) issues.push('共通型番・形状と一致しない');
+      if (!Number.isSafeInteger(v.pack) || v.pack < 1 || (input.axis === 'pack' && packs.has(v.pack))) issues.push('入数が未確認または重複');
+      packs.add(v.pack);
+      if (v.newAvailable !== true || !fresh(v.checkedAt) || !text(v.offerEvidence)) issues.push('直近の新品在庫確認が不足');
+      if (!Number.isSafeInteger(v.costJpy) || v.costJpy <= 0 || !text(v.shippingEvidence)) issues.push('送料込み原価の根拠が不足');
+      if (!packageOK(v.package)) issues.push('梱包値・根拠が不足、または上限超過');
+      const arrive = timestamp(v.arrivalAt), deadline = timestamp(v.deadlineAt);
+      if (!(arrive > now && deadline > arrive) || !text(v.dispatchEvidence)) issues.push('国内到着とSLS期限の根拠が不足');
+      return { asin, label, issues, costJpy: v.costJpy };
+    });
+    if (input.axis === 'color' && packs.size !== 1) catalogIssues.push('色違いに異なる入数が混在');
+    let packing = null;
+    if (variants.every(v => packageOK(v?.package))) {
+      const fields = ['weightG','length','width','height'];
+      packing = Object.fromEntries(fields.map(k => [k, Math.max(...variants.map(v => v.package[k]))]));
+      packing.basis = variants.every(v => v.package.basis === 'measured') ? 'measured' : 'estimated';
+      packing.evidence = 'common envelope';
+      if (!packageOK(packing)) catalogIssues.push('カタログ共通梱包が上限に近い、または超過');
+    }
+    const rg = regionByCc(market);
+    if (!(rg?.rateJpy > 0) || !settings.priceFees?.[market] || !settings.priceSls?.[market]) catalogIssues.push('価格計算の設定が不足');
+    if (!catalogIssues.length && !rows.some(r => r.issues.length)) {
+      const opt = { weightG:packing.weightG, dimW:packing.width, dimH:packing.height, dimD:packing.length };
+      rows.forEach(row => {
+        const target = row.costJpy <= 1000 ? 500 : 1500;
+        const price = pcSolvePrice(market,row.costJpy,target,opt,rg.priceUnit || 1);
+        const profit = priceProfitFor(market,row.costJpy,price,opt).profit;
+        if (Number.isFinite(price) && price > 0 && profit >= target) { row.price = price; row.profit = profit; }
+        else row.issues.push('粗利を満たす価格を計算できない');
+      });
+      const prices = rows.map(r => r.price);
+      if (Math.max(...prices) > Math.min(...prices)*5) catalogIssues.push('明細価格の差が5倍を超過');
+    }
+    return { market, shopId: shops[market], title: text(input.title), currency: rg?.cur || '', condition:'NEW', packing, catalogIssues, rows };
+  }
+
+  function renderShop3Candidate() {
+    const host = document.getElementById('list-shop3candidate');
+    if (!host || host.firstElementChild) return;
+    host.innerHTML = `<div class="tool-card" style="max-width:900px">
+      <h3>第三店のAmazon新品候補</h3>
+      <p>商品・仕入れ・発送の根拠を入力し、価格を下見します。確認用のJSONはこの画面から持ち出せます。</p>
+      <label><span>候補と確認根拠（JSON）</span><textarea class="s3c-input" rows="15" maxlength="200000" style="display:block;width:100%;box-sizing:border-box"></textarea></label>
+      <button type="button" class="smd-btn s3c-preview" title="入力内容だけで確認し、ShopeeやKeepaに照会しません。">候補プレビュー</button>
+      <button type="button" class="smd-btn s3c-export" title="確認根拠を含む入力をJSONファイルに保存します。">候補のJSONを保存</button>
+      <pre class="s3c-result" style="white-space:pre-wrap;overflow-wrap:anywhere" aria-live="polite"></pre>
+    </div>`;
+    const input = host.querySelector('.s3c-input');
+    const result = host.querySelector('.s3c-result');
+    input.oninput = () => { result.textContent = ''; };
+    host.querySelector('.s3c-preview').onclick = () => {
+      try {
+        const p = shop3CandidatePreview(JSON.parse(input.value), Date.now());
+        const lines = [p.market + ' · ' + p.shopId + ' · NEW · ' + p.title,
+          ...p.catalogIssues, ...p.rows.map(r => r.asin + ' · ' + r.label + ' · ' +
+            (r.issues.length ? r.issues.join(' / ') : (r.price != null ? p.currency + r.price + ' / ¥' + r.profit : '入力済み')))];
+        result.textContent = lines.join('\n');
+      } catch (e) { result.textContent = e.message; }
+    };
+    host.querySelector('.s3c-export').onclick = () => {
+      try {
+        const data = JSON.parse(input.value);
+        shop3CandidatePreview(data, Date.now());
+        const href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2) + '\n'], {type:'application/json'}));
+        const a = document.createElement('a');
+        a.href = href; a.download = 'shop3-amazon-candidate.json'; a.click();
+        setTimeout(() => URL.revokeObjectURL(href), 1000);
+      } catch (e) { result.textContent = e.message; }
+    };
+  }
+
   const LIST_GRP = [
     ['list', '📋 出品一覧', ['status', 'bulk']],
-    ['make', '✍️ 出品する', ['composer', 'auto', 'titles']],
+    ['make', '✍️ 出品する', ['composer', 'auto', 'shop3candidate', 'titles']],
     ['price', '💴 値段・利益', ['rank', 'ledger']],
     ['ana', '📊 分析', ['analysis', 'react', 'coverage', 'newacct', 'spinoff', 'quality', 'log']],
     ['stock', '📦 在庫', ['restock', 'dropship']],
@@ -42336,6 +42455,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     /* ★2026-09-26 本人「空白を自動で出す は母数の中だと分かりにくい。もっと上のレイヤーに（母数からのアクセスは残す）」→ 🤖自動出品タブ。
        中身は同じ renderBoshuAuto。箱（#tm-auto-box）は表示中のタブの中に1つだけ置く（同じIDを2つ作らない） */
     { const au = document.getElementById('list-auto'); if (au) { au.style.display = tab === 'auto' ? '' : 'none'; if (tab !== 'auto' && au.innerHTML) au.innerHTML = ''; } }
+    document.getElementById('list-shop3candidate').style.display = tab === 'shop3candidate' ? '' : 'none';
     { const cqb = document.getElementById('list-quality'); if (cqb) cqb.style.display = tab === 'quality' ? '' : 'none'; }
     { const rsb = document.getElementById('list-restock'); if (rsb) rsb.style.display = tab === 'restock' ? '' : 'none'; }
     { const spb = document.getElementById('list-spinoff'); if (spb) spb.style.display = tab === 'spinoff' ? '' : 'none'; }
@@ -42373,6 +42493,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     else if (tab === 'bulk') renderBulkEdit();
     else if (tab === 'dropship') renderDropship();
     else if (tab === 'auto') renderAutoTab();
+    else if (tab === 'shop3candidate') renderShop3Candidate();
     else if (tab === 'quality') renderQualityTab();
     else if (tab === 'restock') renderRestockTab();
     else if (tab === 'spinoff') renderSpinoffTab();
