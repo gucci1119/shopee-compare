@@ -5362,6 +5362,10 @@
     "第三店のAmazon新品候補": "Third-shop Amazon candidates",
     "第三店のAmazon新品候補を価格と確認根拠で下見します。": "Preview prices and sourcing evidence for third-shop Amazon candidates.",
     "商品・仕入れ・発送の根拠を入力し、価格を下見します。確認用のJSONはこの画面から持ち出せます。": "Enter product, sourcing, and dispatch evidence to preview prices. Export the evidence as JSON.",
+    "色違いは、各明細の photo に該当色の写真・色名（color）・商用掲載の根拠を入力してください。": "For each color variant, enter its matching image, color name (color), and commercial-use evidence under photo.",
+    "保留・該当色の写真と商用掲載の根拠が必要": "On hold: a matching color photo and commercial-use evidence are required",
+    "保留・別の色と同じ写真URL": "On hold: another color uses the same photo URL",
+    "色違いの新品候補は明細ごとに写真と商用掲載の根拠を確認": "Require photos and commercial-use evidence for each color variant",
     "候補と確認根拠（JSON）": "Candidate and evidence (JSON)",
     "候補プレビュー": "Preview candidate",
     "候補のJSONを保存": "Export candidate JSON",
@@ -27442,6 +27446,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-09', items: ['<b>色違いの新品候補は明細ごとに写真と商用掲載の根拠を確認</b>。'] },
     { date: '2026-11-09', items: ['<b>第三SGの新品候補に公式の読み取り照会を追加</b>。'] },
     { date: '2026-11-09', items: ['<b>損益明細の上バーを操作しやすく</b>。'] },
     { date: '2026-11-09', items: ['<b>照合済みのPayPal円受取を損益に反映</b>。', '<b>VNのまとめ買いで各商品の個別掲載額を計算</b>。', '<b>第三店のAmazon新品候補を下見</b>。'] },
@@ -42344,15 +42349,15 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!text(input.title) || !text(input.model) || !text(input.shape)) catalogIssues.push('商品名・共通型番・形状が不足');
     if (/\bused\b|\bpre[\s-]*owned\b|中古|二手/i.test(text(input.title))) catalogIssues.push('商品名に中古表記がある');
     if (!['color','pack'].includes(input.axis)) catalogIssues.push('色または入数のバリエーション軸が不足');
-    const photo = input.photo;
-    if (!photo || !secureUrl(photo.url) || !text(photo.evidence) ||
-        !['owned','licensed','permission'].includes(photo.rights) ||
-        (photo.rights !== 'owned' && (!secureUrl(photo.source) || !text(photo.credit))) ||
-        (photo.rights === 'licensed' && !secureUrl(photo.license))) catalogIssues.push('写真の利用根拠が不足');
+    const photoOK = photo => !!photo && secureUrl(photo.url) && !!text(photo.evidence) &&
+      ['owned','licensed','permission'].includes(photo.rights) &&
+      (photo.rights === 'owned' || (secureUrl(photo.source) && !!text(photo.credit))) &&
+      (photo.rights !== 'licensed' || secureUrl(photo.license));
+    if (!photoOK(input.photo)) catalogIssues.push('写真の利用根拠が不足');
     const duplicate = input.duplicate;
     if (!duplicate || duplicate.clear !== true || duplicate.market !== market || !fresh(duplicate.checkedAt) ||
         !text(duplicate.evidence)) catalogIssues.push('同じ市場での重複確認が不足');
-    const labels = new Set(), asins = new Set(), packs = new Set();
+    const labels = new Set(), asins = new Set(), packs = new Set(), colorPhotoUrls = new Set();
     const rows = variants.map(v => {
       v = v || {};
       const asin = text(v.asin).toUpperCase(), label = text(v.label);
@@ -42365,6 +42370,17 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
           text(v.shape).toUpperCase() !== text(input.shape).toUpperCase()) issues.push('共通型番・形状と一致しない');
       if (!Number.isSafeInteger(v.pack) || v.pack < 1 || (input.axis === 'pack' && packs.has(v.pack))) issues.push('入数が未確認または重複');
       packs.add(v.pack);
+      if (input.axis === 'color') {
+        const photo = v.photo;
+        if (!photoOK(photo) || text(photo.color).toUpperCase() !== label.toUpperCase() || !label) {
+          issues.push('保留・該当色の写真と商用掲載の根拠が必要');
+        } else {
+          const photoUrl = new URL(photo.url);
+          photoUrl.hash = '';
+          if (colorPhotoUrls.has(photoUrl.href)) issues.push('保留・別の色と同じ写真URL');
+          colorPhotoUrls.add(photoUrl.href);
+        }
+      }
       if (v.newAvailable !== true || !fresh(v.checkedAt) || !text(v.offerEvidence)) issues.push('直近の新品在庫確認が不足');
       if (!Number.isSafeInteger(v.costJpy) || v.costJpy <= 0 || !text(v.shippingEvidence)) issues.push('送料込み原価の根拠が不足');
       if (!packageOK(v.package)) issues.push('梱包値・根拠が不足、または上限超過');
@@ -42465,6 +42481,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     host.innerHTML = `<div class="tool-card" style="max-width:900px">
       <h3>第三店のAmazon新品候補</h3>
       <p>商品・仕入れ・発送の根拠を入力し、価格を下見します。確認用のJSONはこの画面から持ち出せます。</p>
+      <p>色違いは、各明細の photo に該当色の写真・色名（color）・商用掲載の根拠を入力してください。</p>
       <label><span>候補と確認根拠（JSON）</span><textarea class="s3c-input" rows="15" maxlength="200000" style="display:block;width:100%;box-sizing:border-box"></textarea></label>
       <button type="button" class="smd-btn s3c-preview" title="入力内容だけで確認し、ShopeeやKeepaに照会しません。">候補プレビュー</button>
       <button type="button" class="smd-btn s3c-official">Shopeeで確認（第三SG）</button>
