@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261108-2330'
+var SRC_VER = '20261109-0010'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -10040,6 +10040,9 @@ var BA_REST_OFFSET_MIN = { main: 0, child: 0, child2: 40, child3: 80 };
 function baYhRestUntil_(restH) { var off = 0; try { off = BA_REST_OFFSET_MIN[baRunnerId_()] || 0; } catch (e) {} return Date.now() + restH * 3600000 + off * 60000 + Math.floor(Math.random() * 10 * 60000); }
 /* 前の検索から gapMs（＋0〜10秒）経っていなければ待つ。待つと budgetLeftMs を超える時は待たずに false（その回は叩かない） */
 var BA_RECHECK_YMAX = 8;
+/* ★2026-11-09 事業本部「出品が落ちていて弾かれていなければ間を少しずつ縮める」：ゲームの検索の間は app_kv ba_yh_gap {ms} で変えられる（配り直し不要・5〜60秒に丸める）。無い・読めない時は BA_YAHOO_GAP_MS。読めなくても巡回の「読めなかった」印（BA_KV_ERR）は立てない */
+var BA_YH_GAP_MEMO = null;
+function baYhGapMs_() { if (BA_YH_GAP_MEMO !== null) return BA_YH_GAP_MEMO; var v = null, eb = BA_KV_ERR; try { v = baKv_('ba_yh_gap'); } catch (e) { v = null; } BA_KV_ERR = eb; var ms = Number(v && v.ms) || BA_YAHOO_GAP_MS; BA_YH_GAP_MEMO = Math.max(5000, Math.min(60000, ms)); return BA_YH_GAP_MEMO; }
 var BA_YH_LAST_MEMO = null;   /* その実行の中で1回だけプロパティを読む（review-yaku 低） */
 function baYhGap_(st, gapMs, budgetLeftMs) { if (BA_YH_LAST_MEMO === null) { BA_YH_LAST_MEMO = 0; try { BA_YH_LAST_MEMO = Number(P_().getProperty('BA_YH_LAST') || 0) || 0; } catch (eP) {} } var pl = BA_YH_LAST_MEMO; var last = Math.max(Number(st.yhLast || 0), pl), need = last ? (gapMs + Math.floor(Math.random() * 10000) - (Date.now() - last)) : 0; if (need > 0) { if (budgetLeftMs != null && need > budgetLeftMs) return false; Utilities.sleep(need); } st.yhLast = Date.now(); BA_YH_LAST_MEMO = st.yhLast; try { P_().setProperty('BA_YH_LAST', String(st.yhLast)); } catch (eS) {} return true; }   /* 同じ台のゲーム・トレカ・見直しで共通（review-yaku 低7） */
 function baBlockRec_(st, src, code, until, where) { try { st.blockLog = [{ at: new Date().toISOString(), jst: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'M/d HH:mm'), runner: baRunnerId_(), src: src, code: code, until: new Date(until).toISOString(), where: where }].concat(st.blockLog || []).slice(0, 40); } catch (e) {} }
@@ -10087,7 +10090,7 @@ function boshuAutoRecheck() {
       else {
         if (_rvY >= BA_RECHECK_YMAX) break;
         var _yhR = new Date().toISOString().slice(0, 13); if (!st.yh || st.yh.h !== _yhR) st.yh = { h: _yhR, n: 0 };
-        if (!baYhGap_(st, BA_YAHOO_GAP_MS, 240000 - (Date.now() - t0))) break;   /* 1時間6回では止めない（巡回と取り合って0回になる・review-yaku 中）。数には入れる＝同じ時間の巡回が譲る */
+        if (!baYhGap_(st, baYhGapMs_(), 240000 - (Date.now() - t0))) break;   /* 1時間6回では止めない（巡回と取り合って0回になる・review-yaku 中）。数には入れる＝同じ時間の巡回が譲る */
         st.yh.n++; _rvY++;
         var y = baYahoo_(((a.ja ? baCleanJa_(a.ja) : a.en) + ' ' + (BA_HW_WORD[a.hw] || '')).trim());
         if (y.blocked) { st.blockedUntil = baYhRestUntil_(6); baBlockRec_(st, 'ヤフオク', y.code, st.blockedUntil, '見直し'); baLog_(st, '🛑 見直し中にヤフオクに弾かれた（HTTP ' + y.code + '）→約6時間休む'); break; }
@@ -10639,7 +10642,7 @@ function boshuAutoTick(manual) {
       var _yhH = new Date().toISOString().slice(0, 13);
       if (!st.yh || st.yh.h !== _yhH) st.yh = { h: _yhH, n: 0 };
       if (st.yh.n >= BA_YAHOO_PER_HOUR) { out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
-      if (!baYhGap_(st, BA_YAHOO_GAP_MS, DEADLINE * 0.55 - (Date.now() - t0))) { out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }   /* ★11/8 間を空ける時間が残っていなければ次の回へ */
+      if (!baYhGap_(st, baYhGapMs_(), DEADLINE * 0.55 - (Date.now() - t0))) { out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }   /* ★11/8 間を空ける時間が残っていなければ次の回へ */
       st.yh.n++;
       var y = baPhotoSrc_(q, cfg);   /* ★2026-09-23 既定は Yahoo!フリマ（ヤフオクは Google の IP から弾かれ続けて2時間休みの繰り返しだった） */
       var _srcNm = (y.src === 'yahoo') ? 'ヤフオク' : 'Yahoo!フリマ';
