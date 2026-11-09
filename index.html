@@ -3549,13 +3549,78 @@
     return res;
   }
   // 注文明細（分割UI用：item_id/model_id/order_item_id/promotion_group_id/model_quantity ＋既存package_list）
-  async function openapiGetOrderDetail(shopId, sn) {
-    if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
+  async function openapiGetOrderDetail(shopId, sn, url = settings.openapiUrl, requireSingle = false) {
+    if (!url) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const qs = 'action=get_order_detail&shop_id=' + encodeURIComponent(shopId) + '&order_sn=' + encodeURIComponent(sn);
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000, true);
+    const res = await jsonp(url + (url.includes('?') ? '&' : '?') + qs, 60000, true);
     if (!res || !res.ok) throw new Error((res && res.error) || '注文明細の取得に失敗');
     const list = ((res.response || {}).order_list) || [];
+    if (requireSingle && (!Array.isArray(list) || list.length !== 1)) return null;
     return list[0] || null;
+  }
+
+  // SLS帳票種の照会。GASは同じ注文と梱包を再照合してから、帳票パラメーターだけを取得する。
+  let slsAwbBusy = false;
+  async function showSlsAwbTypes(order, shop, button) {
+    if (slsAwbBusy) return;
+    const tr = value => i18nOn() ? I18N[value] || value : value;
+    const url = String(settings.openapiUrlMain || settings.openapiUrl || '');
+    const token = settings.writeToken;
+    if (demoOn() || !token || !gasUrlOk(url) || url.includes('?') ||
+        String(shop.shop_id) !== String(order.shopId) || shop.cc !== order.cc ||
+        !/^[1-9][0-9]*$/.test(String(order.shopId)) || !Number.isSafeInteger(Number(order.shopId)) || !/^[A-Z0-9]{8,40}$/.test(order.sn) ||
+        order.tab !== 300 || !/^processed$/i.test(order.status)) {
+      toast(tr('店舗・注文・接続先を確認できませんでした。'), true, 6500);
+      return;
+    }
+    slsAwbBusy = true;
+    button.disabled = true;
+    button.textContent = tr('帳票種を照会中…');
+    try {
+      const detail = await openapiGetOrderDetail(order.shopId, order.sn, url, true);
+      const packages = detail?.package_list;
+      const packageNumber = Array.isArray(packages) && packages.length === 1 ? packages[0]?.package_number : null;
+      if (detail?.order_sn !== order.sn || (detail.shop_id != null && String(detail.shop_id) !== String(order.shopId)) ||
+          detail.order_status !== 'PROCESSED' || typeof packageNumber !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(packageNumber)) {
+        toast(tr('Shopeeで手配済みの単一梱包を確認できませんでした。'), true, 6500);
+        return;
+      }
+      if (demoOn() || settings.writeToken !== token || (settings.openapiUrlMain || settings.openapiUrl) !== url) {
+        toast(tr('店舗・注文・接続先を確認できませんでした。'), true, 6500);
+        return;
+      }
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 60000);
+      try {
+        const response = await fetch(url, {
+          method: 'POST', credentials: 'omit', signal: controller.signal,
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ action: 'sls_awb_parameter', token, shop_id: order.shopId, order_sn: order.sn, package_number: packageNumber }),
+        });
+        const result = await response.json();
+        if (result?.error === 'quota_reserved') {
+          toast(tr('Shopeeの接続枠を確保するため、帳票種の照会を見送りました。'), true, 6500);
+          return;
+        }
+        const thermal = 'THERMAL_AIR_WAYBILL', normal = 'NORMAL_AIR_WAYBILL';
+        const types = result?.types;
+        if (!response.ok || result?.ok !== true || !Array.isArray(types) ||
+            types.some(type => type !== thermal && type !== normal) ||
+            result.available !== types.includes(thermal) || (result.suggested !== null && !types.includes(result.suggested))) {
+          throw new Error('unverified');
+        }
+        const name = type => tr(type === thermal ? '感熱' : '普通紙');
+        const listed = types.length ? types.map(name).join(' / ') : tr('感熱・普通紙の候補なし');
+        const suggested = result.suggested ? `（${tr('推奨')}: ${name(result.suggested)}）` : '';
+        toast(`${shop.label} ${order.sn} · ${tr('帳票種')} ${listed}${suggested}`, false, 12000);
+      } finally { clearTimeout(timer); }
+    } catch (_) {
+      toast(tr('Shopeeの帳票種を確認できませんでした。'), true, 6500);
+    } finally {
+      slsAwbBusy = false;
+      button.disabled = false;
+      button.textContent = tr('帳票種を照会');
+    }
   }
   // 注文分割（決裁操作）：packageList=[{item_list:[{item_id,model_id,order_item_id,promotion_group_id,model_quantity}]}]
   async function openapiSplitOrder(shopId, sn, packageList) {
@@ -5359,6 +5424,18 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "帳票種を照会": "Check label types",
+    "帳票種を照会中…": "Checking label types…",
+    "帳票種": "Label types",
+    "感熱": "Thermal",
+    "普通紙": "Plain paper",
+    "感熱・普通紙の候補なし": "No thermal or plain-paper options",
+    "推奨": "Suggested",
+    "店舗・注文・接続先を確認できませんでした。": "Could not verify the shop, order, or connection.",
+    "Shopeeで手配済みの単一梱包を確認できませんでした。": "Could not verify one arranged package in Shopee.",
+    "Shopeeの接続枠を確保するため、帳票種の照会を見送りました。": "Label type check skipped to preserve the Shopee quota.",
+    "Shopeeの帳票種を確認できませんでした。": "Could not verify Shopee's label types.",
+    "伝票発行済の注文から感熱・普通紙の帳票種を照会": "Check thermal and plain-paper label types for arranged orders",
     "第三店のAmazon新品候補": "Third-shop Amazon candidates",
     "第三店のAmazon新品候補を価格と確認根拠で下見します。": "Preview prices and sourcing evidence for third-shop Amazon candidates.",
     "商品・仕入れ・発送の根拠を入力し、価格を下見します。確認用のJSONはこの画面から持ち出せます。": "Enter product, sourcing, and dispatch evidence to preview prices. Export the evidence as JSON.",
@@ -14085,6 +14162,9 @@
         (r.items.length > 1 ? `<div class="ord-itemsub" style="color:#6b7280;margin-top:2px">${r.items.length}商品・合計${qty}点</div>` : '') + ordBundleHtml(r);
       // Shopeeが既に発送手配済み（PROCESSED/SHIPPING等）＝自動手配のSLS注文。ship_orderは「再手配不可/1方式を選べ」で弾かれるので手配済み扱いにし、📮公式発送ボタンは出さない（伝票印刷して倉庫へ持込むだけ）。
       const arranged = ordArranged(r); // 表示・遅延・KPI・フィルタで同一判定（統一）
+      const slsShop = state.orders.filter === 'arranged' && arranged && /^processed$/i.test(r.status) && r.shopId &&
+        settings.writeToken && (settings.openapiUrlMain || settings.openapiUrl) && !demoOn() &&
+        (state.accounts || []).find(a => String(a.shop_id) === String(r.shopId) && a.cc === r.cc && a.label);
       const stKey = r.cc + ':' + r.sn;
       const inTransit = !!(state.orders.selfTransit && state.orders.selfTransit.has(stKey));
       const risk = ordRisk(r); // 2=遅延 1=遅延リスク 0=なし
@@ -14121,7 +14201,7 @@
             : /unpaid/i.test(r.status || '') ? '<span style="color:#d93025;font-weight:700">未入金</span>'
             : /cancel/i.test(r.status || '') ? '<span class="smd-dim">キャンセル</span>'
             : '<span class="smd-dim" title="' + ordStatusJa(r.status) + '（発送手配後＝発送期限の対象外。状態は右の列を参照）">—</span>'}</span>` +
-        `<span class="ord-status">${flags ? flags + '<br>' : ''}<span style="white-space:nowrap">${ordStatusJa(r.status)}</span>${arrangeBtn}${selChk}</span>` +
+        `<span class="ord-status">${flags ? flags + '<br>' : ''}<span style="white-space:nowrap">${ordStatusJa(r.status)}</span>${arrangeBtn}${selChk}${slsShop ? '<br><button type="button" class="smd-btn ord-sls-awb" style="font-size:10px;padding:2px 5px;margin-top:3px">帳票種を照会</button>' : ''}</span>` +
         `<span class="ord-warehouse">${r.tab === 300 ? warehouseLabel + transitToggle : '<span class="smd-dim">—</span>'}</span>` +
         `<div class="ord-date" title="上＝注文の日時（JST）／下＝💳支払い確定の日時（JST）。発送期限は支払い確定から数えます">${(() => { const _sd = r.orderDate || snToDate(r.sn); const t = r.orderTs ? (Number(r.orderTs) < 1e11 ? Number(r.orderTs) * 1000 : Number(r.orderTs)) : (_sd ? Date.parse(_sd + 'T00:00:00+09:00') : 0); r._ot = t; r._fromSn = !r.orderTs && !r.orderDate && !!_sd; if (!t) return '—';
           const fD = (ms) => { try { return new Date(ms).toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }); } catch (_) { return jstDate(ms); } };
@@ -14144,6 +14224,8 @@
       row.title = r.items.map(it => `${it.name}${it.variation ? ' [' + it.variation + ']' : ''} ×${it.qty}`).join('\n');
       // 行クリックでの自動オープンは廃止（Shopee注文詳細は内部ID必須で直リンク不可＝404の元。注文一覧は右の📄から、注文番号は📋でコピー）
       row.querySelectorAll('a').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
+      const slsButton = row.querySelector('.ord-sls-awb');
+      if (slsButton) slsButton.addEventListener('click', e => { e.stopPropagation(); if (e.isTrusted) showSlsAwbTypes(r, slsShop, slsButton); });
       // 📄注文一覧を開くと同時に注文番号を自動コピー（一覧の「Input order ID」欄に貼るだけで検索できる＝詳細直リンク不可の代替）
       row.querySelectorAll('.ord-godetail').forEach(a => a.addEventListener('click', () => { try { copyText(a.dataset.sn); toast('📋 注文番号をコピー→一覧の検索欄に貼付してください'); } catch (_) {} }));
       row.querySelectorAll('.ord-shipapi').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); b.disabled = true; b.textContent = '⏳確認中…'; apiShipFlow(b.dataset.cc, b.dataset.sn, b.dataset.shop, b.dataset.host, b); }));
@@ -27567,6 +27649,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-10', items: ['<b>伝票発行済の注文から感熱・普通紙の帳票種を照会</b>。'] },
     { date: '2026-11-10', items: ['<b>カタログ編集でクリップボードから商品画像を追加</b>。'] },
     { date: '2026-11-10', items: ['<b>第三SGの新品候補から包装違いを確認し、1カタログを直接公開</b>。', '<b>出品一覧を第1・第2・第3アカウントで国をまたいで絞り込めるように</b>。', '<b>出品一覧の最新更新で選んだ1店だけShopeeから取り込めるように</b>。', '<b>個店の同期直後に新しい出品を一覧へ表示</b>。', '<b>第三店のAmazon新品はカタログタイトルの先頭に [New] を自動付与</b>。出品候補に検索されやすいタイトルの例を追加。'] },
     { date: '2026-11-09', items: ['<b>出品一覧の検索中に入力が途切れないように</b>。', '<b>色違いの新品候補は明細ごとに写真と商用掲載の根拠を確認</b>。'] },
