@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261109-0242'
+var SRC_VER = '20261109-1846'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -937,12 +937,12 @@ function doGetInner_(e) {
       catch (err) { dwo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(dwcb + '(' + JSON.stringify(dwo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
-    if (p.action === 'shop3_candidate_read_sg') {
+    if (p.action === 'shop3_candidate_read_sg' || p.action === 'shop3_candidate_read') {
       var scb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), sout;
       try {
         var srk = P_().getProperty('WRITE_TOKEN');
         if (!srk || p.rk !== srk) throw new Error('読み取り鍵がありません');
-        sout = shop3CandidateReadSg_(p);
+        sout = shop3CandidateRead_(p);
       } catch (err) { sout = { ok:false, error:String((err && err.message) || err) }; }
       return ContentService.createTextOutput(scb + '(' + JSON.stringify(sout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -2054,7 +2054,7 @@ function doGetInner_(e) {
         var topLen = []; try { sbLenFlush_(); var _ul = JSON.parse(P_().getProperty('sbLenBy') || 'null'); if (_ul && _ul.d === ufToday_()) topLen = Object.keys(_ul.m || {}).map(function (k) { return { k: k, mb: Math.round(_ul.m[k] / 10485.76) / 100 }; }).sort(function (a2, b2) { return b2.mb - a2.mb; }).slice(0, 30); } catch (eUl) {}   /* ★2026-11-08 処理×表ごとの読んだ量（圧縮前の文字数・MB） */
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, src: SRC_VER, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, topBy: topBy, topLen: topLen, aiSpend: aiSpendLoad_() };
+        ufo = { ok: true, src: SRC_VER, shop3CandidateRead: true, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, topBy: topBy, topLen: topLen, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -3056,10 +3056,14 @@ function getModels_(shopId, itemId) {
 }
 // ★商品まるごと読み（get_item_base_info＋get_model_list）＝ブリッジproductRead代替。カタログ編集エディタの「開く」用。読み取り専用・token不要。
 // 返す: { base: get_item_base_info の item, model: getModels_ の {tier_variation,models} }。ポータル側 apiPiFromFull が内部v3形へ変換。
-// 第3SGの候補照会。出品同期・共有キャッシュ更新から独立させる。
-function shop3CandidateReadSg_(p) {
-  var id = '1938012197';
-  if (p.market !== 'SG' || p.shop_id !== id) throw new Error('第三SGの店指定が一致しません');
+// 第3店の候補照会。1回につき1市場。出品同期・共有キャッシュ更新から独立させる。
+function shop3CandidateRead_(p) {
+  var idsByMarket = { SG:'1938012197', TW:'1938012095', MY:'1938012258', PH:'1938012303', TH:'1938012329' };
+  var market = String(p.market || '');
+  var id = Object.prototype.hasOwnProperty.call(idsByMarket, market) ? idsByMarket[market] : '';
+  if (!id || p.shop_id !== id || (p.action === 'shop3_candidate_read_sg' && market !== 'SG')) {
+    throw new Error('第3店の国または店IDを照合できません');
+  }
   var asins = String(p.asins || '').split(',');
   var model = String(p.model || '').trim();
   if (asins.length < 2 || asins.length > 10 ||
@@ -3071,12 +3075,16 @@ function shop3CandidateReadSg_(p) {
   var probe = sbSelect_('orders', 'select=sn&limit=1');
   if (!Array.isArray(probe) || Date.now() - started > 2000) throw new Error('DBの応答が遅いため照会を見送ります');
   Utilities.sleep(5000);
-  var accounts = sbSelect_('accounts', 'select=cc,shop_id,status,label&cc=eq.SG&status=in.(main,sub,new)&limit=20');
+  var accounts = sbSelect_('accounts', 'select=cc,shop_id,status,label&cc=eq.' + market + '&status=in.(main,sub,new)&limit=20');
+  if (!Array.isArray(accounts)) throw new Error('第3店の登録を取得できません');
   var target = accounts.filter(function (a) { return String(a.shop_id) === id; });
-  if (target.length !== 1 || target[0].status !== 'new' || String(target[0].label).toLowerCase() !== 'maneki_neko_japan.sg' || !getToken_(Number(id))) {
-    throw new Error('第三SGの登録と認可が一致しません');
+  var expectedLabel = market === 'TW' ? 'manekineko_japan' : 'maneki_neko_japan.' + market.toLowerCase();
+  if (target.length !== 1 || target[0].cc !== market || target[0].status !== 'new' ||
+      String(target[0].label || '').trim().toLowerCase() !== expectedLabel || !getToken_(Number(id))) {
+    throw new Error('第3店の登録と認可が一致しません');
   }
-  var out = { ok:true, shop_id:id, checkedAt:new Date().toISOString(), cap:null, used:null, matches:[], duplicate:'unverified' };
+  var out = { ok:true, market:market, shop_id:id, shopLabel:String(target[0].label), checkedAt:new Date().toISOString(),
+    cap:null, used:null, matches:[], duplicate:'unverified' };
   try {
     var lr = callShop_(Number(id), '/api/v2/product/get_item_limit', {}, 'get');
     var cap = Number(((lr.response || {}).item_count_limit || {}).max_limit);
@@ -3117,7 +3125,7 @@ function shop3CandidateReadSg_(p) {
   });
   try {
     Utilities.sleep(5000);
-    var matches = sbSelect_('listings', 'select=item_id,shop_id&cc=eq.SG&shop_id=in.(' + ids.join(',') +
+    var matches = sbSelect_('listings', 'select=item_id,shop_id&cc=eq.' + market + '&shop_id=in.(' + ids.join(',') +
       ')&or=' + encodeURIComponent('(' + terms.join(',') + ')') + '&order=shop_id,item_id&limit=4');
     if (!Array.isArray(matches)) return out;
     out.indexHits = matches.length;
