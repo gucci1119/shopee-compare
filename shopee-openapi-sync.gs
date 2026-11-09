@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261109-2342'
+var SRC_VER = '20261110-0200'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2556,6 +2556,7 @@ function doPostInner_(e) {
     if (!wt || body.token !== wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
     if (body.action === 'chat_ingest') out = chatIngest_(body);
     else if (body.action === 'outbox_done') out = outboxDone_(body);
+    else if (body.action === 'sls_awb_parameter') out = slsAwbParameter_(body); // 手配済みの単一梱包の帳票形式を照会
     else if (body.action === 'list_meta') out = listMeta_(body);      // 公式API出品：category/logistic解決（出品前の確認用）
     else if (body.action === 'add_item') out = addItem_(body);        // 公式API出品：指定shop_idにadd_item（アカウント/国を明示）
     else if (body.action === 'upload_image') out = uploadImageData_(body);
@@ -3056,11 +3057,16 @@ function getModels_(shopId, itemId) {
 }
 // ★商品まるごと読み（get_item_base_info＋get_model_list）＝ブリッジproductRead代替。カタログ編集エディタの「開く」用。読み取り専用・token不要。
 // 返す: { base: get_item_base_info の item, model: getModels_ の {tier_variation,models} }。ポータル側 apiPiFromFull が内部v3形へ変換。
+// 第3雑貨店の店ID。出品候補の照会とゲーム用販促の除外で共用する。
+var SHOP3_IDS_BY_MARKET = { SG:'1938012197', TW:'1938012095', MY:'1938012258', PH:'1938012303', TH:'1938012329' };
+function isShop3Shop_(shopId) {
+  var id = String(shopId);
+  return Object.keys(SHOP3_IDS_BY_MARKET).some(function (market) { return SHOP3_IDS_BY_MARKET[market] === id; });
+}
 // 第3店の候補照会。1回につき1市場。出品同期・共有キャッシュ更新から独立させる。
 function shop3CandidateRead_(p) {
-  var idsByMarket = { SG:'1938012197', TW:'1938012095', MY:'1938012258', PH:'1938012303', TH:'1938012329' };
   var market = String(p.market || '');
-  var id = Object.prototype.hasOwnProperty.call(idsByMarket, market) ? idsByMarket[market] : '';
+  var id = Object.prototype.hasOwnProperty.call(SHOP3_IDS_BY_MARKET, market) ? SHOP3_IDS_BY_MARKET[market] : '';
   if (!id || p.shop_id !== id || (p.action === 'shop3_candidate_read_sg' && market !== 'SG')) {
     throw new Error('第3店の国または店IDを照合できません');
   }
@@ -3581,6 +3587,7 @@ function promoMergeImgs_(cur0, A, bids) {
 }
 function promoVidKey_(A, cc, shopId) { var e = (A.vid || {})[cc]; return (e && e.shop && String(e.shop) !== String(shopId)) ? (cc + '_' + shopId) : cc; }   /* promoVideoFor_ の key と同じ決め方（変えるなら両方） */
 function promoForNew_(shopId, imgIds, A) {
+  if (isShop3Shop_(shopId)) return null; // 呼出元では元画像のまま作成し、販促動画の追加にも進まない
   A = A || baKv_('promo_assets') || {};
   var bids = promoBids_(A, baCcOfShop_(shopId));
   if (bids.length !== PROMO_IMGS.length) return null;   /* 6枚がまだ上がっていない＝ここでは上げない（作成を遅くしない） */
@@ -3649,7 +3656,7 @@ function promoTickBody_() {
       var galPick = 0;
       var gfixLeft = Math.max(0, GFIX_DAILY - dayCount_(job, 'gfix', 0)), gfixPick = 0, hadRet = {}, gfixOnly = {};
       var needsGfix = function (r, d) { if (!(r.images || []).some(function (x) { return retired[x]; })) return false; hadRet[r.item_id] = 1; if (d && d.gfixAt && !(Date.parse(r.synced_at || '') > Number(d.gfixAt))) return false; if (Number((d && d.gfixN) || 0) >= 3) return false; return !(Number(r.update_time || 0) > nowSec - BULK_SKIP_RECENT_SEC); };   /* 入れ直した後、同期で写真の並びが新しくなるまでは選ばない */
-      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id) return false; var d = doneMap[r.item_id]; var gf = needsGfix(r, d); if (!d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d)) return true; if (gf && gfixPick < gfixLeft) { gfixPick++; gfixOnly[r.item_id] = 1; return true; } if (needsGal(d, r) && galPick < galLeft) { galPick++; return true; } return false; });
+      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id || isShop3Shop_(r.shop_id)) return false; var d = doneMap[r.item_id]; var gf = needsGfix(r, d); if (!d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d)) return true; if (gf && gfixPick < gfixLeft) { gfixPick++; gfixOnly[r.item_id] = 1; return true; } if (needsGal(d, r) && galPick < galLeft) { galPick++; return true; } return false; });
       var redoIds = {}; todo.forEach(function (r) { var d = doneMap[r.item_id]; if (d && d.ok) redoIds[r.item_id] = 1; });
       if (!todo.length) continue;
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
@@ -3706,6 +3713,7 @@ function promoStart_(limit) {
   return job;
 }
 function promoApply_(shopId, cc, itemIds, dry, noVideo) {
+  if (isShop3Shop_(shopId)) return { ok: true, skip: 'shop3', n: 0, items: [] }; // 手動の一括適用からもゲーム用販促を入れない
   if (!dry && editSkip_()[cc]) return { ok: false, stop: 'skip', error: cc + ' は書き換えから外しています（edit_skip_cc）', n: 0, items: [] };
   if (!dry && ufTotal_() > ufStopLine_() - 3000) return { ok: false, stop: 'quota', error: '接続枠が残り少ないので止めました（' + ufTotal_() + '）' };
   var A = baKv_('promo_assets') || {}; A.imgs = A.imgs || {};
@@ -4122,8 +4130,14 @@ function galleryFill_(shopId, itemId, add, dry, cap, src) {
   var prod = cur0.filter(function (x) { return x && !strip[x]; });
   var seen = {}; prod.forEach(function (x) { seen[x] = 1; });
   var extra = (add || []).map(function (x) { return String(x).trim(); }).filter(function (x) { if (!x || strip[x] || seen[x] || !/^[a-z0-9-]+$/i.test(x)) return false; seen[x] = 1; return true; });
-  var newProd = prod.concat(extra.slice(0, Math.max(0, cap - prod.length)));
-  var next = bids.length === PROMO_IMGS.length ? promoMergeImgs_(newProd, A, bids).next : newProd.slice(0, 9);
+  var isShop3 = isShop3Shop_(shopId);
+  var room = cap - prod.length;
+  if (isShop3) room = Math.min(room, 9 - cur0.length);
+  var added = extra.slice(0, Math.max(0, room));
+  var newProd = prod.concat(added);
+  // 第3店では商品写真だけを足し、既存の並び・画像・動画は保持する。
+  var next = isShop3 ? cur0.concat(added) :
+    (bids.length === PROMO_IMGS.length ? promoMergeImgs_(newProd, A, bids).next : newProd.slice(0, 9));
   var rec = { item_id: iid, before: cur0.length, prod: prod.length, added: newProd.length - prod.length, after: next.length, from: cur0, to: next };
   if (!next.length || newProd.length < prod.length) { rec.ok = false; rec.err = '商品写真が減る/空になるので書かない'; return rec; }
   if (newProd.length === prod.length) { rec.ok = true; rec.skip = '足せる写真なし'; return rec; }
@@ -5465,6 +5479,52 @@ function getTracking_(shopId, orderSn, packageNumber) {
   if (packageNumber) q.package_number = String(packageNumber); // 分割注文＝梱包ごとに追跡番号が違うのでpackage_numberで指定
   var j = callShop_(shopId, '/api/v2/logistics/get_tracking_number', q, 'get');
   return (j && j.response) || j;
+}
+// 読み取り：手配済みの単一梱包で、現行の感熱ラストマイル伝票と同じ帳票形式を取得できるか確認する。
+function slsAwbParameter_(body) {
+  var shopId = Number(body.shop_id), orderSn = body.order_sn, packageNumber = body.package_number;
+  if ((typeof body.shop_id !== 'number' && typeof body.shop_id !== 'string') ||
+      !/^[1-9][0-9]*$/.test(String(body.shop_id)) || !Number.isSafeInteger(shopId) ||
+      typeof orderSn !== 'string' || !/^[A-Z0-9]{8,40}$/.test(orderSn) ||
+      typeof packageNumber !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(packageNumber)) {
+    return { ok: false, error: 'invalid_request' };
+  }
+  try {
+    // 試験用の手動照会。通常の署名・枠計上を使い、既存の処理に枠を残す。
+    if (ufDead_() || ufTotal_() + 6 > UF_STOP) return { ok: false, error: 'quota_reserved' };
+    var token = getToken_(shopId);
+    if (!token || String(token.shop_id) !== String(shopId) || !(token.expire_at > now_() + 60)) {
+      return { ok: false, error: 'shop_token_unavailable' };
+    }
+    var detail = callShop_(shopId, '/api/v2/order/get_order_detail',
+      { order_sn_list: orderSn, response_optional_fields: 'package_list' }, 'get');
+    var orders = detail && detail.response && detail.response.order_list;
+    var order = Array.isArray(orders) && orders.length === 1 ? orders[0] : null;
+    if (!order || order.order_sn !== orderSn ||
+        (order.shop_id != null && String(order.shop_id) !== String(shopId)) ||
+        order.order_status !== 'PROCESSED' || !Array.isArray(order.package_list) ||
+        order.package_list.length !== 1 || !order.package_list[0] ||
+        order.package_list[0].package_number !== packageNumber) {
+      return { ok: false, error: 'arranged_package_unverified' };
+    }
+    var params = callShop_(shopId, '/api/v2/logistics/get_shipping_document_parameter', null, 'post',
+      { order_list: [{ order_sn: orderSn, package_number: packageNumber }] });
+    var rows = params && params.response && params.response.result_list;
+    var row = Array.isArray(rows) && rows.length === 1 ? rows[0] : null;
+    if (!row || row.order_sn !== orderSn || row.package_number !== packageNumber) {
+      return { ok: false, error: 'document_response_unverified' };
+    }
+    if (row.fail_error) return { ok: false, error: 'document_query_failed' };
+    // 既知のラベル種以外や、Shopeeからの生データは返さない。
+    var allowed = ['THERMAL_AIR_WAYBILL', 'NORMAL_AIR_WAYBILL'];
+    var selectable = row.selectable_shipping_document_type;
+    if (!Array.isArray(selectable)) return { ok: false, error: 'document_response_unverified' };
+    var types = allowed.filter(function (type) { return selectable.indexOf(type) >= 0; });
+    var suggested = types.indexOf(row.suggest_shipping_document_type) >= 0 ? row.suggest_shipping_document_type : null;
+    return { ok: true, available: types.indexOf('THERMAL_AIR_WAYBILL') >= 0, types: types, suggested: suggested };
+  } catch (e) {
+    return { ok: false, error: 'document_query_failed' };
+  }
 }
 // 書き込み：発送手配（ship_order）。paramで pickup{address_id,pickup_time_id} か dropoff{branch_id} を指定（無ければ自動手配）。
 function shipOrder_(shopId, orderSn, param) {
