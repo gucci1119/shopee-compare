@@ -5434,6 +5434,7 @@
     "保留・出品先のShopeeへの写真利用の許諾根拠が必要": "On hold: evidence of permission to license the photo to the destination Shopee market is required",
     "第三SGの外部写真はShopeeへの許諾根拠も確認": "Check permission to license external photos to Shopee in third-shop SG previews",
     "保留・別の色と同じ写真URL": "On hold: another color uses the same photo URL",
+    "出品一覧の検索中に入力が途切れないように": "Keep typing uninterrupted while listing search results refresh",
     "色違いの新品候補は明細ごとに写真と商用掲載の根拠を確認": "Require photos and commercial-use evidence for each color variant",
     "候補と確認根拠（JSON）": "Candidate and evidence (JSON)",
     "候補プレビュー": "Preview candidate",
@@ -27515,7 +27516,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
-    { date: '2026-11-09', items: ['<b>色違いの新品候補は明細ごとに写真と商用掲載の根拠を確認</b>。'] },
+    { date: '2026-11-09', items: ['<b>出品一覧の検索中に入力が途切れないように</b>。', '<b>色違いの新品候補は明細ごとに写真と商用掲載の根拠を確認</b>。'] },
     { date: '2026-11-09', items: ['<b>第三SGの新品候補に公式の読み取り照会を追加</b>。'] },
     { date: '2026-11-09', items: ['<b>損益明細の上バーを操作しやすく</b>。'] },
     { date: '2026-11-09', items: ['<b>照合済みのPayPal円受取を損益に反映</b>。', '<b>VNのまとめ買いで各商品の個別掲載額を計算</b>。', '<b>第三店のAmazon新品候補を下見</b>。', '<b>第三SGの外部写真はShopeeへの許諾根拠も確認</b>。', '<b>第三店の国別候補から公式API用の出品データを準備</b>。'] },
@@ -51142,6 +51143,96 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
      一覧全体（約6,500件の束ね直し・並べ替え）を描き直し、最大9回連続していた。届いた分は1回の描き直しにまとめる */
   let _lstRedrawT = 0;
   function lstRedrawSoon() { if (_lstRedrawT) return; _lstRedrawT = setTimeout(() => { _lstRedrawT = 0; try { drawListingStatus(); } catch (_) {} }, 80); }
+  // 検索欄をDOMから外すとフォーカス・選択・IME変換が失われる。検索欄を含む2階層は残し、その前後だけを更新する。
+  function lstReplaceBeside(current, next) {
+    const siblings = Array.from(next.parentNode.childNodes);
+    const index = siblings.indexOf(next);
+    while (current.previousSibling) current.previousSibling.remove();
+    while (current.nextSibling) current.nextSibling.remove();
+    current.before(...siblings.slice(0, index));
+    current.after(...siblings.slice(index + 1));
+  }
+  function lstReplaceContents(host, html) {
+    const current = host.querySelector('#lst-search');
+    if (!current) { host.innerHTML = html; return; }
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const next = template.content.querySelector('#lst-search');
+    const currentBox = current.parentElement, nextBox = next.parentElement;
+    lstReplaceBeside(currentBox.parentElement, nextBox.parentElement);
+    lstReplaceBeside(currentBox, nextBox);
+    if (current.defaultValue !== next.defaultValue) {
+      // 状態が変わった時だけ同期する。後から届いたデータの描画では打ちかけの文字を上書きしない。
+      if (current.value !== next.value) current.value = next.value;
+      current.defaultValue = next.defaultValue;
+    }
+    currentBox.querySelector('#lst-searchclr').style.display = current.value ? '' : 'none';
+  }
+  function lstSearchMemo() {
+    const memo = window.__lstHayMemo;
+    if (memo && memo.pid === productIds) return memo;
+    return (window.__lstHayMemo = { pid: productIds, m: new WeakMap() });
+  }
+  function lstSearchHay(r, memo) {
+    let value = memo.m.get(r);
+    if (value !== undefined) return value;
+    const p = pidOf(pidKey(r.parent_sku));
+    const models = Array.isArray(r.models) ? r.models : [];
+    value = kwNorm([(r.name || ''), String(r.item_id), (r.parent_sku || ''), (p.jan || ''), (p.mpn || ''),
+      models.map(m => m.n || '').join(' '),
+      models.map(m => (m.id != null ? String(m.id) : '')).filter(Boolean).join(' '),
+      models.map(m => { const q = pidOf(pidKeyModel(r, m)); return [q.jan || '', q.mpn || '', q.own || ''].filter(Boolean).join(' '); }).join(' ')].join(' \u0001 '));
+    memo.m.set(r, value);
+    return value;
+  }
+  function lstWarmSearch(input) {
+    if (!input.value.trim() || state.page !== 'list' || lst.tab !== 'status') return;
+    const memo = lstSearchMemo();
+    const sources = accountTargets().map(t => lst.byCc[t.cc]).filter(Boolean);
+    if (memo.warm && sources.length === memo.warm.length &&
+        sources.every((rows, i) => rows === memo.warm[i].rows && rows.length === memo.warm[i].length)) return;
+    if (memo.warming) return;
+    memo.warming = true;
+    const batches = sources.map(rows => ({ rows, length: rows.length }));
+    let batch = 0, row = 0;
+    const step = () => {
+      if (!input.isConnected || !input.value || state.page !== 'list' || lst.tab !== 'status' || memo !== lstSearchMemo()) {
+        memo.warming = false;
+        return;
+      }
+      // 絞り込みの待機中に索引を少しずつ作る。初回の入力でも全件分の正規化が同時に走らないようにする。
+      const deadline = performance.now() + 5;
+      while (batch < batches.length && performance.now() < deadline) {
+        const { rows, length } = batches[batch];
+        if (row >= length || row >= rows.length) { batch++; row = 0; continue; }
+        lstSearchHay(rows[row++], memo);
+      }
+      if (batch < batches.length) setTimeout(step, 0);
+      else { memo.warm = batches; memo.warming = false; }
+    };
+    setTimeout(step, 0);
+  }
+  let _lstLayoutFrame = 0, _lstLayoutLater = 0, _lstLayoutWired = false;
+  function lstLayoutSoon() {
+    if (_lstLayoutFrame || state.page !== 'list' || lst.tab !== 'status') return;
+    _lstLayoutFrame = requestAnimationFrame(() => {
+      _lstLayoutFrame = 0;
+      if (state.page !== 'list' || lst.tab !== 'status') return;
+      const sc = document.getElementById('lst-scroll'), hw = document.getElementById('lst-hdrwrap');
+      const hi = document.getElementById('lst-hbar-in');
+      if (!sc || !hi) return;
+      // 幅を測ってから書く。横に余っていない時もバーの場所は残す。
+      const w = sc.scrollWidth, over = w > sc.clientWidth + 1;
+      const hdr = sc.querySelector(':scope > [style*="position:sticky"][style*="top:"]');
+      const h = hdr ? hdr.getBoundingClientRect().height : 0;
+      const top = hw ? ((window.__barH ? window.__barH() : 35)) + 'px' : '';
+      if (hw && hw.style.top !== top) hw.style.top = top;
+      if (hi.style.width !== w + 'px') hi.style.width = w + 'px';
+      const minWidth = over ? '' : '101%';
+      if (hi.style.minWidth !== minWidth) hi.style.minWidth = minWidth;
+      document.documentElement.style.setProperty('--lst-headtop', Math.round(h) + 'px');
+    });
+  }
   /* ★2026-10-23 本人「ここの入力のとこ、めっちゃ重くなってる」：どの段が重いかを測る（window.__lstMs に直近20回 [全体, 絞り込みまで, 一覧のHTMLまで]） */
   function drawListingStatus() { const t0 = performance.now(); window.__lstMk = {}; try { drawListingStatusInner(); } finally { const mk = window.__lstMk || {}; (window.__lstMs = window.__lstMs || []).push([Math.round(performance.now() - t0), Math.round((mk.f || t0) - t0), Math.round((mk.l || t0) - t0)]); if (window.__lstMs.length > 20) window.__lstMs.shift(); } }
   function drawListingStatusInner() {
@@ -51254,18 +51345,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       // ★ID で探しやすく（本人「Product IDでも検索できるように」2026-09-18）：「ID52200648598」や Shopee の商品URL（…-i.<shop>.<item>／product/<shop>/<item>／product_id=…）を貼っても数字の ID として当てる
       const idOf = (t) => { let m = t.match(/^id[:：]?\s*(\d{6,})$/i); if (m) return m[1]; m = t.match(/-i\.(\d+)\.(\d{6,})/) || t.match(/\/product\/\d+\/(\d{6,})/) || t.match(/\/product\/(\d{6,})(?:[\/?#]|$)/) || t.match(/product_id=(\d{6,})/) || t.match(/[?&]item_id=(\d{6,})/); return m ? m[m.length - 1] : t; };   // セラーセンターの /portal/product/<item> も
       terms.forEach(t => { if (/^[-−!]/.test(t) && t.length > 1) exc.push(idOf(t.slice(1))); else inc.push(idOf(t)); });
-      const hay = (r) => {
-        const p = pidOf(pidKey(r.parent_sku));
-        const raw = [(r.name || ''), String(r.item_id), (r.parent_sku || ''), (p.jan || ''), (p.mpn || ''),
-          ((r.models || []).map(m => m.n || '').join(' ')),
-          ((r.models || []).map(m => (m.id != null ? String(m.id) : '')).filter(Boolean).join(' ')),   // 明細ID（model_id）でも当たる
-          ((r.models || []).map(m => { const q = pidOf(pidKeyModel(r, m)); return [q.jan || '', q.mpn || '', q.own || ''].filter(Boolean).join(' '); }).join(' '))].join(' \u0001 ');   // 🔖JAN/型番（カタログ＋明細）・親SKU・明細名も検索対象
-        return kwNorm(raw);   // ★アクセントを落として比べる（Pokémon→pokemon）
-      };
-      /* ★2026-10-23 本人「ここの入力のとこ、めっちゃ重くなってる」：打つたびに 7,760件ぶん hay を作り直していた（1回 約0.15秒）。
-         行（オブジェクト）ごとに覚える＝データを読み直せば行が新しくなるので自然に作り直し。JAN の台帳（productIds）が入れ替わった時も作り直す */
-      const _hayMemo = (window.__lstHayMemo = window.__lstHayMemo && window.__lstHayMemo.pid === productIds ? window.__lstHayMemo : { pid: productIds, m: new WeakMap() });
-      const hayC = (r) => { let v = _hayMemo.m.get(r); if (v === undefined) { v = hay(r); _hayMemo.m.set(r, v); } return v; };
+      // 商品・明細のID／JAN／型番／商品名を行ごとに覚える。JAN台帳を読み直したら索引も作り直す。
+      const memo = lstSearchMemo();
+      const hayC = r => lstSearchHay(r, memo);
       // 日本語で打った語は英語にも広げて、どちらでも当たるようにする（除外語も同じ扱い）
       const incV = inc.map(kwExpand), excV = exc.map(kwExpand);
       rows = rows.filter(r => { const h = hayC(r);
@@ -51422,24 +51504,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const listLen = lst.grid ? gridGroups.length : rows.length;
     const lstPages = Math.max(1, Math.ceil(listLen / lstPer)), lstPage = Math.min(Math.max(1, lst.page || 1), lstPages);
     const shown = (lst.grid ? gridGroups : rows).slice((lstPage - 1) * lstPer, lstPage * lstPer);
-    // ★この関数は host.innerHTML を丸ごと書き換える＝検索欄も作り直される。
-    //   そのままだと入力途中でフォーカスが飛び、続きが打てない（2〜3文字で止まって見える）。
-    //   書き換え前にフォーカス位置を覚えて、描画が終わってから戻す。
-    //   ※裏で走っている読み込み（台帳・stats等）も完了時に再描画するので、activeElement を見るだけでは
-    //     「1回目で外れた後の2回目以降」に戻せない。入力中は lst._focusBack に覚えておいて毎回戻す。
-    // ★入力欄は value を【状態から】書き直すので、状態に入る前の"打ちかけの文字"が消える。
-    //   検索は600ms待ってから状態に入れるため、その間に打った分（例: 「variation ds -switch」の -switch）が
-    //   再描画で丸ごと巻き戻っていた（2026-08-22 本人指摘「上書きした時にマイナス検索が消える」）。
-    //   位置だけでなく【今そこに見えている文字】も覚えて戻す。
     // ★描き直すと【見ていた場所】まで戻ってしまう（本人 2026-08-28「調べた後も、この位置のスクロールで
     //   止めてほしい」）。縦は画面全体、横は一覧の横スクロール枠。両方を覚えて、描いた直後に戻す。
     const _scY = window.scrollY || document.documentElement.scrollTop || 0;
     const _scX = (() => { const e = document.getElementById('lst-scroll'); return e ? e.scrollLeft : 0; })();
     const _fa = document.activeElement;
-    const _faLive = !!(_fa && _fa.id && host.contains(_fa) && /^(INPUT|TEXTAREA)$/.test(_fa.tagName));
-    if (_faLive) {
-      lst._focusBack = { id: _fa.id, s: _fa.selectionStart, e: _fa.selectionEnd, v: _fa.value, ts: Date.now() };
-    }
+    // 検索欄以外の入力欄は作り直すので、再描画の直前に触っていたものだけ復元する。
+    const fb = _fa && _fa.id && _fa.id !== 'lst-search' && host.contains(_fa) && /^(INPUT|TEXTAREA)$/.test(_fa.tagName)
+      ? { id: _fa.id, s: _fa.selectionStart, e: _fa.selectionEnd, v: _fa.value } : null;
     // ★覚えておいた位置に戻す。描画のあと（レイアウトが決まってから）に実行する。
     //   ★再読み込みの直後は【前回見ていた場所】に戻す（1回だけ）。中身が届くまで高さが出ないので、
     //     少し待ってからもう一度合わせる。
@@ -51461,23 +51533,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const e = document.getElementById('lst-scroll'); if (e && _scX) e.scrollLeft = _scX;
       } catch (_) {}
     }, 0);
-    { const fb = lst._focusBack;
-      if (fb && Date.now() - fb.ts < 8000) setTimeout(() => {
+    if (fb) setTimeout(() => {
         const el = document.getElementById(fb.id);
-        if (!el || el === document.activeElement) return;
-        // ★文字を戻すのは【この描画の直前まで実際に打っていた欄】だけ。
-        //   そうしないと、✕で消した直後の再描画で消したはずの文字が復活する。
-        if (_faLive && fb.v != null && el.value !== fb.v) el.value = fb.v;
+        if (!el || document.activeElement !== document.body) return;
+        if (el.value !== fb.v) el.value = fb.v;
         el.focus();
         try { if (fb.s != null) el.setSelectionRange(fb.s, fb.e); } catch (_) {}
-      }, 0);
-    }
+    }, 0);
     // ★ツールバーは【役割ごとの3かたまり】に分ける（2026-08-28 本人「色とか揃えてくれ／直感的にみやすい、操作しやすいように」）。
     //   これまで「絞り込み」「並べ替え」「表示の設定」が同じ行に混ざり、色も赤・青・緑・紫でバラバラだった。
     //   ① データ（取りに行く）＝グレー ② 🔎絞り込む＝オレンジ ③ ⇅並べる・見せ方＝むらさき
     //   色は .b-fil / .b-sort のクラスだけを使う（直接 #色 を書かない）。
     window.__lstMk.f = performance.now();
-    host.innerHTML =
+    lstReplaceContents(host,
       `<div class="smd-toolbar" style="margin-bottom:6px">
         <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''} title="${state.mode === 'live' && settings.sbSecret ? 'この端末（🟢ライブ）からShopeeへ直接取りに行って最新化' : '押すとShopeeへ「直近24時間で作られた/変わった出品」を取りに行き、そのあと画面を更新します。&#10;さっき作った出品もこれで出ます（国を1つに絞っていると、その店だけなので速い）'}">🔄 ${lst.syncing ? '取得中...' : '最新に更新'}</button>
         <button class="smd-btn" id="lst-stats" title="👁閲覧・❤️いいね・🛒販売数をShopeeから取り直します（全店で1〜3分。通常は6時間ごとに自動更新）">📊 統計を更新</button>
@@ -51506,8 +51574,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             if (!r.shop_id) { noneN++; return; }
             const sid = String(r.shop_id);
             byS.set(sid, (byS.get(sid) || 0) + 1);
-            const f = acctFamOf(sid); if (f) byF.set(f, (byF.get(f) || 0) + 1);
           });
+          byS.forEach((n, sid) => { const f = acctFamOf(sid); if (f) byF.set(f, (byF.get(f) || 0) + n); });
           if (byS.size < 2 && !noneN) return '';   // 店が1つしか無いなら出さない（無駄な選択肢を置かない）
           const fams = [...byF.entries()].sort((a, b) => b[1] - a[1]);
           const optsFam = fams.map(([f, n]) => `<option value="fam:${av(f)}" ${lst.acct === 'fam:' + f ? 'selected' : ''}>${esc(f)}（系統ぜんぶ ${n}件）</option>`).join('');
@@ -51673,7 +51741,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <div id="lst-list"></div>
         </div>
       </div>`}
-      <div id="lst-more" style="text-align:center;margin:10px 0"></div>`;
+      <div id="lst-more" style="text-align:center;margin:10px 0"></div>`);
     lst._lastRows = rows;   // 🔁似た出品を探す の対象＝いま絞り込んだ結果
     // シリーズ順のとき、表示中のシリーズに順番に色を割り当てる（2件以上あるものだけ色を付ける）
     if (lst.sort === 'series') {
@@ -51690,16 +51758,6 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         + '⚠ この行だけ表示できませんでした（' + esc(String((e && e.message) || e)).slice(0, 120) + '）'
         + '<span class="smd-dim" style="margin-left:8px">' + esc(String(r && r.name || '')).slice(0, 60) + ' / ID ' + esc(String(r && r.item_id || '')) + '</span></div>'; } };
     try {
-      // 📌 開いているカタログの行を貼り付ける位置。
-      //   ★基準は【#lst-scroll の上端】。列見出し(#lst-hdrwrap)とヘッダ帯は #lst-scroll の【外】にあり、
-      //     窓の上端はもう見出しの下なので、その高さを足すと**足したぶんだけ隙間が空く**
-      //     （2026-08-30 本人「列名との間空いてない？」）。足すのは窓の【中】にある見出しだけ。
-      try {
-        const sc = document.getElementById('lst-scroll');
-        const hdr = sc ? sc.querySelector(':scope > [style*="position:sticky"][style*="top:"]') : null;
-        const h = hdr ? hdr.getBoundingClientRect().height : 0;
-        document.documentElement.style.setProperty('--lst-headtop', Math.round(h) + 'px');
-      } catch (_) {}
       window.__lstMk.l0 = performance.now();
       document.getElementById('lst-list').innerHTML = lst.grid ? listingGridHtml(shown) : (shown.map(cardSafe).join('') || (() => {
         // ★0件のときに「該当なし」だけ出すと、条件が効いているのかデータが無いのか分からず
@@ -51728,35 +51786,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   #lst-scroll の下端は画面より下（実測 372px 下）にあるため、
     //   **先に窓の方がスクロールする**＝見出しも一緒に上へ流れて消えていた（貼り付くのは窓を送りきった後）。
     //   見出しを箱の外に出し、窓に対して貼り付ける。横スクロールは本体と同期させる。
-    { const hw = document.getElementById('lst-hdrwrap'), sc0 = document.getElementById('lst-scroll');
-      if (hw) {
-        const putTop = () => { hw.style.top = ((window.__barH ? window.__barH() : 35)) + 'px'; };
-        putTop(); SHOW_PAGE_HOOKS.push(putTop);
-        if (!hw._wired) { hw._wired = true; window.addEventListener('resize', putTop); }
-        if (sc0) { let lk = false;
-          sc0.addEventListener('scroll', () => { if (lk) return; lk = true; hw.scrollLeft = sc0.scrollLeft; lk = false; });
-          hw.scrollLeft = sc0.scrollLeft;
+    { const sc = document.getElementById('lst-scroll'), hb = document.getElementById('lst-hbar'), hw = document.getElementById('lst-hdrwrap');
+      if (sc && hb) {
+        hb.addEventListener('scroll', () => { if (sc.scrollLeft !== hb.scrollLeft) sc.scrollLeft = hb.scrollLeft; });
+        sc.addEventListener('scroll', () => {
+          if (hb.scrollLeft !== sc.scrollLeft) hb.scrollLeft = sc.scrollLeft;
+          if (hw && hw.scrollLeft !== sc.scrollLeft) hw.scrollLeft = sc.scrollLeft;
+        });
+        if (!_lstLayoutWired) {
+          _lstLayoutWired = true;
+          SHOW_PAGE_HOOKS.push(lstLayoutSoon);
+          window.addEventListener('resize', lstLayoutSoon);
         }
-      } }
-    { const sc = document.getElementById('lst-scroll'), hb = document.getElementById('lst-hbar'), hi = document.getElementById('lst-hbar-in');
-      if (sc && hb && hi) {
-        // ★値が変わった時だけ書く。毎回書くと「バーの表示切替→レイアウト変化→ResizeObserver再発火→…」
-        //   で無限ループになりブラウザが固まる（実際に発生）。ResizeObserverは使わずwindow.resizeだけにする。
-        const syncW = () => {
-          const w = sc.scrollWidth + 'px';
-          if (hi.style.width !== w) hi.style.width = w;
-          // ★横に余っていなくても【バーは出したままにする】。列を隠したり画面を広げた瞬間に
-          //   消えてしまい「スクロールバーが無くなった」と混乱するため（本人指摘 2026-08-13）。
-          //   動かせないときは掴めないだけで、位置は変わらない＝表の頭が動かない。
-          if (hb.style.display !== '') hb.style.display = '';
-          const over = sc.scrollWidth > sc.clientWidth + 1;
-          if (hi.style.minWidth !== '101%') hi.style.minWidth = over ? '' : '101%';   // 余っていても掴める幅を残す
-        };
-        syncW(); setTimeout(syncW, 300);
-        let lock = false;
-        hb.addEventListener('scroll', () => { if (lock) return; lock = true; sc.scrollLeft = hb.scrollLeft; lock = false; });
-        sc.addEventListener('scroll', () => { if (lock) return; lock = true; hb.scrollLeft = sc.scrollLeft; lock = false; });
-        if (!sc._roWired) { sc._roWired = true; let rt2; window.addEventListener('resize', () => { clearTimeout(rt2); rt2 = setTimeout(syncW, 200); }); }
+        lstLayoutSoon();
+        clearTimeout(_lstLayoutLater);
+        _lstLayoutLater = setTimeout(lstLayoutSoon, 300);
       } }
     window.__lstMk.l = performance.now();
     { const more = document.getElementById('lst-more'); if (more) more.innerHTML = pageNav(lst.grid ? gridGroups.length : rows.length, lstPer, lstPage); }
@@ -51808,18 +51852,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       jumpSearch('orders', 'ord-search', q, () => { state.orders.filter = 'all'; state.orders.page = 1; });
     }));
     { const se = document.getElementById('lst-search');
-      let t;
-      // ✕ボタンの出し入れだけは打鍵ごとに（再描画しないので軽い）
-      se.addEventListener('input', e => {
-        lst._focusBack = { id: 'lst-search', s: e.target.selectionStart, e: e.target.selectionEnd, ts: Date.now() };
-        const x = document.getElementById('lst-searchclr'); if (x) x.style.display = e.target.value ? '' : 'none';
-      });
-      // ★1回の再描画が重い（6千件超）ので打ち終わってから1回だけ。IMEの変換中は走らせない
-      wireTypeahead(se, (v) => { if (lst.search === v) return; lst.search = v; lst.page = 1; drawListingStatus(); }, 600);
-      { const cb2 = document.getElementById('lst-searchclr');
-        if (cb2) cb2.addEventListener('click', () => { se.value = ''; lst.search = ''; lst.page = 1; lst._focusBack = null; drawListingStatus(); }); }
-      // 検索欄から自分で離れたら復元をやめる（他を触っているのに勝手に戻らないように）
-      se.addEventListener('blur', () => { setTimeout(() => { const a = document.activeElement; if (a && a.id !== 'lst-search' && a.tagName !== 'BODY') lst._focusBack = null; }, 0); });
+      if (!se._imeWired) {
+        const clear = document.getElementById('lst-searchclr');
+        // 打鍵ごとは✕の表示と索引づくりの予約だけ。IME確定後、打ち終わってから一覧を更新する。
+        se.addEventListener('input', e => {
+          clear.style.display = se.value ? '' : 'none';
+          if (!e.isComposing) lstWarmSearch(se);
+        });
+        wireTypeahead(se, v => {
+          if (!se.isConnected || lst.search === v) return;
+          lst.search = v; lst.page = 1; drawListingStatus();
+        }, 600);
+        clear.addEventListener('click', () => {
+          se.value = ''; lst.search = ''; lst.page = 1; drawListingStatus();
+        });
+      }
     }
     { const seg = document.getElementById('lst-pub'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.pub = b.dataset.p; lst.page = 1; drawListingStatus(); }); }
     { const s = document.getElementById('lst-sort'); if (s) s.addEventListener('change', () => { lst.sort = s.value; if (lst.sort && !lst.sortDir) lst.sortDir = (lst.sort === 'name') ? 'asc' : 'desc'; lst.page = 1; drawListingStatus(); }); }
