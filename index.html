@@ -5463,6 +5463,12 @@
     "保留・別の色と同じ写真URL": "On hold: another color uses the same photo URL",
     "出品一覧の検索中に入力が途切れないように": "Keep typing uninterrupted while listing search results refresh",
     "出品一覧を第1・第2・第3アカウントで国をまたいで絞り込めるように": "Filter listings across countries by the first, second or third account",
+    "出品一覧の最新更新で選んだ1店だけShopeeから取り込めるように": "Refresh just the selected shop from Shopee in the listings view",
+    "個店を選ぶとその店だけShopeeから取り込みます。グループを選ぶとポータルの出品データを読み直します。": "Select an individual shop to fetch only that shop from Shopee. Selecting an account group reloads the portal's listing data.",
+    "Shopeeから今すぐ取り込む場合は、絞り込みで国別の店を1つ選んでください。ポータルの出品データを読み直します。": "To fetch from Shopee now, select one individual shop in the filter. Reloading the portal's listing data.",
+    "選んだ店をアカウント登録簿で確認できません。出品の取り込みを止めました。": "The selected shop could not be verified in the account registry. Listing import stopped.",
+    "選んだ店と国または上部のアカウントの絞り込みが一致しません。出品の取り込みを止めました。": "The selected shop conflicts with the country or header account filter. Listing import stopped.",
+    "選んだ店の出品取り込み結果を確認できません。": "Could not verify the listing import result for the selected shop.",
     "色違いの新品候補は明細ごとに写真と商用掲載の根拠を確認": "Require photos and commercial-use evidence for each color variant",
     "候補と確認根拠（JSON）": "Candidate and evidence (JSON)",
     "候補プレビュー": "Preview candidate",
@@ -6309,6 +6315,7 @@
     "同名が複数": "Duplicate titles",
     "🔑 アカウント": "🔑 Account", "（アカウント未判別）": "(account unknown)",
     "第1アカウント": "First account", "第2アカウント": "Second account", "第3アカウント": "Third account",
+    "第3アカウントの国別": "Third account by country",
     "第1・第2・第3アカウント、店名の系統、国別の店で絞ります。複数国をまとめて見るには上部を全アカウントにしてください。": "Filter by the first, second or third account, store-name family, or individual shop. Select All accounts in the header to see multiple countries together.",
     "全期間": "All time", "直近7日": "Last 7 days", "直近30日": "Last 30 days", "直近90日": "Last 90 days",
     "在庫監視": "Stock watch", "バリエーション": "With variations", "単品": "Single item", "明細すべて": "All",
@@ -9472,6 +9479,7 @@
     [/^アカウントすべて（([\d,]+)件）$/, 'All accounts ($1)'],
     [/^第([123])アカウント（([\d,]+)件）$/, 'Account $1 ($2)'],
     [/^第([123])アカウントだけ$/, 'Account $1 only'],
+    [/^([A-Z]{2}) · (.+)（([\d,]+)件）$/, '$1 · $2 ($3)'],
     [/^(.+)（系統ぜんぶ ([\d,]+)件）$/, '$1 (whole family, $2)'],
     [/^(.+) の国別$/, '$1 by country'],
     [/^アカウント未判別（([\d,]+)件）$/, 'Account unknown ($1)'],
@@ -27548,7 +27556,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
-    { date: '2026-11-10', items: ['<b>第三SGの新品候補から包装違いを確認し、1カタログを直接公開</b>。', '<b>出品一覧を第1・第2・第3アカウントで国をまたいで絞り込めるように</b>。'] },
+    { date: '2026-11-10', items: ['<b>第三SGの新品候補から包装違いを確認し、1カタログを直接公開</b>。', '<b>出品一覧を第1・第2・第3アカウントで国をまたいで絞り込めるように</b>。', '<b>出品一覧の最新更新で選んだ1店だけShopeeから取り込めるように</b>。'] },
     { date: '2026-11-09', items: ['<b>出品一覧の検索中に入力が途切れないように</b>。', '<b>色違いの新品候補は明細ごとに写真と商用掲載の根拠を確認</b>。'] },
     { date: '2026-11-09', items: ['<b>第三SGの新品候補に公式の読み取り照会を追加</b>。'] },
     { date: '2026-11-09', items: ['<b>損益明細の上バーを操作しやすく</b>。'] },
@@ -32311,28 +32319,60 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (lst.tab === 'analysis' && lst.anaSub === 'coverage') { try { renderCoverage(); } catch (_) {} }
     }
   }
+  function listingShopInHeader(shop, headerAccount = state.acct || 'all') {
+    return headerAccount === 'all' || headerAccount === String(shop.shop_id) ||
+      (headerAccount.startsWith('fam:') && famOfLabel(shop.label) === headerAccount.slice(4));
+  }
   // ★「さっき作った出品が出てこない」への対処。
   //   定例の自動同期は【30分に1店ずつ】なので、1店ぶんが回ってくるのに数時間かかる（増分も最短2時間おき）。
   //   ＝DBを読み直すだけでは、作りたての出品はどうやっても出ない。
   //   ここでGASに「直近24時間で作られた/変わった出品だけ」を取りに行かせてから読み直す。
-  //   国を1つに絞っているときはその店だけ＝速い。絞っていなければ全店。
+  //   個店指定は登録簿で照合してその店だけ。複数店の指定はDBを読み直す。
   async function pullListingsNow() {
+    if (lst.syncing) return;
+    const viewAccount = lst.acct || '', headerAccount = state.acct || 'all';
+    const scoped = viewAccount || headerAccount !== 'all';
+    if (!scoped && state.mode === 'live' && settings.sbSecret) { await syncListings(); return; }
     if (!settings.openapiUrl || !settings.writeToken) { await reloadListingsFromDb(); return; }
     const ccs = Array.isArray(lst.ccs) ? lst.ccs : [];
-    // ★1国だけ絞っている時はその店だけ取りに行く＝速い。
-    //   ただし settings.shopIds は空のことがあり（実測で空だった）、その場合この短縮が黙って効いていなかった。
-    //   出品行から shop_id を解決して確実に効かせる（2026-08-22）。
-    const sidOfCc = (cc2) => {
-      const v = (settings.shopIds || {})[cc2]; if (v) return String(v);
-      const r0 = (lst.byCc[cc2] || []).find(x => x.shop_id); return r0 ? String(r0.shop_id) : '';
-    };
-    const sid = (ccs.length === 1) ? sidOfCc(ccs[0]) : '';
+    let sid = '', shop = null;
+    if (scoped) {
+      sid = viewAccount || headerAccount;
+      if (!/^\d+$/.test(sid)) {
+        lst.note = 'Shopeeから今すぐ取り込む場合は、絞り込みで国別の店を1つ選んでください。ポータルの出品データを読み直します。';
+        await reloadListingsFromDb();
+        return;
+      }
+      const shops = (state.accounts || []).filter(a => String(a.shop_id) === sid);
+      if (shops.length !== 1 || !regionByCc(shops[0].cc)) {
+        lst.note = '選んだ店をアカウント登録簿で確認できません。出品の取り込みを止めました。';
+        drawListingStatus();
+        return;
+      }
+      shop = shops[0];
+      if (!listingShopInHeader(shop, headerAccount) || !state.enabled.has(shop.cc) || (ccs.length && !ccs.includes(shop.cc))) {
+        lst.note = '選んだ店と国または上部のアカウントの絞り込みが一致しません。出品の取り込みを止めました。';
+        drawListingStatus();
+        return;
+      }
+    } else if (ccs.length === 1) {
+      // 店を選んでいない時は従来どおり、1国なら設定の店IDか読み込み済みの出品行から解決する。
+      sid = String(settings.shopIds?.[ccs[0]] || (lst.byCc[ccs[0]] || []).find(r => r.shop_id)?.shop_id || '');
+    }
     lst.syncing = true;
-    lst.note = sid ? `Shopeeから${ccs[0]}の新しい出品を取りに行っています…（30秒〜2分）` : 'Shopeeから新しい出品を取りに行っています…（全店・1〜3分）';
+    lst.note = sid ? `Shopeeから${shop?.label || ccs[0]}の新しい出品を取りに行っています…（30秒〜2分）` : 'Shopeeから新しい出品を取りに行っています…（全店・1〜3分）';
     drawListingStatus();
     try {
-      const r = await gasCall({ action: 'listings_now', token: settings.writeToken, hours: 24, shop_id: sid }, 300000);
+      const r = await gasCall({ action: 'listings_now', token: settings.writeToken, hours: 24, shop_id: sid,
+        ...(shop ? { _url: settings.openapiUrlMain || settings.openapiUrl } : {}) }, 300000);
       if (!r || !r.ok) throw new Error((r && r.error) || '応答なし');
+      if (shop) {
+        const entry = r.log?.[0];
+        if (r.shops !== 1 || r.log?.length !== 1 || String(entry?.shop_id) !== sid || entry.cc !== shop.cc || entry.error || entry.mdlFail ||
+            !Number.isSafeInteger(entry.listings) || entry.listings < 0 || r.listings !== entry.listings) {
+          throw new Error('選んだ店の出品取り込み結果を確認できません。');
+        }
+      }
       lst.note = `Shopeeから ${r.listings || 0}件を取り込みました（${r.shops || 0}店・直近${r.hours}時間ぶん）`;
       lst.loaded = false; await ensureListings();
       if (typeof toast === 'function') toast(`✓ 新しい出品 ${r.listings || 0}件を取り込みました`);
@@ -32341,7 +32381,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       lst.note = '';
       try { lst.loaded = false; await ensureListings(); } catch (_) {}
       alert('Shopeeからの取り込みに失敗しました: ' + (e.message || e)
-        + '\n\n表示はDBの最新に更新しました。GAS側に listings_now を貼っていない場合はこのエラーになります。');
+        + (shop ? '' : '\n\n表示はDBの最新に更新しました。GAS側に listings_now を貼っていない場合はこのエラーになります。'));
     }
     finally {
       lst.syncing = false; drawListingStatus();
@@ -51725,7 +51765,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     window.__lstMk.f = performance.now();
     lstReplaceContents(host,
       `<div class="smd-toolbar" style="margin-bottom:6px">
-        <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''} title="${state.mode === 'live' && settings.sbSecret ? 'この端末（🟢ライブ）からShopeeへ直接取りに行って最新化' : '押すとShopeeへ「直近24時間で作られた/変わった出品」を取りに行き、そのあと画面を更新します。&#10;さっき作った出品もこれで出ます（国を1つに絞っていると、その店だけなので速い）'}">🔄 ${lst.syncing ? '取得中...' : '最新に更新'}</button>
+        <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''} title="個店を選ぶとその店だけShopeeから取り込みます。グループを選ぶとポータルの出品データを読み直します。">🔄 ${lst.syncing ? '取得中...' : '最新に更新'}</button>
         <button class="smd-btn" id="lst-stats" title="👁閲覧・❤️いいね・🛒販売数をShopeeから取り直します（全店で1〜3分。通常は6時間ごとに自動更新）">📊 統計を更新</button>
         <!-- ★全件バックフィルのボタンは出さない（2026-08-28）。
              全4,078種類を引くと約¥53,000かかるのに、【同じ名前が複数カタログにある】ものは
@@ -51753,26 +51793,33 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             const sid = String(r.shop_id);
             byS.set(sid, (byS.get(sid) || 0) + 1);
           });
+          const thirdShops = (state.accounts || []).filter(a => a.status === 'new' && /^\d+$/.test(String(a.shop_id || '')) &&
+            a.label && state.enabled.has(a.cc) && listingShopInHeader(a));
+          const thirdIds = new Set(thirdShops.map(a => String(a.shop_id)));
+          thirdIds.forEach(sid => { if (!byS.has(sid)) byS.set(sid, 0); });
           byS.forEach((n, sid) => {
             const f = acctFamOf(sid), rank = rankByShop.get(sid);
             if (f) byF.set(f, (byF.get(f) || 0) + n);
             if (rank) byRank.set(rank, (byRank.get(rank) || 0) + n);
           });
           const registeredRanks = new Set(rankByShop.values());
-          if (byS.size < 2 && !noneN && registeredRanks.size < 2 && !lst.acct) return '';
+          if (byS.size < 2 && !noneN && registeredRanks.size < 2 && !thirdShops.length && !lst.acct) return '';
           const optsRank = Object.entries(LST_ACCOUNT_RANK_LABELS).filter(([rank]) => registeredRanks.has(rank))
             .map(([rank, label]) => `<option value="rank:${rank}" ${lst.acct === 'rank:' + rank ? 'selected' : ''}>${label}（${byRank.get(rank) || 0}件）</option>`).join('');
           const fams = [...byF.entries()].sort((a, b) => b[1] - a[1]);
           const optsFam = fams.map(([f, n]) => `<option value="fam:${av(f)}" ${lst.acct === 'fam:' + f ? 'selected' : ''}>${esc(f)}（系統ぜんぶ ${n}件）</option>`).join('');
           const optsShop = fams.map(([f]) => {
-            const list = [...byS.entries()].filter(([sid]) => acctFamOf(sid) === f)
+            const list = [...byS.entries()].filter(([sid]) => !thirdIds.has(sid) && acctFamOf(sid) === f)
               .sort((a, b) => String(acctLabel(a[0])).localeCompare(String(acctLabel(b[0]))));
             if (!list.length) return '';
             return `<optgroup label="${av(f)} の国別">` + list.map(([sid, n]) => `<option value="${av(sid)}" ${lst.acct === sid ? 'selected' : ''}>${esc(acctLabel(sid) || sid)}（${n}件）</option>`).join('') + '</optgroup>';
           }).join('');
+          const optsThird = thirdShops.length ? '<optgroup label="第3アカウントの国別">' + thirdShops
+            .sort((a, b) => a.cc.localeCompare(b.cc))
+            .map(({shop_id, cc, label}) => `<option value="${av(shop_id)}" ${lst.acct === String(shop_id) ? 'selected' : ''}>${esc(cc)} · ${esc(label)}（${byS.get(String(shop_id)) || 0}件）</option>`).join('') + '</optgroup>' : '';
           return `<label style="display:inline-flex;align-items:center;gap:4px;color:#5b6472">🔑<select id="lst-acct" title="第1・第2・第3アカウント、店名の系統、国別の店で絞ります。複数国をまとめて見るには上部を全アカウントにしてください。" style="font-size:11.5px;padding:3px 5px;border:1px solid ${lst.acct ? '#c2401e' : '#dcdfe4'};border-radius:6px;${lst.acct ? 'color:#a83518;font-weight:700;background:#fdece7' : 'color:#5b6472'}">
             <option value="" ${!lst.acct ? 'selected' : ''}>アカウントすべて（${all.length}件）</option>
-            ${optsRank}${optsFam}${optsShop}
+            ${optsRank}${optsFam}${optsThird}${optsShop}
             ${noneN ? `<option value="none" ${lst.acct === 'none' ? 'selected' : ''}>アカウント未判別（${noneN}件）</option>` : ''}
           </select></label>`;
         })()}
@@ -51990,11 +52037,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     window.__lstMk.l = performance.now();
     { const more = document.getElementById('lst-more'); if (more) more.innerHTML = pageNav(lst.grid ? gridGroups.length : rows.length, lstPer, lstPage); }
     wirePageNav(document.getElementById('lst-more'), p => { lst.page = p; drawListingStatus(); const el = document.getElementById('lst-list'); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
-    document.getElementById('lst-sync').addEventListener('click', () => {
-      // 🟢ライブPCならShopeeへ直接。そうでなければGASが自動同期したDBを取り直す（ブリッジ不要）
-      if (state.mode === 'live' && settings.sbSecret) syncListings();
-      else pullListingsNow();
-    });
+    document.getElementById('lst-sync').addEventListener('click', pullListingsNow);
     { const s2 = document.getElementById('lst-sync2'); if (s2) s2.addEventListener('click', syncListings); }
     document.getElementById('lst-filter').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.filter = b.dataset.k; lst.page = 1; drawListingStatus(); });
     // 🚨仕入元売切れ・⚠️在庫0固定は「いつもは押さないが、あると効く」ので状態セグメントの外に出した。
