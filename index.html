@@ -5464,6 +5464,7 @@
     "出品一覧の検索中に入力が途切れないように": "Keep typing uninterrupted while listing search results refresh",
     "出品一覧を第1・第2・第3アカウントで国をまたいで絞り込めるように": "Filter listings across countries by the first, second or third account",
     "出品一覧の最新更新で選んだ1店だけShopeeから取り込めるように": "Refresh just the selected shop from Shopee in the listings view",
+    "個店の同期直後に新しい出品を一覧へ表示": "Show new listings immediately after syncing an individual shop",
     "個店を選ぶとその店だけShopeeから取り込みます。グループを選ぶとポータルの出品データを読み直します。": "Select an individual shop to fetch only that shop from Shopee. Selecting an account group reloads the portal's listing data.",
     "Shopeeから今すぐ取り込む場合は、絞り込みで国別の店を1つ選んでください。ポータルの出品データを読み直します。": "To fetch from Shopee now, select one individual shop in the filter. Reloading the portal's listing data.",
     "選んだ店をアカウント登録簿で確認できません。出品の取り込みを止めました。": "The selected shop could not be verified in the account registry. Listing import stopped.",
@@ -14815,10 +14816,10 @@
      （出品10分・在庫5分まで）。開いた後の画面の中の読み直しは今までどおり毎回 DB を読む。ポータルから書いた時（sbUpsert・sbPatch・sbDelete）はその表の控えを捨てる。🎭デモでは使わない */
   const SB_BOOT_TTL = { listings: 10 * 60e3, inventory: 5 * 60e3 };
   const sbBootKey = (table, qs) => 'boot|' + table + '|' + String(state && state.acct || '') + '|' + qs;
-  async function sbGetAllBoot(table, qs) {
+  async function sbGetAllBoot(table, qs, fresh = false) {
     const ttl = SB_BOOT_TTL[table], k = sbBootKey(table, qs);
     const boot = (typeof performance !== 'undefined' ? performance.now() : 0) < 90000;
-    if (ttl && boot && !demoOn()) {
+    if (!fresh && ttl && boot && !demoOn()) {
       try { const c = await idbKv('readonly', st => st.get(k)); if (c && Array.isArray(c.rows) && Date.now() - c.at < ttl) { try { window.__smdBootHit = (window.__smdBootHit || 0) + 1; } catch (_) {} return c.rows; } } catch (_) {}
     }
     const rows = await sbGetAll(table, qs);
@@ -27556,7 +27557,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
-    { date: '2026-11-10', items: ['<b>第三SGの新品候補から包装違いを確認し、1カタログを直接公開</b>。', '<b>出品一覧を第1・第2・第3アカウントで国をまたいで絞り込めるように</b>。', '<b>出品一覧の最新更新で選んだ1店だけShopeeから取り込めるように</b>。'] },
+    { date: '2026-11-10', items: ['<b>第三SGの新品候補から包装違いを確認し、1カタログを直接公開</b>。', '<b>出品一覧を第1・第2・第3アカウントで国をまたいで絞り込めるように</b>。', '<b>出品一覧の最新更新で選んだ1店だけShopeeから取り込めるように</b>。', '<b>個店の同期直後に新しい出品を一覧へ表示</b>。'] },
     { date: '2026-11-09', items: ['<b>出品一覧の検索中に入力が途切れないように</b>。', '<b>色違いの新品候補は明細ごとに写真と商用掲載の根拠を確認</b>。'] },
     { date: '2026-11-09', items: ['<b>第三SGの新品候補に公式の読み取り照会を追加</b>。'] },
     { date: '2026-11-09', items: ['<b>損益明細の上バーを操作しやすく</b>。'] },
@@ -32302,8 +32303,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return rows;
   }
   const lst = { tab: (function () { try { const t = localStorage.getItem('smdListTab') || 'status'; return t === 'plan' ? 'status' : t; } catch (_) { return 'status'; } })(), grid: (function () { try { return localStorage.getItem('smdListGrid') === '1'; } catch (_) { return false; } })(), started: false, wired: false, syncing: false, byCc: {}, filter: 'all', search: '', open: (function () { try { const a = JSON.parse(localStorage.getItem('smdListOpen') || '[]'); return new Set(Array.isArray(a) ? a : []); } catch (_) { return new Set(); } })(), costOpen: new Set(), covOpen: new Set(), note: '', ccs: (function () { try { const a = JSON.parse(localStorage.getItem('smdLstCcs') || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } })() };
-  function listingsFromDb() {
-    return sbGetAllBoot('listings', 'select=*&order=create_time.desc.nullslast').then(rows => {
+  function listingsFromDb(fresh) {
+    return sbGetAllBoot('listings', 'select=*&order=create_time.desc.nullslast', fresh).then(rows => {
       const byCc = {}; (rows || []).forEach(r => (byCc[r.cc] = byCc[r.cc] || []).push(r)); return byCc;
     });
   }
@@ -32374,7 +32375,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         }
       }
       lst.note = `Shopeeから ${r.listings || 0}件を取り込みました（${r.shops || 0}店・直近${r.hours}時間ぶん）`;
-      lst.loaded = false; await ensureListings();
+      // GASの書き込みは端末の起動時の控えを消さない。個店同期の成功後は同じ1回の読み込みをDBから行う。
+      lst.loaded = false; await ensureListings(!!shop);
       if (typeof toast === 'function') toast(`✓ 新しい出品 ${r.listings || 0}件を取り込みました`);
     } catch (e) {
       // 取りに行けなくても、せめてDBの最新は見せる（何も起きないのがいちばん困る）
@@ -46215,16 +46217,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // lst.byCc を確実にロード（出品状況/分析/横断で共有）
   /* ★2026-09-27 本人「なぜか表示されなくなりました」＝🧹カタログの質が全部0。読み込みが2本重なると（起動時のアカウント確定で lst.byCc を空にして読み直す）
      追い越された方が【何も待たずに】戻り、呼んだ側は空の lst.byCc で描いていた。→ 追い越されたら新しい方の読み込みを待ってから戻る */
-  function ensureListings() {
+  function ensureListings(fresh = false) {
     if (lst.loaded) return Promise.resolve();
-    const p = ensureListingsBody_();
+    const p = ensureListingsBody_(fresh);
     lst._ensureP = p;
     return p;
   }
-  async function ensureListingsBody_() {
+  async function ensureListingsBody_(fresh) {
     const seq = (lst._seq = (lst._seq || 0) + 1);   // アカウント切替で読込が重なった時、古い(未フィルタ)結果が上書きしないように。★最初の await より前に振る＝_ensureP と同じ順番になり、自分自身を待たない
     if (!state.accounts) await loadAccounts().catch(() => {}); // 系統(fam:)フィルタのshop_id解決に登録簿が要る→先に確保
-    const data = await listingsFromDb();
+    const data = await listingsFromDb(fresh);
     if (seq !== lst._seq) { const np = lst._ensureP; if (np) await np.catch(() => {}); return; }   // より新しい読込に追い越された→この結果は破棄し、新しい方が済むまで待つ
     lst.byCc = data;
     // ★販売数の付け替え補正は【ここ1か所】で当てる。読み込んだ時点で正しい数にしておけば、
