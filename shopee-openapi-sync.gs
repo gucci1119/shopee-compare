@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261109-1846'
+var SRC_VER = '20261109-2342'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -3094,6 +3094,15 @@ function shop3CandidateRead_(p) {
     for (var page = 0; page < 12 && bgAllowed_(); page++) {
       var r = callShop_(Number(id), '/api/v2/product/get_item_list', {offset:offset,page_size:100,item_status:'NORMAL'}, 'get');
       var list = r.response || {};
+      // Shopee omits item for a successful empty NORMAL list in MY/PH/TH/TW.
+      // Only the explicit end-of-list response may stand in for an empty array.
+      if (page === 0 && offset === 0 && r.error === '' && list.total_count === 0 &&
+          list.has_next_page === false && (list.next === '' || list.next === undefined) &&
+          (list.next_offset === undefined || list.next_offset === 0) &&
+          (list.item === undefined || (Array.isArray(list.item) && list.item.length === 0))) {
+        out.used = 0;
+        break;
+      }
       if (r.error || !Array.isArray(list.item) || typeof list.has_next_page !== 'boolean') break;
       var count = list.total_count;
       if (Number.isSafeInteger(count) && count >= list.item.length &&
