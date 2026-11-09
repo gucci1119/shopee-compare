@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261110-0200'
+var SRC_VER = '20261110-0540'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2558,6 +2558,7 @@ function doPostInner_(e) {
     else if (body.action === 'outbox_done') out = outboxDone_(body);
     else if (body.action === 'sls_awb_parameter') out = slsAwbParameter_(body); // 手配済みの単一梱包の帳票形式を照会
     else if (body.action === 'list_meta') out = listMeta_(body);      // 公式API出品：category/logistic解決（出品前の確認用）
+    else if (body.action === 'shop3_candidate_publish') out = shop3CandidatePublish_(body); // 第3店候補専用の公開。旧配備へは書き込まない
     else if (body.action === 'add_item') out = addItem_(body);        // 公式API出品：指定shop_idにadd_item（アカウント/国を明示）
     else if (body.action === 'upload_image') out = uploadImageData_(body);
     else if (body.action === 'undo_backup') out = undoBackup_(body);   /* ★2026-11-04 ポータルの戻す控え（IndexedDB の smd_*_undo_）を Drive にも置く（作った時に1回だけ・接続枠を使わない） */
@@ -2945,7 +2946,7 @@ function refreshOne_(refreshToken, who) {
   return { access: j.access_token, refresh: j.refresh_token || refreshToken, expire: now_() + (j.expire_in || 14400) - 300 };
 }
 
-function callShop_(shopId, path, query, method, body) {
+function callShop_(shopId, path, query, method, body, beforeFetch) {
   /* ★2026-09-21 実機で確かめたら、枠切れの印が付かなかった。真因＝**ensureToken_ は try の外**にあり、
      ここが枠切れで投げると下の catch（ufNoteErr_）に届かない。トークン更新も urlfetch を使う。 */
   var tok; try { tok = ensureToken_(shopId); } catch (e0) { ufNoteErr_(e0); throw e0; }
@@ -2960,8 +2961,13 @@ function callShop_(shopId, path, query, method, body) {
   // Shopeeゲートウェイは稀に "Address unavailable"/接続失敗を返す（同一ホストでも散発）→ 短い間隔で最大3回リトライ
   var txt = null, lastErr = null;
   for (var a = 0; a < 3; a++) {
-    try { ufBump_(1, path); txt = UrlFetchApp.fetch(url, opt).getContentText(); break; }
-    catch (e) { lastErr = e; ufNoteErr_(e); if (/too many times|回数が多すぎます|quota|rate/i.test(String(e))) break; if (String(method || '').toLowerCase() === 'post' && /add_item|add_model|init_tier_variation|update_tier_variation|delete_|unlist_item|boost_item|ship_order|copy|register_brand|add_voucher/.test(String(path)) || /\/(add_discount|add_bundle_deal|split_order)$/.test(String(path))) break; Utilities.sleep(700 * (a + 1)); }   /* ★2026-09-28 Codex：作る・消す・並べ替える POST は、通信例外（Shopee側で済んでいて返事だけ落ちた可能性）で送り直さない＝二重作成・二重削除を防ぐ */ // クォータ枯渇は即諦める＋【断られた事実】を残す（2026-09-21）
+    try {
+      ufBump_(1, path);
+      if (a === 0 && beforeFetch) beforeFetch(); // 第3店の控えを送信直前に更新
+      txt = UrlFetchApp.fetch(url, opt).getContentText();
+      break;
+    }
+    catch (e) { lastErr = e; ufNoteErr_(e); if (/too many times|回数が多すぎます|quota|rate/i.test(String(e))) break; if (beforeFetch || String(method || '').toLowerCase() === 'post' && /add_item|add_model|init_tier_variation|update_tier_variation|delete_|unlist_item|boost_item|ship_order|copy|register_brand|add_voucher/.test(String(path)) || /\/(add_discount|add_bundle_deal|split_order)$/.test(String(path))) break; Utilities.sleep(700 * (a + 1)); }   /* ★2026-09-28 Codex：作る・消す・並べ替える POST は、通信例外（Shopee側で済んでいて返事だけ落ちた可能性）で送り直さない＝二重作成・二重削除を防ぐ */ // クォータ枯渇は即諦める＋【断られた事実】を残す（2026-09-21）
   }
   if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + ((lastErr && lastErr.message) || lastErr));
   var j = JSON.parse(txt);
@@ -3029,10 +3035,10 @@ function updatePrice_(shopId, itemId, modelId, price) {
 }
 // ★モデル(明細)一覧を公式APIで読む（ブリッジのproductRead代替）：model_id/価格/在庫/SKU/バリエ名。
 //   バリエ無し商品は get_item_base_info で1件(model_id=0)にフォールバック。
-function getModels_(shopId, itemId) {
+function getModels_(shopId, itemId, strictStock) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   var priceOf = function (o) { var pi = (o.price_info || [])[0] || {}; return pi.original_price != null ? pi.original_price : (pi.current_price != null ? pi.current_price : 0); };
-  var stockOf = function (o) { var sv = o.stock_info_v2 || {}; var ss = (sv.seller_stock || [])[0] || {}; if (ss.stock != null) return ss.stock; var su = sv.summary_info || {}; return su.total_available_stock != null ? su.total_available_stock : 0; };
+  var stockOf = function (o) { var sv = o.stock_info_v2 || {}; var ss = (sv.seller_stock || [])[0] || {}; if (ss.stock != null) return ss.stock; var su = sv.summary_info || {}; return su.total_available_stock != null ? su.total_available_stock : (strictStock ? null : 0); };
   var j = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: itemId }, 'get');
   /* ★2026-11-07 本人「明細の画像じゃないの？」（SG 2店舗目 49118838191 ⑭）：Shopee が get_model_list でエラーを返した時も「明細の無い商品」の形（model_id 0）にして返していた
      → 出品の同期がその形で台帳に保存し（失敗は catch でしか止めていなかった）、出品ログに明細0の行が出た。エラーは失敗として投げる */
@@ -3089,7 +3095,7 @@ function shop3CandidateRead_(p) {
       String(target[0].label || '').trim().toLowerCase() !== expectedLabel || !getToken_(Number(id))) {
     throw new Error('第3店の登録と認可が一致しません');
   }
-  var out = { ok:true, market:market, shop_id:id, shopLabel:String(target[0].label), checkedAt:new Date().toISOString(),
+  var out = { ok:true, market:market, shop_id:id, shopLabel:String(target[0].label), checkedAt:new Date().toISOString(), canPublish:!isChild_(),
     cap:null, used:null, matches:[], duplicate:'unverified' };
   try {
     var lr = callShop_(Number(id), '/api/v2/product/get_item_limit', {}, 'get');
@@ -3162,11 +3168,11 @@ function shop3CandidateRead_(p) {
   return out;
 }
 
-function getItemFull_(shopId, itemId) {
+function getItemFull_(shopId, itemId, strictStock) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   var b = callShop_(shopId, '/api/v2/product/get_item_base_info', { item_id_list: String(itemId), need_tax_info: 'false', need_complaint_policy: 'false' }, 'get');
   var base = (((b.response || {}).item_list) || [])[0] || {};
-  var ml = getModels_(shopId, itemId); // {item_id, tier_variation, models:[{model_id,tier_index,name,sku,price,stock,img}]}
+  var ml = getModels_(shopId, itemId, strictStock); // {item_id, tier_variation, models:[{model_id,tier_index,name,sku,price,stock,img}]}
   return { base: base, model: ml };
 }
 // ★属性(specifics)の選択肢を公式APIで読む（ブリッジの内部v3 get_attribute_tree 代替）。カタログ編集の属性ドロップダウン用。
@@ -3353,10 +3359,10 @@ function priceRelockPromo_(shopId, itemId, promo) {
   return promo;
 }
 // ★在庫を複数モデルまとめて更新（update_stock stock_list）。list=[{model_id,stock}]
-function updateStockList_(shopId, itemId, list) {
+function updateStockList_(shopId, itemId, list, beforeFetch) {
   var sl = (list || []).map(function (x) { return { model_id: parseInt(x.model_id, 10) || 0, seller_stock: [{ stock: parseInt(x.stock, 10) }] }; }).filter(function (x) { return !isNaN(x.seller_stock[0].stock); });
   if (!sl.length) throw new Error('在庫リストが空');
-  var j = callShop_(shopId, '/api/v2/product/update_stock', null, 'post', { item_id: parseInt(itemId, 10), stock_list: sl });
+  var j = callShop_(shopId, '/api/v2/product/update_stock', null, 'post', { item_id: parseInt(itemId, 10), stock_list: sl }, beforeFetch);
   var fl = ((j && j.response) || {}).failure_list || [];   /* ★2026-09-28 Codex：在庫を0にできていないのに成功表示していた */
   if (fl.length) throw new Error('一部の明細の在庫を変えられませんでした（' + fl.length + '/' + sl.length + '）: ' + fl.slice(0, 3).map(function (f) { return (f.model_id || '') + ' ' + String(f.failed_reason || f.reason || ''); }).join(' / ').slice(0, 200));
   return { updated: sl.length, response: (j && j.response) || j };
@@ -5844,8 +5850,160 @@ function baCondFor_(name, given) {
   if (BA_COND_NEW_RE.test(n)) return 'NEW';
   return (g === 'NEW' || g === 'USED') ? g : 'USED';
 }
-function addItem_(body) {
+// 店ごとの8区画に分け、5店合計の値を最大180,000バイトに抑える。
+// 送信前の札だけ10分で失効。送信後の成否が不明なら、期限で再送できるようにしない。
+function shop3PublishReceipt_(claim, phase, itemId) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) throw new Error('第3店の公開控えが使用中です');
+  try {
+    var props = P_(), shards = {}, changes = {};
+    var reserved = 'r:' + claim.at + ':' + claim.owner;
+    var pending = 'p:' + claim.at + ':' + claim.owner;
+    var cutoff = Date.now() - 10 * 60000;
+    claim.asins.forEach(function (asin) {
+      var hash = 0;
+      for (var i = 0; i < asin.length; i++) hash = Math.imul(hash, 31) + asin.charCodeAt(i);
+      var key = 'shop3_pub_' + claim.shopId + '_' + ((hash >>> 0) % 8);
+      if (!shards[key]) {
+        var values = JSON.parse(props.getProperty(key) || '{}');
+        if (!values || typeof values !== 'object' || Array.isArray(values) || Object.keys(values).some(function (k) {
+          return !/^[A-Z0-9]{10}$/.test(k) || typeof values[k] !== 'string' ||
+            !/^(?:[rp]:\d+:[\w-]+|[isa]:[1-9]\d*)$/.test(values[k]);
+        })) throw new Error('第3店の共有公開控えを読み取れません');
+        if (phase === 'reserve') Object.keys(values).forEach(function (k) {
+          var old = /^r:(\d+):[\w-]+$/.exec(values[k]);
+          if (old && Number(old[1]) < cutoff) delete values[k];
+        });
+        shards[key] = values;
+      }
+      var shard = shards[key];
+      var existing = shard[asin];
+      if (phase === 'reserve') {
+        if (Object.prototype.hasOwnProperty.call(shard, asin)) {
+          var published = /^([isa]):(\d+)$/.exec(existing);
+          var conflict = new Error('第3店の同じ子ASINに公開控えがあります: ' + asin +
+            (published ? ' 商品ID ' + published[2] + '。' + ({
+              i:'明細在庫は未有効化。', s:'明細在庫の更新結果を確認してください。', a:'明細在庫の更新受付済み。',
+            })[published[1]] : '。出品一覧を照合してください。'));
+          conflict.shop3Conflict = true;
+          throw conflict;
+        }
+        shard[asin] = reserved;
+      } else if (phase === 'release') {
+        if (existing === reserved || existing === pending) delete shard[asin];
+      } else {
+        var previous = {pending:reserved, done:pending, stockPending:'i:' + itemId, stockReady:'s:' + itemId};
+        var next = {pending:pending, done:'i:' + itemId, stockPending:'s:' + itemId, stockReady:'a:' + itemId};
+        if (existing !== previous[phase]) throw new Error('第3店の共有公開控えが変わりました');
+        shard[asin] = next[phase];
+      }
+    });
+    Object.keys(shards).forEach(function (key) {
+      var value = JSON.stringify(shards[key]);
+      if (value.length > 4500) throw new Error('第3店の共有公開控えが上限に達しました');
+      changes[key] = value;
+    });
+    claim.writeUncertain = true;
+    props.setProperties(changes, false);
+    claim.writeUncertain = false;
+    if (phase === 'reserve') claim.reserved = true;
+  } finally { lock.releaseLock(); }
+}
+
+function shop3CandidatePublish_(body) {
+  var attempt = { claim:null, submitted:false };
+  try {
+    if (isChild_()) throw new Error('第3店の直接公開は本体GASを使ってください');
+    return addItem_(body, attempt);
+  }
+  catch (err) {
+    var retry = !attempt.submitted && !(err && err.shop3Conflict) && !(attempt.claim && attempt.claim.writeUncertain);
+    if (retry && attempt.claim && attempt.claim.reserved) {
+      try { shop3PublishReceipt_(attempt.claim, 'release'); }
+      catch (releaseError) {
+        retry = false;
+        Logger.log('第3店の送信前予約を解除できません shop_id=' + attempt.claim.shopId + ' ' + String(releaseError));
+      }
+    }
+    return { ok:false, error:String((err && err.message) || err), shop3_retry_safe:retry };
+  }
+}
+
+// 在庫を有効にする前に、同じ店への公式照会で商品と全明細がそろったことを確認する。
+function shop3CandidateStockRows_(shopId, itemId, payload, tvBody) {
+  var full = getItemFull_(shopId, itemId, true);
+  var base = full.base || {}, models = (full.model || {}).models || [];
+  var tiers = (full.model || {}).tier_variation || [];
+  var tier = tiers[0] || {}, sent = tvBody.tier_variation[0];
+  var options = tier.option_list || [];
+  var normalize = function (text) { return String(text || '').trim().replace(/\s+/g, ' '); };
+  if (String(base.item_id) !== String(itemId) || String((full.model || {}).item_id) !== String(itemId) ||
+      (base.shop_id != null && String(base.shop_id) !== String(shopId)) ||
+      base.item_status !== 'NORMAL' || base.condition !== 'NEW' ||
+      Number(base.category_id) !== payload.category_id || Number((base.brand || {}).brand_id) !== payload.brand.brand_id ||
+      Math.abs(Number(base.weight) - payload.weight) >= 0.0001 || !Number.isFinite(Number(base.weight)) ||
+      !Object.keys(payload.dimension).every(function (k) { return Number((base.dimension || {})[k]) === payload.dimension[k]; }) ||
+      normalize(base.item_name) !== normalize(payload.item_name) ||
+      normalize(base.description) !== normalize(payload.description) ||
+      !(payload.attribute_list || []).every(function (attr) {
+        var stored = (base.attribute_list || []).find(function (a) { return Number(a.attribute_id) === attr.attribute_id; });
+        return attr.attribute_value_list.every(function (expected) {
+          return ((stored || {}).attribute_value_list || []).some(function (v) {
+            return Number(v.value_id || 0) === expected.value_id &&
+              (expected.value_id !== 0 || normalize(v.original_value_name) === normalize(expected.original_value_name)) &&
+              (!expected.value_unit || v.value_unit === expected.value_unit);
+          });
+        });
+      }) ||
+      !((base.image || {}).image_id_list || []).includes(payload.image.image_id_list[0]) ||
+      tiers.length !== 1 || tier.name !== sent.name || options.length !== sent.option_list.length ||
+      models.length !== tvBody.model.length) return null;
+  var rows = tvBody.model.map(function (expected, i) {
+    var model = models.find(function (m) { return m.sku === expected.model_sku; });
+    var option = options[i] || {}, image = option.image || {};
+    var imageId = image.image_id || (image.image_id_list || [])[0];
+    if (!model || !/^[1-9]\d*$/.test(String(model.model_id)) ||
+        !model.tier_index || model.tier_index.length !== 1 || model.tier_index[0] !== i ||
+        option.option !== sent.option_list[i].option || imageId !== sent.option_list[i].image.image_id ||
+        !(model.stock === 0 || model.stock === '0') ||
+        !Number.isFinite(Number(model.price)) || Math.abs(Number(model.price) - expected.original_price) >= 0.0001) return null;
+    return { model_id:model.model_id, stock:1 };
+  });
+  return rows.every(Boolean) && new Set(rows.map(function (r) { return String(r.model_id); })).size === rows.length ? rows : null;
+}
+
+function addItem_(body, attempt) {
   var shopId = parseInt(body.shop_id, 10); if (!shopId) throw new Error('shop_id 必須');
+  var candidate = body.action === 'shop3_candidate_publish';
+  var vars = body.variations || [];
+  // 第3店のAmazon新品公開は、共有控えを通る専用の入口に限る。
+  if (!candidate && isShop3Shop_(shopId) && body.publish &&
+      Array.isArray(vars) && vars.some(function (v) { return /^AMZ_[A-Z0-9]{10}$/i.test(String((v && v.sku) || '').trim()); })) {
+    throw new Error('第3店のAmazon新品候補画面を再読み込みしてから公開してください');
+  }
+  if (candidate) {
+    var market = String(body.market || '');
+    var names = new Set(), skus = new Set();
+    if (!Object.prototype.hasOwnProperty.call(SHOP3_IDS_BY_MARKET, market) || body.shop_id !== SHOP3_IDS_BY_MARKET[market] ||
+        body.condition !== 'NEW' || body.publish !== true || body.promo !== false || body.stock !== 1 ||
+        !body.dimension || !Number.isSafeInteger(body.category_id) || body.category_id < 1 ||
+        !Number.isSafeInteger(body.brand_id) || body.brand_id < 1 || !Array.isArray(body.attribute_list) ||
+        !/^\[New\] .+/.test(String(body.item_name || '')) || baCondFor_(body.item_name, body.condition) !== 'NEW' ||
+        !/^(Color|Pack size|Packaging)$/.test(body.tier_name) ||
+        !Array.isArray(vars) || vars.length < 2 || vars.length > 10 || vars.some(function (v) {
+          if (!v || !/^AMZ_[A-Z0-9]{10}$/.test(v.sku) || skus.has(v.sku) ||
+              typeof v.name !== 'string' || !v.name || v.name.trim() !== v.name || v.name.length > 30 ||
+              names.has(v.name.toUpperCase()) || v.stock !== 1 || !Number.isFinite(v.price) || v.price <= 0) return true;
+          skus.add(v.sku); names.add(v.name.toUpperCase());
+          return false;
+        }) || body.price !== Math.min.apply(null, vars.map(function (v) { return v.price; }))) {
+      throw new Error('第3店の出品条件を確認できません');
+    }
+    if (!bgAllowed_()) throw new Error('第3店の出品用接続枠が不足しています');
+    attempt.claim = { shopId:shopId, asins:vars.map(function (v) { return v.sku.slice(4); }),
+      at:Date.now(), owner:Utilities.getUuid() };
+    shop3PublishReceipt_(attempt.claim, 'reserve');
+  }
   /* ★2026-10-24 全体レビュー（出品管理 #24）：VN は 909,090 VND を超えると出品ごと非公開になる（2026-10-09 Shopee 通知）。明細の追加（3613）と同じ確かめを新規作成にも */
   { var _ccA = ''; try { _ccA = baCcOfShop_(shopId); } catch (eCcA) {}
     if (_ccA === 'VN') { var _vpA = [parseFloat(body.price)].concat((body.variations || []).map(function (v) { return parseFloat(v.price != null ? v.price : body.price); })); var _ovA = _vpA.filter(function (x) { return x > 909090; });
@@ -5855,7 +6013,7 @@ function addItem_(body) {
   /* ★2026-11-05 01 商品部（本人「出品取り下げを調べて対応」）：ポケモンなどカードのカタログが「Toys & Games > Others（101409）」で作られ、
      Shopee が「Dice, Board & Card Games（101400）」へ直すよう降格を付けていた（BR 7件・TH 2店舗目・13店で55件）。複製は元のカテゴリを写すので、作る所1か所で直す。
      101400 は BR で brand_id 0（NoBrand）が要る（01 が update_item で確かめた）。必須の属性（Bluetooth を含むか＝No）は断られた時に mandatoryAttrFill_ が No で埋める */
-  if (categoryId === 101409 && /\b(trading\s*cards?|cards?|tcg|ccg)\b|カード|ポケカ/i.test(String(body.item_name || '')) && !/memory\s*card|sd\s*card|amiibo/i.test(String(body.item_name || ''))) {
+  if (!candidate && categoryId === 101409 && /\b(trading\s*cards?|cards?|tcg|ccg)\b|カード|ポケカ/i.test(String(body.item_name || '')) && !/memory\s*card|sd\s*card|amiibo/i.test(String(body.item_name || ''))) {
     categoryId = 101400; body.brand_id = 0;
     /* ★2026-11-05 01：BR の 101400 は「Contains Bluetooth, Wireless and/or RF Technology」（106664）が要り、付けずに送ると10件断られ、No（20997）を付けると全部通った＝BR は最初から付ける */
     var _ccCard = ''; try { _ccCard = baCcOfShop_(shopId); } catch (eCc) {}
@@ -5871,19 +6029,32 @@ function addItem_(body) {
     imgIds = body.images.slice(0, 9).map(function (u) { return _upImg(u); }).filter(Boolean);
   }
   if (!imgIds.length) throw new Error('画像が必要（image_ids か images URL を渡す）');
+  // 明細写真が1枚でも取れなければ、公開カタログを作る前に止める。
+  var tierImageIds = null;
+  if (candidate) {
+    if (vars.some(function (v) { return !/^https:\/\/[^\s/@]+\//i.test(String(v.image || '')); })) {
+      throw new Error('第3店の明細画像は全件必要です');
+    }
+    tierImageIds = vars.map(function (v) { return _upImg(v.image); });
+    if (tierImageIds.some(function (id) { return !id; }) || new Set(tierImageIds).size !== vars.length) {
+      throw new Error('第3店の明細画像の取得に失敗したか、同じ画像があります');
+    }
+  }
   /* ★2026-09-26 お店の画像6枚を空いた枠に（商品の写真が先・9枚まで）。失敗しても作成は止めない。body.promo===false で入れない（テスト用） */
   var _promo = null;
   if (body.promo !== false) { try { _promo = promoForNew_(shopId, imgIds, body.promo_assets || null); if (_promo) imgIds = _promo.imgs; } catch (ePm) { _promo = null; } }
+  var listingName = shopNameFit_(shopId, body.item_name);
+  if (candidate && listingName !== body.item_name) throw new Error('第3店の出品条件を確認できません');
   var payload = {
     original_price: parseFloat(body.price),
     description: (function (d) { d = String(d || ''); return d.length >= 20 ? d : (d + ' ' + String(body.item_name || '') + ' 日本の商品です。丁寧に梱包して発送します。').slice(0, 3000); })(body.description || body.item_name || ''), // Shopeeは説明20字以上必須→短ければ自動補完
     weight: parseFloat(body.weight || 0.5),
-    item_name: shopNameFit_(shopId, body.item_name),
+    item_name: listingName,
     category_id: categoryId,
     brand: { brand_id: body.brand_id != null ? parseInt(body.brand_id, 10) : 0 },
     condition: baCondFor_(body.item_name, body.condition),
     item_status: body.publish ? 'NORMAL' : 'UNLIST',
-    seller_stock: [{ stock: parseInt(body.stock != null ? body.stock : 1, 10) }],
+    seller_stock: [{ stock: candidate ? 0 : parseInt(body.stock != null ? body.stock : 1, 10) }], // 明細が揃うまで単品の購入を防ぐ
     image: { image_id_list: imgIds },
     logistic_info: logisticInfo
   };
@@ -5894,7 +6065,12 @@ function addItem_(body) {
      作る時点で必須のものがあると入口で弾かれる。→ 属性で弾かれた時だけ、そのカテゴリの必須属性のうち
      「No／否」系の選択肢があるもの（成人向けか？等）を埋めて1回だけ作り直す。平常時は呼ばない＝接続枠は増えない。 */
   var j;
-  try {
+  if (candidate) {
+    j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload, function () {
+      shop3PublishReceipt_(attempt.claim, 'pending');
+      attempt.submitted = true;
+    });
+  } else try {
     try { j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload); }
     catch (eAdd0) {
       /* ★2026-09-26 足したお店の画像で弾かれた時だけ、商品の写真だけで1回作り直す（お店の画像のせいで出品を止めない）。それ以外は下の既存の作り直しへ */
@@ -5938,9 +6114,16 @@ function addItem_(body) {
   }
   var resp = j.response || j;
   var itemId = (resp.item_id || (resp.item || {}).item_id || null);
+  if (candidate && /^[1-9]\d*$/.test(String(itemId))) {
+    try { shop3PublishReceipt_(attempt.claim, 'done', itemId); }
+    catch (err) {
+      // 作成結果は返す。確定を書けなかった場合も送信中の控えが再送を止める。
+      Logger.log('第3店の共有控えに商品IDを確定できません shop_id=' + shopId + ' item_id=' + itemId + ' ' + String(err));
+    }
+  }
   var result = { ok: true, shop_id: shopId, item_id: itemId, category_id: categoryId, logistic_ids: logisticInfo.map(function (x) { return x.logistic_id; }), image_ids: imgIds };
   // ★バリエーション：add_item後に init_tier_variation で機種等のバリエを設定（2明細以上のとき）
-  var vars = body.variations || [];
+  if (candidate) { result.tier_image_ids = tierImageIds; result.stock_ready = false; }
   /* ★2026-09-23 2店舗目に作ったカタログが【バリエ無しの単品】になり、明細を入れる所で「バリエ無し商品です」で全部失敗していた（PH/SG/TH）。
      ここは2明細以上の時しか軸を作らない作りで、seedShopCatalog_ は仮の test 1つで渡すため素通りしていた。forceTier の時は1つでも軸を作る */
   if (itemId && (vars.length >= 2 || (body.forceTier && vars.length >= 1))) {
@@ -5955,6 +6138,7 @@ function addItem_(body) {
     };
     var _used = {};
     var optionList = vars.map(function (v, i) {
+      if (candidate) return { option: v.name, image: { image_id: tierImageIds[i] } };
       var nm = _optName(v.name, i);
       if (_used[nm]) { var k = 2, c; do { var suf = '(' + k + ')'; c = nm.slice(0, 30 - suf.length) + suf; k++; } while (_used[c] && k < 100); nm = c; }
       _used[nm] = true;
@@ -5963,7 +6147,7 @@ function addItem_(body) {
       return o;
     });
     var modelList = vars.map(function (v, i) {
-      return { tier_index: [i], original_price: parseFloat(v.price != null ? v.price : body.price), model_sku: String(v.sku || ''), seller_stock: [{ stock: parseInt(v.stock != null ? v.stock : 1, 10) }] };
+      return { tier_index: [i], original_price: parseFloat(v.price != null ? v.price : body.price), model_sku: String(v.sku || ''), seller_stock: [{ stock: candidate ? 0 : parseInt(v.stock != null ? v.stock : 1, 10) }] };
     });
     var tvBody = { item_id: itemId, tier_variation: [{ name: String(body.tier_name || 'バージョン').slice(0, 30), option_list: optionList }], model: modelList };
     /* ★2026-10-23 作った直後だと Shopee が「The item is still being created. Please wait 5 seconds」で断る＝入れ物だけ残った（TW のコライドン）。この返事の時だけ6秒待って最大3回やり直す */
@@ -5980,6 +6164,23 @@ function addItem_(body) {
     result.variations = vars.length;
     result.tier_options = optionList.map(function (o) { return o.option; }); // 生成した一意オプション名（確認用）
     result.tier_init = (jt.error && jt.error !== '') ? ('ERROR: ' + jt.error + ' ' + (jt.message || '')) : 'ok';
+    if (candidate && result.tier_init === 'ok') {
+      try {
+        var stockRows = shop3CandidateStockRows_(shopId, itemId, payload, tvBody);
+        if (!stockRows) {
+          Utilities.sleep(1500);
+          stockRows = shop3CandidateStockRows_(shopId, itemId, payload, tvBody);
+        }
+        if (!stockRows) throw new Error('公式照会の商品・明細・画像・価格・在庫が一致しません');
+        updateStockList_(shopId, itemId, stockRows, function () {
+          shop3PublishReceipt_(attempt.claim, 'stockPending', itemId);
+        });
+        shop3PublishReceipt_(attempt.claim, 'stockReady', itemId);
+        result.stock_ready = true;
+      } catch (err) {
+        result.stock_warn = String((err && err.message) || err).slice(0, 300);
+      }
+    }
   }
   /* ★2026-09-26 統一動画は作った【後】に update_item で付ける（add_item では送らない＝cloneItem_ の実測に合わせる）。失敗しても作成は成功のまま */
   if (itemId && _promo) { try { promoAfterCreate_(shopId, itemId, _promo, result); } catch (ePa) { result.promo_warn = String((ePa && ePa.message) || ePa).slice(0, 160); } }

@@ -84,7 +84,7 @@ for (const [market, shop] of Object.entries(thirdShops)) {
 
 test('new catalog in same-country first and second shops still attaches configured promo media', () => {
   const { ctx, store, calls } = setup();
-  const add = section('function addItem_(body)', 'function brandList_');
+  const add = section('function addItem_(', 'function brandList_');
   const branch = add.match(/var _promo = null;\n[^\n]*promoForNew_.*\n/)[0];
   const after = add.match(/if \(itemId && _promo\)[^\n]+promoAfterCreate_[^\n]+/)[0];
   for (const shopId of [firstSg, secondSg, thirdShops.SG]) {
