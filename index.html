@@ -911,9 +911,9 @@
     .mob-clamp:not(.mc-open) { display: -webkit-box !important; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
     .mob-clamp:not(.mc-open) br { display: none; }
   }
-  #ship-check summary { cursor: pointer; font-size: 13px; }
-  #ship-check .sc-fold-label { margin-left: 8px; font-size: 11px; }
-  #ship-check details[open] .sc-open-label, #ship-check details:not([open]) .sc-close-label { display: none; }
+  #ship-check #sc-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; font-size: 13px; cursor: pointer; }
+  #ship-check .sc-fold-label { font-size: 11px; text-decoration: underline; }
+  #ship-check #sc-toggle[aria-expanded="true"] .sc-open-label, #ship-check #sc-toggle[aria-expanded="false"] .sc-close-label { display: none; }
   /* 🎭 デモ表示モード：商品画像をぼかして識別不能に（テキスト系はデータ層で匿名化） */
   html.smd-demo img { filter: blur(11px) saturate(.6) contrast(.95) !important; }
   html.smd-demo #demo-banner { display: flex !important; }
@@ -5447,6 +5447,7 @@
     "Shopeeの接続枠を確保するため、帳票種の照会を見送りました。": "Label type check skipped to preserve the Shopee quota.",
     "Shopeeの帳票種を確認できませんでした。": "Could not verify Shopee's label types.",
     "出荷前チェックを折りたたみ・再表示": "Collapse and expand pre-shipment checks",
+    "出荷前チェックの開閉を注文一覧の更新後も保持": "Keep pre-shipment checks open or closed when the order list refreshes",
     "チェックを開く": "Show checks", "チェックを閉じる": "Hide checks",
     "担当PCで営業集計を自動更新": "Refresh outreach totals automatically on the assigned PC",
     "営業画面を開かなくても、保存から90分経った全店舗の集計を見直します。": "Refreshes the totals for all stores after 90 minutes, even when the outreach page is closed.",
@@ -10188,7 +10189,7 @@
     if (d.v === d.base) _appDraft.delete(k); else _appDraft.set(k, Object.assign(d, { at: Date.now() })); return k; };
     window.__smdDraftNote = appDraftNote; window.__smdDraftMap = () => [..._appDraft.keys()];   /* 画面での確かめ用（JS の input は isTrusted=false で数えないため） */
     document.addEventListener('input', e => { if (e.isTrusted) appDraftNote(e.target); }, true);
-    document.addEventListener('click', e => { const b = e.target && e.target.closest && e.target.closest('button,[role=button],a,input[type=button],input[type=submit]'); if (!b || !_appDraft.size) return; const lb = String(b.textContent || b.value || b.title || '').trim(); if (/追加|登録|記録|保存|作成|クリア|リセット|取り消|取消|キャンセル|閉じる|^✕|^×|Add|Save|Clear|Reset|Cancel|Close/i.test(lb)) _appDraft.clear(); }, true);
+    document.addEventListener('click', e => { const b = e.target && e.target.closest && e.target.closest('button,[role=button],a,input[type=button],input[type=submit]'); if (!b || b.id === 'sc-toggle' || !_appDraft.size) return; const lb = String(b.textContent || b.value || b.title || '').trim(); if (/追加|登録|記録|保存|作成|クリア|リセット|取り消|取消|キャンセル|閉じる|^✕|^×|Add|Save|Clear|Reset|Cancel|Close/i.test(lb)) _appDraft.clear(); }, true);
     document.addEventListener('keydown', e => { const t = e.target; if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229 || !t || t.tagName !== 'INPUT') return; const k = appDraftKey(t); if (k) _appDraft.delete(k); }, true);
     new MutationObserver(ms => {
       if (!_appDraft.size) return;
@@ -14080,7 +14081,7 @@
   /* ✅ 出荷前チェックリスト（本人 2026-10-11：ゴマちゃんの投稿「発送ミスは注意力でなくチェックリストの不在。過去のミスを書き出し→作業順のリスト→ミスのたびに1行足す＝自社のミスだけを潰したリストが最強」）
      app_kv ship_check {items:[{id,text,src:{cc,sn,reason,name,note},on,at}]}。最初の種は返品理由の実数（直近120件：商品違い16・欠品5・破損4・住所違い2）。
      足す口は3つ：この帯の「＋1行足す」／返品ページの各行「✅チェック項目に」（理由と商品名が入った状態で）／A4作業指示に印刷して現場で使う。外した項目は消さず控えに残す */
-  const shipCheck = { items: null };
+  const shipCheck = { items: null, renderedItems: null, open: true };
   const SHIP_CHECK_SEED = [
     { id: 's1', text: '伝票の注文番号と、袋に入れる商品の明細名（機種・作品・版）が一致している', src: { reason: 'WRONG_ITEM', note: '返品理由「商品違い」16件／直近120件' } },
     { id: 's2', text: '複数点の注文は点数を数えて全部入っている（明細の個数と同じ）', src: { reason: 'ITEM_MISSING', note: '返品理由「欠品」5件' } },
@@ -14116,36 +14117,47 @@
     if (dup) { toast('同じ項目がもうあります'); shipCheckRender(); return; }
     if (saved) { toast('出荷前チェックに1行足しました'); shipCheckRender(); try { logAct('注文管理', '出荷前チェック追加', text.slice(0, 60), JSON.stringify(src || {}).slice(0, 80)); } catch (_) {} }
   }
-  function shipCheckRender() {
+  function shipCheckRender(force) {
     const host = document.getElementById('ship-check'); if (!host) return;
     const items = shipCheck.items;
     if (!items) {
       /* ★#1 読めなかった＝0件ではない。描き直しのたびに読みに行かない（失敗から1分は読み直さない・押せば今すぐ読む） */
       if (shipCheck.err && Date.now() - (shipCheck.errAt || 0) < 60000) {
         host.innerHTML = '<span class="smd-err" style="font-size:11px">⚠ 出荷前チェックを読めませんでした（0件ではありません）</span> <button class="smd-btn" id="sc-retry" style="font-size:10.5px;padding:1px 8px">再読込</button>';
-        const rb = host.querySelector('#sc-retry'); if (rb) rb.addEventListener('click', () => { rb.disabled = true; rb.textContent = '⏳読み込み中…'; shipCheckLoad(true).then(shipCheckRender); });
+        const rb = host.querySelector('#sc-retry'); if (rb) rb.addEventListener('click', () => { rb.disabled = true; rb.textContent = '⏳読み込み中…'; shipCheckLoad(true).then(() => shipCheckRender()); });
         return;
       }
       host.innerHTML = '<span class="smd-dim" style="font-size:11px">✅ 出荷前チェック 読み込み中…</span>';
       if (!shipCheck.busy) { shipCheck.busy = true; shipCheckLoad().then(() => { shipCheck.busy = false; shipCheckRender(); }); }
       return;
     }
+    let panel = host.querySelector('#sc-panel');
+    if (!panel) {
+      try { shipCheck.open = localStorage.getItem('smdFold_shipCheck') !== '0'; } catch (_) {}
+      host.innerHTML = `<div class="tool-card" style="margin:0;max-width:none;padding:8px 12px;border:1px dashed #9ccc9c;background:#f6fbf6">
+        <button type="button" id="sc-toggle" aria-expanded="${shipCheck.open}" aria-controls="sc-panel"><b></b><span class="smd-dim sc-fold-label sc-open-label">チェックを開く</span><span class="smd-dim sc-fold-label sc-close-label">チェックを閉じる</span></button>
+        <div id="sc-panel"${shipCheck.open ? '' : ' hidden'}></div></div>`;
+      panel = host.querySelector('#sc-panel');
+      const toggle = host.querySelector('#sc-toggle');
+      // 注文一覧の非同期再描画中も、押下先を作り直さない。
+      toggle.addEventListener('click', () => {
+        shipCheck.open = !shipCheck.open;
+        toggle.setAttribute('aria-expanded', String(shipCheck.open));
+        panel.hidden = !shipCheck.open;
+        try { localStorage.setItem('smdFold_shipCheck', shipCheck.open ? '1' : '0'); } catch (_) {}
+      });
+    } else if (!force && shipCheck.renderedItems === items) {
+      return;
+    }
     const on = items.filter(x => x.on !== false);
-    const previous = host.querySelector('details[data-fold="shipCheck"]');
-    let isOpen = previous ? previous.open : true;
-    try {
-      // 開閉の直後に注文一覧が描き直された場合も、表示中の状態を優先する。
-      const stored = localStorage.getItem('smdFold_shipCheck');
-      if (!previous) isOpen = stored !== '0';
-      else if ((stored !== '0') !== isOpen) localStorage.setItem('smdFold_shipCheck', isOpen ? '1' : '0');
-    } catch (_) {}
-    host.innerHTML = `<details data-fold="shipCheck" ${isOpen ? 'open' : ''} class="tool-card" style="margin:0;max-width:none;padding:8px 12px;border:1px dashed #9ccc9c;background:#f6fbf6">
-      <summary><b>✅ 出荷前チェック（${on.length}）</b><span class="smd-dim sc-fold-label sc-open-label">チェックを開く</span><span class="smd-dim sc-fold-label sc-close-label">チェックを閉じる</span></summary>
+    host.querySelector('#sc-toggle b').textContent = `✅ 出荷前チェック（${on.length}）`;
+    panel.innerHTML = `
       <div style="display:flex;align-items:center;gap:6px 10px;flex-wrap:wrap;margin-top:6px"><span class="smd-dim sc-help" style="font-size:11px">うちで実際に起きたミスだけを潰すリスト。ミスが出たら1行足す（返品ページの各行「✅チェック項目に」からも）。🖨きょうの作業指示にも印刷されます</span><button class="smd-btn b-write" id="sc-add" style="margin-left:auto;font-size:11px;padding:2px 9px">＋ 1行足す</button></div>
       <ol style="margin:6px 0 0;padding-left:20px;font-size:12px;line-height:1.6">${on.map(x => `<li>${esc(x.text)} <span class="smd-dim" style="font-size:10px">${x.src && x.src.note ? '（' + esc(x.src.note) + '）' : (x.src && x.src.sn ? '（' + esc(x.src.cc || '') + ' ' + esc(x.src.sn) + '・' + esc(x.at || '') + '）' : (x.at ? '（' + esc(x.at) + '）' : ''))}</span> <button class="smd-btn sc-off" data-id="${av(x.id)}" style="font-size:9.5px;padding:0 5px" title="外す（消さずに控えに残す）">外す</button></li>`).join('')}</ol>
-      ${items.length > on.length ? `<div class="smd-dim" style="font-size:10.5px;margin-top:4px">外した項目 ${items.length - on.length}件（控えに残っています）</div>` : ''}</details>`;
-    const add = host.querySelector('#sc-add'); if (add) add.addEventListener('click', async () => { const t = prompt('出荷前チェックに足す1行（起きたミスを「二度と起きないための確認」の形で）'); if (t) await shipCheckAdd(t, { by: 'manual' }); });
-    host.querySelectorAll('.sc-off').forEach(b => b.addEventListener('click', async () => { const id = b.dataset.id; b.disabled = true; b.textContent = '⏳'; await shipCheckSave(items => { const it = items.find(x => x.id === id); if (!it) return false; it.on = false; it.offAt = jstToday(); }); shipCheckRender(); }));
+      ${items.length > on.length ? `<div class="smd-dim" style="font-size:10.5px;margin-top:4px">外した項目 ${items.length - on.length}件（控えに残っています）</div>` : ''}`;
+    shipCheck.renderedItems = items;
+    const add = panel.querySelector('#sc-add'); if (add) add.addEventListener('click', async () => { const t = prompt('出荷前チェックに足す1行（起きたミスを「二度と起きないための確認」の形で）'); if (t) await shipCheckAdd(t, { by: 'manual' }); });
+    panel.querySelectorAll('.sc-off').forEach(b => b.addEventListener('click', async () => { const id = b.dataset.id; b.disabled = true; b.textContent = '⏳'; await shipCheckSave(items => { const it = items.find(x => x.id === id); if (!it) return false; it.on = false; it.offAt = jstToday(); }); shipCheckRender(true); }));
   }
   function renderOrders() {
     ordSearchClrSync();
@@ -27909,7 +27921,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
-    { date: '2026-11-11', items: ['<b>商品別の利益で未販売の保有在庫と注文紐付け済みを別集計</b>。', '<b>商品別の利益に現在の保有在庫数と仕入額合計を表示</b>。'] },
+    { date: '2026-11-11', items: ['<b>出荷前チェックの開閉を注文一覧の更新後も保持</b>。', '<b>商品別の利益で未販売の保有在庫と注文紐付け済みを別集計</b>。', '<b>商品別の利益に現在の保有在庫数と仕入額合計を表示</b>。'] },
     { date: '2026-11-11', items: ['<b>商品別の利益でPayPal照合待ちと暫定入金を区別</b>。直近30日・90日の集計を日本時間で区切ります。'] },
     { date: '2026-11-11', items: ['<b>商品別の利益で、粗利に入らない点数と理由を表示</b>。'] },
     { date: '2026-11-11', items: ['<b>値付けの戦略と使い方をそれぞれ開閉できるように</b>。'] },
