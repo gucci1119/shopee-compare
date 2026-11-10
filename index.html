@@ -5439,6 +5439,8 @@
     "Shopeeで手配済みの単一梱包を確認できませんでした。": "Could not verify one arranged package in Shopee.",
     "Shopeeの接続枠を確保するため、帳票種の照会を見送りました。": "Label type check skipped to preserve the Shopee quota.",
     "Shopeeの帳票種を確認できませんでした。": "Could not verify Shopee's label types.",
+    "担当PCで営業集計を自動更新": "Refresh outreach totals automatically on the assigned PC",
+    "営業画面を開かなくても、保存から90分経った全店舗の集計を見直します。": "Refreshes the totals for all stores after 90 minutes, even when the outreach page is closed.",
     "伝票発行済の注文から感熱・普通紙の帳票種を照会": "Check thermal and plain-paper label types for arranged orders",
     "第三店のAmazon新品候補": "Third-shop Amazon candidates",
     "第三店のAmazon新品候補を価格と確認根拠で下見します。": "Preview prices and sourcing evidence for third-shop Amazon candidates.",
@@ -14900,16 +14902,28 @@
     const spec = DEMO_FIELDS[table]; if (!spec) return rows;
     return rows.map(r => _maskObj(r, spec));
   }
-  async function sbGet(table, qs) {
-    qs = acctQs(table, qs);
+  async function sbGet(table, qs, opts) {
+    if (!opts?.allAccounts) qs = acctQs(table, qs);
     const key = settings.sbKey || settings.sbSecret;
     if (!key) throw new Error('⚙️設定でSupabaseキー（publishable）を入力してください');
-    const hit = (k) => fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: { apikey: k, Authorization: 'Bearer ' + k } });
+    const hit = (k) => fetch(`${SB_URL}/rest/v1/${table}?${qs}`, { headers: { apikey: k, Authorization: 'Bearer ' + k }, signal: opts?.signal });
     let r = await hit(key);
     // publishable権限が無いテーブル（GRANT漏れ/RLS無効）で401/403の時はservice_roleで再試行
     if (!r.ok && (r.status === 401 || r.status === 403) && settings.sbSecret && key !== settings.sbSecret) r = await hit(settings.sbSecret);
     if (!r.ok) throw new Error(`DB読取 HTTP ${r.status}`);
-    return maskDemo(table, await r.json());
+    if (!opts?.maxBytes) return maskDemo(table, await r.json());
+    const reader = r.body.getReader(), decoder = new TextDecoder();
+    let text = '', bytes = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > opts.maxBytes) { void reader.cancel().catch(() => {}); throw new Error('営業集計の読取上限'); }
+        text += decoder.decode(value, { stream: true });
+      }
+    } finally { reader.releaseLock(); }
+    return maskDemo(table, JSON.parse(text + decoder.decode()));
   }
   // Supabase RPC（Postgres関数）呼び出し。読取り集計をサーバー側で行い、巨大データをブラウザに落とさないため。listing_stats_delta 等で使用。
   async function sbRpc(fn, args) {
@@ -18447,7 +18461,8 @@
     else w = outSp(OUT_WORD[st] || st);
     return failed ? w + ' ' + outSp('（返す文は送れず）') : w;
   }
-  const outState = { data: null, at: 0, filter: null, inflight: null };
+  const outState = { data: null, at: 0, filter: null, inflight: null, scope: null };
+  const outScope = () => JSON.stringify([state.acct || 'all', demoOn()]);
   async function outCallMain(params, ms) {
     if (!settings.openapiUrl || !settings.writeToken) throw new Error('⚙️設定に「OpenAPI同期GAS URL」と「WRITE_TOKEN」を入れてください');
     const q = Object.assign({ token: settings.writeToken }, params);
@@ -18457,16 +18472,32 @@
     return res;
   }
   async function outLoad(force) {
-    if (!force && outState.data && Date.now() - outState.at < 120000) return outState.data;
-    /* ★2026-10-24 読み直しは1本だけ（2本並ぶと、先に始めた古い方が後に終わって新しい分を上書きしていた） */
-    if (outState.inflight) return outState.inflight;
-    outState.inflight = outLoadBoard().finally(() => { outState.inflight = null; });
+    const scope = outScope();
+    if (!force && outState.data && outState.scope === scope && Date.now() - outState.at < 120000) return outState.data;
+    /* 読み直しは1本だけ。読み込み中に店が替わったら、その読み取りを使わない。 */
+    if (outState.inflight) {
+      try { await outState.inflight; } catch (e) {
+        if (outScope() === scope) return outLoad(force);
+        throw e;
+      }
+      return outState.scope === scope ? outState.data : outLoad(force);
+    }
+    const allAccounts = !state.acct || state.acct === 'all';
+    const read = (table, qs) => sbGet(table, qs, { allAccounts });
+    const inputAt = Date.now();
+    outState.inflight = outLoadBoard(read).then(list => {
+      if (outScope() !== scope) throw new Error('営業集計の読取中に表示条件が変更されました');
+      list._allAccounts = allAccounts; list._inputAt = inputAt;
+      outState.data = list; outState.scope = scope; outState.at = Date.now();
+      return list;
+    }).finally(() => { outState.inflight = null; });
     return outState.inflight;
   }
-  async function outLoadBoard() {
+  async function outLoadBoard(read) {
     const b = await outCallMain({ action: 'outreach_board' }, 90000);
-    const ppl = {};
-    (b.events || []).forEach(e => {
+    if (!Array.isArray(b.events)) throw new Error('営業の台帳を読めませんでした');
+    const ppl = Object.create(null);
+    b.events.forEach(e => {
       const [t, app, cc, phone, acc, name, status, note, ja] = e; const key = (app || '?') + ':' + phone;
       const p = ppl[key] = ppl[key] || { key, app, cc, phone, acc: '', name: '', first: 0, last: 0, lastTxt: '', ev: [], manual: null, paypal: false };
       if (acc) p.acc = acc; if (name) p.name = name; if (cc) p.cc = cc;
@@ -18482,7 +18513,11 @@
     let orders = [];
     for (let i = 0; i < accs.length; i += 60) {
       const part = accs.slice(i, i + 60).map(a => '"' + a.replace(/"/g, '') + '"').join(',');
-      try { const r = await sbGet('orders', 'select=buyer,status,order_ts,cc,sn,total&buyer=in.(' + encodeURIComponent(part) + ')&limit=1000'); if (Array.isArray(r)) orders = orders.concat(r); else list._ordErr = true; } catch (_) { list._ordErr = true; }   /* ★11/7 読めなかった時は流れの数（④購入）を出さない */
+      try {
+        const r = await read('orders', 'select=buyer,status,order_ts,cc,sn,total&buyer=in.(' + encodeURIComponent(part) + ')&limit=1000');
+        if (!Array.isArray(r) || r.length >= 1000) throw new Error('注文を読めませんでした');
+        orders = orders.concat(r);
+      } catch (_) { list._ordErr = true; break; }  /* 読めなかった時は流れの数（④購入）を出さない */
     }
     const ordBy = {}; orders.forEach(o => { (ordBy[String(o.buyer || '').toLowerCase()] = ordBy[String(o.buyer || '').toLowerCase()] || []).push(o); });
     const now = Date.now();
@@ -18505,7 +18540,6 @@
       const lim = (OUT_ST[OUT_IDX[st]] || [])[2] || 0;
       p.days = Math.floor((now - p.since) / 86400000); p.stalled = lim > 0 && p.days >= lim;
     });
-    outState.data = list; outState.at = Date.now();
     return list;
   }
   /* ★2026-11-06 事業本部・本人「見積送ったひとを把握できるようにしたい」：見積もりを送った人の一覧（tools/quote-card-spec.md 22・4つの道具で共通）。
@@ -18527,26 +18561,38 @@
     return true;
   }
   const QL = { rows: null, flags: null, at: 0, loading: null, f: { st: '', tool: '', cc: '', days: '30', q: '' }, ordAt: 0 };
+  async function qlRead(read) {
+    const r = await read('app_kv', 'select=k,v&or=' + encodeURIComponent('(k.like.qlog:*,k.like.qflag:*)') + '&order=updated_at.desc&limit=700');
+    if (!Array.isArray(r)) throw new Error('読めませんでした');
+    let complete = r.length < 700;
+    const rows = r.filter(x => String(x.k).indexOf('qlog:') === 0).map(x => Object.assign({ _k: x.k }, x.v || {}));
+    const flags = r.filter(x => String(x.k).indexOf('qflag:') === 0).map(x => x.v || {}).filter(x => x.flag);
+    let rqErr = '';
+    /* Request page から補う時は、照合番号か国＋Shopee名で同じ見積もりを除く。 */
+    try {
+      const q = await read('app_kv', 'select=k,v&k=like.req_quote_*&order=updated_at.desc&limit=300');
+      if (!Array.isArray(q)) throw new Error('読めませんでした');
+      complete = complete && q.length < 300;
+      const refs = new Set(rows.map(x => String(x.ref || '')).filter(Boolean));
+      const who = new Set(rows.map(x => String(x.cc || '') + '|' + String(x.bkey || x.buyer || '').trim().toLowerCase()));
+      q.forEach(x => {
+        const v = x.v || {}, b = String(v.buyer || '').trim(); if (!b) return;
+        const key = String(v.cc || '') + '|' + b.toLowerCase();
+        if ((v.ref && refs.has(String(v.ref))) || who.has(key)) return;
+        who.add(key);
+        rows.push({ _k: null, _rq: x.k, tool: 'req', cc: v.cc, buyer: b, bkey: b, at: Date.parse(v.at) || 0, ref: v.ref || '', item: v.title || v.option || '', price: v.price, cur: v.iso || '', state: 'listed', plan: v.plan });
+      });
+    } catch (e) { rqErr = String((e && e.message) || e).slice(0, 80); }
+    return { rows, flags, rqErr, complete };
+  }
   async function qlLoad(force) {
     if (!force && QL.rows && Date.now() - QL.at < 120000) return QL.rows;
     if (QL.loading) return QL.loading;
-    QL.loading = sbGet('app_kv', 'select=k,v&or=' + encodeURIComponent('(k.like.qlog:*,k.like.qflag:*)') + '&order=updated_at.desc&limit=700').then(r => {
-      if (r === null || r === undefined) throw new Error('読めませんでした');
-      QL.rows = (r || []).filter(x => String(x.k).indexOf('qlog:') === 0).map(x => Object.assign({ _k: x.k }, x.v || {}));
-      QL.flags = (r || []).filter(x => String(x.k).indexOf('qflag:') === 0).map(x => x.v || {}).filter(x => x.flag);
-      /* ★2026-11-07 本人「見積を送ったひと１人ってそんなわけないやろ？」（03・00）：Request page に足した見積もり（app_kv req_quote_*）のうち、qlog に無い人も一覧に出す（qlog へは移さない＝03 と 05 の決め）。
-         照らし＝照合番号（ref）か、国＋Shopee 名。読めなかった時は QL.rqErr（一覧と流れの数に出す） */
-      return sbGet('app_kv', 'select=k,v&k=like.req_quote_*&order=updated_at.desc&limit=300').then(q => {
-        if (q === null || q === undefined) throw new Error('読めませんでした');
-        QL.rqErr = '';
-        const refs = new Set(QL.rows.map(x => String(x.ref || '')).filter(Boolean)), who = new Set(QL.rows.map(x => String(x.cc || '') + '|' + String(x.bkey || x.buyer || '').trim().toLowerCase()));
-        (q || []).forEach(x => {
-          const v = x.v || {}, b = String(v.buyer || '').trim(); if (!b) return;
-          if ((v.ref && refs.has(String(v.ref))) || who.has(String(v.cc || '') + '|' + b.toLowerCase())) return;
-          who.add(String(v.cc || '') + '|' + b.toLowerCase());
-          QL.rows.push({ _k: null, _rq: x.k, tool: 'req', cc: v.cc, buyer: b, bkey: b, at: Date.parse(v.at) || 0, ref: v.ref || '', item: v.title || v.option || '', price: v.price, cur: v.iso || '', state: 'listed', plan: v.plan });
-        });
-      }).catch(e => { QL.rqErr = String((e && e.message) || e).slice(0, 80); }).then(() => { QL.at = Date.now(); return QL.rows; });
+    const inputAt = Date.now();
+    QL.loading = qlRead(sbGet).then(result => {
+      QL.rows = result.rows; QL.flags = result.flags; QL.rqErr = result.rqErr;
+      QL.complete = result.complete; QL.inputAt = inputAt; QL.at = Date.now();
+      return QL.rows;
     }).finally(() => { QL.loading = null; });
     return QL.loading;
   }
@@ -18571,14 +18617,18 @@
     return hit.length;
   }
   /* 注文の照らし（WA 高4 と同じ）：明細 SKU が REQ_照合番号（まとめ買いは -1 -2…）・注文日が送った日以後・明細名に照合番号（前の形は相手の名前）。10分に1回・1回の読み */
-  async function qlMatchOrders(rows) {
+  async function qlMatchOrders(rows, readOnly) {
     const cand = rows.filter(r => r.ref && QL_RANK[r.state] != null && r.state !== 'bought' && r.state !== 'declined' && !r.orderSn && Number(r.at) > 0).slice(0, 30);
-    if (!cand.length || Date.now() - QL.ordAt < 600000) return 0;
-    QL.ordAt = Date.now();
+    if (!cand.length || (!readOnly && Date.now() - QL.ordAt < 600000)) return 0;
+    if (!readOnly) QL.ordAt = Date.now();
     const minD = jstDate(Math.min(...cand.map(r => Number(r.at))) - 86400000);
     const ors = []; cand.forEach(r => { const b = 'REQ_' + r.ref; ors.push('items.cs.' + JSON.stringify([{ sku: b.slice(0, 40) }])); ors.push('items.cs.' + JSON.stringify([{ sku: b.slice(0, 37) + '-1' }])); });
-    const got = await sbGet('orders', 'select=cc,sn,order_date,items&order_date=gte.' + minD + '&or=(' + encodeURIComponent(ors.join(',')) + ')&limit=100').catch(() => null);
-    if (!got) return 0;
+    const qs = 'select=cc,sn,order_date,items&order_date=gte.' + minD + '&or=(' + encodeURIComponent(ors.join(',')) + ')&limit=100';
+    const got = readOnly ? await readOnly('orders', qs) : await sbGet('orders', qs).catch(() => null);
+    if (!Array.isArray(got) || got.length >= 100) {
+      if (readOnly) throw new Error('見積もりと注文の照合を完了できませんでした');
+      return 0;
+    }
     let n = 0;
     cand.forEach(r => {
       const b = 'REQ_' + r.ref, sentD = jstDate(Number(r.at) - 86400000);   /* order_date は各国の日付＝1日の幅 */
@@ -18586,7 +18636,7 @@
       const hit = got.find(o => o.cc === r.cc && String(o.order_date || '') >= sentD && (o.items || []).some(it => { const sk = String((it && it.sku) || ''); const skuOk = sk === b.slice(0, 40) || sk.indexOf(b.slice(0, 37) + '-') === 0; const vn = String((it && (it.variation || it.model_name)) || '').trim(); const nmOk = vn.indexOf(String(r.ref)) >= 0 || (bn.length >= 4 && vn.toLowerCase().replace(/\s+/g, '').indexOf(bn) === 0); return skuOk && nmOk;   /* 明細名は 11/5 から「照合番号 品名」・前は「相手の名前 品名」 */ }));
       if (!hit) return; n++;
       r._bought = hit.sn;
-      try { if (pcIsOwner()) qlSetState(r._k, 'bought', 'auto', { orderSn: hit.sn }); } catch (_) {}
+      if (!readOnly && pcIsOwner()) qlSetState(r._k, 'bought', 'auto', { orderSn: hit.sn }).catch(() => {});
     });
     return n;
   }
@@ -18658,7 +18708,7 @@
   try { const v = localStorage.getItem('smdOutFunnel'); if (v) Object.assign(OF, JSON.parse(v)); } catch (_) {}
   const ofDig = (x) => { const d = String(x || '').replace(/\D/g, ''); return d.length >= 8 ? d.slice(-9) : ''; };
   const ofLow = (x) => String(x || '').trim().toLowerCase();
-  function outFunnelCalc(list, qrows) {
+  function outFunnelCalc(list, qrows, background = false) {
     const ppl = [];
     list.forEach(p => {
       const sentT = p.ev.filter(e => /^(sent|requested|unknown)$/.test(String(e.status || ''))).reduce((m, e) => (!m || (e.t && e.t < m)) ? e.t : m, 0);
@@ -18713,8 +18763,80 @@
     /* ★11/7 03：見積もりの記録（qlog）は 11/6 から＝それより前に送った人は、11/6 より前の見積もりを数えられない */
     const qStart = (qrows || []).filter(r => !r._rq).reduce((m, r) => { const t = Number(r.at || 0); return t && (!m || t < m) ? t : m; }, 0);
     Object.keys(out).forEach(k => { const lim = k === 'd30' ? now - 30 * 86400000 : k === 'd7' ? now - 7 * 86400000 : 0; out[k].qPre = qStart ? ppl.filter(x => x.sentT >= lim && x.sentT < qStart).length : 0; });
-    try { window.__smdOutFunnelWhy = qWhy; } catch (_) {}
+    if (!background) { try { window.__smdOutFunnelWhy = qWhy; } catch (_) {} }
     return { at: now, periods: out, qAmb, qOut, qEarly, qStart, ppl };
+  }
+  const OUT_FUNNEL_STALE_MS = 90 * 60000;
+  const OUT_FUNNEL_RETRY_MS = 20 * 60000;
+  const OUT_FUNNEL_NEXT = 'smdOutFunnelNextCheck';
+  const outFunnelReadKey = 'k=eq.outreach_funnel';
+  function outFunnelCanRun(background) {
+    if (!authValid() || demoOn() || !settings.sbSecret || !FXD._doneAt || !FXD.days || !Object.keys(FXD.days).length) return false;
+    if (!background) return true;
+    return !!(_bootDone && settings.sbKey && settings.openapiUrl && settings.writeToken && PC.known && PC.fails === 0 && pcIsOwner());
+  }
+  async function outFunnelLatest() {
+    const [row] = await sbGet('app_kv', 'select=updated_at&' + outFunnelReadKey + '&limit=1', { signal: AbortSignal.timeout(2000) });
+    if (row && !Number.isFinite(Date.parse(row.updated_at))) throw new Error('前回の営業集計の保存時刻を確認できませんでした');
+    return row;
+  }
+  async function outFunnelPut(F, qN, row, inputAt, background) {
+    if (!F.periods.all.total.sent || !outFunnelCanRun(background) || (row && Date.parse(row.updated_at) >= inputAt)) return;
+    const v = { at: inputAt, qStart: F.qStart || 0, qAmb: F.qAmb, qOut: F.qOut, qEarly: F.qEarly, qN, periods: F.periods, v: 2 };
+    const data = { v, updated_at: new Date().toISOString() };
+    const key = settings.sbSecret;
+    demoWriteGuard('save', 'app_kv', data);
+    /* 取得した行の時刻が今も同じ時だけ保存。他のPCが先に保存したら0行更新。初回の挿入も重複を無視する。 */
+    const qs = row ? outFunnelReadKey + '&updated_at=eq.' + encodeURIComponent(row.updated_at) : 'on_conflict=k';
+    const r = await fetch(SB_URL + '/rest/v1/app_kv?' + qs + '&select=updated_at', {
+      method: row ? 'PATCH' : 'POST',
+      headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json',
+        Prefer: row ? 'return=representation' : 'resolution=ignore-duplicates,return=representation' },
+      body: JSON.stringify(row ? data : [{ k: 'outreach_funnel', ...data }]),
+      signal: AbortSignal.timeout(12000)
+    });
+    if (!r.ok) throw new Error('営業集計の保存 HTTP ' + r.status);
+    const [saved] = await r.json();
+    if (saved && Date.parse(saved.updated_at) === Date.parse(data.updated_at)) return Date.parse(saved.updated_at);
+  }
+  function outFunnelManualSave(F, qN, inputAt) {
+    if (!outFunnelCanRun(false) || !F.periods.all.total.sent || Date.now() - (OF._savedAt || 0) < 600000) return;
+    OF._savedAt = Date.now();
+    outFunnelLatest().then(row => outFunnelPut(F, qN, row, inputAt, false)).catch(e => {
+      OF._savedAt = 0;
+      console.warn('outreach_funnel', e);
+    });
+  }
+  async function outFunnelAutoTick() {
+    if (!outFunnelCanRun(true) || !navigator.locks?.request) return;
+    try {
+      if (Date.now() < Number(localStorage.getItem(OUT_FUNNEL_NEXT) || 0)) return;
+      await navigator.locks.request('smdOutreachFunnelRefresh', { ifAvailable: true }, async lock => {
+        if (!lock || !outFunnelCanRun(true) || Date.now() < Number(localStorage.getItem(OUT_FUNNEL_NEXT) || 0)) return;
+        const started = Date.now();
+        localStorage.setItem(OUT_FUNNEL_NEXT, String(started + OUT_FUNNEL_RETRY_MS));
+        const row = await outFunnelLatest();
+        const due = row ? Date.parse(row.updated_at) + OUT_FUNNEL_STALE_MS : 0;
+        if (due > Date.now()) { localStorage.setItem(OUT_FUNNEL_NEXT, String(due)); return; }
+        let reads = 0, lastRead = Date.now();
+        const read = async (table, qs) => {
+          const delay = 5000 - (Date.now() - lastRead);
+          if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+          if (++reads > 24 || Date.now() - started > 240000 || !outFunnelCanRun(true)) throw new Error('営業集計の読取を継続できませんでした');
+          lastRead = Date.now();
+          return sbGet(table, qs, { allAccounts: true, signal: AbortSignal.timeout(12000), maxBytes: 2_000_000 });
+        };
+        const list = await outLoadBoard(read);
+        if (list._ordErr) throw new Error('営業集計の注文をすべて読めませんでした');
+        const { rows, rqErr, complete } = await qlRead(read);
+        if (rqErr || !complete) throw new Error('営業集計の見積もりをすべて読めませんでした');
+        await qlMatchOrders(rows, read);
+        const F = outFunnelCalc(list, rows, true);
+        if (!outFunnelCanRun(true) || Date.now() - started > 240000) return;
+        const savedAt = await outFunnelPut(F, rows.length, row, started, true);
+        if (savedAt) localStorage.setItem(OUT_FUNNEL_NEXT, String(savedAt + OUT_FUNNEL_STALE_MS));
+      });
+    } catch (e) { console.warn('outreach_funnel', e); }
   }
   /* ★2026-11-07 本人「ガイドが必要ね」「各機能に」「どこかかざすとポップアップで表示されるように」（00 事業本部・ui-rules 19 と同じ形）：
      data-guide="説明" を付けた物にマウスを乗せると 150ms で吹き出し（12.5px・幅300px まで・画面からはみ出さない・下に入らなければ上）。
@@ -18858,7 +18980,7 @@
     { const fb = document.getElementById('out-funnel'); if (fb) fb.innerHTML = ''; }
     if (!outState.data || force === true) body.innerHTML = '<div class="smd-dim">営業の台帳を読み込み中…</div>';
     let list;
-    try { list = (force === 'local' && outState.data) ? outState.data : await outLoad(force === true); }
+    try { list = (force === 'local' && outState.data && outState.scope === outScope()) ? outState.data : await outLoad(force === true); }
     catch (e) { body.innerHTML = '<div class="tool-card" style="max-width:none;border-color:#f0c4bd"><b style="color:#d93025">営業の台帳を読めませんでした</b><div style="font-size:12px;margin-top:6px">' + esc(String((e && e.message) || e)) + '</div> <button class="smd-btn" id="out-reload" style="font-size:11px;padding:2px 8px">🔄 読み直す</button></div>'; const rl0 = body.querySelector('#out-reload'); if (rl0) rl0.onclick = () => renderOutreach(true); return; }
     let qrows = null, qErr = '';
     if (settings.sbSecret) { try { qrows = await qlLoad(); if (QL.rqErr) qErr = 'Request page の控え：' + QL.rqErr; } catch (e) { qErr = String((e && e.message) || e).slice(0, 80); } } else qErr = '鍵が無い';
@@ -18954,14 +19076,10 @@
     body.querySelectorAll('[data-out-f]').forEach(tr => tr.addEventListener('click', () => { const k = tr.getAttribute('data-out-f'); outState.filter = outState.filter === k ? null : k; renderOutreach('local'); }));
     const rl = body.querySelector('#out-reload'); if (rl) rl.addEventListener('click', () => { QL.at = 0; renderOutreach(true); });
     window.__smdOutFunnel = F;
-    /* ★11/7 03 spec 3：道具（WA・Zalo・Viber）が取込GAS の outreach_funnel_get で読む控え＝app_kv outreach_funnel（数だけ・名前や番号は入れない）。読めなかった物がある時は書かない・10分に1回まで・🎭デモでは書かない */
-    try {
-      if (settings.sbSecret && !demo && !qErr && !ordErr && F.periods.all.total.sent > 0 && Date.now() - (OF._savedAt || 0) > 600000) {
-        OF._savedAt = Date.now();
-        const v = { at: F.at, qStart: F.qStart || 0, qAmb: F.qAmb, qOut: F.qOut, qEarly: F.qEarly, qN, periods: F.periods, v: 2 };
-        sbUpsert('app_kv', [{ k: 'outreach_funnel', v, updated_at: new Date().toISOString() }], 'k').catch(e => { OF._savedAt = 0; try { console.warn('outreach_funnel', e); } catch (_) {} });
-      }
-    } catch (_) {}
+    /* 全店集計を読めた回だけ道具向けの共通集計を更新する。 */
+    if (list._allAccounts && outScope() === outState.scope && QL.complete && qrows === QL.rows && !qErr && !ordErr) {
+      outFunnelManualSave(F, qN, Math.min(list._inputAt, QL.inputAt));
+    }
     const byKey = Object.fromEntries(list.map(p => [p.key, p]));
     const save = async (p, key, el) => {
       el.disabled = true;
@@ -27685,6 +27803,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-10', items: ['<b>担当PCで営業集計を自動更新</b>。営業画面を開かなくても、保存から90分経った全店舗の集計を見直します。'] },
     { date: '2026-11-10', items: ['<b>伝票発行済の注文から感熱・普通紙の帳票種を照会</b>。'] },
     { date: '2026-11-10', items: ['<b>第3店の新品候補は5市場で直接公開し、入数違いの明細画像を照合</b>。', '<b>第3店の新品候補で、別の端末からの重複公開を防止</b>。'] },
     { date: '2026-11-10', items: ['<b>カタログ編集でクリップボードから商品画像を追加</b>。'] },
@@ -60731,7 +60850,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     pcInit();
     const pl = document.getElementById('set-pc-label'); if (pl) pl.addEventListener('change', () => { const v = pl.value.trim().slice(0, 16); if (!v) return; PC.label = v; try { localStorage.setItem('smdPcLabel', v); } catch (_) {} pcBeat(false); });
     const ob = document.getElementById('set-pc-owner'); if (ob) ob.addEventListener('click', async () => { if (!settings.sbSecret) { toast('このPCは閲覧のみなので担当にできません', true); return; } ob.disabled = true; await pcBeat(true); ob.disabled = false; toast(pcIsOwner() ? '🖥 このPCを自動処理の担当にしました' : '担当を切り替えられませんでした（もう一度押してください）', !pcIsOwner()); });
-    pcBeat(false); setInterval(() => pcBeat(false), 120000);
+    pcBeat(false);
+    setInterval(() => pcBeat(false).then(outFunnelAutoTick), 120000);
     /* ★2026-11-04 事業本部・本人「セラーセンターのタブの話ね」：転記の userscript（row-sync 1.7.0〜）がこのタブで Seller Center のタブを見張り、消えた国を開き直す。
        2台の PC で二重に開かないよう、担当の PC かどうかをページの印（data-smd-pc-owner）で渡す（userscript からはページの関数が見えない） */
     { const ow = () => { try { document.documentElement.setAttribute('data-smd-pc-owner', pcIsOwner() ? '1' : '0'); } catch (_) {} }; setTimeout(ow, 5000); setInterval(ow, 30000); }
