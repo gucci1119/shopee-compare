@@ -7369,6 +7369,14 @@
     '直近1か月': 'Last 1 month', '直近2か月': 'Last 2 months', '直近3か月': 'Last 3 months', '直近半年': 'Last 6 months', '直近1年': 'Last 12 months', '去年': 'Last year', '日付で指定': 'Custom dates', '📄 古い月の利益管理表を読む': '📄 Load older profit sheets', 
     '概算を含む': 'Include estimates', '数え方': 'Count', '手数料・送料など/点': 'Fees & shipping/unit', '手数料・送料など': 'Fees & shipping', 
     '損益分岐/点': 'Break-even/unit', '⚠ 損益分岐に近い': '⚠ Near break-even', 
+    '仕入れ不明（平均もなし）': 'Cost unknown (no average)',
+    '入金・売上の情報不足': 'Insufficient payout or sales data',
+    'PayPalの照合・円換算待ち等': 'Pending PayPal reconciliation or JPY conversion',
+    '粗利に入れられなかった': 'Excluded from gross profit',
+    '粗利に入れなかった理由': 'Reasons for gross profit exclusions',
+    '未算入分は売れた数に含みます。未払いとキャンセルは集計外です。': 'Units excluded from gross profit still count as sold. Unpaid and cancelled orders are excluded.',
+    '行を開くと粗利に入れなかった理由が表示されます': 'Expand the row to see why units were excluded',
+    '商品別の利益で、粗利に入らない点数と理由を表示': 'Show how many units were excluded from gross profit and why in Profit by product',
     '🏆 商品別の利益': '🏆 Profit by product', '商品別の利益': 'Profit by product', '（どの商品でいくら稼いだか・多い順）': '(how much each product has earned, highest first)', '期間': 'Period', 'まとめ方': 'Group by', '並べ替え': 'Sort', '今年': 'This year', 'カタログ': 'Catalog', '粗利の合計': 'Total gross profit', '1点あたり': 'Per unit', '赤字の大きい順': 'Biggest losses first', '本店と2店舗目': 'Main and 2nd shop', '本店だけ': 'Main shop only', '2店舗目だけ': '2nd shop only', '🤖だけ': '🤖 only', 'リクエスト品だけ': 'Requests only', '順位': 'Rank', '最後に売れた日': 'Last sold', '国の内訳': 'By country', 'フロントだけ（1点の仕入れ¥1,000以下）': 'Front only (cost ¥1,000 or less per unit)',
     'やめる': 'Cancel', '書く': 'Write', '消す': 'Delete', '閉じる': 'Close', '保存': 'Save', '追加': 'Add', '削除': 'Delete', '検索': 'Search', '更新': 'Refresh',
     'まとめて更新': 'Refresh all', '再計算': 'Recalculate', '計算する': 'Calculate', '解除': 'Clear', '開く': 'Open',
@@ -27835,6 +27843,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-11', items: ['<b>商品別の利益で、粗利に入らない点数と理由を表示</b>。'] },
     { date: '2026-11-11', items: ['<b>値付けの戦略と使い方をそれぞれ開閉できるように</b>。'] },
     { date: '2026-11-10', items: ['<b>確定申告・帳簿、入出金・経費、利益明細のPayPal表示を修復</b>。帳簿の「？」には帳簿の操作だけを表示します。'] },
     { date: '2026-11-10', items: ['<b>出荷前チェックを折りたたみ・再表示</b>。'] },
@@ -57654,6 +57663,16 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     return prToks(nm) + (vr ? ' | ' + prToks(vr) : '');
   }
   const prNums = (k) => new Set(String(k || '').replace(/^nm:/, '').replace(/\|/g, ' ').split(/\s+/).filter(w => /\d/.test(w) && !/^(ps[1-5]|3ds|n64)$/.test(w)));
+  const PR_UNCOUNTED_LABELS = {
+    cost: '仕入れ不明（平均もなし）',
+    payout: '入金・売上の情報不足',
+    paypal: 'PayPalの照合・円換算待ち等'
+  };
+  function prUncountedBreakdown(reasons) {
+    return Object.entries(PR_UNCOUNTED_LABELS).filter(([key]) => reasons && reasons[key]).map(([key, label]) =>
+      '<span>' + label + '</span> <b>' + reasons[key].toLocaleString() + '</b><span>点</span>'
+    ).join(' ・ ');
+  }
   function prCompute() {
     const { start, end } = prPeriodRange();
     const now = Date.now(), d30 = new Date(now - 30 * 86400000).toISOString().slice(0, 10), d90 = new Date(now - 90 * 86400000).toISOString().slice(0, 10);
@@ -57710,7 +57729,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       lstModels.forEach(L => { const g = 'g:' + ufF('nm:' + prNameKey(L.nm, L.vr)); let A = listedBy.get(g); if (!A) { A = []; listedBy.set(g, A); } A.push(L.inf); });
     }
     const V = prVarPer();
-    const groups = new Map(); let tot = { n: 0, gross: 0, orders: 0, noCost: 0, noDep: 0, units: 0 };
+    const groups = new Map(), tot = { n: 0, gross: 0, orders: 0, unitsP: 0, units: 0, uncounted: {} };
+    const skipProfit = (gr, reason, qty) => {
+      const reasons = gr.uncounted || (gr.uncounted = {});
+      reasons[reason] = (reasons[reason] || 0) + qty;
+      tot.uncounted[reason] = (tot.uncounted[reason] || 0) + qty;
+    };
     /* ★2026-11-07 区分の3段（大項目・中項目・機種＝hwTierOf・ui-rules 15）。機種は明細 SKU の頭を先に（PS3_作品名）、無ければ明細名・カタログ名 */
     const tierList = [], _tmc = PR._tmc || (PR._tmc = new Map());
     const prTierOf = (nm, vr, sku) => { const k = nm + '\u0001' + vr + '\u0001' + sku; let t = _tmc.get(k); if (t) return t; const h0 = sku ? hwtCanon(String(sku).split('_')[0]) : ''; const hw = (h0 && (TITLE_HW_JA[h0] || TCG_HW[h0])) ? h0 : (hwOf(vr) || hwOf(nm) || ''); t = hwTierOf(nm, hw); _tmc.set(k, t); return t; };
@@ -57733,7 +57757,6 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       /* ★2026-11-05 本人「確定分だけか、概算含むか」：確定＝入金明細で入金が確定（倉庫スキャンの後）・または古い月の利益管理表の値。概算を含む（既定）＝期間に売れた全部（入金がまだ・仕入れが分からない物は概算） */
       const confirmed = known && ((src === 'real' && di && di.fixed) || src === 'sheet');
       const inMode = PR.basis === 'fixed' ? confirmed : true;
-      if (inP && !known && PR.basis !== 'fixed') { if (cost == null) tot.noCost++; else if (!paypal.pending) tot.noDep++; }
       if (inP && PR.basis === 'fixed' && !confirmed) tot.unconf = (tot.unconf || 0) + 1;
       const pp = paypal.yen ?? 0, g = !known ? 0 : (dep != null ? dep * rate + pp - cost : est + pp);
       const ded = known ? sales - (g - pp + cost) - pp : 0;   /* 差し引き（手数料・送料など）＝売り値 − 入金 − PayPal差分 ⇒ 売り値 − 差し引き − 仕入れ ＝ 粗利 */
@@ -57780,7 +57803,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (it.image) { gr.limg = gr.limg || {}; const li = gr.limg[label]; if (!li || d > li.d || (/_tn$/.test(li.src) && !/_tn$/.test(it.image))) gr.limg[label] = { src: it.image, d }; }
         if (it.image) { gr.imgs = gr.imgs || new Map(); const ik = String(it.image).replace(/_tn$/, ''); const ix = gr.imgs.get(ik); if (ix) { ix.q += q; if (!/_tn$/.test(it.image)) ix.src = it.image; } else gr.imgs.set(ik, { src: it.image, q }); }
         if (d > gr.last) { gr.last = d; if (it.image) gr.img = it.image; } else if (!gr.img && it.image) gr.img = it.image;   /* ★本人「画像ないやん？」：いちばん新しく売れた注文の写真 */
-        if (!known) { if (cost == null) (gr.pend || (gr.pend = [])).push({ q, sh, depY: dep != null ? dep * rate * sh : null, pp: pp * sh, sales: sales * sh, salesL: salesL * sh, cc: o.cc, d, sn: o.sn, vari: V * sh }); else { gr.noCostU = (gr.noCostU || 0) + q; } return; }   /* 仕入れが分からない物は、あとで同じ商品の平均の仕入れで概算 */
+        if (!known) {
+          if (cost == null) (gr.pend || (gr.pend = [])).push({ q, depY: dep != null ? dep * rate * sh : null, pp: pp * sh, sales: sales * sh, salesL: salesL * sh, cc: o.cc, d, sn: o.sn, vari: V * sh, paypalPending: paypal.pending });
+          else skipProfit(gr, paypal.pending ? 'paypal' : 'payout', q);
+          return;
+        }
         if (!(salesL > 0)) { tot.noSales = (tot.noSales || 0) + 1; }
         if (src === 'est') gr.est = (gr.est || 0) + q; else if (src === 'sheet') gr.sheet = (gr.sheet || 0) + q;   /* ★レビュー（低）：売上が空の注文は、売り値の平均と幅に入れない（粗利には入れる＝利益明細と同じ） */
         const uc = cost * sh / q, us = sales * sh / q, ul = salesL * sh / q;
@@ -57797,12 +57824,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     /* 仕入れが分からない物の概算：同じ商品（束ね方の1行）の、仕入れが分かる物の1点あたりの平均で入れる。平均が無い物は粗利に入れず点数だけ */
     groups.forEach(gr => {
       (gr.pend || []).forEach(p => {
-        if (!(gr.cAllN > 0)) { gr.noCostU = (gr.noCostU || 0) + p.q; tot.noCostU = (tot.noCostU || 0) + p.q; return; }
+        if (!(gr.cAllN > 0)) { skipProfit(gr, p.paypalPending ? 'paypal' : p.depY == null && !(p.salesL > 0) ? 'payout' : 'cost', p.q); return; }
         const uc = gr.cAllS / gr.cAllN, costE = uc * p.q;
         let g2 = null;
         if (p.depY != null) g2 = p.depY + p.pp - costE;
         else if (p.salesL > 0) { try { const pr = priceProfitFor(p.cc, uc, p.salesL / p.q); if (pr && isFinite(pr.profit)) g2 = pr.profit * p.q + p.pp; } catch (_) {} }
-        if (g2 == null) { gr.noCostU = (gr.noCostU || 0) + p.q; tot.noCostU = (tot.noCostU || 0) + p.q; return; }
+        if (g2 == null) { skipProfit(gr, p.paypalPending ? 'paypal' : 'payout', p.q); return; }
         const ded2 = p.sales - (g2 - p.pp + costE) - p.pp;
         gr.n += p.q; gr.sales += p.sales; gr.gross += g2; gr.cost += costE; gr.ded += ded2; gr.est = (gr.est || 0) + p.q; gr.vari = (gr.vari || 0) + p.vari;
         { const bc2 = (gr.byCc || {})[p.cc]; if (bc2) { bc2.n += p.q; bc2.sales += p.sales; bc2.salesL += p.salesL; bc2.ded += ded2; bc2.cost += costE; bc2.gross += g2; bc2.vari += p.vari; } }
@@ -57812,7 +57839,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         gr.cc[p.cc] = (gr.cc[p.cc] || 0) + g2; tot.gross += g2; tot.units += p.q; tot.estc = (tot.estc || 0) + p.q;
       });
       gr.pend = null;
+      gr.unitsOut = (gr.nP || 0) - gr.n;
     });
+    tot.unitsOut = tot.unitsP - tot.units;
     const rows = [...groups.values()].filter(r => (r.nP || 0) > 0);
     /* ★11/5 本人「いろんな国・いろんな出品で出していたら、それ全部入れてくれていい」：太い名前は英語の名前（無ければいちばん売れた名前）。ほかの名前は国の札付きで下に小さく */
     rows.forEach(r => { if (!(r.n > 0)) { r.n = 0; } if (r.labels) { const ls = Object.keys(r.labels).sort((a, b) => r.labels[b] - r.labels[a]); if (ls.length) { r.label = ls.find(prIsEn) || ls[0]; r.alt = ls.filter(l => l !== r.label).map(l => ({ l, q: r.labels[l], cc: Object.keys((r.lcc || {})[l] || {}).sort((a, b) => r.lcc[l][b] - r.lcc[l][a]) })); } }
@@ -57925,6 +57954,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       <div><b>仕入れ値</b>：1点あたり ${yen(avgC)}（いちばん安い ${yen(r.cMin)}〜いちばん高い ${yen(r.cMax)}）・合計 ${yen(r.cost)}</div>
       <div><b>売り値</b>：1点あたり ${yen(avgS)}（${esc(locTxt)}）（いちばん安い ${yen(r.sMin)}〜いちばん高い ${yen(r.sMax)}）</div>
       <div><b>手数料・送料など</b>（売り値から Shopee の入金までに引かれた額＝販売・決済の手数料、送料、まとめ買い割引やクーポン、為替の差）：1点あたり ${yen(avgD)}　⇒　売り値 ${yen(avgS)} − 手数料・送料など ${yen(avgD)} − 仕入れ値 ${yen(avgC)} ＝ <b>粗利 ${yen(r.n > 0 ? r.gross / r.n : 0)}</b>/点（粗利に入れた ${r.n}点・売れた ${r.nP || 0}点）</div>
+      ${r.unitsOut ? '<div class="smd-dim"><span>粗利に入れなかった理由</span> ' + prUncountedBreakdown(r.uncounted) + '</div>' : ''}
       <div style="margin-top:4px"><b>回転</b>：直近30日 ${r.n30}点${prRefNow() ? '（参考）' : ''}・直近90日 ${r.n90}点${r.ageDays != null && r.ageDays < 90 ? '（出して ' + r.ageDays + '日＝90日分に直すと ' + (Math.round(r.n90adj * 10) / 10) + '点）' : ''}・全期間 ${r.nAll}点・売れる間隔の平均 ${r.gap != null ? Math.round(r.gap) + '日' : '—（1回だけ）'}・初めて売れた日 ${esc(r.first)}・今の在庫 ${r.stock != null ? r.stock : '—'}${r.sellOut != null ? '・今のペース（90日の点数÷83日）で約 ' + r.sellOut + '日で売り切れ' + (prRefNow() ? '（参考）' : '') : ''}<br><span class="smd-dim" style="font-size:11px">「出してから最初に売れるまでの日数」は、明細を足した日の記録（出品ログ）を読む必要があるので、まだ出していません。</span></div>
       <div style="margin-top:6px"><b>国ごと</b>（売り値・手数料・粗利・損益分岐・4つの箱は国ごとに違います）<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;margin-top:3px"><thead><tr style="background:#eef1f4"><th style="padding:2px 6px">国</th><th style="padding:2px 6px;text-align:right">点数</th><th style="padding:2px 6px;text-align:right">売り値/点</th><th style="padding:2px 6px;text-align:right">手数料・送料など/点</th><th style="padding:2px 6px;text-align:right">仕入れ値/点</th><th style="padding:2px 6px;text-align:right">粗利/点</th><th style="padding:2px 6px;text-align:right">粗利の合計</th><th style="padding:2px 6px;text-align:right">損益分岐の売り値</th><th style="padding:2px 6px">箱</th><th style="padding:2px 6px">最後に売れた日</th></tr></thead><tbody>
       ${Object.keys(r.byCc || {}).sort((a, b) => (r.byCc[b].nP || 0) - (r.byCc[a].nP || 0)).map(c => { const b = r.byCc[c]; if (!(b.n > 0)) return `<tr style="border-top:1px solid #eee"><td style="padding:2px 6px">${c}</td><td style="padding:2px 6px;text-align:right">${b.nP}</td><td colspan="8" class="smd-dim" style="padding:2px 6px">粗利に入れられる注文がありません</td></tr>`;
@@ -58017,11 +58047,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       </div>
       <div class="prk-tier" style="display:flex;flex-direction:column;gap:4px;margin:2px 0 8px">${hwTierBarHtml(R.tierList || [], PR.tier, { cls: 'pr-hwt', lw: 52 })}</div>
       <div class="prk-sum"><div class="t">📅 ${esc(prPeriodLabel())}・${esc(prBasisLabel())}・${PR.cc ? esc(PR.cc) + ' だけ（この国の注文だけで計算）' : 'すべての国'}${(PR.tier.big || PR.tier.nw) ? '・' + esc(hwTierLabel(PR.tier)) + ' だけ' : ''}</div>
-        <div class="g">粗利の合計 <b class="${R.tot.gross < 0 ? 'prk-neg' : ''}" style="font-size:15px">${yen(R.tot.gross)}</b>　売れた ${(R.tot.unitsP || 0).toLocaleString()}点・粗利に入れた ${R.tot.units.toLocaleString()}点・${R.rows.length.toLocaleString()}件${R.tot.noCostU ? '・<span class="prk-warn">粗利に入れられなかった ' + R.tot.noCostU.toLocaleString() + '点</span>' : ''}${chkTxt}</div></div>
+        <div class="g">粗利の合計 <b class="${R.tot.gross < 0 ? 'prk-neg' : ''}" style="font-size:15px">${yen(R.tot.gross)}</b>　売れた ${(R.tot.unitsP || 0).toLocaleString()}点・粗利に入れた ${R.tot.units.toLocaleString()}点・${R.rows.length.toLocaleString()}件${R.tot.unitsOut ? ' ・ <span class="prk-warn"><span>粗利に入れられなかった</span> <b>' + R.tot.unitsOut.toLocaleString() + '</b><span>点</span></span>' : ''}${chkTxt}</div></div>
       ${PR.chg && !PR.chg.ok ? '<div class="prk-warn" style="font-size:12px;margin:2px 0">⚠ 値段を変えた記録を読めなかったので、その印は出ていません。</div>' : ''}
       <details class="prk-help"><summary>数え方の内訳・束ね方・印の決まり（補足）</summary><div>
         <span style="font-size:12.5px">粗利に入れた注文：<b>実際の値 ${(R.tot.real || 0).toLocaleString()}</b>件（入金明細・今月と先月の利益管理表）・<b>利益管理表の控え ${(R.tot.sheet || 0).toLocaleString()}</b>件（古い月）・<b style="color:#b45309">概算 ${(R.tot.est || 0).toLocaleString()}</b>件（入金がまだ・無いので価格計算と同じ式）・<b style="color:#b45309">仕入れを概算 ${(R.tot.estc || 0).toLocaleString()}</b>点（仕入れが分からないので同じ商品の全期間の平均）${PR.basis === 'fixed' ? '・入れていない（確定していない）' + (R.tot.unconf || 0).toLocaleString() + '件' : ''}</span><br>
-        <span class="smd-dim" style="font-size:12px">粗利に入れられなかった：<b>${(R.tot.noCostU || 0).toLocaleString()}</b>点（仕入れが分からず、同じ商品の平均も無い）。売れた数には入れています。未払い・キャンセルは数えていません（💹利益明細と同じ）。${(() => { const m = (PR.old && PR.old.months) || {}; const ks = Object.keys(m); if (!ks.length) return '古い月の利益管理表はまだ読んでいません。'; const ok = ks.filter(k => m[k].ok).length; return '古い月の利益管理表：読めた ' + ok + 'か月・読めない ' + (ks.length - ok) + 'か月（' + ks.filter(k => !m[k].ok).sort().join('・') + '）。'; })()}</span>
+        <span class="smd-dim" style="font-size:12px"><span>粗利に入れられなかった</span> <b>${R.tot.unitsOut.toLocaleString()}</b><span>点</span>${R.tot.unitsOut ? '（' + prUncountedBreakdown(R.tot.uncounted) + '）' : ''}。<span>未算入分は売れた数に含みます。未払いとキャンセルは集計外です。</span>${(() => { const m = (PR.old && PR.old.months) || {}; const ks = Object.keys(m); if (!ks.length) return '古い月の利益管理表はまだ読んでいません。'; const ok = ks.filter(k => m[k].ok).length; return '古い月の利益管理表：読めた ' + ok + 'か月・読めない ' + (ks.length - ok) + 'か月（' + ks.filter(k => !m[k].ok).sort().join('・') + '）。'; })()}</span>
  <button class="pr-old" style="margin-left:6px;padding:2px 8px;border:1px solid #c7cdd6;border-radius:6px;background:#fff;cursor:pointer;font-size:11.5px" title="入金明細が無い古い月の注文を、利益管理表（⭐ YYYYMM_shopee_利益管理表）の入金・仕入れで埋めます。月ごとに1回だけ読み、控え（app_kv profit_sheet_old）に置きます。本番の costs には書きません">📄 古い月の利益管理表を読む</button><br>
         <span class="smd-dim" style="font-size:12px">${R.tot.noSales ? '売上の額が空の注文 ' + R.tot.noSales + '件は、粗利には入れ、売り値の幅には入れていません。' : ''}${PR.group === 'prod' ? (R.pidOk ? '明細ごとに1行。国をまたいだ同じ明細は JAN→同じ写真→SKU→型番→名前（言葉の違いを外す）で1行にしています。同じカタログの別の明細は、SKU・JAN・写真が同じでもつなぎません。' : '明細ごとに1行。国をまたいだ同じ明細は 同じ写真→SKU→名前で1行にしています（JAN の台帳は出品の画面を開いた後に使います）。') : ''}</span></div>
         <div class="smd-dim" style="font-size:11.5px;margin-bottom:8px">印（4つの箱・線は 04 経営企画部が決めた物）：<b>厚い</b>＝1点の仕入れ¥1,000以下は粗利¥250以上・¥3,000以下は¥1,500以上・¥3,000超は仕入れの50%以上／<b>よく売れる</b>＝直近90日に2点以上（国の合計・出してから90日に満たない物は90日分に直す）。リクエスト品は箱に入れません。本人が値段を決めた物・10/20 以降に値段を変えた物（12/4 まで）・全期間で1点だけ・在庫0 は、印を付けて候補から外します。${prRefNow() ? '30日の数と売り切れまでの日数は、バケーションの7日が入るので 12/4 までは参考です。' : ''}${PR.chg && !PR.chg.ok ? ' ⚠ 値段を変えた記録を読めなかったので、その印は出ていません。' : ''}表示だけで、値段の書き込みや出品はしません。行を押すと中身が開きます。</div>
@@ -58031,7 +58061,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       ${PR.group === 'prod' && PR.merge === undefined ? '<div style="margin:6px 0;color:#d93025;font-size:12px">⚠ 手でまとめた行・言い換えの表（app_kv prank_merge）を読めませんでした。いまは既定の言い換えだけで束ねています。🔄読み直すを押してください</div>' : ''}
       <div><table class="prk-tbl">
         <thead><tr>${th('順位')}${th({ prod: '明細', model: '明細', item: 'カタログ', hw: '機種' }[PR.group] || '明細', 'left')}${sth('n', '売れた数', 'left')}${sth('gross', '粗利の合計')}${sth('per', '粗利/点')}${sth('sale', '売り値/点')}${sth('cost', '仕入れ値/点')}${sth('be', '<span title="価格計算と同じ式（国ごとの手数料・送料・為替）で、売れた点数がいちばん多い国で出します。損益分岐＝粗利が0（1件の変動費 約¥240 込み）。基準の線＝10/25 の値付けの基準の粗利。右の数字は「この仕入れ値までなら分岐・基準を守れる」上限。行を開くと国ごとに見えます。並べ替えは損益分岐の売り値（円）で" style="cursor:help;border-bottom:1px dotted #999">損益分岐/点</span>')}</tr></thead>
-        <tbody>${shown.map((r, i) => { const open = PR.open === r.key; return `<tr class="pr-row${open ? ' open' : ''}" data-key="${esc(r.key)}" style="cursor:pointer"><td class="rk">${i + 1}</td><td class="nm"><div style="display:flex;gap:6px;align-items:flex-start"><div style="min-width:0;flex:1">${boxChip(r)}${r.est ? `<span title="入金がまだ・無い注文は価格計算と同じ式で、仕入れが分からない物は同じ商品の平均の仕入れで概算した点数" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#fff4e5;color:#b45309;font-size:10.5px">概算 ${r.est}点</span>` : ''}${r.noCostU ? `<span title="仕入れが分からず、同じ商品の平均も無いので粗利に入れていない点数（売れた数には入っています）" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#f1f3f5;color:#5a6b8c;font-size:10.5px">粗利に入れていない ${r.noCostU}点</span>` : ''}${r.sheet ? `<span title="古い月の利益管理表の値を使った点数" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#eef5ff;color:#2673dd;font-size:10.5px">利益管理表 ${r.sheet}点</span>` : ''}${PR.group === 'prod' ? prNameList(r, open) + `<div class="prk-sub">${prMoreBtn(r, open)}${Object.keys(r.cc || {}).sort((a, b) => r.cc[b] - r.cc[a]).map(c => `<span title="この国の粗利の合計" style="padding:0 4px;border-radius:4px;background:${(regionByCc(c) || {}).color || '#888'};color:#fff;font-size:11px;white-space:nowrap">${c} ${yen(r.cc[c])}</span>`).join('')}<button class="pr-mg" data-key="${esc(r.key)}" title="同じ物なのに別の行になっている時、もう1つの行を選んで1行にまとめます（あとで外せます）" style="margin:4px 0 0 0;padding:0 6px;border:1px solid ${PR.pick && PR.pick.key === r.key ? '#ee4d2d' : '#c7cdd6'};border-radius:5px;background:${PR.pick && PR.pick.key === r.key ? '#fdf0ec' : '#fff'};cursor:pointer;font-size:10.5px;color:#5a6b8c">${PR.pick ? (PR.pick.key === r.key ? '⇄ この行を選んでいます（もう一度押すとやめる）' : '⇄ この行とまとめる') : '⇄ ほかの行とまとめる'}</button></div>` : `<div style="display:flex;gap:6px;align-items:flex-start">${prImgs(r)}<div>${prLabelHtml(r.label)}${PR.group !== 'hw' && r.hw !== '他' ? ` <span class="smd-dim" style="font-size:10.5px">${esc(r.hw)}</span>` : ''}<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:3px">${Object.keys(r.cc || {}).sort((a, b) => r.cc[b] - r.cc[a]).map(c => `<span title="この国の粗利の合計" style="padding:0 4px;border-radius:4px;background:${(regionByCc(c) || {}).color || '#888'};color:#fff;font-size:11px;white-space:nowrap">${c} ${yen(r.cc[c])}</span>`).join('')}</div></div></div>`}</div></div></td>${'<td class="l">'}${('<span class="prk-n">' + (r.nP || 0).toLocaleString() + '</span><span class="prk-s">30日 ' + r.n30 + (prRefNow() ? '（参考）' : '') + '</span><span class="prk-s">90日 ' + r.n90 + '</span><span class="prk-s">' + esc(r.last || '') + '</span>')}</td>${td('<span class="prk-n prk-b' + neg(r.gross) + '">' + yen(r.gross) + '</span><span class="prk-s">ROI ' + (r.cost > 0 ? Math.round(r.gross / r.cost * 100) + '%' : '—') + '</span>')}${r.n > 0 ? td('<span class="prk-n prk-b' + neg(r.gross) + '">' + yen(r.gross / r.n) + '</span>' + prRng(r.gMin, r.gMax, r.n)) + td('<span class="prk-n">' + yen(r.sales / r.n) + '</span>' + prRng(r.sMin, r.sMax, r.n) + prCcDiff(r)) + td('<span class="prk-n">' + yen(r.cost / r.n) + '</span>' + prRng(r.cMin, r.cMax, r.n)) + prBECell(r) : td('—') + td('—') + td('—') + td('—')}</tr>${open ? `<tr><td></td><td colspan="7" style="padding:4px 6px 10px;white-space:normal;text-align:left">${prDetailHtml(r, R, yen)}</td></tr>` : ''}`; }).join('')}</tbody></table></div>
+        <tbody>${shown.map((r, i) => { const open = PR.open === r.key; return `<tr class="pr-row${open ? ' open' : ''}" data-key="${esc(r.key)}" style="cursor:pointer"><td class="rk">${i + 1}</td><td class="nm"><div style="display:flex;gap:6px;align-items:flex-start"><div style="min-width:0;flex:1">${boxChip(r)}${r.est ? `<span title="入金がまだ・無い注文は価格計算と同じ式で、仕入れが分からない物は同じ商品の平均の仕入れで概算した点数" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#fff4e5;color:#b45309;font-size:10.5px">概算 ${r.est}点</span>` : ''}${r.unitsOut ? `<span title="行を開くと粗利に入れなかった理由が表示されます" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#f1f3f5;color:#5a6b8c;font-size:10.5px"><span>粗利に入れられなかった</span> <b>${r.unitsOut.toLocaleString()}</b><span>点</span></span>` : ''}${r.sheet ? `<span title="古い月の利益管理表の値を使った点数" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#eef5ff;color:#2673dd;font-size:10.5px">利益管理表 ${r.sheet}点</span>` : ''}${PR.group === 'prod' ? prNameList(r, open) + `<div class="prk-sub">${prMoreBtn(r, open)}${Object.keys(r.cc || {}).sort((a, b) => r.cc[b] - r.cc[a]).map(c => `<span title="この国の粗利の合計" style="padding:0 4px;border-radius:4px;background:${(regionByCc(c) || {}).color || '#888'};color:#fff;font-size:11px;white-space:nowrap">${c} ${yen(r.cc[c])}</span>`).join('')}<button class="pr-mg" data-key="${esc(r.key)}" title="同じ物なのに別の行になっている時、もう1つの行を選んで1行にまとめます（あとで外せます）" style="margin:4px 0 0 0;padding:0 6px;border:1px solid ${PR.pick && PR.pick.key === r.key ? '#ee4d2d' : '#c7cdd6'};border-radius:5px;background:${PR.pick && PR.pick.key === r.key ? '#fdf0ec' : '#fff'};cursor:pointer;font-size:10.5px;color:#5a6b8c">${PR.pick ? (PR.pick.key === r.key ? '⇄ この行を選んでいます（もう一度押すとやめる）' : '⇄ この行とまとめる') : '⇄ ほかの行とまとめる'}</button></div>` : `<div style="display:flex;gap:6px;align-items:flex-start">${prImgs(r)}<div>${prLabelHtml(r.label)}${PR.group !== 'hw' && r.hw !== '他' ? ` <span class="smd-dim" style="font-size:10.5px">${esc(r.hw)}</span>` : ''}<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:3px">${Object.keys(r.cc || {}).sort((a, b) => r.cc[b] - r.cc[a]).map(c => `<span title="この国の粗利の合計" style="padding:0 4px;border-radius:4px;background:${(regionByCc(c) || {}).color || '#888'};color:#fff;font-size:11px;white-space:nowrap">${c} ${yen(r.cc[c])}</span>`).join('')}</div></div></div>`}</div></div></td>${'<td class="l">'}${('<span class="prk-n">' + (r.nP || 0).toLocaleString() + '</span><span class="prk-s">30日 ' + r.n30 + (prRefNow() ? '（参考）' : '') + '</span><span class="prk-s">90日 ' + r.n90 + '</span><span class="prk-s">' + esc(r.last || '') + '</span>')}</td>${td('<span class="prk-n prk-b' + neg(r.gross) + '">' + yen(r.gross) + '</span><span class="prk-s">ROI ' + (r.cost > 0 ? Math.round(r.gross / r.cost * 100) + '%' : '—') + '</span>')}${r.n > 0 ? td('<span class="prk-n prk-b' + neg(r.gross) + '">' + yen(r.gross / r.n) + '</span>' + prRng(r.gMin, r.gMax, r.n)) + td('<span class="prk-n">' + yen(r.sales / r.n) + '</span>' + prRng(r.sMin, r.sMax, r.n) + prCcDiff(r)) + td('<span class="prk-n">' + yen(r.cost / r.n) + '</span>' + prRng(r.cMin, r.cMax, r.n)) + prBECell(r) : td('—') + td('—') + td('—') + td('—')}</tr>${open ? `<tr><td></td><td colspan="7" style="padding:4px 6px 10px;white-space:normal;text-align:left">${prDetailHtml(r, R, yen)}</td></tr>` : ''}`; }).join('')}</tbody></table></div>
       ${R.rows.length > 100 && !PR.more ? `<div style="margin-top:8px"><button class="pr-more" style="padding:5px 12px;border:1px solid #c7cdd6;border-radius:6px;background:#fff;cursor:pointer">残り ${(R.rows.length - 100).toLocaleString()}件も出す</button></div>` : ''}`;
     try { smdFitToScreen(body.querySelector('.prk-tbl')); } catch (_) {}   /* ★11/5 表は画面に見えている幅まで（窓が画面より大きい時に 1,877px まで伸びない） */
     body.querySelectorAll('.pr-seg').forEach(b => b.addEventListener('click', () => { PR[b.dataset.k] = b.dataset.v; PR.more = false; PR.open = null; prSave(); renderProfitRank(); }));
