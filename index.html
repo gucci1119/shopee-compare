@@ -7376,15 +7376,15 @@
     '粗利に入れなかった理由': 'Reasons for gross profit exclusions',
     '未算入分は売れた数に含みます。未払いとキャンセルは集計外です。': 'Units excluded from gross profit still count as sold. Unpaid and cancelled orders are excluded.',
     '行を開くと粗利に入れなかった理由が表示されます': 'Expand the row to see why units were excluded',
-    '台帳の保有在庫': 'Stock on hand in the inventory ledger',
-    'うち注文紐付け済み': 'Of these, linked to orders',
-    '点（仕分け要確認）': ' units (review classification)',
+    '台帳上の未販売・保有在庫': 'Unsold stock on hand in the inventory ledger',
+    '注文紐付け済み（仕分け要確認）': 'Linked to orders (classification needs review)',
     '合計保有在庫数': 'Total stock on hand',
     '合計保有金額': 'Total cost of stock on hand',
     '仕入額未登録': 'Missing purchase cost',
     '在庫台帳を読み込み中…': 'Loading the inventory ledger…',
     '在庫台帳を取得できませんでした': 'Could not load the inventory ledger',
-    '在庫台帳の「在庫保管中」全体。販売期間・市場・商品で絞り込んでも同じです。': 'All in-stock units in the inventory ledger. Sales period, market and product filters do not affect these totals.',
+    '在庫保管中で注文に紐付いていない分を集計。販売期間・市場・商品で絞り込んでも同じです。': 'Includes in-stock units with no linked order. Sales period, market and product filters do not affect these totals.',
+    '商品別の利益で未販売の保有在庫と注文紐付け済みを別集計': 'Show unsold stock and stock linked to orders separately in Profit by product',
     '商品別の利益に現在の保有在庫数と仕入額合計を表示': 'Show total units on hand and their purchase cost in Profit by product',
     '過去表の仕入れ': 'Cost from a past profit sheet',
     '過去表の入金（確定）': 'Confirmed payout from a past profit sheet',
@@ -15742,15 +15742,16 @@
     sortDir: (function () { try { return localStorage.getItem('smdStkSortD') || 'desc'; } catch (_) { return 'desc'; } })() };
   const stockHeld = { summary: null, at: 0, pending: null, rev: 0 };
   function stockHeldTotal(rows) {
-    const result = { units: 0, yen: 0, unknown: 0, linked: 0 };
+    const unlinked = { units: 0, yen: 0, unknown: 0 };
+    const linked = { units: 0, yen: 0, unknown: 0 };
     for (const r of rows) {
       if (r.status !== '在庫保管中') continue;
-      result.units++;
-      if (String(r.shopee_sn || '').trim()) result.linked++;
-      if (r.price == null || r.price === '' || !Number.isFinite(Number(r.price))) result.unknown++;
-      else result.yen += Number(r.price);
+      const group = String(r.shopee_sn || '').trim() ? linked : unlinked;
+      group.units++;
+      if (r.price == null || r.price === '' || !Number.isFinite(Number(r.price))) group.unknown++;
+      else group.yen += Number(r.price);
     }
-    return result;
+    return { units: unlinked.units + linked.units, yen: unlinked.yen + linked.yen, unlinked, linked };
   }
   function stockHeldSet(summary) {
     stockHeld.summary = summary;
@@ -27908,7 +27909,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
-    { date: '2026-11-11', items: ['<b>商品別の利益に現在の保有在庫数と仕入額合計を表示</b>。'] },
+    { date: '2026-11-11', items: ['<b>商品別の利益で未販売の保有在庫と注文紐付け済みを別集計</b>。', '<b>商品別の利益に現在の保有在庫数と仕入額合計を表示</b>。'] },
     { date: '2026-11-11', items: ['<b>商品別の利益でPayPal照合待ちと暫定入金を区別</b>。直近30日・90日の集計を日本時間で区切ります。'] },
     { date: '2026-11-11', items: ['<b>商品別の利益で、粗利に入らない点数と理由を表示</b>。'] },
     { date: '2026-11-11', items: ['<b>値付けの戦略と使い方をそれぞれ開閉できるように</b>。'] },
@@ -58040,16 +58041,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       </tbody></table>${r.ords.length >= 300 ? '<div class="smd-dim" style="font-size:11px">注文は新しい方から300件まで出しています</div>' : ''}</div></div>`;
   }
   function prHeldHtml() {
+    const heading = '<div class="t">台帳上の未販売・保有在庫</div>';
     const held = stockHeld.summary;
-    const details = !held
-      ? '<span class="smd-dim">' + (stockHeld.pending ? '在庫台帳を読み込み中…' : '在庫台帳を取得できませんでした') + '</span>'
-      : '<span>合計保有在庫数</span> <b>' + held.units.toLocaleString() + '</b><span>点</span>　' +
-        '<span>合計保有金額</span> <b>' + fmtJpy(held.yen) + '</b>' +
-        (held.unknown ? '　<span>仕入額未登録</span> <b>' + held.unknown.toLocaleString() + '</b><span>点</span>' : '');
-    const linked = held && held.linked
-      ? '<div class="smd-dim"><span>うち注文紐付け済み</span> <b>' + held.linked.toLocaleString() + '</b><span>点（仕分け要確認）</span></div>' : '';
-    return '<div class="t">台帳の保有在庫</div>' + details + linked +
-      '<div class="smd-dim" style="font-size:11px">在庫台帳の「在庫保管中」全体。販売期間・市場・商品で絞り込んでも同じです。</div>';
+    if (!held) {
+      return heading + '<span class="smd-dim">' +
+        (stockHeld.pending ? '在庫台帳を読み込み中…' : '在庫台帳を取得できませんでした') + '</span>';
+    }
+    const { unlinked, linked } = held;
+    const missingCost = group => group.unknown
+      ? '　<span>仕入額未登録</span> <b>' + group.unknown.toLocaleString() + '</b><span>点</span>' : '';
+    return heading + '<div><span>合計保有在庫数</span> <b>' + unlinked.units.toLocaleString() + '</b><span>点</span>　' +
+      '<span>合計保有金額</span> <b>' + fmtJpy(unlinked.yen) + '</b>' + missingCost(unlinked) + '</div>' +
+      '<div class="smd-dim" style="font-size:11px">在庫保管中で注文に紐付いていない分を集計。販売期間・市場・商品で絞り込んでも同じです。</div>' +
+      '<div class="smd-dim" style="margin-top:6px;padding-top:6px;border-top:1px solid var(--smd-line,#e6e6e6)">' +
+      '<span>注文紐付け済み（仕分け要確認）</span> <b>' + linked.units.toLocaleString() + '</b><span>点</span>　' +
+      '<span>仕入額</span> <b>' + fmtJpy(linked.yen) + '</b>' + missingCost(linked) + '</div>';
   }
   async function renderProfitRank(force) {
     const body = document.getElementById('prank-body'); if (!body) return;
