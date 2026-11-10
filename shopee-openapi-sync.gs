@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261110-2102'
+var SRC_VER = '20261111-0110'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -12294,7 +12294,8 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
   var _bn = baBrNewMode_(cfg, cc, hw, series, st);   /* ★2026-10-25 BR の新しい総称カタログ（上の説明）。null＝今までどおり */
   /* 本店の切り替え前のカタログ・2店舗目のカタログ＝0（入れない）。05 のレビュー：2店舗目に空きがあると、新しいカタログを作らずに本店向けの明細が2店舗目へ流れて試しが始まらない。
      新しいカタログを作れない時（1日の上限・重複で5回断られた・複製の失敗）は、2店舗目に落とさず、その回の BR は足さずに次の回へ回す（下の break） */
-  var capOf = function (x) { if (!_bn) return 100; if (!x || String(x.shop_id) !== _bn.main) return 0; return _bn.ids[String(x.item_id)] ? _bn.cap : 0; };
+  var incompatible = {};
+  var capOf = function (x) { if (!x || incompatible[String(x.item_id)]) return 0; if (!_bn) return 100; if (!x || String(x.shop_id) !== _bn.main) return 0; return _bn.ids[String(x.item_id)] ? _bn.cap : 0; };
   rows = rows.slice().sort(function (a, b) { return ((a.status === 1 ? 0 : 1) - (b.status === 1 ? 0 : 1)) || (baSeriesNo_(a.name) - baSeriesNo_(b.name)) || (a.item_id - b.item_id); });
   if (!rows.length) { res.note = 'カタログ群なし'; todo.forEach(function (p) { baSet_(ledger, p.key, cc, 'skip:nofam'); baSkipRec_(st, hw, cc, p, 'nofam'); }); return res; }
   var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 909090 : 0;   // ★2026-10-09 Shopee通知：VNの明細は 909,090 VND 以下（超えると出品ごと非公開）
@@ -12327,11 +12328,36 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         baLog_(st, cc + '：価格の幅に収まるカタログが無く、複製がOFFなので在庫0で置きます（' + String(todo[i].en || '').slice(0, 26) + '）');
       } else { bandHp = _hp; if (_anyFree) baLog_(st, cc + '：価格の幅に収まるカタログが無いので新しく作ります（' + String(todo[i].en || '').slice(0, 26) + '）'); }
     }
+    /* 控えに明細が無い既存カタログは、書き込む前に公式の層と明細を確かめる。 */
+    if (_bn && tgt && tgt.status === 8 && !tgt.isNew && !(tgt.models || []).length) {
+      if (!bgAllowed_()) { res.note = '入れ先確認は接続枠の予約により次の回へ'; break; }
+      var actual;
+      try { actual = getModels_(tgt.shop_id, tgt.item_id); }
+      catch (eShape) { baLog_(st, cc + '：入れ先の公式確認ができず次の回へ（' + tgt.item_id + '）'); }
+      if (!actual || !Array.isArray(actual.tier_variation) || !Array.isArray(actual.models)) {
+        res.note = '入れ先の公式確認待ち'; break;
+      }
+      if (actual.tier_variation.length || actual.models.some(function (m) { return m && m.model_id; })) {
+        /* DBと公式の明細が食い違う間は、別名の同一SKU/JANを見落とさないよう同期を待つ。 */
+        res.note = '入れ先の明細同期待ち'; break;
+      }
+      incompatible[String(tgt.item_id)] = true;
+      baLog_(st, cc + '：非公開・バリエなしの入れ先を除外（' + tgt.item_id + '）');
+      continue;
+    }
     var newItem = false;
     if (!tgt) {
       if (cfg.autoClone === false) { res.note = '満杯（複製OFF）'; break; }
       var base = rows[rows.length - 1];
       if (_bn) { for (var _bi = rows.length - 1; _bi >= 0; _bi--) { if (String(rows[_bi].shop_id) === _bn.main) { base = rows[_bi]; break; } } }   /* ★2026-10-25 BR は本店の家族カタログを元に複製（名前・親SKU・説明・重さ・表紙を家族と同じに） */
+      if (incompatible[String(base.item_id)]) {
+        var safeBases = rows.filter(function (x) {
+          return !incompatible[String(x.item_id)] && x.status === 1 && (x.models || []).length &&
+            (!_bn || String(x.shop_id) === _bn.main);
+        });
+        if (!safeBases.length) { res.note = '公開中の複製元を確認できず次の回へ'; break; }
+        base = safeBases[safeBases.length - 1];
+      }
       var nextNo = Math.max(Math.max.apply(null, rows.map(function (x) { return baSeriesNo_(x.name); })) + 1, baFreeNo_(cc, rows[rows.length - 1].name));   /* ★2026-09-26 国の中（2店舗目・親SKU無しも含む）で空いている番号 */
       var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳', mark = CIRC[nextNo - 1] || ('(' + nextNo + ')');
       var curMark = CIRC[baSeriesNo_(base.name) - 1], nm0 = String(base.name || '');
