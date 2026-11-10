@@ -2557,6 +2557,7 @@ function doPostInner_(e) {
     if (body.action === 'chat_ingest') out = chatIngest_(body);
     else if (body.action === 'outbox_done') out = outboxDone_(body);
     else if (body.action === 'sls_awb_parameter') out = slsAwbParameter_(body); // 手配済みの単一梱包の帳票形式を照会
+    else if (body.action === 'sls_awb_existing_status') out = slsAwbExistingStatus_(body); // 既発行の感熱帳票の状態を読むだけ
     else if (body.action === 'list_meta') out = listMeta_(body);      // 公式API出品：category/logistic解決（出品前の確認用）
     else if (body.action === 'shop3_candidate_publish') out = shop3CandidatePublish_(body); // 第3店候補専用の公開。旧配備へは書き込まない
     else if (body.action === 'add_item') out = addItem_(body);        // 公式API出品：指定shop_idにadd_item（アカウント/国を明示）
@@ -5487,7 +5488,8 @@ function getTracking_(shopId, orderSn, packageNumber) {
   return (j && j.response) || j;
 }
 // 読み取り：手配済みの単一梱包で、現行の感熱ラストマイル伝票と同じ帳票形式を取得できるか確認する。
-function slsAwbParameter_(body) {
+function slsAwbParameter_(body, readOnce) {
+  var read = readOnce || callShop_;
   var shopId = Number(body.shop_id), orderSn = body.order_sn, packageNumber = body.package_number;
   if ((typeof body.shop_id !== 'number' && typeof body.shop_id !== 'string') ||
       !/^[1-9][0-9]*$/.test(String(body.shop_id)) || !Number.isSafeInteger(shopId) ||
@@ -5502,7 +5504,7 @@ function slsAwbParameter_(body) {
     if (!token || String(token.shop_id) !== String(shopId) || !(token.expire_at > now_() + 60)) {
       return { ok: false, error: 'shop_token_unavailable' };
     }
-    var detail = callShop_(shopId, '/api/v2/order/get_order_detail',
+    var detail = read(shopId, '/api/v2/order/get_order_detail',
       { order_sn_list: orderSn, response_optional_fields: 'package_list' }, 'get');
     var orders = detail && detail.response && detail.response.order_list;
     var order = Array.isArray(orders) && orders.length === 1 ? orders[0] : null;
@@ -5510,17 +5512,20 @@ function slsAwbParameter_(body) {
         (order.shop_id != null && String(order.shop_id) !== String(shopId)) ||
         order.order_status !== 'PROCESSED' || !Array.isArray(order.package_list) ||
         order.package_list.length !== 1 || !order.package_list[0] ||
-        order.package_list[0].package_number !== packageNumber) {
+        order.package_list[0].package_number !== packageNumber ||
+        (readOnce && /CANCEL/i.test(String(order.package_list[0].logistics_status || '')))) {
       return { ok: false, error: 'arranged_package_unverified' };
     }
-    var params = callShop_(shopId, '/api/v2/logistics/get_shipping_document_parameter', null, 'post',
+    var params = read(shopId, '/api/v2/logistics/get_shipping_document_parameter', null, 'post',
       { order_list: [{ order_sn: orderSn, package_number: packageNumber }] });
     var rows = params && params.response && params.response.result_list;
     var row = Array.isArray(rows) && rows.length === 1 ? rows[0] : null;
     if (!row || row.order_sn !== orderSn || row.package_number !== packageNumber) {
       return { ok: false, error: 'document_response_unverified' };
     }
-    if (row.fail_error) return { ok: false, error: 'document_query_failed' };
+    if (row.fail_error || (readOnce && (slsAwbHasWarning_(row.warning) || slsAwbHasWarning_(row.fail_message)))) {
+      return { ok: false, error: 'document_query_failed' };
+    }
     // 既知のラベル種以外や、Shopeeからの生データは返さない。
     var allowed = ['THERMAL_AIR_WAYBILL', 'NORMAL_AIR_WAYBILL'];
     var selectable = row.selectable_shipping_document_type;
@@ -5529,6 +5534,69 @@ function slsAwbParameter_(body) {
     var suggested = types.indexOf(row.suggest_shipping_document_type) >= 0 ? row.suggest_shipping_document_type : null;
     return { ok: true, available: types.indexOf('THERMAL_AIR_WAYBILL') >= 0, types: types, suggested: suggested };
   } catch (e) {
+    return { ok: false, error: 'document_query_failed' };
+  }
+}
+// 既発行の状態照会に使う読取だけ。送信先を外から受け取らず、応答本文も返さない。
+function slsAwbHasWarning_(warning) {
+  return warning != null && warning !== '' && (!Array.isArray(warning) || warning.length > 0);
+}
+function slsAwbReadOnce_(shopId, path, query, method, payload) {
+  var allowed = ['/api/v2/order/get_order_detail', '/api/v2/logistics/get_shipping_document_parameter',
+    '/api/v2/logistics/get_shipping_document_result'];
+  if (allowed.indexOf(path) < 0 || method !== (path === allowed[0] ? 'get' : 'post')) {
+    throw new Error('document_read_unverified');
+  }
+  var token = getToken_(shopId);
+  if (!token || String(token.shop_id) !== String(shopId) || !(token.expire_at > now_() + 60) ||
+      ufDead_() || ufTotal_() + 1 > UF_STOP) throw new Error('document_read_unavailable');
+  // 通常の署名・枠計上を使い、認可更新・通信再送・リダイレクトは行わない。
+  var ts = now_(), access = token.access_token;
+  if (!access) throw new Error('document_read_unavailable');
+  var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts +
+    '&access_token=' + access + '&shop_id=' + shopId + '&sign=' + signShop_(path, ts, access, shopId);
+  if (query) Object.keys(query).forEach(function (key) { url += '&' + key + '=' + encodeURIComponent(query[key]); });
+  var opt = { method: method, muteHttpExceptions: true, followRedirects: false };
+  if (payload) { opt.contentType = 'application/json'; opt.payload = JSON.stringify(payload); }
+  var response;
+  try {
+    ufBump_(1, path);
+    response = UrlFetchApp.fetch(url, opt);
+  } catch (e) {
+    var message = String((e && e.message) || '');
+    if (/too many times|回数が多すぎます/i.test(message) && /for one day|1\s*日に/i.test(message)) {
+      ufNoteErr_(new Error('Service invoked too many times for one day: UrlFetch'));
+    }
+    throw new Error('document_read_unverified');
+  }
+  if (response.getResponseCode() !== 200) throw new Error('document_read_unverified');
+  var r = JSON.parse(response.getContentText());
+  if (!r || r.error || slsAwbHasWarning_(r.warning) || slsAwbHasWarning_(r.warning_list) ||
+      !r.response || slsAwbHasWarning_(r.response.warning) || slsAwbHasWarning_(r.response.warning_list)) {
+    throw new Error('document_read_unverified');
+  }
+  return r;
+}
+function slsAwbExistingStatus_(body) {
+  if (isChild_()) return { ok: false, error: 'main_only' };
+  var preflight = slsAwbParameter_(body, slsAwbReadOnce_);
+  if (!preflight.ok) return preflight;
+  if (!preflight.available) return { ok: false, error: 'thermal_unavailable' };
+  var kind = 'THERMAL_AIR_WAYBILL';
+  try {
+    var result = slsAwbReadOnce_(Number(body.shop_id), '/api/v2/logistics/get_shipping_document_result', null, 'post',
+      { order_list: [{ order_sn: body.order_sn, package_number: body.package_number, shipping_document_type: kind }] });
+    var list = result.response.result_list;
+    var row = Array.isArray(list) && list.length === 1 ? list[0] : null;
+    if (result.error !== '' || !row || row.order_sn !== body.order_sn || row.package_number !== body.package_number ||
+        (row.shipping_document_type != null && row.shipping_document_type !== kind) ||
+        slsAwbHasWarning_(row.warning) || slsAwbHasWarning_(row.warning_list) ||
+        slsAwbHasWarning_(row.fail_error) || slsAwbHasWarning_(row.fail_message)) {
+      return { ok: false, error: 'document_result_unverified' };
+    }
+    if (row.status !== 'READY') return { ok: false, error: 'document_not_ready' };
+    return { ok: true, ready: true, type: kind, status: 'READY' };
+  } catch (_) {
     return { ok: false, error: 'document_query_failed' };
   }
 }
