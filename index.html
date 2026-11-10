@@ -7376,6 +7376,16 @@
     '粗利に入れなかった理由': 'Reasons for gross profit exclusions',
     '未算入分は売れた数に含みます。未払いとキャンセルは集計外です。': 'Units excluded from gross profit still count as sold. Unpaid and cancelled orders are excluded.',
     '行を開くと粗利に入れなかった理由が表示されます': 'Expand the row to see why units were excluded',
+    '台帳の保有在庫': 'Stock on hand in the inventory ledger',
+    'うち注文紐付け済み': 'Of these, linked to orders',
+    '点（仕分け要確認）': ' units (review classification)',
+    '合計保有在庫数': 'Total stock on hand',
+    '合計保有金額': 'Total cost of stock on hand',
+    '仕入額未登録': 'Missing purchase cost',
+    '在庫台帳を読み込み中…': 'Loading the inventory ledger…',
+    '在庫台帳を取得できませんでした': 'Could not load the inventory ledger',
+    '在庫台帳の「在庫保管中」全体。販売期間・市場・商品で絞り込んでも同じです。': 'All in-stock units in the inventory ledger. Sales period, market and product filters do not affect these totals.',
+    '商品別の利益に現在の保有在庫数と仕入額合計を表示': 'Show total units on hand and their purchase cost in Profit by product',
     '過去表の仕入れ': 'Cost from a past profit sheet',
     '過去表の入金（確定）': 'Confirmed payout from a past profit sheet',
     '過去表の入金（暫定）': 'Provisional payout from a past profit sheet',
@@ -15012,6 +15022,7 @@
   }
   function sbBootDrop(table) {
     if (!SB_BOOT_TTL[table]) return;
+    if (table === 'inventory') { stockHeld.rev++; stockHeld.at = 0; }
     idbKv('readwrite', st => { const r = st.openCursor(); r.onsuccess = () => { const c = r.result; if (!c) return; if (String(c.key).indexOf('boot|' + table + '|') === 0) c.delete(); c.continue(); }; return r; }).catch(() => {});
   }
   async function sbGetAll(table, qs) {
@@ -15729,6 +15740,52 @@
   const stock = { rows: null, imgMap: null, snItems: null, st: '', sup: '', origin: '', q: '', tak: '', hw: '', cat: '', bound: false, adding: false,
     sortKey: (function () { try { return localStorage.getItem('smdStkSortK') || ''; } catch (_) { return ''; } })(),
     sortDir: (function () { try { return localStorage.getItem('smdStkSortD') || 'desc'; } catch (_) { return 'desc'; } })() };
+  const stockHeld = { summary: null, at: 0, pending: null, rev: 0 };
+  function stockHeldTotal(rows) {
+    const result = { units: 0, yen: 0, unknown: 0, linked: 0 };
+    for (const r of rows) {
+      if (r.status !== '在庫保管中') continue;
+      result.units++;
+      if (String(r.shopee_sn || '').trim()) result.linked++;
+      if (r.price == null || r.price === '' || !Number.isFinite(Number(r.price))) result.unknown++;
+      else result.yen += Number(r.price);
+    }
+    return result;
+  }
+  function stockHeldSet(summary) {
+    stockHeld.summary = summary;
+    stockHeld.at = Date.now();
+  }
+  async function stockHeldLoad(force) {
+    if (stockHeld.pending) return stockHeld.pending;
+    if (!force && stockHeld.at && Date.now() - stockHeld.at < 120000) return;
+    if (!force && !stockHeld.rev && Array.isArray(stock.rows)) {
+      stockHeldSet(stockHeldTotal(stock.rows));
+      return;
+    }
+    const rev = stockHeld.rev;
+    stockHeld.pending = (async () => {
+      let summary = null;
+      try {
+        const rows = [], limit = 500;
+        const signal = AbortSignal.timeout(25000);
+        let after = '';
+        for (;;) {
+          const page = await sbGet('inventory', 'select=item_id,status,price,shopee_sn&status=eq.' + encodeURIComponent('在庫保管中') +
+            '&order=item_id.asc&limit=' + limit + (after ? '&item_id=gt.' + encodeURIComponent(after) : ''), { signal, maxBytes: 2000000 });
+          if (!Array.isArray(page)) throw new Error('在庫の応答が不正');
+          rows.push(...page);
+          if (page.length < limit) break;
+          const last = String(page[page.length - 1].item_id || '');
+          if (!last || last === after) throw new Error('在庫のページ送りに失敗');
+          after = last;
+        }
+        summary = stockHeldTotal(rows);
+      } catch (_) { /* 集計不能と、正常に取得した0点を区別する */ }
+      if (stockHeld.rev === rev) stockHeldSet(summary);
+    })().finally(() => { stockHeld.pending = null; });
+    return stockHeld.pending;
+  }
   const stkOrigin = r => String(r.item_id || '').indexOf('PITM-') === 0 ? 'auto' : (String(r.item_id || '').indexOf('ITM-') === 0 ? 'sheet' : 'other');
   // フリマ系＝取引ページ＋受取評価がある（配達状況を取引画面で確認できる）。EC系(Amazon/楽天/ヤフショ/セカスト/駿河屋/Nintendo等)＝取引ページ・受取評価が無く「届くだけ」＝取引ページリンクは出さない
   const isFleaMarket = (sup) => /メルカリ|ラクマ|ヤフオク|Yahoo!?フリマ|PayPay|フリル/i.test(String(sup || ''));
@@ -17488,7 +17545,9 @@
   function stockRender() {
     const body = document.getElementById('stock-body');
     const all = stock.rows || [];
-    const inStock = all.filter(r => r.status === '在庫保管中');
+    const held = stockHeldTotal(all);
+    stockHeld.rev++;
+    stockHeldSet(held);
     // ハード/カテゴリの選択肢は「実際に在庫にあるものだけ」を件数つきで出す（空の選択肢を並べない）
     (() => {
       const fill = (id, get, cur) => {
@@ -17503,7 +17562,6 @@
       fill('stock-cat', invCat, stock.cat);
       const te = document.getElementById('stock-tak'); if (te && te.value !== stock.tak) te.value = stock.tak;
     })();
-    const stockVal = inStock.reduce((s, r) => s + (r.price || 0), 0);
     // ★仕分けが必要＝注文に紐付いていないのに「販売済み」／紐付いているのに「在庫保管中」。
     //   帳簿と実物の在り処が食い違っている可能性がある分。押すと下の一覧がその条件で絞られる。
     const needFixOf = (r) => {
@@ -17512,7 +17570,7 @@
     };
     const needFix = all.filter(needFixOf);
     document.getElementById('stock-kpis').innerHTML = [
-      ['在庫保管中', inStock.length + '点', '仕入額合計 ' + fmtJpy(stockVal), '在庫保管中'],
+      ['在庫保管中', held.units + '点', '仕入額合計 ' + fmtJpy(held.yen), '在庫保管中'],
       ['入庫待ち', all.filter(r => r.status === '入庫待ち').length + '点', '仕入元から到着待ち', '入庫待ち'],
       ['販売済み', all.filter(r => r.status === '販売済み').length + '点', '累計', '販売済み'],
       ['仕入キャンセル', all.filter(r => r.status === '仕入キャンセル').length + '点', '仕入元都合で届かなかった分（資産から除外）', '仕入キャンセル'],
@@ -27850,6 +27908,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-11', items: ['<b>商品別の利益に現在の保有在庫数と仕入額合計を表示</b>。'] },
     { date: '2026-11-11', items: ['<b>商品別の利益でPayPal照合待ちと暫定入金を区別</b>。直近30日・90日の集計を日本時間で区切ります。'] },
     { date: '2026-11-11', items: ['<b>商品別の利益で、粗利に入らない点数と理由を表示</b>。'] },
     { date: '2026-11-11', items: ['<b>値付けの戦略と使い方をそれぞれ開閉できるように</b>。'] },
@@ -57980,8 +58039,21 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       ${ords.map(x => `<tr style="border-top:1px solid #eee"><td style="padding:2px 6px;white-space:nowrap">${esc(x.d)}</td><td style="padding:2px 6px">${x.cc}</td><td style="padding:2px 6px;text-align:right">${x.q}</td><td style="padding:2px 6px;text-align:right">${yen(x.sale)} <span class="smd-dim">${fmtL(x.cc, x.saleL)}</span></td><td style="padding:2px 6px;text-align:right">${yen(x.ded)}${prFeeTxt(x)}</td><td style="padding:2px 6px;text-align:right">${yen(x.cost)}${x.src === 'estc' ? ' <span style="color:#b45309;font-size:10.5px">概算</span>' : x.oldCost ? ' <span class="smd-dim">過去表の仕入れ</span>' : ''}</td><td style="padding:2px 6px;text-align:right;color:${x.g < 0 ? '#d93025' : '#1a7f37'}">${yen(x.g)}${(x.src === 'est' || x.src === 'estc') ? ' <span style="color:#b45309;font-size:10.5px">概算</span>' : ''}${x.oldDep ? ' <span class="smd-dim">' + (x.depFixed ? '過去表の入金（確定）' : '過去表の入金（暫定）') + '</span>' : ''}</td><td style="padding:2px 6px"><a href="#" class="pr-jump" data-sn="${esc(x.sn)}" data-d="${esc(x.d)}" style="color:#2673dd;text-decoration:none;white-space:nowrap">💹 利益明細で見る</a></td></tr>`).join('')}
       </tbody></table>${r.ords.length >= 300 ? '<div class="smd-dim" style="font-size:11px">注文は新しい方から300件まで出しています</div>' : ''}</div></div>`;
   }
+  function prHeldHtml() {
+    const held = stockHeld.summary;
+    const details = !held
+      ? '<span class="smd-dim">' + (stockHeld.pending ? '在庫台帳を読み込み中…' : '在庫台帳を取得できませんでした') + '</span>'
+      : '<span>合計保有在庫数</span> <b>' + held.units.toLocaleString() + '</b><span>点</span>　' +
+        '<span>合計保有金額</span> <b>' + fmtJpy(held.yen) + '</b>' +
+        (held.unknown ? '　<span>仕入額未登録</span> <b>' + held.unknown.toLocaleString() + '</b><span>点</span>' : '');
+    const linked = held && held.linked
+      ? '<div class="smd-dim"><span>うち注文紐付け済み</span> <b>' + held.linked.toLocaleString() + '</b><span>点（仕分け要確認）</span></div>' : '';
+    return '<div class="t">台帳の保有在庫</div>' + details + linked +
+      '<div class="smd-dim" style="font-size:11px">在庫台帳の「在庫保管中」全体。販売期間・市場・商品で絞り込んでも同じです。</div>';
+  }
   async function renderProfitRank(force) {
     const body = document.getElementById('prank-body'); if (!body) return;
+    const heldReady = stockHeldLoad(force);
     if (!PR.orders || force) body.innerHTML = '<div class="smd-dim" style="padding:14px 4px"><span class="smd-spin"></span>読み込み中…（全期間の注文を1回だけ読みます）</div>';
     try { await prLoad(force); } catch (e) { body.innerHTML = '<span class="smd-err">読めませんでした: ' + esc((e && e.message) || e) + '</span>'; return; }
     if (PR.auto && !_ordAuto) { try { _ordAutoAt = 0; await ordAutoLoad(); } catch (_) {} }
@@ -58058,6 +58130,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <span><button class="pr-reload" style="padding:4px 10px;border:1px solid #c7cdd6;border-radius:6px;background:#fff;cursor:pointer;font-size:12.5px">🔄 読み直す</button>${R.lstOk ? '' : '<button class="pr-lst" style="padding:4px 10px;border:1px solid #c7cdd6;border-radius:6px;background:#fff;cursor:pointer;font-size:12.5px" title="出品の画面と同じ控えを読みます（出している国・今の値段・在庫・SKU が出ます）">📦 出品の控えを読む</button>'}</span>
       </div>
       <div class="prk-tier" style="display:flex;flex-direction:column;gap:4px;margin:2px 0 8px">${hwTierBarHtml(R.tierList || [], PR.tier, { cls: 'pr-hwt', lw: 52 })}</div>
+      <div id="prank-held" class="prk-sum">${prHeldHtml()}</div>
       <div class="prk-sum"><div class="t">📅 ${esc(prPeriodLabel())}・${esc(prBasisLabel())}・${PR.cc ? esc(PR.cc) + ' だけ（この国の注文だけで計算）' : 'すべての国'}${(PR.tier.big || PR.tier.nw) ? '・' + esc(hwTierLabel(PR.tier)) + ' だけ' : ''}</div>
         <div class="g">粗利の合計 <b class="${R.tot.gross < 0 ? 'prk-neg' : ''}" style="font-size:15px">${yen(R.tot.gross)}</b>　売れた ${(R.tot.unitsP || 0).toLocaleString()}点・粗利に入れた ${R.tot.units.toLocaleString()}点・${R.rows.length.toLocaleString()}件${R.tot.unitsOut ? ' ・ <span class="prk-warn"><span>粗利に入れられなかった</span> <b>' + R.tot.unitsOut.toLocaleString() + '</b><span>点</span></span>' : ''}${chkTxt}</div></div>
       ${PR.chg && !PR.chg.ok ? '<div class="prk-warn" style="font-size:12px;margin:2px 0">⚠ 値段を変えた記録を読めなかったので、その印は出ていません。</div>' : ''}
@@ -58076,6 +58149,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         <tbody>${shown.map((r, i) => { const open = PR.open === r.key; return `<tr class="pr-row${open ? ' open' : ''}" data-key="${esc(r.key)}" style="cursor:pointer"><td class="rk">${i + 1}</td><td class="nm"><div style="display:flex;gap:6px;align-items:flex-start"><div style="min-width:0;flex:1">${boxChip(r)}${r.est ? `<span title="入金がまだ・無い注文は価格計算と同じ式で、仕入れが分からない物は同じ商品の平均の仕入れで概算した点数" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#fff4e5;color:#b45309;font-size:10.5px">概算 ${r.est}点</span>` : ''}${r.unitsOut ? `<span title="行を開くと粗利に入れなかった理由が表示されます" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#f1f3f5;color:#5a6b8c;font-size:10.5px"><span>粗利に入れられなかった</span> <b>${r.unitsOut.toLocaleString()}</b><span>点</span></span>` : ''}${r.sheet ? `<span title="入金または仕入れに古い月の利益管理表を使った点数" style="display:inline-block;margin-right:4px;padding:0 5px;border-radius:4px;background:#eef5ff;color:#2673dd;font-size:10.5px">利益管理表 ${r.sheet}点</span>` : ''}${PR.group === 'prod' ? prNameList(r, open) + `<div class="prk-sub">${prMoreBtn(r, open)}${Object.keys(r.cc || {}).sort((a, b) => r.cc[b] - r.cc[a]).map(c => `<span title="この国の粗利の合計" style="padding:0 4px;border-radius:4px;background:${(regionByCc(c) || {}).color || '#888'};color:#fff;font-size:11px;white-space:nowrap">${c} ${yen(r.cc[c])}</span>`).join('')}<button class="pr-mg" data-key="${esc(r.key)}" title="同じ物なのに別の行になっている時、もう1つの行を選んで1行にまとめます（あとで外せます）" style="margin:4px 0 0 0;padding:0 6px;border:1px solid ${PR.pick && PR.pick.key === r.key ? '#ee4d2d' : '#c7cdd6'};border-radius:5px;background:${PR.pick && PR.pick.key === r.key ? '#fdf0ec' : '#fff'};cursor:pointer;font-size:10.5px;color:#5a6b8c">${PR.pick ? (PR.pick.key === r.key ? '⇄ この行を選んでいます（もう一度押すとやめる）' : '⇄ この行とまとめる') : '⇄ ほかの行とまとめる'}</button></div>` : `<div style="display:flex;gap:6px;align-items:flex-start">${prImgs(r)}<div>${prLabelHtml(r.label)}${PR.group !== 'hw' && r.hw !== '他' ? ` <span class="smd-dim" style="font-size:10.5px">${esc(r.hw)}</span>` : ''}<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:3px">${Object.keys(r.cc || {}).sort((a, b) => r.cc[b] - r.cc[a]).map(c => `<span title="この国の粗利の合計" style="padding:0 4px;border-radius:4px;background:${(regionByCc(c) || {}).color || '#888'};color:#fff;font-size:11px;white-space:nowrap">${c} ${yen(r.cc[c])}</span>`).join('')}</div></div></div>`}</div></div></td>${'<td class="l">'}${('<span class="prk-n">' + (r.nP || 0).toLocaleString() + '</span><span class="prk-s">30日 ' + r.n30 + (prRefNow() ? '（参考）' : '') + '</span><span class="prk-s">90日 ' + r.n90 + '</span><span class="prk-s">' + esc(r.last || '') + '</span>')}</td>${td('<span class="prk-n prk-b' + neg(r.gross) + '">' + yen(r.gross) + '</span><span class="prk-s">ROI ' + (r.cost > 0 ? Math.round(r.gross / r.cost * 100) + '%' : '—') + '</span>')}${r.n > 0 ? td('<span class="prk-n prk-b' + neg(r.gross) + '">' + yen(r.gross / r.n) + '</span>' + prRng(r.gMin, r.gMax, r.n)) + td('<span class="prk-n">' + yen(r.sales / r.n) + '</span>' + prRng(r.sMin, r.sMax, r.n) + prCcDiff(r)) + td('<span class="prk-n">' + yen(r.cost / r.n) + '</span>' + prRng(r.cMin, r.cMax, r.n)) + prBECell(r) : td('—') + td('—') + td('—') + td('—')}</tr>${open ? `<tr><td></td><td colspan="7" style="padding:4px 6px 10px;white-space:normal;text-align:left">${prDetailHtml(r, R, yen)}</td></tr>` : ''}`; }).join('')}</tbody></table></div>
       ${R.rows.length > 100 && !PR.more ? `<div style="margin-top:8px"><button class="pr-more" style="padding:5px 12px;border:1px solid #c7cdd6;border-radius:6px;background:#fff;cursor:pointer">残り ${(R.rows.length - 100).toLocaleString()}件も出す</button></div>` : ''}`;
     try { smdFitToScreen(body.querySelector('.prk-tbl')); } catch (_) {}   /* ★11/5 表は画面に見えている幅まで（窓が画面より大きい時に 1,877px まで伸びない） */
+    void heldReady.then(() => {
+      const el = body.querySelector('#prank-held');
+      if (el) { el.innerHTML = prHeldHtml(); applyI18n(el); }
+    });
     body.querySelectorAll('.pr-seg').forEach(b => b.addEventListener('click', () => { PR[b.dataset.k] = b.dataset.v; PR.more = false; PR.open = null; prSave(); renderProfitRank(); }));
     body.querySelectorAll('.pr-sortb').forEach(b => b.addEventListener('click', () => { PR.sort = b.dataset.s; PR.dir = b.dataset.d; PR.more = false; PR.open = null; prSave(); renderProfitRank(); }));
     body.querySelectorAll('.pr-sth').forEach(h => h.addEventListener('click', () => { const k = h.dataset.s; PR.dir = (PR.sort === k && PR.dir === 'desc') ? 'asc' : 'desc'; PR.sort = k; PR.more = false; PR.open = null; prSave(); renderProfitRank(); }));
