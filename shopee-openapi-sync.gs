@@ -5571,6 +5571,8 @@ function slsAwbReadOnce_(shopId, path, query, method, payload) {
   }
   if (response.getResponseCode() !== 200) throw new Error('document_read_unverified');
   var r = JSON.parse(response.getContentText());
+  // 最後の状態照会だけは、公開仕様のエラーを呼び出し元で固定の理由に変換する。
+  if (path === allowed[2]) return r;
   if (!r || r.error || slsAwbHasWarning_(r.warning) || slsAwbHasWarning_(r.warning_list) ||
       !r.response || slsAwbHasWarning_(r.response.warning) || slsAwbHasWarning_(r.response.warning_list)) {
     throw new Error('document_read_unverified');
@@ -5586,14 +5588,31 @@ function slsAwbExistingStatus_(body) {
   try {
     var result = slsAwbReadOnce_(Number(body.shop_id), '/api/v2/logistics/get_shipping_document_result', null, 'post',
       { order_list: [{ order_sn: body.order_sn, package_number: body.package_number, shipping_document_type: kind }] });
-    var list = result.response.result_list;
+    if (!result || typeof result !== 'object' || Array.isArray(result)) {
+      return { ok: false, error: 'document_query_failed' };
+    }
+    var response = result.response, list = response && response.result_list;
     var row = Array.isArray(list) && list.length === 1 ? list[0] : null;
-    if (result.error !== '' || !row || row.order_sn !== body.order_sn || row.package_number !== body.package_number ||
-        (row.shipping_document_type != null && row.shipping_document_type !== kind) ||
-        slsAwbHasWarning_(row.warning) || slsAwbHasWarning_(row.warning_list) ||
+    var sameParcel = row && row.order_sn === body.order_sn && row.package_number === body.package_number &&
+      (row.shipping_document_type == null || row.shipping_document_type === kind);
+    var code = result.error;
+    if ((code == null || code === '' || code === 'common.batch_api_all_failed') && sameParcel) code = row.fail_error;
+    // 行の理由は同じ梱包の1行に限定。警告や詳細メッセージは返さない。
+    switch (code) {
+      case 'logistics.shipping_document_should_print_first': return { ok: false, error: 'document_not_issued' };
+      case 'error_permission': return { ok: false, error: 'document_permission_denied' };
+      case 'error_auth': return { ok: false, error: 'document_auth_failed' };
+    }
+    if (result.error || slsAwbHasWarning_(result.warning) || slsAwbHasWarning_(result.warning_list) ||
+        !response || slsAwbHasWarning_(response.warning) || slsAwbHasWarning_(response.warning_list)) {
+      return { ok: false, error: 'document_query_failed' };
+    }
+    if (result.error !== '' || !sameParcel || slsAwbHasWarning_(row.warning) || slsAwbHasWarning_(row.warning_list) ||
         slsAwbHasWarning_(row.fail_error) || slsAwbHasWarning_(row.fail_message)) {
       return { ok: false, error: 'document_result_unverified' };
     }
+    if (row.status === 'PROCESSING') return { ok: false, error: 'document_processing' };
+    if (row.status === 'FAILED') return { ok: false, error: 'document_failed' };
     if (row.status !== 'READY') return { ok: false, error: 'document_not_ready' };
     return { ok: true, ready: true, type: kind, status: 'READY' };
   } catch (_) {
