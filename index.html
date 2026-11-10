@@ -4012,12 +4012,14 @@
   }
   // ★カテゴリ一覧（id→{n:名前, p:フルパス, hc:子ありフラグ}）。カテゴリ変更UIの検索元。国ごとにキャッシュ。
   const catFullCache = {};
-  async function loadCatFull(cc, shopId) {
-    if (catFullCache[cc]) return catFullCache[cc];
+  async function loadCatFull(cc, shopId, shopScoped = false) {
+    const key = shopScoped ? cc + ':' + shopId : cc;
+    if (catFullCache[key]) return catFullCache[key];
     if (!shopId || !settings.openapiUrl) return null;
     const r = await gasCall({ action: 'get_categories', shop_id: shopId }, 45000);
-    catFullCache[cc] = r.map || {};
-    return catFullCache[cc];
+    if (shopScoped && (String(r.shop_id) !== String(shopId) || !r.map || !Object.keys(r.map).length)) return null;
+    catFullCache[key] = r.map || {};
+    return catFullCache[key];
   }
   async function openapiReorderVariation(shopId, itemId, orderNames) {
     if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
@@ -5447,6 +5449,15 @@
     "Shopeeの接続枠を確保するため、帳票種の照会を見送りました。": "Label type check skipped to preserve the Shopee quota.",
     "Shopeeの帳票種を確認できませんでした。": "Could not verify Shopee's label types.",
     "出荷前チェックを折りたたみ・再表示": "Collapse and expand pre-shipment checks",
+    "第3店の新品は各国カードで公式の末端カテゴリを選んでください": "Select an official leaf category on each market card for new items in the third shop",
+    "公式の末端カテゴリを選択": "Select official leaf category",
+    "カテゴリ名またはIDで検索": "Search by category name or ID",
+    "公式カテゴリを取得中…": "Loading official categories…",
+    "このショップの公式カテゴリを取得できませんでした": "Could not load official categories for this shop",
+    "一致するカテゴリがありません": "No matching categories",
+    "戻る": "Back",
+    "未選択・出品不可": "Select a category to list",
+    "第3店の新品出品に公式の末端カテゴリ選択を必須化": "Require an official leaf category when listing new items in the third shop",
     "出荷前チェックの開閉を注文一覧の更新後も保持": "Keep pre-shipment checks open or closed when the order list refreshes",
     "チェックを開く": "Show checks", "チェックを閉じる": "Hide checks",
     "担当PCで営業集計を自動更新": "Refresh outreach totals automatically on the assigned PC",
@@ -27921,7 +27932,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
-    { date: '2026-11-11', items: ['<b>出荷前チェックの開閉を注文一覧の更新後も保持</b>。', '<b>商品別の利益で未販売の保有在庫と注文紐付け済みを別集計</b>。', '<b>商品別の利益に現在の保有在庫数と仕入額合計を表示</b>。'] },
+    { date: '2026-11-11', items: ['<b>第3店の新品出品に公式の末端カテゴリ選択を必須化</b>。', '<b>出荷前チェックの開閉を注文一覧の更新後も保持</b>。', '<b>商品別の利益で未販売の保有在庫と注文紐付け済みを別集計</b>。', '<b>商品別の利益に現在の保有在庫数と仕入額合計を表示</b>。'] },
     { date: '2026-11-11', items: ['<b>商品別の利益でPayPal照合待ちと暫定入金を区別</b>。直近30日・90日の集計を日本時間で区切ります。'] },
     { date: '2026-11-11', items: ['<b>商品別の利益で、粗利に入らない点数と理由を表示</b>。'] },
     { date: '2026-11-11', items: ['<b>値付けの戦略と使い方をそれぞれ開閉できるように</b>。'] },
@@ -54561,6 +54572,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     mode: 'single', // 'single'(単品) | 'variation'(バリエーション)。variations配列と連動
     descExtra: '',
     watchSrcUrl: '', // ♾️無在庫: 在庫監視する仕入元URL（任意）。入れて出品すると作成後に自動で在庫監視へ紐付け
+    officialCategories: {}, // 公式末端カテゴリは別の下書きや再読込に引き継がない
     overrides: {}, // 国別上書き { [cc]: { title, images, vars: { [i]: { name, price, stock, image, off } } } }
   };
   let listDragVar = null; // バリエカードのドラッグ並べ替え中インデックス
@@ -55553,6 +55565,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function listApplyState(st) {
     st = st || {};
     Object.assign(listState, {
+      officialCategories: {},
       name: st.name || '', hardware: st.hardware || '', jpseries: st.jpseries || '', parentSku: st.parentSku || '', titleOverride: st.titleOverride || '', category: st.category || '', images: st.images || '', uploadImgs: st.uploadImgs || [], catImgs: st.catImgs || [],
       roiPct: st.roiPct != null ? st.roiPct : null, weightG: st.weightG != null ? st.weightG : null, dimW: st.dimW || 0, dimH: st.dimH || 0, dimD: st.dimD || 0,
       varTier: st.varTier || '', descExtra: st.descExtra || '', watchSrcUrl: st.watchSrcUrl || '', costJpy: st.costJpy || 0, overrides: st.overrides || {},
@@ -56278,6 +56291,64 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     el.querySelectorAll('.lp-dev').forEach(b => b.addEventListener('click', () => { listState._prevDevice = b.dataset.dev; renderComposerPreview(); }));
     const col = el.closest('.li-prevcol'); if (col) { col.style.flex = device === 'pc' ? '0 0 560px' : '0 0 330px'; col.style.minWidth = device === 'pc' ? '460px' : '280px'; }
   }
+  const LIST_OFFICIAL_CATEGORY_REQUIRED = '第3店の新品は各国カードで公式の末端カテゴリを選んでください';
+  const listOfficialCategoryRequired = (shopId, condition) =>
+    condition === 'NEW' && Object.values(SHOP3_CANDIDATE_SHOPS).includes(String(shopId));
+  const listCategoryProduct = () => JSON.stringify([listState.name, listState.parentSku]);
+  function listOfficialCategory(cc, shopId) {
+    const choice = listState.officialCategories[cc];
+    return choice && SHOP3_CANDIDATE_SHOPS[cc] === String(shopId) &&
+      choice.shopId === String(shopId) && choice.product === listCategoryProduct() ? choice : null;
+  }
+  function listApiCategory(cc, shopId, condition) {
+    if (!listOfficialCategoryRequired(shopId, condition)) return { condition, category: listState.category || 'Games' };
+    const selected = listOfficialCategory(cc, shopId);
+    return selected ? { condition, category_id: selected.id } : null;
+  }
+  async function listPickOfficialCategory(cc, shopId, label) {
+    shopId = String(shopId);
+    const product = listCategoryProduct(), choices = listState.officialCategories;
+    if (SHOP3_CANDIDATE_SHOPS[cc] !== shopId) { toast(LIST_OFFICIAL_CATEGORY_REQUIRED, true); return; }
+    const dialog = document.createElement('dialog');
+    dialog.setAttribute('aria-labelledby', 'li-official-category-heading');
+    dialog.style.cssText = 'width:min(640px,94vw);max-height:85vh;border:1px solid #ddd;border-radius:8px;padding:16px';
+    dialog.innerHTML = `<b id="li-official-category-heading">公式の末端カテゴリを選択</b><div class="smd-dim">${esc(cc + ' / ' + label + ' #' + shopId)}</div>
+      <input class="li" type="search" placeholder="カテゴリ名またはIDで検索" style="width:100%;margin:8px 0" disabled>
+      <div class="li-official-results" style="max-height:50vh;overflow:auto">公式カテゴリを取得中…</div>
+      <form method="dialog" style="margin-top:8px"><button class="smd-btn">戻る</button></form>`;
+    document.body.appendChild(dialog);
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    dialog.showModal();
+    applyI18n(dialog);
+    const q = dialog.querySelector('input'), results = dialog.querySelector('.li-official-results');
+    let map;
+    try { map = await loadCatFull(cc, shopId, true); } catch (_) {}
+    if (!dialog.open) return;
+    const leaves = Object.entries(map || {}).filter(([id, c]) =>
+      /^[1-9]\d*$/.test(id) && Number.isSafeInteger(Number(id)) && c && c.hc === 0 && (c.p || c.n));
+    if (!leaves.length) { results.textContent = 'このショップの公式カテゴリを取得できませんでした'; applyI18n(dialog); return; }
+    function draw() {
+      const term = q.value.trim().toLowerCase();
+      const matches = leaves.filter(([id, c]) => id === term || String(c.p || c.n).toLowerCase().includes(term)).slice(0, 60);
+      results.innerHTML = matches.length ? matches.map(([id, c]) =>
+        `<button type="button" class="smd-btn" data-id="${id}" style="display:block;width:100%;text-align:left;white-space:normal;margin-bottom:3px">${esc(c.p || c.n)} #${id}</button>`).join('') : '一致するカテゴリがありません';
+      applyI18n(results);
+    }
+    results.addEventListener('click', e => {
+      const button = e.target.closest('button[data-id]'); if (!button) return;
+      const entry = map[button.dataset.id];
+      if (!entry || entry.hc !== 0) return;
+      if (choices !== listState.officialCategories || product !== listCategoryProduct()) { dialog.close(); toast(LIST_OFFICIAL_CATEGORY_REQUIRED, true); return; }
+      choices[cc] = { id: Number(button.dataset.id), path: entry.p || entry.n, shopId, product };
+      dialog.close();
+      listRefresh();
+    });
+    q.disabled = false;
+    q.addEventListener('input', draw);
+    draw();
+    q.focus();
+  }
+
   function listRefresh() {
     const out = document.getElementById('list-out');
     if (!out) return;
@@ -56448,8 +56519,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const apiShopRow = (cardFam && !skip) ? (state.accounts || []).find(a => a.shop_id && String(a.cc || '').toUpperCase() === rg.cc && famOfLabel(a.label) === cardFam) : null;
         if (apiShopRow) {
           const p0 = pricedLive[0] || {};
-          apiJobs[rg.cc] = { shop_id: apiShopRow.shop_id, fam: cardFam, name: title, desc, price: p0.local || 0, stock: (p0.stock != null ? p0.stock : 1), weight: ((job.weightG || 0) / 1000) || 0.5, images: job.images, imagesRaw: ccCatImgs, hasVar, varCount: pricedLive.length, variations: (job.variations || []).map(v => ({ name: v.name, price: v.price, stock: v.stock, sku: v.sku, image: v.image || '' })), costs: pricedLive.map(p => Number(p.cost) || 0), costNames: pricedLive.map(p => String(p.name || p.opt || '')) };   /* ★#25 明細ごとの仕入れ目安 */
+          apiJobs[rg.cc] = { shop_id: apiShopRow.shop_id, shopLabel: apiShopRow.label, fam: cardFam, name: title, desc, price: p0.local || 0, stock: (p0.stock != null ? p0.stock : 1), weight: ((job.weightG || 0) / 1000) || 0.5, images: job.images, imagesRaw: ccCatImgs, hasVar, varCount: pricedLive.length, variations: (job.variations || []).map(v => ({ name: v.name, price: v.price, stock: v.stock, sku: v.sku, image: v.image || '' })), costs: pricedLive.map(p => Number(p.cost) || 0), costNames: pricedLive.map(p => String(p.name || p.opt || '')) };   /* ★#25 明細ごとの仕入れ目安 */
         }
+        const officialRequired = apiShopRow && listOfficialCategoryRequired(apiShopRow.shop_id, listState.apiCondition);
+        const officialCategory = officialRequired && listOfficialCategory(rg.cc, apiShopRow.shop_id);
         // 🚀直接APIは http(s)画像が必要。http画像があるか、または書込キーありでアップロード画像(data:)を上げられる場合に使える
         const apiUsable = !!apiShopRow && ((job.images || []).length > 0 || (!!settings.sbSecret && (ccCatImgs || []).some(u => /^data:/.test(u))));
         return `<div class="cov-card" data-cc="${rg.cc}" style="border:1.5px solid ${hasOv ? '#c9b6ec' : '#e2e2e2'};border-top:4px solid ${rg.color};border-radius:8px;padding:0 10px 10px;margin-bottom:0;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.07)">
@@ -56485,6 +56558,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               </details>
             </span>
           </div>
+          ${officialRequired ? `<div style="margin:4px 0;font-size:11px">
+            <button type="button" class="li-official-cat smd-btn" data-cc="${rg.cc}">公式の末端カテゴリを選択</button>
+            ${officialCategory ? `<b>${esc(officialCategory.path)} #${officialCategory.id}</b>` : '<span class="smd-err">未選択・出品不可</span>'}
+          </div>` : ''}
           ${apiShopRow ? `<div class="li-apiresult" data-cc="${rg.cc}" style="font-size:11px;margin:2px 0 4px"></div>` : ''}
           ${catStrip}
           <div style="font-size:12.5px;margin-top:8px"><b>タイトル</b> ${titleWarn} <span class="smd-dim" style="font-size:11px">(${title.length}字)</span>
@@ -56574,7 +56651,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // 国別のアカウント（系統）上書き
     out.querySelectorAll('.li-cardfam').forEach(sel => sel.addEventListener('change', () => { listState.apiFamByCc[sel.dataset.cc] = sel.value; listRefresh(); }));
     // 条件(USED/NEW)セレクタ
-    { const cs = document.getElementById('li-apicond'); if (cs) cs.addEventListener('change', () => { listState.apiCondition = cs.value; }); }
+    { const cs = document.getElementById('li-apicond'); if (cs) cs.addEventListener('change', () => { listState.apiCondition = cs.value; listRefresh(); }); }
+    out.querySelectorAll('.li-official-cat').forEach(btn => btn.addEventListener('click', () => {
+      const cc = btn.dataset.cc, job = apiJobs[cc];
+      if (job) listPickOfficialCategory(cc, job.shop_id, job.shopLabel);
+    }));
     { const ps = document.getElementById('li-apipub'); if (ps) ps.addEventListener('change', () => { listState.apiPublish = ps.value; }); }
     { const ws = document.getElementById('li-watchsrc'); if (ws) ws.addEventListener('input', () => { listState.watchSrcUrl = ws.value.trim(); try { listAutoSave(); } catch (_) {} }); }
     // Shopeeの英語エラーを日本語のヒントに変換（原文も併記する。ヒント無しは''）
@@ -56601,7 +56682,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     };
     // 1国の公式API出品（per-country ボタン＆一括で共用。confirmは呼び出し側）
     const apiBusy = (listState._apiBusy = listState._apiBusy || new Set()); // 出品処理の進行中ロック（二重送信＝重複作成を防止）
-    const apiCreateOne = async (cc) => {
+    const apiCreateOne = async (cc, category, pubFlag) => {
       const jb = apiJobs[cc]; if (!jb) return { cc, skip: true };
       if (apiBusy.has(cc)) { toast(`${cc}: 出品処理が進行中です（二重送信を防止）`, true); return { cc, skip: 'busy' }; }
       const resEl = out.querySelector('.li-apiresult[data-cc="' + cc + '"]');
@@ -56612,6 +56693,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       apiBusy.add(cc);  // 以降 finally で必ず解除（=最初のawait前に同期でロック→二重呼び出しは即skip）
       try {
         const _stop = (html, why) => { if (resEl) resEl.innerHTML = '<span style="color:#d93025">❌ ' + html + '</span>'; toast(`${cc}: ${why}`, true); return { cc, error: why }; };
+        if (!category || (listOfficialCategoryRequired(jb.shop_id, category.condition) && !category.category_id)) {
+          return _stop(LIST_OFFICIAL_CATEGORY_REQUIRED, LIST_OFFICIAL_CATEGORY_REQUIRED);
+        }
         /* ★2026-10-24 全体レビュー（出品管理 #23）：この国はもう作った（同じ名前）＝押し直しで2つ目を作らない（同じ中身のカタログが2つあると片方が消される） */
         { const _d = (listState._apiDone || {})[cc + '|' + jb.name]; if (_d) return _stop('この国にはもう作りました（item_id=' + esc(String(_d)) + '）。もう一度作ると同じカタログが2つになります（作り直す時は名前を変える）', 'もう作成済み item_id=' + _d); }
         /* ★#25 仕入れ目安が無い（0）明細があれば出さない（本人 10/16「仕入れ目安が無い物はこれから絶対なし」） */
@@ -56623,7 +56707,6 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           const nk = t => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
           const dupL = (((lst.byCc || {})[cc]) || []).filter(l => String(l.shop_id || '') === String(jb.shop_id) && [1, 8].includes(Number(l.status)) && nk(l.name) === nk(jb.name));
           if (dupL.length) return _stop('同じ店に同じ名前のカタログがあります（' + dupL.slice(0, 3).map(l => '#' + esc(String(l.item_id))).join('、') + '）。既存のカタログに明細を足すか、名前・表紙を変えてから', '同じ店に同じ名前のカタログがあるので作っていません'); }
-        const pubFlag = (listState.apiPublish || 'public') === 'public' ? 1 : 0;
         // 画像をすべてhttp化（httpはそのまま／アップロード画像(data:)はStorageへ上げてURL化）
         if (resEl) resEl.innerHTML = '<span class="smd-dim"><span class="smd-spin"></span>画像を準備中…</span>';
         let imgUrls;
@@ -56640,7 +56723,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           await Promise.all(Array.from({ length: Math.min(5, src.length || 1) }, w));
           vars = src.map((v, i) => Object.assign({}, v, { image: imgs[i], sku: String(v.sku || '').trim() || autoSku(jb.name, v.name) })); }
         if (resEl) resEl.innerHTML = `<span class="smd-dim"><span class="smd-spin"></span>作成中…（画像アップロード＋登録${doVar ? '＋バリエ設定' : ''}。通常30〜60秒・最大2分）</span>`;
-        const r = await openapiAddItem({ shop_id: jb.shop_id, name: jb.name, desc: jb.desc, price: jb.price, stock: jb.stock, weight: jb.weight, images: imgUrls.join('\n'), category: (listState.category || 'Games'), condition: (listState.apiCondition || 'USED'), publish: pubFlag, variations: doVar ? JSON.stringify(vars) : undefined, tier_name: doVar ? ((listState.varTier || '').trim() || undefined) : undefined });
+        const r = await openapiAddItem({ shop_id: jb.shop_id, name: jb.name, desc: jb.desc, price: jb.price, stock: jb.stock, weight: jb.weight, images: imgUrls.join('\n'), ...category, publish: pubFlag, variations: doVar ? JSON.stringify(vars) : undefined, tier_name: doVar ? ((listState.varTier || '').trim() || undefined) : undefined });
         const rg2 = REGIONS.find(x => x.cc === cc) || {};
         const host = rg2.host || ('seller.shopee.' + cc.toLowerCase());
         const varFailed = r.variations && r.tier_init && r.tier_init !== 'ok';
@@ -56670,10 +56753,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (apiBusy.has(cc)) { toast(`${cc}: 出品処理が進行中です`, true); return; } // 確認ダイアログの二重表示も防止
       const doVar = jb.hasVar && jb.variations && jb.variations.length >= 2;
       const warnVar = doVar ? `\n※${jb.varCount}明細を機種バリエ(init_tier_variation)として作成します。` : '';
-      const stW = (listState.apiPublish || 'public') === 'public' ? '公開' : '非公開(下書き)';
-      if (!confirm(`${cc} の「${jb.fam || apiFam}」ショップに、公式APIで【${stW}】で出品します。\n\n商品: ${jb.name}\n価格(現地): ${jb.price}\n条件: ${listState.apiCondition || 'USED'}\n作成後: ${stW}\nshop_id: ${jb.shop_id}${warnVar}\n\nよろしいですか？`)) return;
+      const category = listApiCategory(cc, jb.shop_id, listState.apiCondition || 'USED');
+      if (!category) { toast(`${cc}: ${LIST_OFFICIAL_CATEGORY_REQUIRED}`, true); return; }
+      const pubFlag = (listState.apiPublish || 'public') === 'public' ? 1 : 0;
+      const stW = pubFlag ? '公開' : '非公開(下書き)';
+      const official = category.category_id ? listOfficialCategory(cc, jb.shop_id) : null;
+      const catLine = official ? `\nカテゴリ: ${official.path} #${official.id}` : '';
+      if (!confirm(`${cc} の「${jb.fam || apiFam}」ショップに、公式APIで【${stW}】で出品します。\n\n商品: ${jb.name}\n価格(現地): ${jb.price}\n条件: ${category.condition}${catLine}\n作成後: ${stW}\nshop_id: ${jb.shop_id}${warnVar}\n\nよろしいですか？`)) return;
       try { recordListing(true); } catch (_) {}
-      await apiCreateOne(cc);
+      await apiCreateOne(cc, category, pubFlag);
     }));
     // 🚀 全対象国に一括出品（各国順に作成）
     const apiBulkBtn = document.getElementById('li-apibulk');
@@ -56683,8 +56771,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (_ccs0.length && !ccs.length) { alert('対象の国には、この名前でもう全部作りました（' + _ccs0.join('/') + '）。もう一度作ると同じカタログが2つになります'); return; }
       if (!ccs.length) { alert('出品先が解決できる対象国がありません（系統セレクタとアカウント登録簿を確認）'); return; }
       if (!(listState.name || '').trim() && !listState.variations.length) { alert('先に商品情報を入力してください'); return; }
-      const stWb = (listState.apiPublish || 'public') === 'public' ? '公開' : '非公開(下書き)';
-      if (!confirm(`対象 ${ccs.length}国へ公式APIで【${stWb}】一括出品します。\n出品先（国→アカウント）:\n${ccs.map(cc => '  ' + cc + ' → ' + (apiJobs[cc].fam || apiFam)).join('\n')}\n\n各国を順に作成（1〜2分/国・途中でタブを閉じないで）。\n条件: ${listState.apiCondition || 'USED'} ／ 作成後: ${stWb}\n\nよろしいですか？`)) return;
+      const condition = listState.apiCondition || 'USED';
+      const categories = Object.fromEntries(ccs.map(cc => [cc, listApiCategory(cc, apiJobs[cc].shop_id, condition)]));
+      const missing = ccs.filter(cc => !categories[cc]);
+      if (missing.length) { toast(`${missing.join('/')}: ${LIST_OFFICIAL_CATEGORY_REQUIRED}`, true); return; }
+      const pubFlag = (listState.apiPublish || 'public') === 'public' ? 1 : 0;
+      const stWb = pubFlag ? '公開' : '非公開(下書き)';
+      const shops = ccs.map(cc => {
+        const job = apiJobs[cc], official = categories[cc].category_id ? listOfficialCategory(cc, job.shop_id) : null;
+        return '  ' + cc + ' → ' + (job.fam || apiFam) + (official ? ' / ' + official.path + ' #' + official.id : '');
+      }).join('\n');
+      if (!confirm(`対象 ${ccs.length}国へ公式APIで【${stWb}】一括出品します。\n出品先（国→アカウント）:\n${shops}\n\n各国を順に作成（1〜2分/国・途中でタブを閉じないで）。\n条件: ${condition} ／ 作成後: ${stWb}\n\nよろしいですか？`)) return;
       try { recordListing(true); } catch (_) {}
       apiBulkBtn.disabled = true; const bo = apiBulkBtn.textContent;
       let ok = 0, ng = 0;
@@ -56694,7 +56791,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       //   予約済みの国を個別ボタンが弾けるよう apiBusy に入れておき、その国の番が来たら外して処理する。
       ccs.forEach(c => apiBusy.add(c));
       try {
-        for (const cc of ccs) { apiBulkBtn.textContent = `⏳ 出品中 ${ok + ng + 1}/${ccs.length}（${cc}）`; apiBusy.delete(cc); const r = await apiCreateOne(cc); if (r.ok) ok++; else ng++; }
+        for (const cc of ccs) { apiBulkBtn.textContent = `⏳ 出品中 ${ok + ng + 1}/${ccs.length}（${cc}）`; apiBusy.delete(cc); const r = await apiCreateOne(cc, categories[cc], pubFlag); if (r.ok) ok++; else ng++; }
       } finally { ccs.forEach(c => apiBusy.delete(c)); }
       apiBulkBtn.textContent = bo; apiBulkBtn.disabled = false;
       toast(`🚀 一括出品 完了：成功 ${ok}/${ccs.length}${ng ? ' ・失敗' + ng + '（各国の表示を確認）' : ''}`, ng > 0);
