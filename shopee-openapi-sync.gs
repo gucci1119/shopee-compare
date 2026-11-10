@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261110-0540'
+var SRC_VER = '20261110-2102'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9807,6 +9807,7 @@ function baEnName0_(row, st, enCache, hw) {
       'Reply JSON only: {"en": "<official English / Western release title; if it was never released in English, the commonly used romanized title>", "short": "<the same title in at most 30 characters (letters, digits, spaces, basic punctuation only), keeping the numbers and subtitle words that distinguish it from other games in the series; drop a leading The; no trailing cut-off words>", "known": true|false}', st, '英題', 200);
     if (o && !o.nokey && o.en && !/[ぁ-んァ-ヶ一-龠]/.test(String(o.en))) { en = String(o.en); aiShort = String(o.short || ''); if (enCache && key) enCache[key] = { en: en, short: aiShort, known: !!o.known, src: 'ai', at: Date.now() }; }
   }
+  if (!en && BA_AI_DOWN) return '';
   if (!en && ja) { try { en = String(LanguageApp.translate(baCleanJa_(ja), 'ja', 'en') || '').trim(); } catch (e) { en = ''; } }
   if (!en) return '';
   en = baEnTidy_(en);
@@ -10013,8 +10014,11 @@ function baConfirmCorners_(imgUrl, u, st, cache) {
   var ck = u + '|c1', cv = cache ? String(cache[ck] || '') : '';
   var n;
   if (cv.indexOf('art:') !== 0 && cache) { var _ic = baImgIdx_(cache)[String(u).split('|')[0]]; if (_ic && _ic.c1 && _ic.c1.indexOf('art:') === 0) { cv = _ic.c1; cache[ck] = cv; } }   /* ★2026-09-28 同じ写真の四隅は1回だけ聞く */
-  if (cv.indexOf('art:') === 0) n = Number(cv.slice(4));
-  else { var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return -1; n = baCornersArt_(imgUrl, key, st); if (n === null) return null; if (n >= 0 && cache) { cache[ck] = 'art:' + n; baImgMemoSet_(u, 'c1', 'art:' + n); } }
+  if (cv.indexOf('art:') === 0) {
+    if (BA_AI_DOWN && !/^art:[0-4]$/.test(cv)) return null;
+    n = Number(cv.slice(4));
+  }
+  else { if (BA_AI_DOWN) return null; var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return -1; n = baCornersArt_(imgUrl, key, st); if (n === null) return null; if (n >= 0 && cache) { cache[ck] = 'art:' + n; baImgMemoSet_(u, 'c1', 'art:' + n); } }
   return n;
 }
 /* ★2026-09-26 本人「シュリンク被ってるから新品に見えない？」（THE Fishing Vol.3：右端でフィルムがケースの外にはみ出し・角にシワ）。
@@ -10035,8 +10039,10 @@ function baSealedCheck_(imgUrl, u, st, cache, hwKey) {
     else if (BA_CONFIRM && (_is.s3 === 'sealed:0' || _is.s3 === 'ov:1')) cv = _is.s3;   /* Haiku で「未開封ではない・文字入り」と確認済み */
     else if (!BA_CONFIRM && _is.s3 && (_is.s3.indexOf('sealed:') === 0 || _is.s3 === 'ov:1')) cv = _is.s3;
     if (cv) cache[ck] = cv; }
-  if (cv.indexOf('sealed:') === 0) return cv === 'sealed:1';
+  if (cv === 'sealed:0' || cv === 'sealed:1') return cv === 'sealed:1';
+  if (!BA_AI_DOWN && cv.indexOf('sealed:') === 0) return cv === 'sealed:1';
   if (cv.indexOf('hw:') === 0 || cv === 'ov:1' || cv === 'pt:1') return cv;
+  if (BA_AI_DOWN) return null;
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {} if (!key) return false;
   var big = !!BA_CONFIRM, model = big ? BA_CONFIRM : 'claude-haiku-4-5-20251001';
   var txt0 = '中古ゲームの出品写真です。見えたことだけを書き写してください。判定はしないでください。JSONだけで答える：{'
@@ -10085,7 +10091,6 @@ function baImgMemoSet_(u, field, v) { if (!BA_IMG_IDX) return; var p = String(u)
    狭い語のままだと dark surface・black cloth・革・magnetic holder・ぼかした背景 などの実物が落ちていた（scan 15枚・catalog 38枚）。ゲームの規則は変えない */
 var BA_TCG_REAL_RE = /机|床|布|畳|手|指|棚|カーペット|シーツ|シート|テーブル|木|台|革|敷物|タオル|ケース|ホルダー|ぼか|ボケ|スリーブ|ローダー|マット|紙|table|floor|desk|hand|finger|carpet|wood|fabric|cloth|towel|sheet|surface|leather|case|holder|blur|bokeh|sleeve|loader|mat/i;
 function baJudge_(imgUrl, st, cache, capN, expect) {
-  if (BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
   /* ★2026-10-20 全体レビュー 中②：手動判定（Claude ¥0）や判定の控えが読めなかった回は、判定済みの写真を有料 AI でやり直してしまう＝その回は AI を呼ばない */
   try { baManualLoad_(); } catch (eML) {}
   if (BA_KV_FAIL['boshu_auto_judged_manual'] || BA_KV_FAIL['boshu_auto_judged_manual_ng'] || BA_KV_FAIL[BA_JUDGED]) return { ok: false, judged: false, kind: 'aidown' };
@@ -10102,6 +10107,7 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
   try { var _lr = ((baKv_('photo_learn') || {}).rules || {}).extra || [];
     if (_lr.length) _extraRule = ' 次の点も必ず守ってください：' + _lr.map(function (x) { return String(x && x.text || ''); }).filter(String).join(' '); } catch (e) {}
   var key = ''; try { key = P_().getProperty('CLAUDE_KEY') || ''; } catch (e) {}
+  if (!key && BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
   if (!key) { if (st && st.today && !st.today.nk) { st.today.nk = 1; baLog_(st, '⚠ スクリプト プロパティ CLAUDE_KEY が無い→写真のAI判定なしで進む'); } return { ok: true, judged: false, kind: 'unjudged' }; }
   var u = String(imgUrl || '').replace(/\?.*$/, '') + ((expect && expect.key) ? '|v13|' + String(expect.hw || '') + '|' + expect.key : '');   // ★v184 作品と突き合わせた判定は作品ごとに控える
   if (cache && cache[u]) {
@@ -10121,6 +10127,8 @@ function baJudge_(imgUrl, st, cache, capN, expect) {
     return { ok: c0.indexOf('ok:') === 0, judged: true, kind: c0.slice(3), cached: true };
   }
   if (cache) { var _im = baImgIdx_(cache)[String(imgUrl || '').replace(/\?.*$/, '')]; if (_im && _im.ng) { cache[u] = _im.ng; return { ok: false, judged: true, kind: _im.ng.slice(3), cached: true, reused: true }; } }   /* ★2026-09-28 別の機種・作品で「写真そのものがダメ」と出た写真は見に行かない */
+  // 既存の判定は読める。残高エラー中の新しい画像判定だけを止める。
+  if (BA_AI_DOWN) return { ok: false, judged: false, kind: 'aidown' };
   if (capN > BA_AI_HARD_CAP * 2) capN = BA_AI_HARD_CAP * 2;
   if (st && st.today && capN > 0 && (st.today.judged || 0) >= capN) { if (!st.today.capW) { st.today.capW = 1; baLog_(st, '⚠ 今日のAI判定が上限（' + capN + '回）→今日はこれ以上判定しない'); } return { ok: false, judged: false, kind: 'budget' }; }
   var body = { model: 'claude-haiku-4-5-20251001', max_tokens: 300, messages: [{ role: 'user', content: [
@@ -10932,7 +10940,12 @@ function boshuAutoTick(manual) {
         else { if ((baPreOf_(pre, c.key, hw) || {}).img) { baGameJanTodo_(hw, c); out.nojanPh = (out.nojanPh || 0) + 1; } out.skipped++; out.nojan = (out.nojan || 0) + 1; baSkipRec_(st, hw, '', c, 'nojan'); continue; }
       }
       var en = baEnName_(c, st, enCache, hw); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
-      if (!en) { baMark_(ledger, c.key, ccsHw, 'skip:noname'); out.skipped++; baSkipRec_(st, hw, '', c, 'noname'); continue; }
+      if (!en) {
+        if (!BA_AI_DOWN) baMark_(ledger, c.key, ccsHw, 'skip:noname');
+        out.skipped++;
+        baSkipRec_(st, hw, '', c, BA_AI_DOWN ? 'aiwait' : 'noname');
+        continue;
+      }
       /* ★2026-09-20 「出していない作品」の判定は【日本語名の鍵】で見ていたが、Shopee に載っている明細名は【英名】。英名はここで初めて作るので、
          同じ作品が英名で既に載っていても候補として残り、写真もAI判定も使った末に add_model が「同名が既にある」で丸ごと失敗していた
          （実測：9/20 の62件中23件＝37%が無駄）。英名を作った直後に、その国で既に載っているかをもう一度見る。 */
@@ -10979,7 +10992,7 @@ function boshuAutoTick(manual) {
           if (okP) { pm = Object.assign({}, pm, cm, (cm.img === pm.img) ? {} : { alts: [] }); pm.sameWhy = smM.why || ''; okM = true; }
         }
         if (!okM) {
-          baLog_(st, (sameNgM ? '🔎 別の作品の出品（AI判定 ' + sameNgM + '枚）' : '📷 実物の写真でない（メルカリ）') + '→ヤフオクで探す: ' + (c.ja || c.en));
+          if (!BA_AI_DOWN) baLog_(st, (sameNgM ? '🔎 別の作品の出品（AI判定 ' + sameNgM + '枚）' : '📷 実物の写真でない（メルカリ）') + '→ヤフオクで探す: ' + (c.ja || c.en));
           /* 判定し切った時だけ記録（AIの鍵・予算切れで「判定できず」が混ざった時は記録しない＝NGと決めつけない） */
           var _pmImg = String(pm.img || '').replace(/\?.*$/, '');
           if (!sameUnj && !(preRej[c.key] && preRej[c.key].img === _pmImg)) {   /* 同じ写真のNGは記録し直さない（毎回 at を更新すると「探して無かった」印より新しくなり、集め直しが止まらない） */
@@ -11009,6 +11022,7 @@ function boshuAutoTick(manual) {
         }
         baLog_(st, 'メルカリの写真を取れず→ヤフオクで探す: ' + (c.ja || c.en));
       }
+      if (BA_AI_DOWN) { out.skipped++; baSkipRec_(st, hw, '', c, 'aiwait'); continue; }
       if (!yahooOk) { out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }   /* メルカリの写真が通らなかった＋ヤフオク休み中＝台帳には入れず、ヤフオクが戻ったら試す */
       /* ★2026-09-22 🤖を15分ごとにしたので、ヤフオクを叩く量は【1時間あたり】で抑える（回数が倍になっても叩き方は変えない）。
          実測：本体は 9/21 16:00〜9/22 05:00 に68回（1時間 約5回）で 403/429 → 6時間休み。GoogleのIPは少ない回数でも弾かれる。
@@ -11089,6 +11103,7 @@ function boshuAutoTick(manual) {
     }
     st.lastMsg = hw + '：' + picks.length + '件 → 明細 ' + out.added + '件追加（' + Object.keys(out.ccs).map(function (c) { var x = out.ccs[c]; return c + ' ' + (x.added || 0) + (x.note ? '(' + x.note + ')' : ''); }).join('・') + '）';
     baLog_(st, st.lastMsg + '  例: ' + picks.slice(0, 3).map(function (p) { return p.en + (p.stock ? '' : '(在庫0)'); }).join(' / '));
+    if (BA_AI_DOWN) baLog_(st, '写真AI停止中の既存判定: 候補 ' + picks.length + '件・追加 ' + out.added + '明細');
     if (Object.keys(touchedShops).length || BA_FAM_TICK > 0) baTickTouch_();   /* ★11/8 使い回しの控えを古いと分かるように */
     baTickCleanOnce_();
     // 触った店の出品行を取り直す（次回の「出している」判定と、ポータルの一覧のため）
