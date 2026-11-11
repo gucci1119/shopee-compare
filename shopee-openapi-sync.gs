@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261112-0400'
+var SRC_VER = '20261112-0510'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -11756,7 +11756,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
       var ratio = cc === 'BR' ? 4 : 5, ceil = cc === 'VN' ? 909090 : 0;   // ★2026-10-09 Shopee通知：VNの明細は 909,090 VND 以下（超えると出品ごと非公開）
       var unit = ((((cfg.priceTbl || {}).byCc || {})[cc]) || {}).unit || 1;
       var wG = Math.round((Number(tgt.weight) || 0) * 1000) || Number(cfg.family[hw].weightG) || 150;
-      var ps = (tgt.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; });
+      var ps = (tgt.models || []).filter(function (m) { return String((m && (m.n || m.name)) || '').toLowerCase() !== 'test'; }).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; });   /* ★2026-11-12 仮の明細 test は数えない（本店・2店舗目に作る道は test に元のカタログの値段を付けるので、PH md で安い3作品が「値段の差」で見送りの印になった） */
       var avg = ps.length ? ps.reduce(function (p1, p2) { return p1 + p2; }, 0) / ps.length : 0;
       var lo = ps.length ? Math.min.apply(null, ps) : 0, hi = ps.length ? Math.max.apply(null, ps) : 0;
       var ceilA = ceil ? Math.floor(ceil / unit) * unit : 0;
@@ -12562,7 +12562,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (_in.length) { todo = todo.slice(0, i).concat(_in, _out); batch = _in; }
     }
     // 価格：価格表（仕入帯→現地）→ 無ければカタログ平均。既存明細との価格差（5倍/BR4倍）とVN上限を先に守る
-    var ps = (tgt.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; });
+    var ps = (tgt.models || []).filter(function (m) { return String((m && (m.n || m.name)) || '').toLowerCase() !== 'test'; }).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; });   /* ★2026-11-12 仮の明細 test は数えない（本店・2店舗目に作る道は test に元のカタログの値段を付けるので、PH md で安い3作品が「値段の差」で見送りの印になった） */
     var avg = ps.length ? ps.reduce(function (a, b) { return a + b; }, 0) / ps.length : 0;
     var lo = ps.length ? Math.min.apply(null, ps) : 0, hi = ps.length ? Math.max.apply(null, ps) : 0;
     var ceilA = ceil ? Math.floor(ceil / unit) * unit : 0;   // 上限を丸めの単位に揃える（999,999 を1,000単位で丸めると 1,000,000 で弾かれる）
