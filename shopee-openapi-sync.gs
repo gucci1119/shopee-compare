@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261112-0230'
+var SRC_VER = '20261112-0300'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -10426,7 +10426,9 @@ function baYahoo_(q) {
     out.items.push({ id: id, t: t.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#39;/g, "'"), img: img.replace(/&amp;/g, '&'), price: pr });
   }
   // ★200が返っても中身が無い＝弾かれている可能性（実測でHTTP200のまま遮断される・[[dont-get-ip-blocked]]）
-  if (!out.items.length && !/class="Product|検索結果|該当する商品|に一致する商品は/.test(html)) out.blocked = true;
+  /* ★2026-11-12 事業本部：11/11 04:39 の見直しで HTTP 200 なのに「弾かれた」扱い→休み・間を広げる判断の元になった。200 で結果も目印も無い時は、遮断らしい文言がある時だけ弾かれた扱いにし、
+     それ以外は unknown（形が読めない）＝弾かれたにはしない。呼ぶ側は unknown を「0件」と取らない（見直しは在庫を触らずに止める） */
+  if (!out.items.length && !/class="Product|検索結果|該当する商品|に一致する商品は/.test(html)) { if (/アクセス(が|を)(制限|集中)|一時的にご利用|不正なアクセス|captcha|ロボットではありません|Access Denied|Too Many Requests/i.test(html)) out.blocked = true; else out.unknown = true; }
   return out;
 }
 // 検索結果から「その作品のソフト本体」らしい出品だけを残す。
@@ -10562,6 +10564,7 @@ function boshuAutoRecheck() {
         if (!baYhGap_(st, baYhGapMs_(), 240000 - (Date.now() - t0))) break;   /* 1時間6回では止めない（巡回と取り合って0回になる・review-yaku 中）。数には入れる＝同じ時間の巡回が譲る */
         st.yh.n++; _rvY++;
         var y = baYahoo_(((a.ja ? baCleanJa_(a.ja) : a.en) + ' ' + (BA_HW_WORD[a.hw] || '')).trim());
+        if (y.unknown) { baLog_(st, '見直し：ヤフオクの検索結果の形が読めなかった（HTTP ' + y.code + '）→この回はここまで（在庫は触らない・弾かれた扱いにしない）'); break; }
         if (y.blocked) { st.blockedUntil = baYhRestUntil_(6); baBlockRec_(st, 'ヤフオク', y.code, st.blockedUntil, '見直し'); baLog_(st, '🛑 見直し中にヤフオクに弾かれた（HTTP ' + y.code + '）→約6時間休む'); break; }
         hits = baMatch_(y.items, a.ja || a.en, a.hw).length; byTitle[tk] = hits;
       }
@@ -11121,6 +11124,7 @@ function boshuAutoTick(manual) {
       st.yh.n++;
       var y = baPhotoSrc_(q, cfg);   /* ★2026-09-23 既定は Yahoo!フリマ（ヤフオクは Google の IP から弾かれ続けて2時間休みの繰り返しだった） */
       var _srcNm = (y.src === 'yahoo') ? 'ヤフオク' : 'Yahoo!フリマ';
+      if (y.unknown) { yahooOk = false; out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); baLog_(st, _srcNm + 'の検索結果の形が読めなかった（HTTP ' + y.code + '）→この回はヤフオクの検索をやめる（休みにはしない）'); continue; }   /* ★11/12 0件と取って skip:noimg にしない */
       if (y.blocked) { var restH = (y.code === 403 || y.code === 429) ? 6 : 2; st.blockedUntil = baYhRestUntil_(restH); baBlockRec_(st, _srcNm, y.code, st.blockedUntil, 'game:' + hw); yahooOk = false; baLog_(st, '🛑 ' + _srcNm + 'に弾かれた（HTTP ' + y.code + '）→' + _srcNm + 'の検索だけ ' + restH + '時間休む（メルカリの写真がある作品は続ける）'); out.skipped++; baSkipRec_(st, hw, '', c, 'yahoowait'); continue; }
       var hits = baMatch_(y.items, c.ja || c.en, hw);
       var img = null, srcId = '', srcUrl = '', triedY = 0;
@@ -11184,7 +11188,9 @@ function boshuAutoTick(manual) {
     if (out.added > 0) st.errStreak = 0;
     else {
       var _notes = Object.keys(out.ccs).map(function (c2) { return c2 + ':' + String((out.ccs[c2] || {}).note || ''); }).join(' ');
-      var _realFail = /失敗|エラー|error|作れません/.test(_notes);   /* ★「複製はこの回はもう作りません」「満杯（複製OFF）」は失敗ではない（自分のレビューで発見・2026-09-25） */
+      /* ★2026-11-12 事業本部（2台目が 11/9 19:30 からブレーキで止まったまま・出品 −34%）：複製が「重複（duplicate）」で断られただけの国は、その国を6時間外す扱い（⏸）で済んでいて、何も作られていない。
+         これを全体のエラーに数えると、離れた時刻の3回でブレーキが掛かり、本人の再開まで全部の国が止まる＝重複で断られた国の分は数えない（ほかの失敗は今まで通り数える） */
+      var _realFail = Object.keys(out.ccs).some(function (c3) { return String((out.ccs[c3] || {}).note || '').split('／').some(function (n3) { return /失敗|エラー|error|作れません/.test(n3) && !/duplicates (another|an existing)/i.test(n3); }); });   /* review-yaku：明細の「tier option name is duplicated」等は今まで通り数える・家族とシリーズのメモは1つずつ見る */   /* ★「複製はこの回はもう作りません」「満杯（複製OFF）」は失敗ではない（自分のレビューで発見・2026-09-25） */
       if (_realFail) { st.errStreak = (st.errStreak || 0) + 1; st.errAt = new Date().toISOString(); st.lastErr = '候補 ' + picks.length + '件が1件も入らなかった（' + _notes.slice(0, 160) + '）'; }
       else { st.lastErr = ''; baSkipDay_(st, hw, 'taishonashi', true, picks.length); baLog_(st, hw + '：候補 ' + picks.length + '件は全部「対象なし」（既に出ている／見送り）＝エラーには数えない'); }
     }
@@ -11727,7 +11733,7 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
     else if (!blocked && !noYahoo && Date.now() - t0 < 200000) {
       var qBase = c.ja ? baCleanJa_(c.ja) : String(c.en || ''); var q = (qBase + ' ' + hwWord).trim();
       var y = baYahoo_(q);
-      if (y.blocked) { blocked = true; row.note = 'ヤフオクに弾かれた'; }
+      if (y.blocked || y.unknown) { blocked = true; row.note = y.unknown ? 'ヤフオクの検索結果の形が読めない（この回は検索をやめる）' : 'ヤフオクに弾かれた'; }
       else {
         var hits = baMatch_(y.items, c.ja || c.en, hw);
         var img = '', srcId = '';
@@ -13878,6 +13884,7 @@ function tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk) {
   if (!baYhGap_(st, BA_YAHOO_GAP_TCG_MS, 30000)) return { nosrc: 1, cap: 1 };   /* ★11/8 事業本部：1.2〜2.7秒 → 8〜18秒（待ちが長すぎる時は叩かない） */
   st.yh.n++;
   var y = baPhotoSrc_(q, cfg);
+  if (y.unknown) return { nosrc: 1, cap: 1, unknown: 1 };   /* ★11/12 形が読めない時は0件と取らず、その回はこのカードを飛ばす（休みにはしない） */
   if (y.blocked) return { blocked: 1, code: y.code, src: (y.src === 'yahoo') ? 'ヤフオク' : 'Yahoo!フリマ' };
   var numN = String(c.num).replace(/\s+/g, '').toLowerCase();
   var hits = (y.items || []).filter(function (it) {
@@ -14065,6 +14072,7 @@ function tcgTick(manual) {
       tried++;
       var ph = tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk);
       if (ph.nosrc) { nosrc++; tried--; continue; }
+      if (ph.unknown) yahooOk = false;   /* ★11/12 形が読めなかった後は、その回の残りのカードでヤフオクを叩かない（休みにはしない） */
       if (ph.blocked) { blocked = true; yahooOk = false; st.blockedUntil = baYhRestUntil_(2); baBlockRec_(st, ph.src || 'Yahoo!フリマ', ph.code, st.blockedUntil, 'tcg:' + hw); baLog_(st, (ph.src || 'Yahoo!フリマ') + 'の検索に弾かれた（HTTP ' + ph.code + '）→約2時間はメルカリの写真の控えがあるカードだけ続ける'); tried--; continue; }
       if (ph.stop) { baLog_(st, 'AI判定が止まった（' + ph.stop + '）→この回はここまで'); break; }
       if (!ph.img) { miss++; st.tried[c.key] = tr + 1; continue; }
