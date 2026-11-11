@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261112-0510'
+var SRC_VER = '20261112-0745'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -12964,12 +12964,20 @@ function baReuseTestSlot_(shopId, itemId, it, st, cc) {
     if (it.sku) { try { updateModelSku_(shopId, itemId, [{ model_id: tm.model_id, sku: it.sku }]); } catch (eS) {} }
     /* ④ 読み直して【名前・価格・画像】が入っていることを確かめてから在庫を戻す。
           1つでも欠けたら在庫0のまま残す＝**間違った値・違う写真では絶対に売れない**方に倒す。 */
-    var g2 = getModels_(shopId, itemId) || {}; var now = null, a2 = g2.models || [];
-    for (var j = 0; j < a2.length; j++) { if (String(a2[j].model_id) === String(tm.model_id)) { now = a2[j]; break; } }
-    var okName = now && String(now.name || '').trim() === String(it.option).trim();
-    var okPrice = now && Math.abs((Number(now.price) || 0) - Number(it.price)) < Math.max(1, Number(it.price) * 0.02);
-    var okImg = !it.image_id || (now && String(now.img || '') === String(it.image_id));
-    var okSku = !it.sku || (now && String(now.sku || '') === String(it.sku));
+    /* ★2026-11-12 05：書いた直後の読み直しは、Shopee 側にまだ反映されていないことがある
+       （SG 51921486336：SKU× で在庫0のまま公開→ 後で読むと SKU は入っていた）。合わない時は2秒おいて2回まで読み直す。
+       SKU だけ合わない時は、もう一度 SKU を書いてから読む。 */
+    var now = null, okName = false, okPrice = false, okImg = false, okSku = false;
+    for (var _rt = 0; _rt < 3; _rt++) {
+      if (_rt > 0) { Utilities.sleep(2000); if (!okSku && okName && okPrice && okImg && it.sku) { try { updateModelSku_(shopId, itemId, [{ model_id: tm.model_id, sku: it.sku }]); } catch (eS2) {} } }
+      var g2 = getModels_(shopId, itemId) || {}, a2 = g2.models || []; now = null;
+      for (var j = 0; j < a2.length; j++) { if (String(a2[j].model_id) === String(tm.model_id)) { now = a2[j]; break; } }
+      okName = !!(now && String(now.name || '').trim() === String(it.option).trim());
+      okPrice = !!(now && Math.abs((Number(now.price) || 0) - Number(it.price)) < Math.max(1, Number(it.price) * 0.02));
+      okImg = !it.image_id || !!(now && String(now.img || '') === String(it.image_id));
+      okSku = !it.sku || !!(now && String(now.sku || '') === String(it.sku));
+      if (okName && okPrice && okImg && okSku) break;
+    }
     if (!okName || !okPrice || !okImg || !okSku) {
       baLog_(st, cc + '：仮の明細の上書きが途中までで止まったので在庫0のままにしました（' + String(it.option).slice(0, 26) + '／'
         + (okName ? '' : '名前×') + (okPrice ? '' : '価格×') + (okImg ? '' : '写真×') + (okSku ? '' : 'SKU×') + '）');
