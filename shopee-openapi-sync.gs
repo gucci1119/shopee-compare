@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261112-0130'
+var SRC_VER = '20261112-0230'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -14309,4 +14309,454 @@ function baLimitedFix_(p) {
   try { baKvSet_('limited_audit', res); } catch (eW) { out.saveErr = String(eW).slice(0, 100); }
   if (out.replaced.length) { try { baKvSetMerged_(BA_IMGS, used, baKvFreshMany_([BA_IMGS]), 0); } catch (eW2) {} }   /* ★2026-10-24 全体レビュー（出品管理 #18 と同じ型）：古い写しで丸ごと書かない */
   return out;
+}
+
+// ===== 2026-11-12 05：Codex（代打）が 11/10 に本体の GAS のエディタへ直接入れた関数（リポジトリに無かった）。本体を貼り替える時に消えないよう、そのまま写した。
+//       BR の入金（settlement）を読むだけの試し。エディタから手で動かす物で、トリガー・/exec からは呼ばない。
+// Read-only adapter for the BR pilot. The caller must authenticate each
+// response for this shop and supply complete released and payout windows.
+function settlementReleaseEvidenceBr_(input) {
+  var order = input.order || {};
+  var result = {evidence:null, adjustmentState:'unknown'};
+  if (!/^[A-Z0-9]{10,24}$/.test(String(order.sn || '')) || String(order.shopId) !== '1501965253' ||
+      input.releasesComplete !== true ||
+      input.payoutsComplete !== true || !Array.isArray(input.releases) || !Array.isArray(input.payouts) ||
+      !Number.isSafeInteger(input.from) || !Number.isSafeInteger(input.through) || input.from >= input.through) return result;
+
+  var releases = input.releases.filter(function (row) { return row.order_sn === order.sn; });
+  if (releases.length !== 1) return result;
+  var release = releases[0];
+  var at = Number(release.escrow_release_time), amount = Number(release.payout_amount);
+  if (!Number.isSafeInteger(at) || at < input.from || at > input.through ||
+      !Number.isFinite(amount) || amount <= 0) return result;
+
+  var entries = [], adjustment = false, incomplete = false;
+  input.payouts.forEach(function (payout) {
+    var info = payout.payout_info || {};
+    var time = Number(info.payout_time);
+    if (!Number.isSafeInteger(time) || time > input.through) {
+      incomplete = true;
+      return;
+    }
+    if (time < at) {
+      if (Array.isArray(payout.escrow_list) &&
+          payout.escrow_list.some(function (row) { return row.order_sn === order.sn; })) incomplete = true;
+      return;
+    }
+    if (!Array.isArray(payout.escrow_list) || !Array.isArray(payout.offline_adjustment_list)) {
+      incomplete = true;
+      return;
+    }
+    payout.escrow_list.forEach(function (row) { if (row.order_sn === order.sn) entries.push(row); });
+    if (payout.offline_adjustment_list.some(function (row) { return row.order_sn === order.sn; })) adjustment = true;
+  });
+  if (adjustment) result.adjustmentState = 'adjusted';
+  if (incomplete || entries.length !== 1 || entries[0].currency !== 'BRL' || Number(entries[0].escrow_amount) !== amount) return result;
+
+  var detail = input.detail || {};
+  var income = detail.order_income || {};
+  var totalAdj = income.total_adjustment_amount;
+  if (detail.order_sn !== order.sn || Number(income.escrow_amount_after_adjustment) !== amount ||
+      totalAdj == null || totalAdj === '' || !Number.isFinite(Number(totalAdj)) ||
+      !Array.isArray(detail.return_order_sn_list)) return result;
+  if (adjustment || Number(totalAdj) !== 0 || detail.return_order_sn_list.length) {
+    result.adjustmentState = 'adjusted';
+    return result;
+  }
+
+  result.adjustmentState = 'clear';
+  result.evidence = {shopId:String(order.shopId), sn:order.sn, source:'escrow_released', sourceId:String(order.shopId)+':'+order.sn+':'+at, amount:amount};
+  return result;
+}
+// Editor-only preview. Business data is read and only aggregate results are logged.
+// Editor-only preview. Business data is read and only aggregate results are logged.
+function settlementPreviewBr() {
+  var shop = 1501965253;
+  var through = now_();
+  var month = Utilities.formatDate(new Date(through * 1000), 'America/Sao_Paulo', 'yyyy-MM');
+  var from = Date.parse(month + '-01T00:00:00-03:00') / 1000;
+  var prefix = 'shop_id=eq.' + shop;
+  var result = {shop:'BR本店',month:month,through:new Date(through * 1000).toISOString(),complete:false};
+  try {
+    if (!bgAllowed_() || !getToken_(shop)) throw new Error('接続枠または既存認可を確認できません');
+    var started = Date.now();
+    var ping = sbSelect_('orders', 'select=sn&' + prefix + '&limit=1');
+    if (!Array.isArray(ping) || Date.now() - started > 2000) throw new Error('DBの応答を確認できません');
+    Utilities.sleep(5000);
+    var orders = sbSelect_('orders', 'select=sn,shop_id,order_date&' + prefix +
+      '&order_date=gte.' + month + '-01&order_date=lte.' +
+      Utilities.formatDate(new Date(through * 1000), 'America/Sao_Paulo', 'yyyy-MM-dd') + '&limit=301');
+    var orderKeys = Object.create(null);
+    if (!Array.isArray(orders) || orders.length >= 301 || orders.some(function (o) {
+      if (String(o.shop_id) !== String(shop) || !/^[A-Z0-9]{10,24}$/.test(String(o.sn || '')) ||
+          String(o.order_date).slice(0,7) !== month || orderKeys[o.sn]) return true;
+      orderKeys[o.sn] = true;
+      return false;
+    })) throw new Error('当月の注文を完全に照合できません');
+    result.orders = orders.length;
+
+    var releases = settlementReadWindowBr_(shop, from, through, false);
+    var seen = Object.create(null);
+    if (releases.some(function (r) {
+      var at = Number(r.escrow_release_time), sn = String(r.order_sn || '');
+      if (!/^[A-Z0-9]{10,24}$/.test(sn) || seen[sn] || !Number.isSafeInteger(at) || at < from || at > through ||
+          r.payout_amount == null || r.payout_amount === '' || !Number.isFinite(Number(r.payout_amount))) return true;
+      seen[sn] = true;
+      return false;
+    })) throw new Error('リリース一覧に不整合があります');
+    var current = releases.filter(function (r) { return orderKeys[r.order_sn]; });
+    result.releasesRead = releases.length;
+    result.currentReleased = current.length;
+    result.currentStrict = 0;
+    result.currentExamined = 0;
+    result.priorStrictExample = false;
+    result.priorReleasedDetailExample = false;
+    if (!releases.length) {
+      result.complete = true;
+      return result;
+    }
+
+    var payouts = settlementReadWindowBr_(shop, from, through, true);
+    var eligible = Object.create(null);
+    payouts.forEach(function (p) {
+      if (!Array.isArray(p.escrow_list) || !Array.isArray(p.offline_adjustment_list)) return;
+      p.escrow_list.forEach(function (r) {
+        if (r.currency === 'BRL') eligible[r.order_sn] = true;
+      });
+    });
+    // Check at most three details per group and keep the first past-month match.
+    var verify = function (r) {
+      if (!bgAllowed_()) throw new Error('接続枠の予約線で終了しました');
+      var detail = callShop_(shop, '/api/v2/payment/get_escrow_detail', {order_sn:r.order_sn}, 'get').response || {};
+      var evidence = settlementReleaseEvidenceBr_({order:{shopId:shop,sn:r.order_sn},
+        releasesComplete:true,payoutsComplete:true,from:from,through:through,
+        releases:releases,payouts:payouts,detail:detail});
+      if (evidence.evidence) return {state:'confirmed',releasedDetailMatch:true};
+      if (evidence.adjustmentState === 'adjusted') return {state:'adjusted',releasedDetailMatch:false};
+      var at = Number(r.escrow_release_time), amount = Number(r.payout_amount);
+      var matching = payouts.filter(function (p) {
+        return (p.escrow_list || []).some(function (x) {
+          return x.order_sn === r.order_sn && x.currency === 'BRL' && Number(x.escrow_amount) === amount;
+        });
+      });
+      var income = detail.order_income || {}, adj = income.total_adjustment_amount;
+      var releasedDetailMatch = amount > 0 && detail.order_sn === r.order_sn &&
+        Number(income.escrow_amount_after_adjustment) === amount && adj != null && adj !== '' &&
+        Number(adj) === 0 && Array.isArray(detail.return_order_sn_list) && !detail.return_order_sn_list.length;
+      var check = {state:'evidence_incomplete',releasedDetailMatch:releasedDetailMatch};
+      if (!matching.length) check.state = 'payout_amount_mismatch';
+      else if (matching.every(function (p) { return Number((p.payout_info || {}).payout_time) < at; })) {
+        check.state = 'payout_before_release';
+        check.payoutLeadHours = Math.round((at - Math.max.apply(null, matching.map(function (p) {
+          return Number((p.payout_info || {}).payout_time);
+        }))) / 3600);
+      } else if (!releasedDetailMatch) check.state = 'detail_unconfirmed';
+      return check;
+    };
+    current.filter(function (r) { return eligible[r.order_sn]; }).slice(0,3).forEach(function (r) {
+      result.currentExamined++;
+      if (verify(r).state === 'confirmed') result.currentStrict++;
+    });
+    var previous = releases.filter(function (r) { return !orderKeys[r.order_sn] && eligible[r.order_sn]; }).slice(0,12);
+    if (previous.length) {
+      Utilities.sleep(5000);
+      var previousRows = sbSelect_('orders','select=sn,shop_id,order_date&' + prefix +
+        '&order_date=lt.' + month + '-01&sn=in.(' + previous.map(function (r) { return r.order_sn; }).join(',') + ')&limit=13');
+      if (!Array.isArray(previousRows) || previousRows.length >= 13) throw new Error('過去月の注文を照合できません');
+      result.priorChecks = [];
+      previous.filter(function (r) {
+        return previousRows.filter(function (o) {
+          return o.sn === r.order_sn && String(o.shop_id) === String(shop) && /^\d{4}-\d{2}-\d{2}$/.test(o.order_date || '');
+        }).length === 1;
+      }).slice(0,3).some(function (example) {
+        var check = verify(example);
+        var exampleMonth = previousRows.find(function (o) { return o.sn === example.order_sn; }).order_date.slice(0,7);
+        check.month = exampleMonth;
+        result.priorChecks.push(check);
+        if (check.releasedDetailMatch) {
+          result.priorReleasedDetailExample = true;
+          result.priorReleasedDetailMonth = exampleMonth;
+        }
+        if (check.state !== 'confirmed') return false;
+        result.priorExampleMonth = exampleMonth;
+        result.priorStrictExample = true;
+        return true;
+      });
+    }
+    result.complete = true;
+    return result;
+  } catch (e) {
+    result.reason = String(e && e.message || e).replace(/https?:\/\/\S+/g,'[URL]').slice(0,140);
+    return result;
+  } finally {
+    Logger.log('SETTLEMENT_BR_PREVIEW ' + JSON.stringify(result));
+    ufPersist_();
+  }
+}
+function settlementReadWindowBr_(shop, from, through, payouts) {
+  var rows = [], calls = 0;
+  var endpoint = payouts ? 'get_payout_detail' : 'get_escrow_list';
+  for (var start = from; start <= through; start += 14 * 86400) {
+    var end = Math.min(through, start + 14 * 86400 - 1);
+    for (var page = 0; ; page++) {
+      if (calls++ >= 6 || !bgAllowed_()) throw new Error(endpoint + ' の全ページを取得できません');
+      var q = payouts ? {payout_time_from:start,payout_time_to:end,page_size:40,page_no:page} :
+        {release_time_from:start,release_time_to:end,page_size:100,page_no:page+1};
+      var response = callShop_(shop, '/api/v2/payment/' + endpoint, q, 'get').response || {};
+      var batch = payouts ? response.payout_list : response.escrow_list;
+      if (!Array.isArray(batch) || typeof response.more !== 'boolean' || (response.more && !batch.length))
+        throw new Error(endpoint + ' の応答が不完全です');
+      rows = rows.concat(batch);
+      if (!response.more) break;
+      Utilities.sleep(1800);
+    }
+  }
+  return rows;
+}
+
+// The caller must collect all three lists with the BR shop's existing OpenAPI
+// authorization. The legacy payout list corroborates amounts and adjustments.
+// The caller must collect all three lists with the BR shop's existing OpenAPI
+// authorization. The legacy payout list corroborates amounts and adjustments.
+function settlementReleasedIncomeEvidenceBr_(input) {
+  var result = {state:'incomplete', evidence:null, adjustmentState:'unknown'};
+  var order = input.order || {};
+  var sn = order.sn;
+  if (String(order.shopId) !== '1501965253' || typeof sn !== 'string' || !/^[A-Z0-9]{10,24}$/.test(sn)) {
+    result.state = 'identity_review';
+    return result;
+  }
+  if (input.incomeStatus !== 1 || input.incomeComplete !== true || input.releasesComplete !== true ||
+      input.payoutsComplete !== true || !Array.isArray(input.incomeRows) || !Array.isArray(input.releases) ||
+      !Array.isArray(input.payouts) || !Number.isSafeInteger(input.from) || !Number.isSafeInteger(input.through) ||
+      input.from >= input.through) return result;
+  var invalidOrderRow = function (row) { return !row || typeof row.order_sn !== 'string' || !/^[A-Z0-9]{10,24}$/.test(row.order_sn); };
+  if (input.incomeRows.some(invalidOrderRow) || input.releases.some(invalidOrderRow)) return result;
+
+  var released = input.incomeRows.filter(function (row) { return row.order_sn === sn; });
+  var escrow = input.releases.filter(function (row) { return row.order_sn === sn; });
+  if (!released.length && !escrow.length) {
+    result.state = 'not_released';
+    return result;
+  }
+  var markAdjusted = function () {
+    result.state = 'adjusted';
+    result.adjustmentState = 'adjusted';
+    return result;
+  };
+  if (released.some(function (row) { return /adjust|refund/i.test(String(row.description || '')); })) return markAdjusted();
+  result.state = 'source_mismatch';
+  if (released.length !== 1 || escrow.length !== 1) return result;
+  var row = released[0];
+  if (row.currency !== 'BRL' || !/^order income$/i.test(String(row.description || '').trim()) ||
+      typeof row.status !== 'string' || !row.status.trim() || /pending|to release|cancel|refund/i.test(row.status)) return result;
+
+  var numeric = function (value) {
+    return typeof value === 'number' || (typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value)) ? Number(value) : NaN;
+  };
+  var amount = numeric(row.released_amount);
+  var actualAt = numeric(row.actual_payout_time), escrowAt = numeric(escrow[0].escrow_release_time);
+  if (!Number.isFinite(amount) || amount <= 0 || amount !== numeric(escrow[0].payout_amount) ||
+      !Number.isSafeInteger(escrowAt) || !Number.isSafeInteger(actualAt) ||
+      escrowAt < input.from || actualAt < escrowAt || actualAt > input.through) return result;
+
+  var payoutEntries = [], adjusted = false;
+  var payoutsValid = input.payouts.every(function (payout) {
+    if (!payout || !Array.isArray(payout.escrow_list) || !Array.isArray(payout.offline_adjustment_list)) return false;
+    var legacyAt = numeric((payout.payout_info || {}).payout_time);
+    if (!Number.isSafeInteger(legacyAt) || legacyAt < input.from || legacyAt > input.through) return false;
+    if (payout.escrow_list.some(function (entry) { return !entry || !/^[A-Z0-9]{10,24}$/.test(String(entry.order_sn || '')); })) return false;
+    payout.escrow_list.forEach(function (entry) { if (entry.order_sn === sn) payoutEntries.push(entry); });
+    return payout.offline_adjustment_list.every(function (entry) {
+      if (!entry) return false;
+      if (entry.order_sn === sn) adjusted = true;
+      return /^[A-Z0-9]{10,24}$/.test(String(entry.order_sn || '')) || /^shop$/i.test(String(entry.adjustment_level || ''));
+    });
+  });
+  if (adjusted) return markAdjusted();
+  if (!payoutsValid) {
+    result.state = 'incomplete';
+    return result;
+  }
+  if (payoutEntries.length !== 1 || payoutEntries[0].currency !== 'BRL' || numeric(payoutEntries[0].escrow_amount) !== amount) return result;
+
+  var detail = input.detail || {};
+  var income = detail.order_income || {};
+  if (detail.order_sn !== sn) return result;
+  var totalAdjustment = numeric(income.total_adjustment_amount);
+  var returns = detail.return_order_sn_list;
+  if ((Number.isFinite(totalAdjustment) && totalAdjustment !== 0) || (Array.isArray(returns) && returns.length)) return markAdjusted();
+  if (!Number.isFinite(totalAdjustment) || !Array.isArray(returns)) {
+    result.state = 'incomplete';
+    return result;
+  }
+  if (numeric(income.escrow_amount_after_adjustment) !== amount) return result;
+
+  result.state = 'confirmed';
+  result.adjustmentState = 'clear';
+  result.evidence = {shopId:String(order.shopId), sn:sn, source:'my_income_final',
+    sourceId:'released:' + order.shopId + ':' + sn + ':' + actualAt, amount:amount};
+  return result;
+}
+
+// Manual, aggregate-only BR pilot for the official Seller Centre Released feed.
+// Manual, aggregate-only BR pilot for the official Seller Centre Released feed.
+function settlementProbeReleasedIncomeBr() {
+  var shop = 1501965253;
+  var through = now_();
+  var tz = 'America/Sao_Paulo';
+  var day = Utilities.formatDate(new Date(through * 1000), tz, 'yyyy-MM-dd');
+  var monthStart = day.slice(0, 7) + '-01';
+  var from = Date.parse(monthStart + 'T00:00:00-03:00') / 1000;
+  var result = {shop:'BR本店',from:monthStart,to:day,complete:false};
+  var stage = 'released_income';
+  try {
+    if (!getToken_(shop) || !bgAllowed_() || day <= monthStart || through - from >= 14 * 86400) {
+      throw new Error('対象期間・認可・予約枠の確認が必要');
+    }
+    var cursor = '', seen = Object.create(null), rows = [];
+    for (var page = 0; page < 4; page++) {
+      if (!bgAllowed_()) throw new Error('予約枠の停止線');
+      var response = callShop_(shop, '/api/v2/payment/get_income_detail', {
+        income_status:1, date_from:monthStart, date_to:day, cursor:cursor, page_size:50
+      }, 'get');
+      var wrapped = response.response;
+      var data = response.income_detail_list || (wrapped && (wrapped.income_detail_list || wrapped));
+      var next = data && data.next_page;
+      var shortLastPage = page > 0 && data && data === wrapped && Array.isArray(data.list) &&
+        data.list.length > 0 && data.list.length < 50 && !Object.prototype.hasOwnProperty.call(data, 'next_page');
+      if (!data || !Array.isArray(data.list) || data.list.length > 50 || (!shortLastPage && (!next || typeof next.cursor !== 'string'))) {
+        var shape = function (object) { return Object.keys(object || {}).filter(function (k) { return /^[a-z_]{1,40}$/.test(k); }).slice(0, 16); };
+        result.responseShape = {page:page+1, top:shape(response), wrapped:shape(response.response),
+          listKeys:shape(data), length:Array.isArray(data && data.list) ? data.list.length : null,
+          nextKeys:shape(next), cursorType:typeof (next && next.cursor)};
+        throw new Error('一覧またはページ情報が不完全');
+      }
+      rows = rows.concat(data.list);
+      cursor = shortLastPage ? '' : next.cursor;
+      if (shortLastPage) result.terminal = 'short_page_without_next';
+      if (!cursor) break;
+      if (!data.list.length || seen[cursor]) throw new Error('ページ情報が重複');
+      seen[cursor] = true;
+    }
+    if (cursor) throw new Error('ページ上限で照会未完了');
+    result.pages = page + 1;
+    result.incomeRows = rows.length;
+    result.orderRows = rows.filter(function (r) { return r && typeof r.order_sn === 'string' && /^[A-Z0-9]{10,24}$/.test(r.order_sn); }).length;
+    if (result.orderRows !== rows.length) throw new Error('Released一覧に注文番号を確認できない行があります');
+    result.brlRows = rows.filter(function (r) { return r.currency === 'BRL'; }).length;
+    result.orderIncomeRows = rows.filter(function (r) { return /^order income$/i.test(String(r.description || '').trim()); }).length;
+    result.adjustmentRows = rows.filter(function (r) { return /adjust|refund/i.test(String(r.description || '')); }).length;
+
+    stage = 'escrow_list';
+    var releases = settlementReadWindowBr_(shop, from, through, false);
+    if (releases.some(function (r) { return !r || typeof r.order_sn !== 'string' || !/^[A-Z0-9]{10,24}$/.test(r.order_sn); })) {
+      throw new Error('リリース一覧に注文番号を確認できない行があります');
+    }
+    var byOrder = Object.create(null);
+    rows.forEach(function (row) {
+      var sn = String(row.order_sn || '');
+      if (/^[A-Z0-9]{10,24}$/.test(sn)) (byOrder[sn] || (byOrder[sn] = [])).push(row);
+    });
+    var matches = releases.filter(function (release) {
+      var matched = byOrder[release.order_sn] || [];
+      if (matched.length !== 1) return false;
+      var row = matched[0];
+      var at = Number(row.actual_payout_time);
+      var amount = Number(row.released_amount);
+      return row.currency === 'BRL' && Number.isFinite(amount) && amount > 0 && amount === Number(release.payout_amount) &&
+        Number.isSafeInteger(at) && at >= from && at <= through;
+    });
+    result.escrowRows = releases.length;
+    result.sameOrder = releases.filter(function (r) { return (byOrder[r.order_sn] || []).length > 0; }).length;
+    result.sameOrderBrlAmount = matches.length;
+
+    stage = 'orders';
+    var prefix = 'shop_id=eq.' + shop;
+    var started = Date.now();
+    var ping = sbSelect_('orders', 'select=sn&' + prefix + '&limit=1');
+    if (!Array.isArray(ping) || Date.now() - started > 2000) throw new Error('DBの応答を確認できません');
+    Utilities.sleep(5000);
+    var orders = sbSelect_('orders', 'select=sn,shop_id,order_date&' + prefix +
+      '&order_date=gte.' + monthStart + '&order_date=lte.' + day + '&limit=301');
+    var orderKeys = Object.create(null);
+    if (!Array.isArray(orders) || orders.length >= 301 || orders.some(function (order) {
+      if (String(order.shop_id) !== String(shop) || !/^[A-Z0-9]{10,24}$/.test(String(order.sn || '')) ||
+          String(order.order_date).slice(0, 7) !== monthStart.slice(0, 7) || orderKeys[order.sn]) return true;
+      orderKeys[order.sn] = true;
+      return false;
+    })) throw new Error('当月の注文を完全に照合できません');
+    result.monthOrders = orders.length;
+    result.monthIncomeMatches = orders.filter(function (order) { return !!byOrder[order.sn]; }).length;
+
+    stage = 'legacy_payout';
+    var payouts = settlementReadWindowBr_(shop, from, through, true);
+    var legacyTimes = Object.create(null), legacyAdjustments = Object.create(null);
+    var legacyComplete = payouts.every(function (payout) {
+      var at = Number((payout.payout_info || {}).payout_time);
+      if (!Number.isSafeInteger(at) || at < from || at > through || !Array.isArray(payout.escrow_list) ||
+          !Array.isArray(payout.offline_adjustment_list)) return false;
+      payout.escrow_list.forEach(function (entry) {
+        (legacyTimes[entry.order_sn] || (legacyTimes[entry.order_sn] = [])).push({at:at,entry:entry});
+      });
+      payout.offline_adjustment_list.forEach(function (entry) { if (entry.order_sn) legacyAdjustments[entry.order_sn] = true; });
+      return true;
+    });
+    var matchedLegacy = function (release) {
+      var entries = legacyTimes[release.order_sn] || [];
+      var one = entries[0];
+      return legacyComplete && entries.length === 1 && one.entry.currency === 'BRL' &&
+        Number(one.entry.escrow_amount) === Number(release.payout_amount) ? one : null;
+    };
+    var inverted = matches.filter(function (release) {
+      var previous = matchedLegacy(release);
+      return previous && previous.at < Number(release.escrow_release_time);
+    });
+    result.legacyComplete = legacyComplete;
+    if (!legacyComplete) throw new Error('旧払い出し・調整一覧が不完全です');
+    result.legacyInversions = inverted.length;
+    stage = 'order_detail';
+    var samples = matches.filter(function (release) { return orderKeys[release.order_sn]; });
+    if (!samples.length) samples = inverted.length ? inverted : matches;
+    result.detailChecks = samples.slice(0, 3).map(function (release) {
+      if (!bgAllowed_()) throw new Error('予約枠の停止線');
+      var row = byOrder[release.order_sn][0];
+      var detail = (callShop_(shop, '/api/v2/payment/get_escrow_detail', {order_sn:release.order_sn}, 'get').response || {});
+      var income = detail.order_income || {};
+      var at = Number(row.actual_payout_time), created = Number(row.creation_date);
+      var assessment = settlementReleasedIncomeEvidenceBr_({
+        order:{shopId:shop,sn:release.order_sn}, incomeStatus:1, incomeComplete:true,
+        releasesComplete:true, payoutsComplete:true, from:from, through:through,
+        incomeRows:rows, releases:releases, payouts:payouts, detail:detail
+      });
+      return {
+        orderIncome: /^order income$/i.test(String(row.description || '').trim()),
+        statusPresent: typeof row.status === 'string' && !!row.status.trim(),
+        creationMonth: Number.isSafeInteger(created) && created > 0 ? Utilities.formatDate(new Date(created * 1000), tz, 'yyyy-MM') : null,
+        detailMatches: detail.order_sn === release.order_sn && Number(income.escrow_amount_after_adjustment) === Number(row.released_amount),
+        noAdjustment: income.total_adjustment_amount != null && income.total_adjustment_amount !== '' && Number(income.total_adjustment_amount) === 0,
+        noReturn: Array.isArray(detail.return_order_sn_list) && !detail.return_order_sn_list.length,
+        currentMonthOrder: !!orderKeys[release.order_sn],
+        legacyPayoutBeforeEscrowRelease: matchedLegacy(release) ? matchedLegacy(release).at < Number(release.escrow_release_time) : null,
+        noLegacyOrderAdjustment: legacyComplete ? !legacyAdjustments[release.order_sn] : null,
+        payoutBeforeEscrowRelease: at < Number(release.escrow_release_time),
+        evidenceState: assessment.state
+      };
+    });
+    result.currentInspected = result.detailChecks.filter(function (check) { return check.currentMonthOrder; }).length;
+    result.currentConfirmedInSample = result.detailChecks.filter(function (check) {
+      return check.currentMonthOrder && check.evidenceState === 'confirmed';
+    }).length;
+    result.priorConfirmedInSample = result.detailChecks.filter(function (check) {
+      return !check.currentMonthOrder && check.evidenceState === 'confirmed';
+    }).length;
+    result.complete = true;
+  } catch (error) {
+    result.stage = stage;
+    result.reason = String(error && error.message || error).replace(/https?:\/\/\S+/g, '[URL]').replace(/\b\d{8,}\b/g, '[ID]').slice(0, 180);
+  } finally {
+    Logger.log('SETTLEMENT_BR_RELEASED_INCOME ' + JSON.stringify(result));
+    ufPersist_();
+  }
+  return result;
 }
