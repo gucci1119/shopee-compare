@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261111-0110'
+var SRC_VER = '20261112-0130'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -12445,7 +12445,20 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         if (!safeBases.length) { res.note = '公開中の複製元を確認できず次の回へ'; break; }
         base = safeBases[safeBases.length - 1];
       }
-      var nextNo = Math.max(Math.max.apply(null, rows.map(function (x) { return baSeriesNo_(x.name); })) + 1, baFreeNo_(cc, rows[rows.length - 1].name));   /* ★2026-09-26 国の中（2店舗目・親SKU無しも含む）で空いている番号 */
+      /* ★2026-11-12 事業本部（01 の調べ：PH 本店 971/1,000・SG 本店 469/500 に空きがあるのに🤖が足せない）：元にする「家族の一番最後のカタログ」が2店舗目で、
+         その2店舗目が満杯（PH 100/100・SG 98/100）だと、下の baCloneToSub_ が「2店舗目も満杯」で止まり、本店の空きを使わなかった。BR だけは本店の家族カタログを元にする形（_bn）があった。
+         → BR 以外も、元の店が満杯なら、同じ国の【満杯でない店】にある公開中・明細ありの家族カタログを元にして、その店に作る。
+         守り：①両方の店が満杯なら元のまま（下の baCloneToSub_ が止める＝11/4 TW の作り直し続けの型を出さない）②番号は今までどおり国の全店で数える（nextNo・baFreeNo_）③満杯の線（baShopFull_）は変えない */
+      if (!_bn && baShopFull_(cc, base.shop_id)) {
+        var _alt = null, _ms = 0; try { _ms = baMainShop_(cc); } catch (eMs) { _ms = 0; }
+        var _okShops = {}; if (_ms) { _okShops[String(_ms)] = 1; var _ss = 0; try { _ss = baSubShop_(cc, _ms); } catch (eSs) { _ss = 0; } if (_ss) _okShops[String(_ss)] = 1; }   /* review-yaku 低2：作り先は本店・2店舗目（枠の分かる店）だけ */
+        var _bb = baNameBase_(base.name);
+        for (var _pass = 0; _pass < 2 && !_alt; _pass++) {   /* review-yaku 低3：まず元と同じ名前の系列（番号を除く）・無ければ他の家族カタログ */
+          for (var _ai = rows.length - 1; _ai >= 0; _ai--) { var _ar = rows[_ai]; if (!_ar || String(_ar.shop_id) === String(base.shop_id) || !_okShops[String(_ar.shop_id)] || incompatible[String(_ar.item_id)] || _ar.isNew) continue; if (_pass === 0 && baNameBase_(_ar.name) !== _bb) continue; if (_ar.status === 1 && (_ar.models || []).length && !baShopFull_(cc, _ar.shop_id)) { _alt = _ar; break; } }
+        }
+        if (_alt) { baLog_(st, cc + '：元のカタログの店（' + base.shop_id + '）は満杯→空きのある店（' + _alt.shop_id + '）の家族カタログ（' + _alt.item_id + '）を元にその店に作る'); base = _alt; }
+      }
+      var nextNo = Math.max(Math.max.apply(null, rows.map(function (x) { return baSeriesNo_(x.name); })) + 1, baFreeNo_(cc, rows[rows.length - 1].name), baFreeNo_(cc, base.name));   /* ★11/12 review-yaku 中1：名前は base から作るので base の名前でも国の空きを数える */   /* ★2026-09-26 国の中（2店舗目・親SKU無しも含む）で空いている番号 */
       var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳', mark = CIRC[nextNo - 1] || ('(' + nextNo + ')');
       var curMark = CIRC[baSeriesNo_(base.name) - 1], nm0 = String(base.name || '');
       var newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, mark) : (nm0.trim() + ' ' + mark);
@@ -12474,12 +12487,12 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
           try { setVariationImage_(tgt.shop_id, tgt.item_id, 'test', todo[i].imageId); } catch (eImg) { res.note = 'test画像失敗: ' + String((eImg && eImg.message) || eImg).slice(0, 60); baLog_(st, cc + ' ' + res.note); baFinishClone_(cfg, cc, tgt, true, 0, st); break; }   /* ★2026-10-07 作った直後に止まる時も締めを通す（test の在庫を0に・放置しない） */
         }
       }
-      var cl = null, dupErr = '';
+      var cl = null, dupErr = '', _triedNames = [];   /* 実際に試して duplicate で断られた名前（番号を送る時に国の空きから外す） */
       if (!tgt && BA_FAM_TICK >= 1) { res.note = '複製はこの回はもう作りません（1回1件）'; break; }
       for (var tryNo = 0; tryNo < 5 && !cl && !tgt; tryNo++) {
-        if (tryNo) { var m2 = CIRC[nextNo - 1 + tryNo] || ('(' + (nextNo + tryNo) + ')'); newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, m2) : (nm0.trim() + ' ' + m2); }
+        if (tryNo) { var _low = []; for (var _lq = 1; _lq <= nextNo; _lq++) _low.push(baWithNo_(base.name, _lq)); var _nx = baFreeNo_(cc, base.name, _low.concat(_triedNames));   /* nextNo 以下は使った扱い＋実際に試した名前＝下の空きへ戻らず、同じ名前を繰り返さない */ var m2 = CIRC[_nx - 1] || ('(' + _nx + ')'); newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, m2) : (nm0.trim() + ' ' + m2); }   /* review-yaku 低4：送る時も国の中の空きを取り直す */
         try { cl = cloneItem_(base.shop_id, base.item_id, newName, false); if (cl && cl.item_id) { BA_FAM_TICK++; if (_bn) st.brNewMade.n++; else st.cloneMade.n++; } }
-        catch (e) { dupErr = String((e && e.message) || e); if (!/duplicate/i.test(dupErr)) break; baLog_(st, cc + ' 同じ名前のカタログが既にある→番号を送る: ' + newName); }
+        catch (e) { dupErr = String((e && e.message) || e); if (!/duplicate/i.test(dupErr)) break; _triedNames.push(newName); baLog_(st, cc + ' 同じ名前のカタログが既にある→番号を送る: ' + newName); }
       }
       if (!tgt) {
         if (!cl) { res.note = '複製失敗: ' + dupErr.slice(0, 160); baLog_(st, cc + ' ' + res.note); if (_bn) { var _fn = baBrNewFail_(st, false); baLog_(st, 'BR：新しい総称カタログを作れなかった（今日 続けて ' + _fn + '/' + Math.max(1, Number((cfg.brNewCat || {}).failMax) || 3) + ' 回）'); } break; }
