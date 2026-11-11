@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261112-0300'
+var SRC_VER = '20261112-0310'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -11956,6 +11956,15 @@ function baFreeNo_(cc, name, extraNames) {
   var no = 1; while (used[no]) no++;
   return no;
 }
+/* ★2026-11-12 事業本部の見張り（PH PS2）：空きのある店に作る時、新しい番号が国の中の別の店にある非公開の ④ と重なった。
+   nextNo は「家族の一番大きい番号＋1」と「国の中で一番小さい空き」の大きい方で、家族に入らない非公開のカタログと、番号の無い1冊目（＝①）を見ていなかった。
+   → 国の中で使っている番号（全部の店・公開と非公開・番号の無い名前は ① と数える）を集め、重なる間は番号を送る。DB も読む（巡回の控えに無い行の分） */
+function baUsedNos_(cc, name) {
+  var b = baNameBase_(name), used = {}, names = baCountryNames_(cc);
+  try { (sbSelectAll_('listings', 'select=name&cc=eq.' + encodeURIComponent(cc) + '&status=in.(1,8)') || []).forEach(function (r) { names.push(String(r.name || '')); }); } catch (e) {}
+  names.forEach(function (n) { if (baNameBase_(n) !== b) return; var m = String(n).match(/[①-⑳]/); used[m ? (BA_CIRC.indexOf(m[0]) + 1) : 1] = 1; });
+  return used;
+}
 function baWithNo_(name, no) { var nm = String(name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim(); return nm + ' ' + (BA_CIRC[no - 1] || ('(' + no + ')')); }
 /* 満杯の店の代わりに、2店舗目へ同じ中身のカタログを作る（非公開で作られる→明細を入れてから公開）。
    作れなければ null（＝今までどおり1店舗目で続ける） */
@@ -12465,6 +12474,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         if (_alt) { baLog_(st, cc + '：元のカタログの店（' + base.shop_id + '）は満杯→空きのある店（' + _alt.shop_id + '）の家族カタログ（' + _alt.item_id + '）を元にその店に作る'); base = _alt; }
       }
       var nextNo = Math.max(Math.max.apply(null, rows.map(function (x) { return baSeriesNo_(x.name); })) + 1, baFreeNo_(cc, rows[rows.length - 1].name), baFreeNo_(cc, base.name));   /* ★11/12 review-yaku 中1：名前は base から作るので base の名前でも国の空きを数える */   /* ★2026-09-26 国の中（2店舗目・親SKU無しも含む）で空いている番号 */
+      try { var _usedC = baUsedNos_(cc, base.name), _n0 = nextNo; while (_usedC[nextNo] && nextNo < 40) nextNo++; if (nextNo !== _n0) baLog_(st, cc + '：番号 ' + _n0 + ' は国の中の別のカタログが使っている→ ' + nextNo + ' にする'); } catch (eUn) {}   /* ★2026-11-12 PH PS2 ④ が2店舗で重なった */
       var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳', mark = CIRC[nextNo - 1] || ('(' + nextNo + ')');
       var curMark = CIRC[baSeriesNo_(base.name) - 1], nm0 = String(base.name || '');
       var newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, mark) : (nm0.trim() + ' ' + mark);
