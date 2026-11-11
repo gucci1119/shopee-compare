@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261112-0310'
+var SRC_VER = '20261112-0400'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -11970,6 +11970,9 @@ function baWithNo_(name, no) { var nm = String(name || '').replace(/[①-⑳]/g,
    作れなければ null（＝今までどおり1店舗目で続ける） */
 function baCloneToSub_(cc, base, newName, st, hw, role) {
   var sub = baSubShop_(cc, base.shop_id);
+  /* ★2026-11-12 事業本部の見張り（PH・SG の md）：元の家族カタログが【2店舗目】にしか無く、その2店舗目が満杯だと、作り先を「元の店の2店舗目」でしか探さず
+     「複製先が無い」で止まっていた（本店 PH 695473017・SG 679971186 には空きがある）。→ 元が2店舗目なら、空きのある本店に作る。両方満杯なら今までどおり作らない */
+  if (!sub || baShopFull_(cc, sub)) { var _mn = 0; try { _mn = baMainShop_(cc); } catch (eMn) { _mn = 0; } if (_mn && String(_mn) !== String(base.shop_id) && !baShopFull_(cc, _mn)) { baLog_(st, cc + '：元のカタログは2店舗目（' + base.shop_id + '・満杯）→ 空きのある本店（' + _mn + '）に作る'); sub = _mn; } }
   if (!sub) {
     var _isSubBase = false; try { _isSubBase = (sbSelectAll_('accounts', 'select=shop_id,status&cc=eq.' + encodeURIComponent(cc) + '&shop_id=eq.' + encodeURIComponent(String(base.shop_id))) || []).some(function (r) { return String(r.status || '') === 'sub'; }); } catch (eB) {}
     baLog_(st, cc + (_isSubBase ? '：2店舗目も出品枠が満杯です（' + base.shop_id + '）' : '：2店舗目が登録簿にありません'));   /* ★2026-10-18 元のカタログが2店舗目の時に「登録簿にありません」と出ていた＝実際は2店舗目も満杯 */
@@ -11986,7 +11989,7 @@ function baCloneToSub_(cc, base, newName, st, hw, role) {
   var CIRC2 = '①②③④⑤⑥⑦⑧⑨⑩', r = null, lastErr = '';
   for (var tn = 0; tn < 5 && !r; tn++) {
     var nm2 = String(newName || '');
-    if (tn) { var cur = CIRC2.split('').filter(function (c) { return nm2.indexOf(c) >= 0; })[0]; var nxt = CIRC2[tn] || ('(' + (tn + 1) + ')'); nm2 = cur ? nm2.replace(cur, nxt) : (nm2.trim() + ' ' + nxt); }
+    if (tn) { var cur = CIRC2.split('').filter(function (c) { return nm2.indexOf(c) >= 0; })[0]; var _curNo = cur ? (CIRC2.indexOf(cur) + 1) : 1, _usedS = {}; try { _usedS = baUsedNos_(cc, base.name); } catch (eUs) {} var _nn = _curNo + 1; while (_usedS[_nn] && _nn < 40) _nn++; var nxt = BA_CIRC[_nn - 1] || ('(' + _nn + ')'); nm2 = cur ? nm2.replace(cur, nxt) : (nm2.trim() + ' ' + nxt); }   /* ★2026-11-12 送る番号も国の中で使っていない物（前は ②③… を順に試し、別の店の名前と重なり得た） */
     var rr = seedShopCatalog_({ src_shop_id: base.shop_id, dst_shop_id: sub, item_id: base.item_id, price: pr, name: nm2 });
     if (rr && rr.ok && rr.item_id) { r = rr; newName = nm2; break; }
     lastErr = String((rr && rr.error) || '');
