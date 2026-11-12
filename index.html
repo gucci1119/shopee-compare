@@ -19218,6 +19218,60 @@
   /* ★2026-11-07 本人「ガイドが必要ね」「各機能に」「どこかかざすとポップアップで表示されるように」（00 事業本部・ui-rules 19 と同じ形）：
      data-guide="説明" を付けた物にマウスを乗せると 150ms で吹き出し（12.5px・幅300px まで・画面からはみ出さない・下に入らなければ上）。
      今ある title も同じ吹き出しで出す（乗せた時に title を data-guide に移す＝ブラウザの遅い吹き出しと二重に出さない）。外れた時・押した時・スクロールで消す。英語表示では辞書で訳す */
+  /* ★2026-11-13 本人「もうしっかりしてくれよ。その辺の UI とかまで気配ってくれよ。もうミスなく漏れなくやってくれって。」（事業本部）：
+     ポータルの UI の自動点検（03 の tools/ui-audit.js と同じ見方をポータルの画面に合わせた）。読むだけ＝押さない・書かない。
+     使い方：コンソールで await window.__smdUiAudit() ＝今開いている画面を点検して { ok, ng, text } を返す。opts.max でボタンの数の上限（既定 400）。
+     見る物：1 一番下まで届くか／2 中で切れている箱（二重スクロール）／3 押せないボタン（大きさ0・ほかの物の下・画面の横の外）／4 字が切れているボタン／
+     5 かざす説明の無いボタン／6 次にやることの1個目（opts.expectFirst）／7 同じボタンが2か所。わざと中でスクロールさせる一覧は data-ui-scroll-ok、わざと2つ置く所は data-ui-dup-ok */
+  window.__smdUiAudit = async function (opts) {
+    opts = opts || {};
+    const ng = [], info = [], MAX = Number(opts.max) || 400;
+    const page = [...document.querySelectorAll('[id^="page-"]')].find(el => el.offsetParent !== null || getComputedStyle(el).display !== 'none');
+    if (!page) return { ok: false, ng: [{ k: 0, why: '開いている画面が見つかりません' }], text: 'NG：開いている画面が見つかりません' };
+    const name = el => { if (!el) return ''; const t = (el.getAttribute && (el.getAttribute('data-guide') || el.getAttribute('aria-label') || el.getAttribute('title'))) || ''; const x = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim(); return (x || t).slice(0, 40) + ' [' + el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.') : '') + ']'; };
+    const shown = el => { if (!el || !el.isConnected || el.closest('[hidden]')) return false; for (let p = el; p && p !== document.body; p = p.parentElement) { const cs = getComputedStyle(p); if (cs.display === 'none' || cs.visibility === 'hidden') return false; if (p.tagName === 'DETAILS' && !p.open && !el.closest('summary')) return false; } return true; };
+    const btnSel = 'button, [role=button], a[href], input[type=button], input[type=submit], select, summary';
+    let btns = [...page.querySelectorAll(btnSel)].filter(shown);
+    if (btns.length > MAX) { info.push('ボタンが ' + btns.length + ' 個あるので、上から ' + MAX + ' 個だけ 3・5 を見ました'); }
+    const sx = window.scrollX, sy = window.scrollY;
+    /* 1 一番下まで届くか */
+    window.scrollTo(0, document.documentElement.scrollHeight); await new Promise(z => setTimeout(z, 150));
+    const last = btns.slice().sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0];
+    if (last) { const r = last.getBoundingClientRect(); if (r.bottom > window.innerHeight + 1) ng.push({ k: 1, why: '一番下までスクロールしても、一番下のボタンが画面に入りません（' + Math.round(r.bottom - window.innerHeight) + 'px）', el: name(last) }); }
+    /* 2 中で切れている箱 */
+    page.querySelectorAll('*').forEach(el => {
+      if (!shown(el) || el.closest('[data-ui-scroll-ok]')) return;
+      const cs = getComputedStyle(el); if (!/(hidden|auto|scroll|clip)/.test(cs.overflowY)) return;
+      if (el.scrollHeight > el.clientHeight + 2 && el.clientHeight > 0) { if (/(BUTTON|A|SPAN|LABEL|IMG)/.test(el.tagName) && el.clientHeight < 40) return; if (el.clientHeight < 24) return;
+        ng.push({ k: 2, why: '箱の中で切れています（中身 ' + el.scrollHeight + 'px／見えている ' + el.clientHeight + 'px・overflow ' + cs.overflowY + '）', el: name(el) }); }
+    });
+    /* 3 押せないボタン・5 説明なし */
+    const vw = document.documentElement.clientWidth;
+    for (const b of btns.slice(0, MAX)) {
+      const r = b.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) { ng.push({ k: 3, why: '大きさが0です', el: name(b) }); continue; }
+      if (r.left > vw - 2 || r.right < 2) { ng.push({ k: 3, why: '画面の横の外にあります', el: name(b) }); continue; }
+      b.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      const r2 = b.getBoundingClientRect(), hit = document.elementFromPoint(r2.left + r2.width / 2, r2.top + Math.min(r2.height / 2, 8));
+      if (hit && !b.contains(hit) && !hit.contains(b) && !hit.closest('.smd-guide-tip')) ng.push({ k: 3, why: 'ほかの物の下に隠れています（上にある物：' + name(hit) + '）', el: name(b) });
+      const g = (b.getAttribute('data-guide') || b.getAttribute('title') || b.getAttribute('aria-label') || '').trim();
+      if (!g && !/^(SELECT|A)$/.test(b.tagName)) ng.push({ k: 5, why: 'かざすと出る説明がありません', el: name(b) });
+    }
+    /* 4 字が切れているボタン */
+    btns.forEach(el => { const cs = getComputedStyle(el); if ((cs.textOverflow === 'ellipsis' || /(hidden|clip)/.test(cs.overflowX)) && el.scrollWidth > el.clientWidth + 1) ng.push({ k: 4, why: '字が切れています（' + el.scrollWidth + 'px／' + el.clientWidth + 'px）', el: name(el) }); });
+    /* 6 次にやることの1個目 */
+    if (opts.expectFirst != null) { const box = page.querySelector('.pa2-next, [data-ui-next]'); const fb = box && [...box.querySelectorAll('button')].find(shown); const got = fb ? (fb.innerText || '').replace(/\s+/g, ' ').trim() : '';
+      if (!fb) ng.push({ k: 6, why: '次にやることの箱か1個目のボタンがありません' }); else if (got.indexOf(String(opts.expectFirst)) < 0) ng.push({ k: 6, why: '次にやることの1個目が合っていません（出すはず：' + opts.expectFirst + '・出ている：' + got.slice(0, 40) + '）' }); }
+    else info.push('6 は opts.expectFirst を渡すと見ます');
+    /* 7 同じボタンが2か所（行ごとにくり返す物＝表の中・カードの中は外す） */
+    const seen = {};
+    btns.forEach(b => { if (b.closest('[data-ui-dup-ok], tr, .pa2-card, .llog-ccgrid, .llc-work, li')) return; const key = (b.innerText || '').replace(/\s+/g, ' ').replace(/[\d,.¥]+/g, '#').trim().slice(0, 40); if (!key || key.length < 2) return; (seen[key] = seen[key] || []).push(b); });
+    Object.keys(seen).forEach(k => { if (seen[k].length > 1) ng.push({ k: 7, why: '同じボタンが ' + seen[k].length + ' か所にあります（' + k + '）', el: seen[k].slice(0, 3).map(name).join(' ／ ') }); });
+    window.scrollTo(sx, sy);
+    const head = '🧪 ポータルの UI の点検（' + (page.id || '') + (state && state.page ? '・' + state.page : '') + '・' + new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }) + '）：NG ' + ng.length + '件';
+    const byK = {}; ng.forEach(x => { byK[x.k] = (byK[x.k] || 0) + 1; });
+    return { ok: ng.length === 0, ng, info, byK, nBtn: btns.length, text: [head, '種類ごと：' + JSON.stringify(byK)].concat(ng.slice(0, 80).map(x => '・[' + x.k + '] ' + x.why + (x.el ? '：' + x.el : '')), info.map(x => '（' + x + '）')).join('\n') };
+  };
   (function smdGuideInit() {
     if (window.__smdGuideOn) return; window.__smdGuideOn = true;
     const st = document.createElement('style');
