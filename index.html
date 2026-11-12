@@ -28247,6 +28247,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-12', items: [
+      '🏪 <b>出品ログの「アカウントごとの件数」と「アカウントごとの列」に、その日0件の店も出すようにしました</b>（本人「第３アカウントがないですよ」）。🔑登録簿にある店は全部、0件なら薄く出します。TW の3店舗目（登録簿の名前が manekineko_japan）も第3 maneki_neko_japan に数えます。',
       '🩹 <b>上の「対象アカウント」を切り替えた直後、出品ログが前の店の数のまま描き変わらなかったのを直しました</b>（出品データを読み直している間、入れ先のカタログを束ねる所で止まっていました）。',
       '🏪 <b>出品ログ（🆕出品管理 ▸ 出品ログ）を、アカウント（店）ごとに見られるようにしました</b>（本人「これ、アカウントごとにみれるようにってcodexかclaudeに指示したけど」）。①画面のいちばん上の「対象アカウント」で店や系統を選ぶと、日ごとの棒グラフ・今日／今月などの数字・その日に出した商品・🤖の表・🤖自動出品の収支が、全部その店の分だけになります（AI料金は店ごとに分けられないので、店を選んでいる時は回収率を出しません）。②その日に出した商品の段に「アカウントごとの件数」（第1 gcsonlinestore／第2 gs_japan_select／第3 maneki_neko_japan と、国の中の店ごと）を足しました。押すとその店だけに絞り込みます。③並べ方に「アカウントごとの列」を足しました（列＝店・行＝作品）。店は出品データの shop_id から引き、名前は🔑登録簿の名前です。出品データに店が見つからない明細は「不明」に入ります。',
       '🛑 <b>🤖がブレーキで3時間以上止まっている台を、上のバーに赤で出します</b>（いつから・理由）。押すと 🤖 自動出品の画面を開きます。2台目が約2日半止まったまま気づけなかったための直しです。',
@@ -45270,7 +45271,11 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   const llFamRank = (f) => { const i = LL_FAM_ORD.indexOf(f); return i < 0 ? 99 : i; };
   const llFamNo = (f) => { const i = LL_FAM_ORD.indexOf(f); return i < 0 ? '' : '第' + (i + 1) + ' '; };
   const llShopCc = (sid) => { const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid)); return a ? String(a.cc || '').toUpperCase() : ''; };
-  const llShopFam = (sid) => famOfLabel(acctLabel(sid) || '') || ('店 ' + sid);
+  /* ★2026-11-12 本人「第３アカウントがないですよ」：TW の3店舗目は登録簿の名前が manekineko_japan（他の国は maneki_neko_japan）＝同じ第3として数える */
+  const LL_FAM_ALIAS = { manekineko_japan: 'maneki_neko_japan' };
+  const llShopFam = (sid) => { const f = famOfLabel(acctLabel(sid) || ''); return LL_FAM_ALIAS[f] || f || ('店 ' + sid); };
+  /* 🔑登録簿にある店（出品ログの7か国）。その日0件でも丸と列を出す（本人 9/24「2つ目のアカウントが出てない。表示させて」と同じ考え） */
+  const llRegShops = () => (state.accounts || []).filter(a => a && a.shop_id && REGIONS.some(r => r.cc === String(a.cc || '').toUpperCase())).map(a => String(a.shop_id));
   /* 列や丸の並び：国（REGIONS の順）→ 系統の順 → 名前。'?PH' のような「その国の不明」は国の最後 */
   function llAcctColCmp(a, b) {
     const ccs = REGIONS.map(r => r.cc);
@@ -45532,18 +45537,19 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const _llAcctBar = (() => {
       const fam = {}, shop = {}; let unk = 0;
       selRowsT.forEach(r => { const sid = llShopOf(r.cc, r.item_id); if (!sid) { unk++; return; } const f = llShopFam(sid); fam[f] = (fam[f] || 0) + 1; shop[sid] = (shop[sid] || 0) + 1; });
+      llRegShops().forEach(sid => { if (!(sid in shop)) shop[sid] = 0; const f = llShopFam(sid); if (!(f in fam)) fam[f] = 0; });   /* 0件の店も出す（薄く） */
       const fams = Object.keys(fam).sort((a, b) => (llFamRank(a) - llFamRank(b)) || a.localeCompare(b));
       const on = (k) => _llAF === k ? 'background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700' : '';
       const _cc0 = (cc) => (regionByCc(cc) || {}).color || '#888';   /* ccColor はこの後で宣言＝ここでは使えない（TDZ） */
-      const btn = (k, inner, tip) => `<button class="smd-btn llog-acctf" data-a="${av(k)}" data-guide-name="出品ログ：アカウントで絞り込み" data-guide="${av(tip)}" style="font-size:11px;border-radius:12px;padding:2px 9px;${on(k)}">${inner}</button>`;
+      const btn = (k, inner, tip, zero) => `<button class="smd-btn llog-acctf" data-a="${av(k)}" data-guide-name="出品ログ：アカウントで絞り込み" data-guide="${av(tip + (zero ? '（この日は0件）' : ''))}" style="font-size:11px;border-radius:12px;padding:2px 9px;${zero && _llAF !== k ? 'opacity:.5;' : ''}${on(k)}">${inner}</button>`;
       let h = `<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-top:6px"><b style="font-size:12px" data-guide-name="アカウントごとの件数" data-guide="この日に出した明細を、どの店（アカウント）のカタログに入ったかで数えます。店＝出品データの shop_id、名前は🔑登録簿の名前。押すとその店の分だけに絞り込みます">アカウントごとの件数</b>`
         + btn('', `すべて <b>${selRowsT.length}</b>件`, '店で絞り込まずに全部出します')
-        + fams.map(f => btn('fam:' + f, `${esc(llFamNo(f))}${esc(f)} <b>${fam[f]}</b>件`, f + ' の全部の国の店の分だけに絞り込みます')).join('')
+        + fams.map(f => btn('fam:' + f, `${esc(llFamNo(f))}${esc(f)} <b>${fam[f]}</b>件`, f + ' の全部の国の店の分だけに絞り込みます', !fam[f])).join('')
         + (unk ? btn('unk', `不明 <b>${unk}</b>件`, '出品データに店が見つからない明細（消したカタログ・まだ出品データに取り込まれていない新しいカタログ等）だけに絞り込みます') : '')
         + `</div>`;
       const sids = Object.keys(shop).sort(llAcctColCmp);
       if (sids.length) h += `<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-top:4px"><b style="font-size:11px;color:#5a6b8c">国の中の店</b>`
-        + sids.map(sid => { const cc = llShopCc(sid); return btn(sid, `<b style="color:${_cc0(cc)}">${esc(cc || '?')}</b> ${esc(llShopFam(sid))} <b>${shop[sid]}</b>件`, '🏪 ' + (acctLabel(sid) || ('店 ' + sid)) + ' の分だけに絞り込みます'); }).join('')
+        + sids.map(sid => { const cc = llShopCc(sid); return btn(sid, `<b style="color:${_cc0(cc)}">${esc(cc || '?')}</b> ${esc(llShopFam(sid))} <b>${shop[sid]}</b>件`, '🏪 ' + (acctLabel(sid) || ('店 ' + sid)) + ' の分だけに絞り込みます', !shop[sid]); }).join('')
         + `</div>`;
       if (!logState.shopMap) h += `<div style="font-size:11px;color:#b26a00;margin-top:3px">⏳ 店の情報（出品データの shop_id）を読み込み中です。読み終わるまで多くが「不明」に入ります</div>`;
       if (_llAF && !selRows.length) h += `<div style="font-size:11px;color:#b26a00;margin-top:3px">この日は、選んだ店に出した明細がありません（「すべて」で絞り込みを外せます）</div>`;
@@ -45602,6 +45608,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         /* ★2026-11-12 事業本部：列＝店（国→第1・第2・第3の順、店が分からない明細はその国の「不明」の列）・行＝作品 */
         const byW = new Map(), cntA = {};
         pairs.forEach(p => { const col = p[4] || ('?' + p[0]); cntA[col] = (cntA[col] || 0) + 1; const k = (p[2] || p[1]) + '|' + String(p[3] || ''); if (!byW.has(k)) byW.set(k, {}); byW.get(k)[col] = p[1]; });
+        llRegShops().forEach(sid => { if (!(sid in cntA)) cntA[sid] = 0; });   /* ★2026-11-12 本人「第３アカウントがないですよ」＝0件の店も列を出す */
         const colsA = Object.keys(cntA).sort(llAcctColCmp);
         if (colsA.length > 1) {
           const gapA = `<div style="border:1px dashed #e0e3e7;border-radius:8px;min-height:60px;height:100%;background:#fbfbfc;display:flex;align-items:center;justify-content:center;text-align:center;color:#b6bcc4;font-size:10px;line-height:1.3" title="この日は、この店にはこの商品を出していません">この日は<br>この店に出していない</div>`;
@@ -45609,7 +45616,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           const minA = Math.max(150, Math.min(210, Math.floor((wA - 44 - 8 * (colsA.length - 1)) / colsA.length)));
           const fitA = minA * colsA.length + 8 * (colsA.length - 1) <= wA - 20;
           const headA = (col) => { const unkC = col.charAt(0) === '?'; const cc = unkC ? col.slice(1) : llShopCc(col); const nm = unkC ? '不明' : llShopFam(col);
-            return `<div style="position:sticky;top:0;z-index:3;background:#fff;border-bottom:3px solid ${ccColor(cc)};padding:4px 6px;font-weight:800;color:${ccColor(cc)};font-size:12.5px" title="${av(unkC ? '出品データに店が見つからない明細（消したカタログ・取り込み前の新しいカタログ等）' : ('🏪 ' + (acctLabel(col) || col)))}">${esc(cc)} <span style="color:${unkC ? '#8a8f98' : (llFamRank(nm) === 0 ? '#2b6cb0' : '#7b52c4')};font-size:11px">${esc(nm)}</span> <span style="color:#333;font-weight:700">${cntA[col]}件</span></div>`; };
+            return `<div style="position:sticky;top:0;z-index:3;background:#fff;border-bottom:3px solid ${ccColor(cc)};padding:4px 6px;font-weight:800;color:${ccColor(cc)};font-size:12.5px" title="${av(unkC ? '出品データに店が見つからない明細（消したカタログ・取り込み前の新しいカタログ等）' : ('🏪 ' + (acctLabel(col) || col)))}">${esc(cc)} <span style="color:${unkC ? '#8a8f98' : (llFamRank(nm) === 0 ? '#2b6cb0' : '#7b52c4')};font-size:11px">${esc(nm)}</span> <span style="color:${cntA[col] ? '#333' : '#b6bcc4'};font-weight:700">${cntA[col]}件</span></div>`; };
           return head + `<div class="llog-ccgrid" style="display:grid;grid-template-columns:repeat(${colsA.length},${fitA ? 'minmax(0,1fr)' : 'minmax(' + minA + 'px,1fr)'});gap:8px;margin-top:7px;overflow-x:auto;align-items:stretch">`
             + colsA.map(headA).join('') + [...byW.values()].map(m => colsA.map(c => m[c] || gapA).join('')).join('') + `</div>`;
         }
