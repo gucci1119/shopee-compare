@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261113-0600'
+var SRC_VER = '20261113-0700'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -3303,6 +3303,19 @@ function priceUnlockPromo_(shopId, itemId, opt) {
   var it = (((gj || {}).response || {}).success_list || [])[0] || {};
   /* ★2026-11-13 中7：keepDiscount の時は、値下げ（Discount）が1つでもあれば何も外さずに返す（呼び元が失敗にする） */
   if (opt && opt.keepDiscount && (it.promotion || []).some(function (pr) { var stg = String(pr.promotion_staging || ''); return /discount/i.test(String(pr.promotion_type || '')) && (!stg || /ongoing|upcoming/i.test(stg)); })) { out.other.push('値下げ（Discount）に入っている＝裏の書き込みでは外さない'); return out; }
+  /* ★2026-11-13 事業本部（本人 10/22「都度外したり付けたりすればいいのでは？」）＋review-yaku：needSnap（明細の追加）の時は、何かを外す前に全部の値下げの控え（明細ごとの値下げの値段・名前・元の値段）を取り、
+     サーバー（app_kv promo_disc_snap）にも書く。1つでも取れない・書けない時は何も外さない。戻せたら控えを消す（残った控えはポータルの🔔に出る） */
+  if (opt && opt.needSnap) {
+    out.discountSnap = {};
+    var dps = (it.promotion || []).filter(function (pr) { var stg = String(pr.promotion_staging || ''); return /discount/i.test(String(pr.promotion_type || '')) && (!stg || /ongoing|upcoming/i.test(stg)); });
+    for (var di = 0; di < dps.length; di++) {
+      var dpid = Number(dps[di].promotion_id), sn0 = null; try { sn0 = discountItemSnap_(shopId, dpid, itemId); } catch (eSn) { sn0 = null; }
+      if (!sn0) { out.other.push('値下げ（' + dpid + '）の元の値段を読めない＝外さない'); return out; }
+      out.discountSnap[dpid] = sn0;
+    }
+    if (dps.length) { try { sbUpsert_('app_kv', [{ k: promoSnapKey_(shopId, itemId), v: { at: new Date().toISOString(), shop: String(shopId), item: String(itemId), cc: (function () { try { return baCcOfShop_(shopId); } catch (eC) { return ''; } })(), snaps: out.discountSnap }, updated_at: new Date().toISOString() }], 'k'); }   /* 品物ごとの鍵＝2台が同時でも互いの控えを消さない */
+      catch (eW0) { out.other.push('値下げの控えをサーバーに書けない＝外さない'); return out; } }
+  }
   (it.promotion || []).forEach(function (pr) {
     var ty = String(pr.promotion_type || ''), pid = Number(pr.promotion_id), stg = String(pr.promotion_staging || '');
     if (stg && !/ongoing|upcoming/i.test(stg)) return;
@@ -3311,8 +3324,10 @@ function priceUnlockPromo_(shopId, itemId, opt) {
         if (((dj.response || {}).success_list || []).length) out.bundleOut.push(pid); else out.other.push('まとめ買い割引から外せない ' + JSON.stringify((dj.response || {}).failed_list || dj).slice(0, 80)); }
       catch (e1) { if (avStillInPromo_(shopId, itemId, pid) === false) out.bundleOut.push(pid); else out.other.push('まとめ買い割引から外せない ' + String(e1.message || e1).slice(0, 80)); }   /* ★2026-11-05 洗い出し9：例外でも外れていることがある＝読み直して外れていれば「外した」に数える（後で戻す一覧に載る） */
     } else if (/discount/i.test(ty)) {
+      var snap = (out.discountSnap || {})[pid] || null;
+      try { delete DISC_PAGE_CACHE[String(shopId) + '|' + String(pid)]; } catch (eDc) {}   /* 外すと並びが変わる＝読み置きを捨てる */
       try { callShop_(shopId, '/api/v2/discount/delete_discount_item', null, 'post', { discount_id: pid, item_id: parseInt(itemId, 10) }); out.discountOut.push(pid); }
-      catch (e2) { if (avStillInPromo_(shopId, itemId, pid) === false) out.discountOut.push(pid); else out.other.push('値下げから外せない ' + String(e2.message || e2).slice(0, 80)); }
+      catch (e2) { var st2 = avStillInPromo_(shopId, itemId, pid); if (st2 === false || (st2 === null && snap)) out.discountOut.push(pid); else out.other.push('値下げから外せない ' + String(e2.message || e2).slice(0, 80)); }   /* 外れたか読めない時も、控えがあれば戻しを試す（まだ入っていれば戻しが断られて🔔に出る） */
     } else out.other.push(ty || '不明な販促');
   });
   return out;
@@ -3367,12 +3382,74 @@ function updateWeightSafe_(shopId, itemId, kg) {
   return { ok: !!(a2 && same(a2.w)), how: 'bundle', weight: a2 ? a2.w : a1.w, before: b0, r1: r1, r2: r2, modelBefore: mw, bundleOut: out, bundleOutErr: outErr, bundleBack: back, bundleBackErr: backErr, otherPromo: others };
 }
 /* 外したまとめ買い割引に戻す（値下げは戻さない） */
-function priceRelockPromo_(shopId, itemId, promo) {
+/* 値下げ（discount_id）の中のこの品物の中身（明細ごとの値下げの値段・購入の上限）を読む。10ページ（1,000品）まで。見つからなければ null */
+function promoSnapKey_(shopId, itemId) { return 'promo_disc_snap_' + String(shopId) + '_' + String(itemId); }
+var DISC_PAGE_CACHE = {};   /* この実行の中で読んだ値下げのページ（discount_id → {pages:[item_list...], done}）＝同じ値下げの品物を続けて足す時に読み直さない */
+function discountItemSnap_(shopId, discountId, itemId) {
+  var iid = String(parseInt(itemId, 10)), ck = String(shopId) + '|' + String(discountId), C = DISC_PAGE_CACHE[ck] || (DISC_PAGE_CACHE[ck] = { pages: [], done: false });
+  for (var pg = 1; pg <= 10; pg++) {
+    var list;
+    if (C.pages[pg - 1]) list = C.pages[pg - 1];
+    else { if (C.done) break;
+      var j = callShop_(shopId, '/api/v2/discount/get_discount', { discount_id: Number(discountId), page_no: pg, page_size: 100 }, 'get');
+      if (j && j.error) throw new Error(String(j.error) + ' ' + String(j.message || '').slice(0, 80));
+      var r = (j && j.response) || {}; list = r.item_list || []; C.pages[pg - 1] = list; if (!r.more) C.done = true; }
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i]; if (String(it.item_id) !== iid) continue;
+      var ms = (it.model_list || []).filter(function (m) { return m && Number(m.model_id) > 0 && Number(m.model_promotion_price) > 0; }).map(function (m) { return { model_id: Number(m.model_id), model_promotion_price: Number(m.model_promotion_price), _name: String(m.model_name || ''), _orig: Number(m.model_original_price) || 0 }; });   /* _name・_orig は戻す前の照らし用（送らない） */
+      var o = { item_id: parseInt(iid, 10), purchase_limit: Number(it.purchase_limit) || 0 };
+      if (ms.length) o.model_list = ms; else if (Number(it.item_promotion_price) > 0) { o.item_promotion_price = Number(it.item_promotion_price); o._orig = Number(it.item_original_price) || 0; } else return null;
+      return o;
+    }
+    if (C.done && pg >= C.pages.length) break;
+  }
+  return null;
+}
+/* opt.restoreDiscount＝外した値下げにも、控えた明細だけを元の値段で戻す（🤖・ポータルの明細の追加・値段の書き込みの失敗の時）。
+   値段の書き込み（updatePriceList_）は前からの決めどおり値下げを戻さない（控えも取らない）。戻せなかった物は promo_back_skip（🔔）へ */
+function priceRelockPromo_(shopId, itemId, promo, opt) {
   (promo.bundleOut || []).forEach(function (pid) {
     try { var aj = callShop_(shopId, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: pid, item_list: [{ item_id: parseInt(itemId, 10), status: 1 }] });
       if (((aj.response || {}).success_list || []).length) promo.bundleBack.push(pid); else promo.bundleBackErr.push(pid + ' ' + JSON.stringify((aj.response || {}).failed_list || aj).slice(0, 100)); }
     catch (e) { promo.bundleBackErr.push(pid + ' ' + String(e.message || e).slice(0, 100)); }
   });
+  if (opt && opt.restoreDiscount && (promo.discountOut || []).length) {
+    promo.discountBack = promo.discountBack || []; promo.discountBackErr = promo.discountBackErr || [];
+    var curMs = null; try { curMs = (getModels_(shopId, itemId) || {}).models || []; } catch (eGm) { curMs = null; }
+    var nzN = function (t) { return String(t || '').trim().toLowerCase().replace(/\s+/g, ' '); };
+    var okBack = [];
+    (promo.discountOut || []).forEach(function (pid) {
+      if (promo.discountBack.indexOf(pid) >= 0) return;
+      var snap = (promo.discountSnap || {})[pid];
+      if (!snap) { promo.discountBackErr.push(pid + ' 元の値段の控えが無い'); return; }
+      var send = { item_id: snap.item_id, purchase_limit: snap.purchase_limit };
+      if (snap.model_list) {
+        /* ★review-yaku 中5：model_id だけで戻さない＝今の明細の名前と元の値段が控えと合い、値下げの値段が今の値段より低い明細だけ戻す（詰め直しで同じ番号に別の作品が入った時に安く売らない） */
+        if (!curMs) { promo.discountBackErr.push(pid + ' 今の明細を読めない＝戻していない（控え ' + snap.model_list.map(function (m) { return (m._name || m.model_id) + '→' + m.model_promotion_price; }).join('・').slice(0, 120) + '）'); return; }
+        var keepM = [], skipM = [];
+        snap.model_list.forEach(function (m) { var c = curMs.filter(function (x) { return Number(x.model_id) === m.model_id; })[0], cp = c ? Number(c.price) : 0;
+          if (c && m._name && nzN(c.name) === nzN(m._name) && (!m._orig || Math.abs(cp - m._orig) <= Math.max(0.01, m._orig * 0.01)) && m.model_promotion_price < cp) keepM.push({ model_id: m.model_id, model_promotion_price: m.model_promotion_price });   /* 名前が空の時は戻さない（番号だけで結び付けない） */
+          else skipM.push((m._name || m.model_id) + '→' + m.model_promotion_price); });
+        if (skipM.length) promo.discountBackErr.push(pid + ' 名前か元の値段が変わった明細は戻していない：' + skipM.join('・').slice(0, 120));
+        if (!keepM.length) return;
+        send.model_list = keepM;
+      } else { if (curMs && curMs.some(function (x) { return Number(x.model_id) > 0; })) { promo.discountBackErr.push(pid + ' 前は明細の無い品物だった（今は明細がある）＝品物全体の値段では戻していない（控え ' + snap.item_promotion_price + '）'); return; } send.item_promotion_price = snap.item_promotion_price; }
+      var ok = false, em = '', part = ''; try { delete DISC_PAGE_CACHE[String(shopId) + '|' + String(pid)]; } catch (eDc2) {}
+      try { var dj = callShop_(shopId, '/api/v2/discount/add_discount_item', null, 'post', { discount_id: Number(pid), item_list: [send] });
+        var el = ((dj && dj.response) || {}).error_list || [];
+        if (dj && dj.error) em = String(dj.error) + ' ' + String(dj.message || '').slice(0, 80);
+        else if (el.length) { part = el.slice(0, 3).map(function (x) { return String(x.model_id || '') + ' ' + String(x.fail_error || '') + ' ' + String(x.fail_message || '').slice(0, 60); }).join(' / '); if (el.length < (send.model_list || [1]).length) ok = true; else em = part; }   /* 一部だけ断られた時は戻せた扱いにしつつ、断られた明細は🔔へ */
+        else ok = true; }
+      catch (eD) { em = String((eD && eD.message) || eD).slice(0, 100); }
+      if (!ok && avStillInPromo_(shopId, itemId, pid) === true) { ok = true; if (!(part && em !== part)) part = ''; }   /* 例外・全部の断りの時は読み直す（入っていれば「もう入っていた」＝🔔に出さない）。一部の断りは下で🔔へ */
+      if (part && ok) promo.discountBackErr.push(pid + ' 一部の明細は値下げに戻せませんでした：' + part);   /* ★review-yaku 中6：送り直しで「もう入っている」と断られた時・2台が同時に戻した時は、読み直して入っていれば戻せた扱い */
+      if (ok) { promo.discountBack.push(pid); okBack.push(pid); } else promo.discountBackErr.push(pid + ' ' + em);
+    });
+    if (promo.discountBackErr.length) { try { var cc0 = ''; try { cc0 = baCcOfShop_(shopId); } catch (eCc) {} var pb = baKvFresh_('promo_back_skip'); if (BA_KV_FAIL['promo_back_skip']) throw new Error('promo_back_skip を読めない'); pb = pb || {}; var arr = Array.isArray(pb.items) ? pb.items : [];
+      arr.unshift({ at: new Date().toISOString(), cc: cc0, shop: String(shopId), item: String(itemId), r: '値下げに戻せませんでした：' + promo.discountBackErr.join(' ／ ').slice(0, 400), snaps: promo.discountSnap || null });   /* 元の値下げの値段（控え）ごと積む */ baKvSet_('promo_back_skip', { items: arr.slice(0, 100), at: new Date().toISOString() }); promo._pbOk = true; } catch (eW) { Logger.log('promo_back_skip を書けませんでした ' + String(eW).slice(0, 100)); } }
+  }
+  /* 戻す番が全部うまくいったら品物の控えを消す。戻せなかった物がある・途中で止まった時は控えを残す（ポータルの🔔に出る） */
+  if (opt && opt.restoreDiscount && promo.discountSnap && Object.keys(promo.discountSnap).length && !(promo.discountBackErr || []).length) { try {   /* ★3回目の確かめ 1：戻せなかった物が1つでもあれば控えを消さない（🔔にも控えごと積んだ・🔔を片付けた時に消す） */ sbDelete_('app_kv', 'k=eq.' + encodeURIComponent(promoSnapKey_(shopId, itemId))); } catch (eCl) { Logger.log('値下げの控えを消せませんでした ' + String(eCl).slice(0, 80)); } }
   return promo;
 }
 // ★在庫を複数モデルまとめて更新（update_stock stock_list）。list=[{model_id,stock}]
@@ -5095,16 +5172,16 @@ function addVariationsBulkP_(shopId, itemId, items, jobKey) {
     var _first = (BA_ADD_OLD_FIRST && BA_ADD_OLD_FIRST.k === parseInt(shopId, 10) + '|' + parseInt(itemId, 10)) ? BA_ADD_OLD_FIRST.ids : null;   /* 1回目の頭で取った「前からの番号」 */
     var em = String((e && e.message) || e);
     if (!/in_promotion|has promotion/i.test(em) || /巻き戻していません|状態が分かりません/.test(em)) throw e;   /* ★2026-11-05 洗い出し3：明細が入っていた知らせの中の断り文で、販促を外しに行かない */
-    var promo = priceUnlockPromo_(shopId, itemId);
-    var note = function (stage) { try { var lg = baKvFresh_('promo_unlock_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), shop: String(shopId), item: String(itemId), stage: stage, bundleOut: promo.bundleOut, bundleBack: promo.bundleBack, bundleBackErr: (promo.bundleBackErr || []).slice(0, 3), discountOut: promo.discountOut, other: promo.other.slice(0, 3) }); lg.items = a.slice(0, 80); baKvSet_('promo_unlock_log', lg); } catch (eN) {} };
-    var backTxt = function () { var nb = (promo.bundleOut || []).length, bb = (promo.bundleBack || []).length; return (nb ? (bb === nb ? 'まとめ買い割引は戻しました' : '⚠まとめ買い割引を戻せませんでした（' + (nb - bb) + '件・promo_unlock_log）') : '') + ((promo.discountOut || []).length ? '・値下げ ' + promo.discountOut.length + '件は外したまま' : ''); };
-    if (promo.other.length || (!promo.bundleOut.length && !promo.discountOut.length)) { priceRelockPromo_(shopId, itemId, promo); note('cannot_unlock'); throw new Error('promo_hard: ' + clean(em).slice(0, 160) + ' ／販促を外せませんでした: ' + clean(promo.other.join(',') || String(promo.raw || '')).slice(0, 160) + ' ' + backTxt()); }
+    var promo = priceUnlockPromo_(shopId, itemId, { needSnap: true });
+    var note = function (stage) { try { var lg = baKvFresh_('promo_unlock_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), shop: String(shopId), item: String(itemId), stage: stage, bundleOut: promo.bundleOut, bundleBack: promo.bundleBack, bundleBackErr: (promo.bundleBackErr || []).slice(0, 3), discountOut: promo.discountOut, discountBack: promo.discountBack || [], discountBackErr: (promo.discountBackErr || []).slice(0, 3), other: promo.other.slice(0, 3) }); lg.items = a.slice(0, 80); baKvSet_('promo_unlock_log', lg); } catch (eN) {} };
+    var backTxt = function () { var nb = (promo.bundleOut || []).length, bb = (promo.bundleBack || []).length, nd = (promo.discountOut || []).length, db = (promo.discountBack || []).length; return (nb ? (bb === nb ? 'まとめ買い割引は戻しました' : '⚠まとめ買い割引を戻せませんでした（' + (nb - bb) + '件・promo_unlock_log）') : '') + (nd ? ((db === nd && !(promo.discountBackErr || []).length) ? '・値下げも戻しました' : '・⚠値下げを一部戻せませんでした（🔔）') : ''); };
+    if (promo.other.length || (!promo.bundleOut.length && !promo.discountOut.length)) { priceRelockPromo_(shopId, itemId, promo, { restoreDiscount: true }); note('cannot_unlock'); throw new Error('promo_hard: ' + clean(em).slice(0, 160) + ' ／販促を外せませんでした: ' + clean(promo.other.join(',') || String(promo.raw || '')).slice(0, 160) + ' ' + backTxt()); }
     Utilities.sleep(1500);
     var r;
     try { r = addVariationsBulk0_(shopId, itemId, items, jobKey, _first); }
-    catch (e2) { priceRelockPromo_(shopId, itemId, promo); note('retry_failed'); throw new Error('promo_hard: ' + clean((e2 && e2.message) || e2).slice(0, 200) + ' ／販促から外して再送しても失敗（' + backTxt() + '）'); }
-    priceRelockPromo_(shopId, itemId, promo);
-    if ((promo.bundleBack || []).length < (promo.bundleOut || []).length || (promo.discountOut || []).length) note('added');
+    catch (e2) { priceRelockPromo_(shopId, itemId, promo, { restoreDiscount: true }); note('retry_failed'); throw new Error('promo_hard: ' + clean((e2 && e2.message) || e2).slice(0, 200) + ' ／販促から外して再送しても失敗（' + backTxt() + '）'); }
+    priceRelockPromo_(shopId, itemId, promo, { restoreDiscount: true });   /* ★11/13 値下げも戻す */
+    if ((promo.bundleBack || []).length < (promo.bundleOut || []).length || (promo.discountBack || []).length < (promo.discountOut || []).length || (promo.discountOut || []).length) note('added');
     try { r = r || {}; r.promo = { bundleOut: promo.bundleOut.length, bundleBack: promo.bundleBack.length, discountOut: promo.discountOut.length, backErr: (promo.bundleBackErr || []).slice(0, 2), text: backTxt() }; } catch (eP) {}
     return r;
   }
@@ -5358,7 +5435,7 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) 
     catch (eA1) {
       var emA = String((eA1 && eA1.message) || eA1);
       if (!/in_promotion|has promotion/i.test(emA)) throw eA1;
-      _promo = priceUnlockPromo_(shopId, itemId);
+      _promo = priceUnlockPromo_(shopId, itemId, { needSnap: true });
       if (_promo.other.length || (!_promo.bundleOut.length && !_promo.discountOut.length)) throw new Error('販促中で足せません。販促を外せませんでした: ' + String(_promo.other.join(',') || _promo.raw || '').slice(0, 160));
       Utilities.sleep(1500);
       am = addModel_(shopId, itemId, [model]);
@@ -5378,8 +5455,8 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) 
     }
   } finally {
     if (_promo) {
-      priceRelockPromo_(shopId, itemId, _promo);
-      try { var lg = baKvFresh_('promo_unlock_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), shop: String(shopId), item: String(itemId), stage: 'add_variation', bundleOut: _promo.bundleOut, bundleBack: _promo.bundleBack, bundleBackErr: (_promo.bundleBackErr || []).slice(0, 3), discountOut: _promo.discountOut, other: _promo.other.slice(0, 3) }); lg.items = a.slice(0, 80); baKvSet_('promo_unlock_log', lg); } catch (eN) {}
+      priceRelockPromo_(shopId, itemId, _promo, { restoreDiscount: true });   /* ★11/13 値下げも戻す */
+      try { var lg = baKvFresh_('promo_unlock_log') || {}; var a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), shop: String(shopId), item: String(itemId), stage: 'add_variation', bundleOut: _promo.bundleOut, bundleBack: _promo.bundleBack, bundleBackErr: (_promo.bundleBackErr || []).slice(0, 3), discountOut: _promo.discountOut, discountBack: _promo.discountBack || [], discountBackErr: (_promo.discountBackErr || []).slice(0, 3), other: _promo.other.slice(0, 3) }); lg.items = a.slice(0, 80); baKvSet_('promo_unlock_log', lg); } catch (eN) {}
     }
   }
   var nm = ((am && am.model) || [])[0] || {};
