@@ -28339,6 +28339,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-12', items: [
+      '🏷 <b>値付けの見直しの「➕ このカタログの②を作って移す」の番号と店を、🤖と同じ決め方にしました</b>（事業本部）：番号は国の全部の店・公開も非公開ものカタログで数え、今の番号の次から使っていない番号にします（前は画面の一覧で数えていて、上の対象アカウントで店を絞っていると重なることがありました）。元の店の出品枠が満杯（空き5以下）の時は、同じ国の空きのある店（本店→2店舗目）に作ります。全部満杯なら作りません。',
       '✂ <b>まとめで出した見積もりを、品物ごとの明細に分けられるようにしました（Smart Reply などから呼ぶ口）</b>（本人「一回この『まとめ購入』のリンクで出したのを分けろって言われてるんだけど、その分ける機能とかも欲しい」）：①まとめの品物ごとに値段（本人が直した額）を渡すと、その値段で1明細ずつ足し、まとめ買い割引は入れません（SKU は REQ_番号-1・-2…）②試し（dry=1）で、入れ先・明細名・値段・SKU・止まる所を Shopee に書かずに返します ③元のまとめの明細を在庫0にする口（本人がボタンを押した時だけ・Request page の REQ_ の明細だけ・sold や注文〔取り消し以外〕が付いていれば断って理由を返す・消す口は作らない）。',
       '📶 <b>出品ログの自動の反映が10分ごとに丸読みを繰り返していたのを止めました</b>（Supabase の通信量・事業本部）：11/11 2時〜11/12 16時、出品ログへの書き込みが毎回「項目がそろっていない（PGRST102）」で断られ、そのたびに出品（明細付き）と出品ログを丸ごと読み直していました（1日 約48回→約166回）。①仮の行（明細の番号0）の日付も読み、日付が空の行を作らない ②失敗したら30分あけてやり直し、理由を画面に出す。',
       '🏪 <b>上の「対象アカウント」で第3（maneki_neko_japan）を選ぶと、TW の店（登録簿の名前は manekineko_japan）も入るようにしました</b>。登録簿の名前は変えていません。注文・アクセス・損益・出品ログなど、同じ選択欄を使う画面は全部同じです。',
@@ -48756,12 +48757,27 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!list.length) {
           /* ★2026-10-22 本人「ない場合は、この値段の差がある別のカタログへ移すというのは作ってくれるのだろうか？」：
              移せる家族のカタログが無い時は、元のカタログを複製して次の番号（②…・国の全店で数える）を作り、そこへ移す。作ったカタログは公開（本人 10/22「非公開じゃなくて公開」） */
-          const sibs = ((lst.byCc || {})[e.cc] || []).filter(x => seriesKey(x.name) === famKey);
-          const nextNo = Math.max(1, ...sibs.map(x => seriesNo(x.name) || 1)) + 1, mark = CIRC[nextNo - 1] || ('(' + nextNo + ')');
+          /* ★2026-11-12 事業本部（GAS SRC 20261112-0310 と同じ形）：番号は【国の全店・公開も非公開も】（DB の listings）で数え、今の番号の次から使っていない番号を選ぶ。
+             前は画面の一覧（lst.byCc＝上の対象アカウントで店が絞られていることがある）で数えていた＝GAS では非公開と番号の無い1冊目を数えず PH PS2 ④が重なった */
+          let ccRows = null; { const r0 = state.rawRead; state.rawRead = true; let pr0; try { pr0 = sbGetAll('listings', 'select=item_id,shop_id,status,name&cc=eq.' + e.cc); } finally { state.rawRead = r0; } ccRows = await pr0.catch(() => null); }
+          if (!Array.isArray(ccRows) || !ccRows.length) { box.innerHTML = '<span style="color:#d93025">' + esc(e.cc) + ' の全部の店のカタログを読めなかったので、番号を決められません（作りません）。少し待ってもう一度押してください</span>'; return; }
+          const usedNo = new Set(); ccRows.concat((lst.byCc || {})[e.cc] || []).forEach(x => { if (x && seriesKey(x.name) === famKey) usedNo.add(seriesNo(x.name) || 1); });
+          let nextNo = (seriesNo(srcRow.name || e.name) || 1) + 1; while (usedNo.has(nextNo) && nextNo < 40) nextNo++;
+          const mark = CIRC[nextNo - 1] || ('(' + nextNo + ')');
+          /* ★2026-11-12 事業本部：作る店。元の店が満杯（出品の上限−公開中 が5以下・GAS の baShopFull_ と同じ）なら、同じ国の空きのある店（本店→2店舗目）に作る。全部満杯なら作らない */
+          let lim0 = null; try { lim0 = await baKvGetRaw('shop_item_limit'); } catch (_) {}
+          const capOf = sh => { const r = ((lim0 && lim0.shops) || []).find(x => String(x.shop_id) === String(sh)); return Number(r && r.cap) || 0; };
+          const liveOf = sh => ccRows.filter(x => String(x.shop_id) === String(sh) && Number(x.status) === 1).length;
+          const fullOf = sh => { const c = capOf(sh); return !!c && c - liveOf(sh) <= 5; };
+          let dstShop = String(sid), dstNote = '';
+          if (fullOf(sid)) { const others = ((lim0 && lim0.shops) || []).filter(x => String(x.cc || '').toUpperCase() === String(e.cc).toUpperCase() && String(x.shop_id) !== String(sid)).sort((a1, b1) => (a1.role === 'main' ? 0 : 1) - (b1.role === 'main' ? 0 : 1));
+            const o = others.find(x => !fullOf(x.shop_id));
+            if (!o) { box.innerHTML = '<span style="color:#d93025">値段の差が合う同じ家族のカタログが無く、元の店（' + esc(String(sid)) + '・公開中 ' + liveOf(sid) + '／上限 ' + capOf(sid) + '）も ' + esc(e.cc) + ' のほかの店も出品枠が満杯なので、新しいカタログは作りません</span>'; return; }
+            dstShop = String(o.shop_id); dstNote = '元の店は満杯なので' + (o.role === 'main' ? '本店' : '2店舗目') + '（' + dstShop + '）に作る・'; }
           const cur = String(srcRow.name || e.name || ''), curMark = CIRC[(seriesNo(cur) || 1) - 1];
           let newName = (curMark && cur.includes(curMark)) ? cur.replace(curMark, mark) : (/ \| /.test(cur) ? cur.replace(/ \| (?!.* \| )/, ' ' + mark + ' | ') : cur.trim() + ' ' + mark);
           if (newName.length > 110 && / \| [^|]*$/.test(newName)) newName = newName.replace(/ \| [^|]*$/, '');   /* ★10/22 実測：長いと末尾が切れて「… ② |」になった＝「| Japonês」を落とす */
-          box.innerHTML = '<div style="color:#b06000;font-size:11px;margin:3px 0">値段の差が合う同じ家族のカタログがありません。</div><button class="smd-btn b-write pa-make2" style="font-size:11px;padding:1px 8px" title="' + esc(newName) + '">➕ このカタログの' + esc(mark) + 'を作って ' + esc(paLoc(e.cc, want)) + ' で移す（公開で作る）</button><span class="pa-make2-st" style="font-size:11px;margin-left:4px"></span>';
+          box.innerHTML = '<div style="color:#b06000;font-size:11px;margin:3px 0">値段の差が合う同じ家族のカタログがありません。</div><button class="smd-btn b-write pa-make2" style="font-size:11px;padding:1px 8px" title="' + esc(newName) + '">➕ このカタログの' + esc(mark) + 'を作って ' + esc(paLoc(e.cc, want)) + ' で移す（' + esc(dstNote) + '公開で作る）</button><span class="pa-make2-st" style="font-size:11px;margin-left:4px"></span>';
           box.querySelector('.pa-make2').addEventListener('click', async ev => {
             const bt = ev.currentTarget, st2 = box.querySelector('.pa-make2-st'); bt.disabled = true;
             const say = (h) => { st2.innerHTML = h; };
@@ -48769,23 +48785,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               const gw = await guardWriteCountries([e.cc]); if (!gw.ok) { alert(gw.msg); bt.disabled = false; return; }
               const live = await paLiveSrc(sid, e);   /* ★2026-11-03 高-5：作る前に元の明細の今の名前と在庫を確かめる */
               say('<span class="smd-dim"><span class="smd-spin"></span>' + esc(mark) + 'を作っています…</span>');
-              const cr = await gasCall({ action: 'clone_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id, name: newName }, 300000);   /* 作る時は非公開（仮の明細 test が買えてしまうので）→ 本物を入れて test を消したら最後に公開する */
+              const nsid = dstShop;   /* 新しいカタログの店（元の店が満杯なら空きのある店） */
+              const cr = nsid === String(sid) ? await gasCall({ action: 'clone_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id, name: newName }, 300000)
+                : await gasCall({ action: 'seed_shop', token: settings.writeToken, src_shop_id: sid, dst_shop_id: nsid, item_id: e.item_id, price: want, name: newName }, 300000);   /* ★11/12 別の店へは GAS の seed_shop（🤖の満杯の時と同じ口） */   /* 作る時は非公開（仮の明細 test が買えてしまうので）→ 本物を入れて test を消したら最後に公開する */
               const nid = cr && cr.item_id; if (!nid) throw new Error('カタログを作れませんでした（元はそのまま）：' + paErrJa(String((cr && cr.error) || '失敗')) + (/duplicat/i.test(String((cr && cr.error) || '')) ? '（同じ店に同じ中身と判断された＝表紙を変える必要があります）' : ''));
               say('<span class="smd-dim"><span class="smd-spin"></span>明細を入れています…</span>');
               const img = e.img ? (/^https?:/.test(e.img) ? e.img : IMG_CDN + e.img) : '';
               /* ★2026-10-22 実測：複製の仮の明細 test には画像が無い＝画像つきで足すと「最初のバリエーションは全部に画像を付けるか、全部付けない」で断られる → 画像なしで足し、test を消してから画像を付ける */
               /* ★10/22 実測：複製の test は元の一番安い値段（R$140）で入る＝R$1,006 を足すと4倍の決まりで断られる → 先に test を目標の値段にする。
                  選択肢を足した直後は「Model tier_index error」で弾かれることがある＝少し待って最大3回 */
-              try { const g0 = await openapiGetModels(sid, nid); const t0 = ((g0 && g0.models) || []).find(m => String(m.name || '').trim().toLowerCase() === 'test'); if (t0) await openapiUpdatePriceList(sid, nid, [{ model_id: t0.model_id, price: want }]); } catch (_) {}
+              try { const g0 = await openapiGetModels(nsid, nid); const t0 = ((g0 && g0.models) || []).find(m => String(m.name || '').trim().toLowerCase() === 'test'); if (t0) await openapiUpdatePriceList(nsid, nid, [{ model_id: t0.model_id, price: want }]); } catch (_) {}
               let ar = null;
-              for (let tr = 0; tr < 3; tr++) { if (tr) await new Promise(r => setTimeout(r, 8000)); ar = await openapiAddVariation(sid, nid, { option: e.vari || e.name, price: want, stock: live.stock, sku: e.sku || '' }); if (ar && ar.ok) break; if (!/tier_index/i.test(String((ar && ar.error) || ''))) break; }
+              for (let tr = 0; tr < 3; tr++) { if (tr) await new Promise(r => setTimeout(r, 8000)); ar = await openapiAddVariation(nsid, nid, { option: e.vari || e.name, price: want, stock: live.stock, sku: e.sku || '' }); if (ar && ar.ok) break; if (!/tier_index/i.test(String((ar && ar.error) || ''))) break; }
               if (!ar || !ar.ok) throw new Error(esc(mark) + '（' + nid + '）は作れましたが、明細を入れられませんでした（元はそのまま）：' + paErrJa(String((ar && ar.error) || '失敗')));
-              try { const gm = await openapiGetModels(sid, nid); const t = ((gm && gm.models) || []).find(m => String(m.name || '').trim().toLowerCase() === 'test'); if (t) await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: nid, mids: String(t.model_id), vnames: 'test' }, 300000); } catch (_) {}   // 複製の仮の明細「test」を消す
-              let imgOk = !img; if (img) { try { const ir = await openapiSetVariationImage(sid, nid, e.vari || e.name, img); imgOk = !!(ir && ir.ok); } catch (_) {} }
+              try { const gm = await openapiGetModels(nsid, nid); const t = ((gm && gm.models) || []).find(m => String(m.name || '').trim().toLowerCase() === 'test'); if (t) await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: nsid, item_id: nid, mids: String(t.model_id), vnames: 'test' }, 300000); } catch (_) {}   // 複製の仮の明細「test」を消す
+              let imgOk = !img; if (img) { try { const ir = await openapiSetVariationImage(nsid, nid, e.vari || e.name, img); imgOk = !!(ir && ir.ok); } catch (_) {} }
               /* ★2026-10-22 本人「非公開じゃなくて公開」：本物の明細を入れて test を消した後に公開する */
               /* ★2026-10-22 レビュー：test を消すのに失敗しても公開へ進むと、在庫1の「test」が買える＝Shopee を読み直して test が無い時だけ公開する */
-              let testLeft = true; try { const g2 = await openapiGetModels(sid, nid); testLeft = ((g2 && g2.models) || []).some(m => String(m.name || '').trim().toLowerCase() === 'test'); } catch (_) { testLeft = true; }
-              let pubOk = false; if (!testLeft) { try { const pr = await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: sid, item_id: nid, unlist: '0' }, 120000); pubOk = !!(pr && pr.ok); } catch (_) {} }
+              let testLeft = true; try { const g2 = await openapiGetModels(nsid, nid); testLeft = ((g2 && g2.models) || []).some(m => String(m.name || '').trim().toLowerCase() === 'test'); } catch (_) { testLeft = true; }
+              let pubOk = false; if (!testLeft) { try { const pr = await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: nsid, item_id: nid, unlist: '0' }, 120000); pubOk = !!(pr && pr.ok); } catch (_) {} }
               if (testLeft) say('<b style="color:#b06000">⚠ 仮の明細「test」が消えていない（読めなかった）ので、' + esc(mark) + 'は非公開のままにしました。Seller Center で test を消してから公開してください</b>');
               say('<span class="smd-dim"><span class="smd-spin"></span>元のカタログから消しています…</span>');
               let dr; const fr = await sbGetAll('listings', 'select=models&item_id=eq.' + e.item_id);
@@ -48794,8 +48812,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 120000);
               else dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
               /* ★2026-11-03 付け替えは gasCallShift の中で行う（2回やると1つずれる） */
-              try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: e.item_id + ',' + nid }, 120000); } catch (_) {}
-              try { logAct('価格調整', '値段の差で' + mark + 'を作って移した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), `${e.item_id}→${nid}（${newName}・公開） ${paLoc(e.cc, want)} 元から消す:${dr && dr.ok ? 'OK' : '失敗 ' + ((dr && dr.error) || '')}`); } catch (_) {}
+              try { if (nsid === String(sid)) await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: e.item_id + ',' + nid }, 120000); else { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(e.item_id) }, 120000); await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: nsid, ids: String(nid) }, 120000); } } catch (_) {}
+              try { logAct('価格調整', '値段の差で' + mark + 'を作って移した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), `${e.item_id}→${nid}（${newName}・公開・店 ${dstShop}） ${paLoc(e.cc, want)} 元から消す:${dr && dr.ok ? 'OK' : '失敗 ' + ((dr && dr.error) || '')}`); } catch (_) {}
               if (!dr || !dr.ok) { say('<b style="color:#b06000">⚠ ' + esc(mark) + 'に入れましたが、元から消せませんでした（' + esc(String((dr && dr.error) || '').slice(0, 120)) + '）。元の明細は在庫0にするか、もう一度消してください</b>'); return; }
               say('<b style="color:#1a7f37">✅ ' + esc(mark) + 'を作って移しました（' + esc(newName.slice(0, 60)) + '）' + (pubOk ? '・公開しました' : '</b><b style="color:#b06000">・⚠ 公開にできませんでした（出品一覧で公開してください）') + (imgOk ? '' : '</b><b style="color:#b06000">・⚠ 明細の写真を付けられませんでした') + '</b>');
               setTimeout(() => { PA.data = null; paRender(true); }, 2500);
