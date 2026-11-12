@@ -3464,6 +3464,21 @@
   // 公式APIで明細(モデル)一覧を読む（get_model_list）→ [{model_id,tier_index,name,sku,price,stock}]
   /* ★2026-11-03 全体レビュー 10/31 高-5：🔀移す（値付けの見直し）は起動時の古い在庫・明細名のまま移し先に「買える明細」を足していた
      （売れて在庫0になった物が在庫1で増える・詰め直しで番号が別の作品に移っていても足す）。足す前に Shopee の今の元の明細を読み、名前が同じかを確かめ、在庫は今の値を使う */
+  /* ★2026-11-12 単品のレビュー 高3：元の明細を外す共通の口（移す・②・単品・上限超えの削除）。末尾かは Shopee の今の明細（get_models）で決める。
+     GAS の断り（ok:false）は gasCall が例外にするので、「途中」の断りは catch で拾って詰め直しでやり直す（前は dr.ok を見ていて一度も走っていなかった）。
+     返事は {ok, error} の形で返す（例外にしない＝呼ぶ側が「外せなかった＝二重に売れる」と必ず出せるように） */
+  async function paDelSrc(sid, e) {
+    const base = { token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') };
+    const shift = async () => { try { return await gasCallShift(Object.assign({ action: 'delete_variation_shift' }, base), 300000); } catch (err) { return { ok: false, error: String((err && err.message) || err) }; } };
+    let tail = false;
+    try { const md = await openapiGetModels(sid, e.item_id); const ms = ((md && md.models) || []).map(m => ({ id: m.model_id, ti: Number(Array.isArray(m.tier_index) ? m.tier_index[0] : m.tier_index) || 0 }));
+      const me = ms.find(m => String(m.id) === String(e.model_id)); if (!me) return { ok: false, error: '元の明細が Shopee の今のカタログに見当たりません（外していません）' };
+      if (ms.length <= 1) return { ok: false, error: '元のカタログの最後の1明細なので外していません（外すとカタログごと消えます）' };
+      tail = me.ti === Math.max(...ms.map(m => m.ti)); } catch (eM) { tail = false; }
+    if (!tail) return await shift();
+    try { return await gasCall(Object.assign({ action: 'delete_variation' }, base), 120000); }
+    catch (err) { const em = String((err && err.message) || err); if (/途中/.test(em)) return await shift(); return { ok: false, error: em }; }
+  }
   async function paLiveSrc(sid, e) {
     const gm = await openapiGetModels(sid, e.item_id);
     const m = ((gm && gm.models) || []).find(x => String(x.model_id) === String(e.model_id));
@@ -28371,6 +28386,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-12', items: [
+      '🛡 <b>値付けの見直しの「単品で出す」「②を作って移す」「別のカタログへ移す」「上限超えで消す」の守りを足しました</b>（レビュー）：元のカタログから明細を外す時は Shopee の今の明細で末尾かを決め、途中なら詰め直しでやり直します（前は途中だと断られて止まっていました）。単品は、本人が画面で押した時だけ動き、押し直し・2台の PC でも二重に作らない印を置き、明細の写真だけを使い、公開の前に元の明細を在庫0にしてから公開を確かめ、確かめられなければ元の在庫を戻します。予約出品も写します。',
       '🏷 <b>値付けの見直しの「別のカタログへ移す」で、合う家族のカタログが無い時に「➕ 単品で出す」も選べるようにしました</b>（本人「別のカタログがないときは単品出品にしたら？」「こういうモンスターボール Plus とかのって、多分ないでしょ？別のカタログ」）。機種の語が無い品（周辺機器・グッズ）や家族の明細の種類が5以下の物は単品を、機種のカタログ（🤖が明細を足していく物）は②をおすすめにし、理由を1行で出します。単品は、題名を明細の名前から作り（BR は [Usado]・| Japão）、写真・重さ・状態・カテゴリ・説明・属性を元から写し、値段は目標の値段。仕入れ目安と JAN（無ければ型番）が無ければ作りません。非公開で作って SKU・仕入れ目安・JAN を引き継ぎ、公開を確かめてから元のカタログから明細を外します（元のカタログは残す）。店が満杯なら空きのある店に作ります。',
       '🏷 <b>値付けの見直しの「➕ このカタログの②を作って移す」の番号と店を、🤖と同じ決め方にしました</b>（事業本部）：番号は国の全部の店・公開も非公開ものカタログで数え、今の番号の次から使っていない番号にします（前は画面の一覧で数えていて、上の対象アカウントで店を絞っていると重なることがありました）。元の店の出品枠が満杯（空き5以下）の時は、同じ国の空きのある店（本店→2店舗目）に作ります。全部満杯なら作りません。',
       '✂ <b>まとめで出した見積もりを、品物ごとの明細に分けられるようにしました（Smart Reply などから呼ぶ口）</b>（本人「一回この『まとめ購入』のリンクで出したのを分けろって言われてるんだけど、その分ける機能とかも欲しい」）：①まとめの品物ごとに値段（本人が直した額）を渡すと、その値段で1明細ずつ足し、まとめ買い割引は入れません（SKU は REQ_番号-1・-2…）②試し（dry=1）で、入れ先・明細名・値段・SKU・止まる所を Shopee に書かずに返します ③元のまとめの明細を在庫0にする口（本人がボタンを押した時だけ・Request page の REQ_ の明細だけ・sold や注文〔取り消し以外〕が付いていれば断って理由を返す・消す口は作らない）。レビューで直した所：試しの印が途中で外れて本番に化けない／品物ごとに1点だけ買われた時の粗利も確かめる／同じ照合番号の元のまとめがある時は「もう足してある」で終わらせず止める／お客さんへの英文を「1点ずつ別々に買えます」に／値段の差が上限を超える時は先に止める／在庫0は Shopee の今の明細（名前・SKU・在庫）で確かめてから書き、時間切れは「書いたか分からない」と分けて読み直す。',
@@ -48756,10 +48772,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             dr = await gasCall({ action: 'delete_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id }, 120000);   // 最後の1明細＝カタログごと
           }
           else {
-            const me = ms.find(m => String(m.id) === String(e.model_id)), maxTi = Math.max(...ms.map(m => Number(m.ti) || 0));
-            if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 120000);
-            else dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
-            if (dr && !dr.ok && /途中/.test(String(dr.error || ''))) dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
+            dr = await paDelSrc(sid, e);   /* ★11/12 共通の口（途中なら詰め直し） */
+            if (dr && !dr.ok) throw new Error(String(dr.error || '消せませんでした'));
             /* ★2026-11-03 付け替えは gasCallShift の中で行う（2回やると1つずれる） */
             try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(e.item_id) }, 120000); } catch (_) {}
           }
@@ -48814,35 +48828,58 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
              合う家族のカタログが無い時は「➕ 単品で出す」も出す。おすすめ＝機種の語がある（🤖が明細を足していく）物は②、機種の語が無い物・家族の明細の種類が5以下の物は単品
              （10/13 の「単品にしない」は後で明細を足せる時の決まり＝足す見込みが無い家族は例外・事業本部の決め） */
           const famVar = Math.max(0, ...ccRows.filter(x => x && seriesKey(x.name) === famKey && [1, 8].includes(Number(x.status))).map(x => Number(x.model_count) || 0));
-          const recSingle = !hwKnown || famVar <= 5;
-          const recWhy = recSingle ? (!hwKnown ? '機種の語が無い品（周辺機器・グッズ）＝🤖が明細を足していかないので、②を作っても明細1つのまま' : '家族の明細の種類が ' + famVar + ' と少ない＝②を作っても増える見込みが無い') : '機種のカタログ（🤖が明細を足していく）なので、②に入れると後で明細が増える';
-          const vn0 = String(e.vari || e.name || '').replace(/^\s*\[(used|usado)\]\s*/i, '').replace(/\s+/g, ' ').trim(), isBR0 = String(e.cc).toUpperCase() === 'BR';
-          let sTitle = (isBR0 ? '[Usado] ' : '[Used] ') + vn0; if (!/japan|jap[aã]o|japon[eê]s/i.test(sTitle)) sTitle += isBR0 ? ' | Japão' : ' Japan';
+          /* ★11/12 単品のレビュー 低15：SKU が空でも、カタログ名・明細名に機種の語があれば機種の品として見る */
+          const hwAny = hwKnown || skuHwsOf(String(srcRow.name || '') + ' ' + String(e.vari || e.name || '')).length > 0;
+          const hwWord = hwKnown ? hwKey : (skuHwsOf(String(e.vari || '') + ' ' + String(srcRow.name || ''))[0] || '');
+          const recSingle = !hwAny || famVar <= 5;
+          const recWhy = recSingle ? (!hwAny ? '機種の語が無い品（周辺機器・グッズ）＝🤖が明細を足していかないので、②を作っても明細1つのまま' : '家族の明細の種類が ' + famVar + ' と少ない＝②を作っても増える見込みが無い') : '機種のカタログ（🤖が明細を足していく）なので、②に入れると後で明細が増える';
+          /* 題名（単品のレビュー 中12）：明細名が「…」で縮められていたら控えの英語名（元の名前）を使う・無ければ作らない／機種の語が無ければ足す／Japan は語の区切りで見る */
+          const ceT = (PA.llog && PA.llog[e.key] && llSame(PA.llog[e.key].en, PA.llog[e.key].sku, e.vari || e.name, e.sku)) ? PA.llog[e.key] : null;
+          let vn0 = String(e.vari || e.name || ''); if (/…|\.\.\./.test(vn0) && ceT && ceT.en && !/…|\.\.\./.test(String(ceT.en))) vn0 = String(ceT.en);
+          vn0 = vn0.replace(/^\s*\[(used|usado)\]\s*/i, '').replace(/\s+/g, ' ').trim(); const isBR0 = String(e.cc).toUpperCase() === 'BR';
+          const titleCut = /…|\.\.\./.test(vn0);
+          let sTitle = (isBR0 ? '[Usado] ' : '[Used] ') + vn0;
+          if (hwWord && !skuHwsOf(vn0).includes(hwWord)) sTitle += ' ' + hwWord;
+          if (!/\bjapan\b|\bjap[aã]o\b/i.test(sTitle)) sTitle += isBR0 ? ' | Japão' : ' Japan';
           if (sTitle.length > 110) sTitle = sTitle.slice(0, 110).trim();
           const recTag = (on) => on ? ' <b style="color:#1a7f37">（おすすめ）</b>' : '';
           box.innerHTML = '<div style="color:#b06000;font-size:11px;margin:3px 0">値段の差が合う同じ家族のカタログがありません。</div>'
-            + '<button class="smd-btn b-write pa-single" style="font-size:11px;padding:1px 8px" title="明細を1つの単品の出品にします（題名「' + esc(sTitle) + '」・写真・重さ・状態・カテゴリは元から写す・仕入れ目安と JAN／型番を引き継ぐ）。非公開で作り、公開を確かめてから元のカタログから明細を外します。元のカタログは残します">➕ 単品で出す（' + esc(paLoc(e.cc, want)) + '）' + recTag(recSingle) + '</button> '
+            + '<button class="smd-btn b-write pa-single" style="font-size:11px;padding:1px 8px" title="明細を1つの単品の出品にします（題名「' + esc(sTitle) + '」・写真・重さ・状態・カテゴリ・説明・属性・予約出品は元から写す・仕入れ目安と JAN／型番を引き継ぐ）。非公開で作り、元の明細を在庫0にしてから公開し、公開を確かめてから元のカタログから明細を外します。元のカタログは残します">➕ 単品で出す（' + esc(paLoc(e.cc, want)) + '）' + recTag(recSingle) + '</button> '
             + '<button class="smd-btn b-write pa-make2" style="font-size:11px;padding:1px 8px" title="' + esc(newName) + '（同じ家族の次の番号のカタログを作り、そこへ移します）">➕ このカタログの' + esc(mark) + 'を作って ' + esc(paLoc(e.cc, want)) + ' で移す（' + esc(dstNote) + '公開で作る）' + recTag(!recSingle) + '</button>'
             + '<div class="smd-dim" style="font-size:10.5px;margin-top:2px">おすすめの理由：' + esc(recWhy) + '</div><span class="pa-make2-st" style="font-size:11px;margin-left:4px"></span>';
           box.querySelector('.pa-single').addEventListener('click', async ev => {
+            /* ★11/12 単品のレビュー 高1：本人が画面で押した時だけ（部署の JS の .click() では動かない） */
+            if (!ev.isTrusted) { const s0 = box.querySelector('.pa-make2-st'); if (s0) s0.innerHTML = '<b style="color:#d93025">⚠ 本人が画面で押した時だけ動きます</b>'; return; }
             const bt = ev.currentTarget, st2 = box.querySelector('.pa-make2-st'), mk = box.querySelector('.pa-make2'); bt.disabled = true; if (mk) mk.disabled = true;
             const say = (h) => { st2.innerHTML = h; };
-            const stop = (t) => { say('<b style="color:#d93025">⚠ ' + esc(t) + '</b>'); bt.disabled = false; if (mk) mk.disabled = false; };
-            let nid = null;
+            const stop = (t) => { say('<b style="color:#d93025">⚠ ' + esc(t) + '</b>'); bt.disabled = false; if (mk) mk.disabled = false; };   /* 何も作っていない時だけ（押し直せる） */
+            const stopKeep = (t) => { say('<b style="color:#d93025">⚠ ' + esc(t) + '</b>'); };   /* ★高2：単品ができた後・作れたか分からない時はボタンを戻さない（二重に作らない） */
+            const lockK = 'pa_single_lock_' + e.cc + '_' + e.item_id + '_' + e.model_id;
+            let nid = null, zeroed = false;
             try {
               const gw = await guardWriteCountries([e.cc]); if (!gw.ok) { alert(gw.msg); bt.disabled = false; if (mk) mk.disabled = false; return; }
+              /* ★高2：前に押して作った（作り中の）印があれば作らない（2台の PC・押し直し・画面の開き直しでも二重にしない） */
+              { const lk = await sbGet('app_kv', 'select=v&k=eq.' + encodeURIComponent(lockK)).catch(() => null); if (!Array.isArray(lk)) return stop('前に押した印を読めませんでした（二重に作らないため止めます）。少し待ってもう一度');
+                const lv = (lk[0] && lk[0].v) || null; if (lv && (lv.nid || Date.now() - (Number(lv.at) || 0) < 30 * 60000)) return stopKeep('この明細はもう単品にしています（' + (lv.nid ? '単品 ' + lv.nid : '作り中・' + new Date(Number(lv.at)).toLocaleTimeString('ja-JP')) + '）。出品一覧で確かめてください（二重には作りません）'); }
+              if (titleCut) return stop('明細の名前が途中で縮められていて（…）、元の英語名も控えに無いので、題名を作れません。何もしていません');
               /* 本人の決まり（10/16）：仕入れ目安と JAN（無ければ型番）が無い物は出さない */
               if (!(Number(e.cost) > 0)) return stop('仕入れ目安が無いので単品にしません（仕入れ目安と JAN が無い物は出さない決まり）。何もしていません');
-              try { await ensureProductIds(); } catch (_) {}
-              const mObj = ((srcRow.models || []).find(m => m && String(m.id) === String(e.model_id))) || null;
-              let pidRec = {}; try { if (productIds && mObj) pidRec = Object.assign({}, productIds[pidKeyModel(srcRow, mObj)] || {}); } catch (_) {}
-              const ce0 = (PA.llog && PA.llog[e.key] && llSame(PA.llog[e.key].en, PA.llog[e.key].sku, e.vari || e.name, e.sku)) ? PA.llog[e.key] : null;
+              let pidOk = true; try { await ensureProductIds(); } catch (_) { pidOk = false; }
+              if (!pidOk || !productIds) return stop('JAN の台帳を読めませんでした（無いのではなく読めない）。少し待ってもう一度。何もしていません');   /* ★中9 */
+              const mObj = ((srcRow.models || []).find(m => m && String(m.id) === String(e.model_id))) || { id: e.model_id, n: e.vari || e.name };
+              let pidRec = {}; try { pidRec = Object.assign({}, productIds[pidKeyModel(Object.assign({ item_id: e.item_id, parent_sku: srcRow.parent_sku }, srcRow), mObj)] || {}); } catch (_) {}
+              const ce0 = ceT;
+              /* ★中8：台帳の JAN と仕入れ目安の控えの JAN が食い違えば止める（番号の付け替え漏れで別の作品の JAN を写さない） */
+              if (pidRec.jan && ce0 && ce0.jan && String(pidRec.jan).trim() !== String(ce0.jan).trim()) return stop('JAN が台帳（' + pidRec.jan + '）と仕入れ目安の控え（' + ce0.jan + '）で違います＝どちらかが別の作品の見込み。確かめてから。何もしていません');
               const jan = String(pidRec.jan || (ce0 && ce0.jan) || '').trim(), mpn = String(pidRec.mpn || (ce0 && ce0.mpn) || '').trim();
               if (!jan && !mpn) return stop('JAN も型番も無いので単品にしません（決まり）。先にこの明細の JAN か型番を入れてください。何もしていません');
-              const img = e.img ? (/^https?:/.test(e.img) ? e.img : IMG_CDN + e.img) : '';
-              if (!img) return stop('明細の写真が無いので単品にしません（実物の写真が要ります）。何もしていません');
-              const nk0 = t => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
-              if (ccRows.some(x => x && String(x.shop_id) === String(dstShop) && [1, 8].includes(Number(x.status)) && nk0(x.name) === nk0(sTitle))) return stop('同じ店に同じ題名の出品がもうあります（' + sTitle.slice(0, 50) + '）。二重には作りません');
+              /* ★高5：写真は明細の写真だけ（表紙に落とさない） */
+              const mImg = String((mObj && mObj.img) || '').trim(), img = mImg ? (/^https?:/.test(mImg) ? mImg : IMG_CDN + mImg) : '';
+              if (!img) return stop('この明細に写真が無いので単品にしません（明細の実物の写真が要ります・表紙は使いません）。何もしていません');
+              /* ★高2・中13：作る直前に、国の全店で同じ題名が無いかを読み直す */
+              { const r0 = state.rawRead; state.rawRead = true; let pq; try { pq = sbGetAll('listings', 'select=item_id,shop_id,status,name&cc=eq.' + e.cc + '&status=in.(1,8)&name=eq.' + encodeURIComponent(sTitle)); } finally { state.rawRead = r0; }
+                const dupR = await pq.catch(() => null); if (!Array.isArray(dupR)) return stop('同じ題名の出品があるかを読めませんでした（二重に作らないため止めます）');
+                if (dupR.length) return stopKeep('この国（どこかの店）に同じ題名の出品がもうあります（' + dupR.map(x => x.item_id).slice(0, 3).join('・') + '）。二重には作りません'); }
               const live = await paLiveSrc(sid, e);   /* 元の明細の今の名前と在庫を確かめる */
               say('<span class="smd-dim"><span class="smd-spin"></span>元のカタログの中身（カテゴリ・説明・属性）を読んでいます…</span>');
               const bi = await gasCall({ action: 'api_probe', token: settings.writeToken, shop_id: sid, path: '/api/v2/product/get_item_base_info', q: JSON.stringify({ item_id_list: String(e.item_id) }) }, 60000);
@@ -48852,39 +48889,55 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               const attrs = (base.attribute_list || []).map(a => ({ attribute_id: a.attribute_id, attribute_value_list: (a.attribute_value_list || []).filter(v => v && v.value_id).map(v => v.value_unit ? { value_id: v.value_id, value_unit: v.value_unit } : { value_id: v.value_id }) })).filter(a => a.attribute_value_list.length);
               const dm = base.dimension || {}, dim = (dm.package_length > 0 && dm.package_width > 0 && dm.package_height > 0) ? { package_length: dm.package_length, package_width: dm.package_width, package_height: dm.package_height } : null;
               const wKg = Number(base.weight) > 0 ? Number(base.weight) : (Number(e.weightG) > 0 ? Number(e.weightG) / 1000 : 0.3);
+              /* 作り中の印（30分）を先に置く */
+              try { await sbUpsert('app_kv', [{ k: lockK, v: { at: Date.now(), title: sTitle, by: (typeof pcName === 'function' ? pcName() : '') }, updated_at: new Date().toISOString() }], 'k'); } catch (_) { return stop('作り中の印を書けませんでした（二重に作らないため止めます）'); }
               say('<span class="smd-dim"><span class="smd-spin"></span>単品を作っています…（非公開で作り、確かめてから公開します・最大2分）</span>');
               let cr;
               try { cr = await openapiAddItem({ shop_id: Number(dstShop), item_name: sTitle, description: desc || sTitle, images: [img], price: want, stock: live.stock, weight: wKg, category_id: Number(base.category_id), brand_id: Number(((base.brand || {}).brand_id) || 0), condition: base.condition || 'USED', publish: false, attribute_list: attrs, ...(dim ? { dimension: dim } : {}) }); }
-              catch (eA) { const em = String((eA && eA.message) || eA); if (/abort|time|時間/i.test(em)) return stop('作れたか分かりません（返事が2分で来ませんでした）。出品一覧で「' + sTitle.slice(0, 40) + '」があるか確かめてください。元の明細はそのままです（もう一度押すと二重になりえます）'); return stop('単品を作れませんでした（元はそのまま）：' + paErrJa(em)); }
-              nid = cr && cr.item_id; if (!nid) return stop('単品を作れませんでした（元はそのまま）：' + paErrJa(String((cr && cr.error) || '返事に商品番号が無い')));
-              say('<span class="smd-dim"><span class="smd-spin"></span>SKU・仕入れ目安・JAN を引き継いでいます…</span>');
-              if (String(e.sku || '').trim()) { try { await openapiUpdateItem({ shop_id: dstShop, item_id: nid, sku: String(e.sku).trim() }); } catch (_) {} }
+              catch (eA) { const em = String((eA && eA.message) || eA);
+                /* ★中7：GAS がはっきり断った時だけ「作れなかった」。通信・形の崩れは「分からない」（印は残す＝二重にしない） */
+                if (/abort|time|時間|Failed to fetch|NetworkError|JSON|Unexpected token|公式API出品に失敗/i.test(em)) return stopKeep('作れたか分かりません（' + em.slice(0, 80) + '）。出品一覧で「' + sTitle.slice(0, 40) + '」があるか確かめてください。元の明細はそのままです（二重に作らないよう、このボタンは30分止めています）');
+                try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(lockK)); } catch (_) {}
+                return stop('単品を作れませんでした（元はそのまま）：' + paErrJa(em)); }
+              nid = cr && cr.item_id; if (!nid) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(lockK)); } catch (_) {} return stop('単品を作れませんでした（元はそのまま）：' + paErrJa(String((cr && cr.error) || '返事に商品番号が無い'))); }
+              try { await sbUpsert('app_kv', [{ k: lockK, v: { at: Date.now(), nid: String(nid), shop: String(dstShop), title: sTitle }, updated_at: new Date().toISOString() }], 'k'); } catch (_) {}
+              say('<span class="smd-dim"><span class="smd-spin"></span>SKU・予約出品・仕入れ目安・JAN を引き継いでいます…</span>');
               let carryNote = [];
+              /* SKU（低14：作った直後は断られうる＝5秒おいて1回やり直す）と予約出品（中10） */
+              const pre = base.pre_order && base.pre_order.is_pre_order ? { is_pre_order: true, days_to_ship: Number(base.pre_order.days_to_ship) || 10 } : null;
+              const upd = async () => openapiUpdateItem(Object.assign({ shop_id: dstShop, item_id: nid }, String(e.sku || '').trim() ? { sku: String(e.sku).trim() } : {}, pre ? { preorder: JSON.stringify(pre) } : {}));
+              if (String(e.sku || '').trim() || pre) { try { await upd(); } catch (_) { await new Promise(r => setTimeout(r, 5000)); try { await upd(); } catch (eU) { carryNote.push('SKU' + (pre ? '・予約出品' : '') + 'を付けられませんでした（' + String((eU && eU.message) || eU).slice(0, 60) + '）'); } } }
               /* JAN・型番＝台帳（product_ids）の新しい鍵（id:<商品番号>）に元の明細の行を写す */
-              try { if (productIds) { const t0 = Date.now(); productIds['id:' + nid] = Object.assign({}, pidRec, jan ? { jan } : {}, mpn ? { mpn } : {}); saveProductIds(); const ok = await pidSaveWait(t0, 20000); if (!ok) carryNote.push('JAN の台帳の保存を確かめられませんでした'); } else carryNote.push('JAN の台帳を読めませんでした'); } catch (eP) { carryNote.push('JAN の台帳に書けませんでした'); }
-              /* 仕入れ目安＝小さな控えの鍵 llog_cost_single（出品ログ・値付けの見直しは llog_cost_* をまとめて読む） */
-              try { const r1 = await sbGet('app_kv', 'select=v&k=eq.llog_cost_single'); if (!Array.isArray(r1)) throw new Error('読めない'); const v1 = (r1[0] && r1[0].v) || {}; v1.m = v1.m || {};
-                v1.m[e.cc + '|' + nid + '|0'] = { c: Math.round(Number(e.cost)), ja: String((ce0 && ce0.ja) || e.costJa || '').slice(0, 80), en: String(e.vari || e.name || '').slice(0, 120), sku: String(e.sku || '').slice(0, 100), jan: jan, mpn: mpn, src: String((ce0 && ce0.src) || '').slice(0, 200), from: 'single', at: new Date().toISOString().slice(0, 10), was: e.key };
-                v1.at = new Date().toISOString(); v1.src = 'portal'; await sbUpsert('app_kv', [{ k: 'llog_cost_single', v: v1, updated_at: v1.at }], 'k'); } catch (eC) { carryNote.push('仕入れ目安の控えに書けませんでした'); }
-              say('<span class="smd-dim"><span class="smd-spin"></span>公開して、公開になったか確かめています…</span>');
+              try { const t0 = Date.now(); productIds['id:' + nid] = Object.assign({}, pidRec, jan ? { jan } : {}, mpn ? { mpn } : {}); saveProductIds(); const ok = await pidSaveWait(t0, 20000); if (!ok) carryNote.push('JAN の台帳の保存を確かめられませんでした'); } catch (eP) { carryNote.push('JAN の台帳に書けませんでした'); }
+              /* 仕入れ目安＝小さな控えの鍵 llog_cost_single。★高4：en は単品の題名（値付けの見直しの単品の行の名前と照らすため）・sku は空（単品の行は明細 SKU を持たない）・元の明細名は was に */
+              const llPut = async (en) => { const r1 = await sbGet('app_kv', 'select=v&k=eq.llog_cost_single'); if (!Array.isArray(r1)) throw new Error('読めない'); const v1 = (r1[0] && r1[0].v) || {}; v1.m = v1.m || {};
+                v1.m[e.cc + '|' + nid + '|0'] = { c: Math.round(Number(e.cost)), ja: String((ce0 && ce0.ja) || e.costJa || '').slice(0, 80), en: String(en || sTitle).slice(0, 120), sku: '', itemSku: String(e.sku || '').slice(0, 100), jan: jan, mpn: mpn, src: String((ce0 && ce0.src) || '').slice(0, 200), from: 'single', at: new Date().toISOString().slice(0, 10), was: e.key, wasName: String(e.vari || e.name || '').slice(0, 120) };
+                v1.at = new Date().toISOString(); v1.src = 'portal'; await sbUpsert('app_kv', [{ k: 'llog_cost_single', v: v1, updated_at: v1.at }], 'k'); };
+              /* ★中11：公開する前に元の明細を在庫0にする（戻せる操作・公開から外すまでの間に二重に売れないように） */
+              say('<span class="smd-dim"><span class="smd-spin"></span>元の明細を在庫0にしてから公開します…</span>');
+              try { await openapiUpdate('update_stock', { shop_id: sid, item_id: e.item_id, model_id: String(e.model_id), model_name: String(e.vari || e.name || ''), stock: 0 }); zeroed = true; } catch (eZ) { return stopKeep('単品（' + nid + '・非公開）は作れましたが、元の明細を在庫0にできませんでした（' + String((eZ && eZ.message) || eZ).slice(0, 80) + '）。公開していません＝二重には売れません。出品一覧で単品を確かめてください'); }
               try { await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: dstShop, item_id: nid, unlist: '0' }, 120000); } catch (_) {}
-              let stNow = ''; try { const b2 = await gasCall({ action: 'api_probe', token: settings.writeToken, shop_id: dstShop, path: '/api/v2/product/get_item_base_info', q: JSON.stringify({ item_id_list: String(nid) }) }, 60000); stNow = String((((((b2 || {}).data || {}).response || {}).item_list || [])[0] || {}).item_status || ''); } catch (_) {}
-              if (stNow !== 'NORMAL') { say('<b style="color:#b06000">⚠ 単品（' + esc(String(nid)) + '・' + esc(sTitle.slice(0, 50)) + '）は作れましたが、公開を確かめられませんでした（今 ' + esc(stNow || '読めず') + '）。元のカタログの明細はそのままです（二重に売れないよう、単品を公開する前に元の明細を在庫0にするか、出品一覧で公開を確かめてからもう一度）</b>'); try { logAct('価格調整', '単品を作った（公開を確かめられず・元はそのまま）', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), e.item_id + '→' + nid + '（' + sTitle + '・店 ' + dstShop + '・' + stNow + '）'); } catch (_) {} return; }
+              /* ★中6：数秒おいて最大3回読む */
+              let stNow = '', nmNow = '';
+              for (let k = 0; k < 3 && stNow !== 'NORMAL'; k++) { if (k) await new Promise(r => setTimeout(r, 4000)); try { const b2 = await gasCall({ action: 'api_probe', token: settings.writeToken, shop_id: dstShop, path: '/api/v2/product/get_item_base_info', q: JSON.stringify({ item_id_list: String(nid) }) }, 60000); const it2 = (((((b2 || {}).data || {}).response || {}).item_list || [])[0]) || {}; stNow = String(it2.item_status || ''); nmNow = String(it2.item_name || ''); } catch (_) {} }
+              try { await llPut(nmNow || sTitle); } catch (eC) { carryNote.push('仕入れ目安の控えに書けませんでした'); }
+              if (stNow !== 'NORMAL') {
+                /* 公開を確かめられない＝元の明細の在庫を戻す（単品は公開されていないかもしれない＝売り場から消えないように） */
+                let back = false; try { await openapiUpdate('update_stock', { shop_id: sid, item_id: e.item_id, model_id: String(e.model_id), model_name: String(e.vari || e.name || ''), stock: live.stock }); back = true; } catch (_) {}
+                stopKeep('単品（' + nid + '・' + sTitle.slice(0, 40) + '）は作れましたが、公開を確かめられませんでした（今 ' + (stNow || '読めず') + '）。' + (back ? '元の明細の在庫は ' + live.stock + ' に戻しました＝元はそのまま売れます。' : '⚠ 元の明細は在庫0のままです（戻せませんでした）。') + (stNow ? '' : '単品も公開されているかもしれません（その時は二重に売れます）。') + '出品一覧で単品を確かめてから、元から外すか単品を非公開にしてください');
+                try { logAct('価格調整', '単品を作った（公開を確かめられず）', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), e.item_id + '→' + nid + '（' + sTitle + '・店 ' + dstShop + '・' + (stNow || '読めず') + '・元の在庫 ' + (back ? '戻した' : '0のまま') + '）'); } catch (_) {}
+                return; }
               say('<span class="smd-dim"><span class="smd-spin"></span>公開を確かめました。元のカタログから明細を外しています…</span>');
-              let dr; const fr = await sbGetAll('listings', 'select=models&item_id=eq.' + e.item_id);
-              const ms = ((fr && fr[0] && fr[0].models) || []).filter(m => m && m.id && !m.ghost);
-              const me = ms.find(m => String(m.id) === String(e.model_id)), maxTi = Math.max(...ms.map(m => Number(m.ti) || 0));
-              if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 120000);
-              else dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
-              if (dr && !dr.ok && /途中/.test(String(dr.error || ''))) dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);   /* ★11/12 再レビュー低12：末尾でなかった時は詰め直し（隣の移す処理と同じ） */
-              try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(e.item_id) }, 120000); if (String(dstShop) !== String(sid)) await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: dstShop, ids: String(nid) }, 120000); else await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(nid) }, 120000); } catch (_) {}
-              try { logAct('価格調整', '値段の差で単品にして移した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), `${e.item_id}→${nid}（${sTitle}・単品・公開・店 ${dstShop}） ${paLoc(e.cc, want)} 仕入れ目安 ¥${Math.round(e.cost)}・${jan ? 'JAN ' + jan : '型番 ' + mpn} 元から外す:${dr && dr.ok ? 'OK' : '失敗 ' + ((dr && dr.error) || '')}`); } catch (_) {}
-              if (!dr || !dr.ok) { say('<b style="color:#b06000">⚠ 単品（' + esc(String(nid)) + '）は公開しましたが、元のカタログから明細を外せませんでした（' + esc(String((dr && dr.error) || '').slice(0, 120)) + '）。二重に売れないよう、元の明細を在庫0にするか、もう一度外してください</b>'); return; }
+              const dr = await paDelSrc(sid, e);   /* ★高3：共通の口（Shopee の今の明細で末尾かを決め、途中なら詰め直し・失敗は返す） */
+              try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(e.item_id) }, 120000); await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: dstShop, ids: String(nid) }, 120000); } catch (_) {}
+              try { logAct('価格調整', '値段の差で単品にして移した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), `${e.item_id}→${nid}（${sTitle}・単品・公開・店 ${dstShop}） ${paLoc(e.cc, want)} 仕入れ目安 ¥${Math.round(e.cost)}・${jan ? 'JAN ' + jan : '型番 ' + mpn} 元から外す:${dr && dr.ok ? 'OK' : '失敗（在庫0のまま） ' + ((dr && dr.error) || '')}`); } catch (_) {}
+              if (!dr || !dr.ok) { stopKeep('単品（' + nid + '）は公開しましたが、元のカタログから明細を外せませんでした（' + String((dr && dr.error) || '').slice(0, 120) + '）。元の明細は在庫0にしてあるので二重には売れませんが、元のカタログに在庫0の明細が残っています（Seller Center で外すか、もう一度）' + (carryNote.length ? '／' + carryNote.join('／') : '')); return; }
               say('<b style="color:#1a7f37">✅ 単品にして移しました（' + esc(sTitle.slice(0, 60)) + '・' + esc(paLoc(e.cc, want)) + '・公開・元のカタログは残しています）</b>' + (carryNote.length ? '<b style="color:#b06000">・⚠ ' + esc(carryNote.join('／')) + '</b>' : ''));
               setTimeout(() => { PA.data = null; paRender(true); }, 2500);
-            } catch (err) { stop(String((err && err.message) || err).slice(0, 240) + (nid ? '（単品 ' + nid + ' は作られています＝出品一覧で確かめてください）' : '')); }
+            } catch (err) { const t = String((err && err.message) || err).slice(0, 240); if (nid) stopKeep(t + '（単品 ' + nid + ' は作られています' + (zeroed ? '・元の明細は在庫0にしてあります' : '') + '＝出品一覧で確かめてください）'); else stop(t); }
           });
           box.querySelector('.pa-make2').addEventListener('click', async ev => {
+            if (!ev.isTrusted) { const s0 = box.querySelector('.pa-make2-st'); if (s0) s0.innerHTML = '<b style="color:#d93025">⚠ 本人が画面で押した時だけ動きます</b>'; return; }   /* ★11/12 単品のレビュー 高1 と同じ */
             const bt = ev.currentTarget, st2 = box.querySelector('.pa-make2-st'); bt.disabled = true;
             const say = (h) => { st2.innerHTML = h; };
             try {
@@ -48913,12 +48966,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               let pubOk = false; if (!testLeft) { try { const pr = await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: nsid, item_id: nid, unlist: '0' }, 120000); pubOk = !!(pr && pr.ok); } catch (_) {} }
               if (testLeft) say('<b style="color:#b06000">⚠ 仮の明細「test」が消えていない（読めなかった）ので、' + esc(mark) + 'は非公開のままにしました。Seller Center で test を消してから公開してください</b>');
               say('<span class="smd-dim"><span class="smd-spin"></span>元のカタログから消しています…</span>');
-              let dr; const fr = await sbGetAll('listings', 'select=models&item_id=eq.' + e.item_id);
-              const ms = ((fr && fr[0] && fr[0].models) || []).filter(m => m && m.id && !m.ghost);
-              const me = ms.find(m => String(m.id) === String(e.model_id)), maxTi = Math.max(...ms.map(m => Number(m.ti) || 0));
-              if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 120000);
-              else dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
-              if (dr && !dr.ok && /途中/.test(String(dr.error || ''))) dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);   /* ★11/12 再レビュー低12：末尾でなかった時は詰め直し（隣の移す処理と同じ） */
+              const dr = await paDelSrc(sid, e);   /* ★11/12 共通の口（Shopee の今の明細で末尾かを決め、途中なら詰め直し） */
               /* ★2026-11-03 付け替えは gasCallShift の中で行う（2回やると1つずれる） */
               try { if (nsid === String(sid)) await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: e.item_id + ',' + nid }, 120000); else { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(e.item_id) }, 120000); await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: nsid, ids: String(nid) }, 120000); } } catch (_) {}
               try { logAct('価格調整', '値段の差で' + mark + 'を作って移した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), `${e.item_id}→${nid}（${newName}・公開・店 ${dstShop}） ${paLoc(e.cc, want)} 元から消す:${dr && dr.ok ? 'OK' : '失敗 ' + ((dr && dr.error) || '')}`); } catch (_) {}
@@ -48940,12 +48988,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             const ar = await openapiAddVariation(tsid, tgt, { option: e.vari || e.name, price: want, stock: live.stock, sku: e.sku || '', image: img });
             if (!ar || !ar.ok) throw new Error('移し先に足せませんでした（元はそのまま）：' + paErrJa(String((ar && ar.error) || '失敗')));
             // 元から消す：末尾かどうかは最新の明細で決める（途中なら詰め直し）
-            let dr; const fr = await sbGetAll('listings', 'select=models&item_id=eq.' + e.item_id);
-            const ms = ((fr && fr[0] && fr[0].models) || []).filter(m => m && m.id && !m.ghost);
-            const me = ms.find(m => String(m.id) === String(e.model_id)), maxTi = Math.max(...ms.map(m => Number(m.ti) || 0));
-            if (me && Number(me.ti) === maxTi) dr = await gasCall({ action: 'delete_variation', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 120000);
-            else dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
-            if (dr && !dr.ok && /途中/.test(String(dr.error || ''))) dr = await gasCallShift({ action: 'delete_variation_shift', token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') }, 300000);
+            const dr = await paDelSrc(sid, e);   /* ★11/12 共通の口 */
             /* ★2026-11-03 付け替えは gasCallShift の中で行う（2回やると1つずれる） */
             try { if (tsid === String(sid)) await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: e.item_id + ',' + tgt }, 120000); else { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(e.item_id) }, 120000); await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: tsid, ids: String(tgt) }, 120000); } } catch (_) {}
             try { logAct('価格調整', '値段の差が合うカタログへ移した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), `${e.item_id}→${tgt} ${paLoc(e.cc, want)} 元から消す:${dr && dr.ok ? 'OK' : '失敗 ' + ((dr && dr.error) || '')}`); } catch (_) {}
