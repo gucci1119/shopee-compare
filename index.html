@@ -48929,7 +48929,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const sd = root.querySelector('#pa-sortdir'); if (sd) sd.addEventListener('click', () => { PA.dir = -PA.dir; paSave(); paRender(); }); }
     /* ★2026-11-13 「移し先を探す」は、カードが画面に入ったら自動で開く（押さずに 移し先・単品・② が見える）。読むのは見えたカードだけ・1回だけ */
     try { const mvs = [...root.querySelectorAll('.pa-move[data-auto="1"]')];
-      if (mvs.length && 'IntersectionObserver' in window) { const io2 = new IntersectionObserver(ents => { ents.forEach(en => { if (!en.isIntersecting) return; const b0 = en.target; io2.unobserve(b0); if (b0.dataset.opened) return; b0.dataset.opened = '1'; setTimeout(() => { try { b0.click(); } catch (_) {} }, 50); }); }, { root: null, rootMargin: '120px' }); mvs.slice(0, 40).forEach(b0 => io2.observe(b0)); } } catch (_) {}
+      if (mvs.length && 'IntersectionObserver' in window) { const io2 = new IntersectionObserver(ents => { ents.forEach(en => { if (!en.isIntersecting) return; const b0 = en.target; io2.unobserve(b0); if (b0.dataset.opened) return; const rk = (b0.closest('.pa-row') || {}).dataset ? b0.closest('.pa-row').dataset.k : ''; PA.mvOpen = PA.mvOpen || new Set(); if (rk && PA.mvOpen.has(rk)) return; if (rk) PA.mvOpen.add(rk); b0.dataset.opened = '1'; setTimeout(() => { try { b0.click(); } catch (_) {} }, 50); }); }, { root: null, rootMargin: '120px' }); mvs.slice(0, 12).forEach(b0 => io2.observe(b0)); } } catch (_) {}   /* ★11/13 レビュー6：自動で開くのは12枚まで・一度開いたカードは描き直しで開き直さない（PA.mvOpen） */
     root.querySelectorAll('.pa-sort').forEach(h => h.addEventListener('click', () => { const k = h.dataset.s; if (PA.sort === k) PA.dir = -PA.dir; else { PA.sort = k; PA.dir = k === 'name' ? 1 : -1; } paSave(); paRender(); }));
     const q = root.querySelector('#pa-q'); if (q) { let tm = null; q.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(() => { PA.q = q.value; paRender().then(() => { const q2 = document.getElementById('pa-q'); if (q2) { q2.focus(); q2.setSelectionRange(q2.value.length, q2.value.length); } }); }, 350); }); }
     /* ★2026-10-23 本人「1個処理するとまた1個出てくる。最初から全部出せないのか？」：赤字は仕入れ値が分かって初めて判定できる。仕入れ値は利益管理表から
@@ -49047,14 +49047,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       box.innerHTML = '<span class="smd-dim"><span class="smd-spin"></span>移せるカタログを探しています…</span>';
       const want = e.ratioWant, lim = (e.ratioLim || 4) * 0.98;
       try {
-        let cands; { const r0c = state.rawRead; state.rawRead = true; let pc0; try { pc0 = sbGetAll('listings', 'select=item_id,shop_id,name,price_min,price_max,model_count&cc=eq.' + e.cc + '&status=eq.1&model_count=gt.1&model_count=lt.98&price_min=gte.' + (want / lim).toFixed(2) + '&price_max=lte.' + (want * lim).toFixed(2)); } finally { state.rawRead = r0c; } cands = await pc0; }   /* ★11/12 再レビュー中5：国の全店から（満杯で別の店に作った②も候補に）。足すのはその店で */
+        let cands; { /* ★2026-11-13 事業本部のレビュー6・全体レビュー中3：国ごとに1回だけ読み、10分は使い回す（カードごと・描き直しのたびに読み直さない＝通信量） */
+          PA.mvC = PA.mvC || {}; const c0 = PA.mvC[e.cc];
+          let all = (c0 && Date.now() - c0.at < 600000) ? c0.rows : null;
+          if (!all) { const r0c = state.rawRead; state.rawRead = true; let pc0; try { pc0 = (c0 && c0.p) || sbGetAll('listings', 'select=item_id,shop_id,name,price_min,price_max,model_count&cc=eq.' + e.cc + '&status=eq.1&model_count=gt.1&model_count=lt.98'); PA.mvC[e.cc] = { at: 0, rows: null, p: pc0 }; } finally { state.rawRead = r0c; }
+            try { all = await pc0; PA.mvC[e.cc] = { at: Date.now(), rows: all || [] }; } catch (eR) { PA.mvC[e.cc] = null; throw eR; } }
+          const lo = want / lim, hi = want * lim; cands = (all || []).filter(c => Number(c.price_min) >= lo - 1e-9 && Number(c.price_max) <= hi + 1e-9); }   /* ★11/12 再レビュー中5：国の全店から（満杯で別の店に作った②も候補に）。足すのはその店で */
         const hwKey0 = String(e.sku || '').split('_')[0].toUpperCase(), hwKey = hwKey0 === 'GBC' ? 'GB' : hwKey0;
         const hwKnown = SKU_HW.some(x => x[0] === hwKey);
         const hwSame = (nm) => { const h = skuHwsOf(nm); return h.indexOf(hwKey) >= 0 && (h.length === 1 || h.slice().sort().join(',') === '3DS,DS'); };   /* カタログ名の機種が明細SKUの頭と同じ物だけ（DS・3DS を一緒にしたカタログは両方に可） */
         /* ★2026-10-22 本人「ポップコーンバケツ2のカタログはあるんやろうか？」：機種の語が無いもの（グッズ等）は、名前が同じ家族（①②…）のカタログだけを移し先にする＝関係のないゲームのカタログへ入れない */
         const srcRow = ((lst.byCc || {})[e.cc] || []).find(x => String(x.item_id) === String(e.item_id)) || { name: e.name };
         const famKey = seriesKey(srcRow.name || e.name);
-        const list = (cands || []).filter(c => String(c.item_id) !== String(e.item_id) && Math.max(Number(c.price_max), want) / Math.min(Number(c.price_min), want) <= lim && (hwKnown ? (hwSame(c.name) || (seriesKey(c.name) === famKey && !skuHwsOf(c.name).length)) : seriesKey(c.name) === famKey))   /* 機種の語が無い同じ家族（①②…）のカタログも候補に残す＝候補が空になって新しいカタログを作る（重複）のを避ける */
+        const PA_WORK_MARK = /^[\s\u3000]*(?:[【\[]\s*)?(?:削除予定|削除|要確認|確認用|テスト|仮置き|保留|非公開予定|仮(?=[\s\u3000:：・\-】\]]))(?:\s*[】\]])?[\s\u3000:：・\-]*/;   /* ★2026-11-13 事業本部のレビュー7：作業の印の付いたカタログは移し先にしない・②の名前に写さない（GAS の BA_WORK_MARK_RE と同じ・「仮」は後ろに区切りがある時だけ） */
+        const list = (cands || []).filter(c => !PA_WORK_MARK.test(String(c.name || '')) && String(c.item_id) !== String(e.item_id) && Math.max(Number(c.price_max), want) / Math.min(Number(c.price_min), want) <= lim && (hwKnown ? (hwSame(c.name) || (seriesKey(c.name) === famKey && !skuHwsOf(c.name).length)) : seriesKey(c.name) === famKey))   /* 機種の語が無い同じ家族（①②…）のカタログも候補に残す＝候補が空になって新しいカタログを作る（重複）のを避ける */
           .map(c => Object.assign(c, { hit: hwKnown })).sort((a, b) => (b.hit - a.hit) || (b.model_count - a.model_count)).slice(0, 6);
         if (!list.length) {
           /* ★2026-10-22 本人「ない場合は、この値段の差がある別のカタログへ移すというのは作ってくれるのだろうか？」：
@@ -49078,7 +49084,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             dstShop = String(o.shop_id); dstNote = '元の店は満杯なので' + (o.role === 'main' ? '本店' : '2店舗目') + '（' + dstShop + '）に作る・'; }
           const cur = String(srcRow.name || e.name || ''), curMark = CIRC[(seriesNo(cur) || 1) - 1];
           let newName = (curMark && cur.includes(curMark)) ? cur.replace(curMark, mark) : (/ \| /.test(cur) ? cur.replace(/ \| (?!.* \| )/, ' ' + mark + ' | ') : cur.trim() + ' ' + mark);
-          if (newName.length > 110 && / \| [^|]*$/.test(newName)) newName = newName.replace(/ \| [^|]*$/, '');   /* ★10/22 実測：長いと末尾が切れて「… ② |」になった＝「| Japonês」を落とす */
+          if (newName.length > 110 && / \| [^|]*$/.test(newName)) newName = newName.replace(/ \| [^|]*$/, '');
+          { let prevN = null; while (prevN !== newName) { prevN = newName; newName = newName.replace(PA_WORK_MARK, ''); } newName = newName.trim(); }   /* ★11/13 レビュー7：頭の「削除予定」などを写さない */   /* ★10/22 実測：長いと末尾が切れて「… ② |」になった＝「| Japonês」を落とす */
           /* ★2026-11-12 事業本部・本人「別のカタログがないときは単品出品にしたら？」「こういうモンスターボール Plus とかのって、多分ないでしょ？別のカタログ」：
              合う家族のカタログが無い時は「➕ 単品で出す」も出す。おすすめ＝機種の語がある（🤖が明細を足していく）物は②、機種の語が無い物・家族の明細の種類が5以下の物は単品
              （10/13 の「単品にしない」は後で明細を足せる時の決まり＝足す見込みが無い家族は例外・事業本部の決め） */
@@ -49245,13 +49252,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             if (!ev.isTrusted) { const s0 = box.querySelector('.pa-make2-st'); if (s0) s0.innerHTML = '<b style="color:#d93025">⚠ 本人が画面で押した時だけ動きます</b>'; return; }   /* ★11/12 単品のレビュー 高1 と同じ */
             const bt = ev.currentTarget, st2 = box.querySelector('.pa-make2-st'); bt.disabled = true;
             const say = (h) => { st2.innerHTML = h; };
+            /* ★2026-11-13 事業本部のレビュー4・全体レビュー高5：作った②の番号を控え、押し直しで同じ店に同じ中身の②をもう1冊作らない（相方が消される型） */
+            const lockK = 'pa_make2_lock_' + e.cc + '_' + e.item_id + '_' + e.model_id; let nidMade = '';
+            try { const lk = JSON.parse(localStorage.getItem(lockK) || 'null'); if (lk && lk.nid && Date.now() - (lk.at || 0) < 14 * 86400000) { say('<b style="color:#b06000">⚠ この明細の' + esc(mark) + '（' + esc(String(lk.nid)) + '）はもう作ってあります（' + esc(new Date(lk.at).toLocaleString('ja-JP')) + '）。出品一覧でそのカタログを確かめてください。もう一度作ると同じ中身のカタログが2つになり、Shopee に片方を消されることがあります</b>'); return; } } catch (_) {}
             try {
               const gw = await guardWriteCountries([e.cc]); if (!gw.ok) { alert(gw.msg); bt.disabled = false; return; }
               const live = await paLiveSrc(sid, e);   /* ★2026-11-03 高-5：作る前に元の明細の今の名前と在庫を確かめる */
               say('<span class="smd-dim"><span class="smd-spin"></span>' + esc(mark) + 'を作っています…</span>');
               const nsid = dstShop;   /* 新しいカタログの店（元の店が満杯なら空きのある店） */
-              const cr = nsid === String(sid) ? await gasCall({ action: 'clone_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id, name: newName }, 300000)
-                : await gasCall({ action: 'seed_shop', token: settings.writeToken, src_shop_id: sid, dst_shop_id: nsid, item_id: e.item_id, price: want, name: newName }, 300000);   /* ★11/12 別の店へは GAS の seed_shop（🤖の満杯の時と同じ口） */   /* 作る時は非公開（仮の明細 test が買えてしまうので）→ 本物を入れて test を消したら最後に公開する */
+              let cr = null;
+              try { cr = nsid === String(sid) ? await gasCall({ action: 'clone_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id, name: newName }, 300000)
+                : await gasCall({ action: 'seed_shop', token: settings.writeToken, src_shop_id: sid, dst_shop_id: nsid, item_id: e.item_id, price: want, name: newName }, 300000); }
+              catch (eC) { if (eC && eC.res && eC.res.item_id) cr = eC.res; else throw eC; }   /* ★11/13 レビュー4：GAS が ok:false でも item_id があれば作られている＝拾う */
+              if (cr && cr.item_id) { nidMade = String(cr.item_id); try { localStorage.setItem(lockK, JSON.stringify({ nid: nidMade, shop: nsid, at: Date.now(), name: newName })); } catch (_) {} }   /* ★11/12 別の店へは GAS の seed_shop（🤖の満杯の時と同じ口） */   /* 作る時は非公開（仮の明細 test が買えてしまうので）→ 本物を入れて test を消したら最後に公開する */
               if (cr && cr.item_id && cr.ok === false) throw new Error('カタログ（' + cr.item_id + '）は作られましたが、途中で止まりました（元はそのまま・作られたカタログは非公開のまま残っています＝消していません）：' + paErrJa(String(cr.error || '')));   /* ★11/12 再レビュー低9 */
               const nid = cr && cr.item_id; if (!nid) throw new Error('カタログを作れませんでした（元はそのまま）：' + paErrJa(String((cr && cr.error) || '失敗')) + (/duplicat/i.test(String((cr && cr.error) || '')) ? '（同じ店に同じ中身と判断された＝表紙を変える必要があります）' : ''));
               say('<span class="smd-dim"><span class="smd-spin"></span>明細を入れています…</span>');
@@ -49268,8 +49281,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               /* ★2026-10-22 本人「非公開じゃなくて公開」：本物の明細を入れて test を消した後に公開する */
               /* ★2026-10-22 レビュー：test を消すのに失敗しても公開へ進むと、在庫1の「test」が買える＝Shopee を読み直して test が無い時だけ公開する */
               let testLeft = true; try { const g2 = await openapiGetModels(nsid, nid); testLeft = ((g2 && g2.models) || []).some(m => String(m.name || '').trim().toLowerCase() === 'test'); } catch (_) { testLeft = true; }
-              let pubOk = false; if (!testLeft) { try { const pr = await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: nsid, item_id: nid, unlist: '0' }, 120000); pubOk = !!(pr && pr.ok); } catch (_) {} }
-              if (testLeft) say('<b style="color:#b06000">⚠ 仮の明細「test」が消えていない（読めなかった）ので、' + esc(mark) + 'は非公開のままにしました。Seller Center で test を消してから公開してください</b>');
+              /* ★11/13 事業本部のレビュー5：別の店に作った②には親SKU を付ける（🤖の家族に入るように・shopee-openapi-sync.gs の複製と同じ） */
+              if (nsid !== String(sid) && e.psku) { try { await gasCall({ action: 'update_item', token: settings.writeToken, shop_id: nsid, item_id: nid, sku: String(e.psku) }, 60000); } catch (_) {} }
+              /* ★11/13 事業本部のレビュー2・3・全体レビュー高4：test が残る・公開できない時は元から外さずに止める。元を在庫0にしてから公開し、公開できなければ元の在庫を戻す */
+              if (testLeft) { say('<b style="color:#b06000">⚠ 仮の明細「test」が消えていない（読めなかった）ので、' + esc(mark) + '（' + esc(String(nid)) + '）は非公開のままにしました。元の明細はそのまま売れます。Seller Center で test を消してから公開してください</b>'); return; }
+              const setSrc = async (v) => { try { await openapiUpdate('update_stock', { shop_id: sid, item_id: e.item_id, model_id: String(e.model_id), model_name: String(e.vari || e.name || ''), stock: v }); return true; } catch (eZ) { await new Promise(r => setTimeout(r, 8000)); try { const lv2 = await paLiveSrc(sid, e); return lv2.stock === v; } catch (_) { return false; } } };
+              let liveB = null; try { liveB = await paLiveSrc(sid, e); } catch (_) {}
+              if (!liveB) { say('<b style="color:#b06000">⚠ 元の明細を読み直せなかったので、' + esc(mark) + '（' + esc(String(nid)) + '）は非公開のままにしました（元はそのまま売れます）</b>'); return; }
+              if (liveB.stock <= 0) { say('<b style="color:#b06000">⚠ 作っている間に元の明細が売れて在庫0になりました。' + esc(mark) + '（' + esc(String(nid)) + '）は非公開のままにしています（二重に売らないため）</b>'); return; }
+              if (liveB.stock !== live.stock) { try { await openapiUpdate('update_stock', { shop_id: nsid, item_id: nid, stock: liveB.stock }); } catch (_) { say('<b style="color:#b06000">⚠ 作っている間に元の在庫が変わり、' + esc(mark) + 'の在庫を合わせられませんでした。非公開のままにしています（元はそのまま売れます）</b>'); return; } }
+              say('<span class="smd-dim"><span class="smd-spin"></span>元の明細を在庫0にしています…</span>');
+              if (!(await setSrc(0))) { say('<b style="color:#b06000">⚠ 元の明細を在庫0にできなかったので、' + esc(mark) + '（' + esc(String(nid)) + '）は公開していません（元はそのまま売れます）</b>'); return; }
+              let pubOk = false; try { const pr = await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: nsid, item_id: nid, unlist: '0' }, 120000); pubOk = !!(pr && pr.ok); } catch (_) {}
+              if (!pubOk) { const back = await setSrc(liveB.stock); say('<b style="color:#b06000">⚠ ' + esc(mark) + '（' + esc(String(nid)) + '）を公開できませんでした。元の明細は' + (back ? '在庫を ' + liveB.stock + ' に戻しました（そのまま売れます）' : '<u>在庫0のまま</u>です（戻せませんでした・出品一覧で在庫を戻してください）') + '。元からは外していません</b>'); return; }
               say('<span class="smd-dim"><span class="smd-spin"></span>元のカタログから消しています…</span>');
               const dr = await paDelSrc(sid, e);   /* ★11/12 共通の口（Shopee の今の明細で末尾かを決め、途中なら詰め直し） */
               /* ★2026-11-03 付け替えは gasCallShift の中で行う（2回やると1つずれる） */
@@ -49278,7 +49302,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               if (!dr || !dr.ok) { say('<b style="color:#b06000">⚠ ' + esc(mark) + 'に入れましたが、元から消せませんでした（' + esc(String((dr && dr.error) || '').slice(0, 120)) + '）。元の明細は在庫0にするか、もう一度消してください</b>'); return; }
               say('<b style="color:#1a7f37">✅ ' + esc(mark) + 'を作って移しました（' + esc(newName.slice(0, 60)) + '）' + (pubOk ? '・公開しました' : '</b><b style="color:#b06000">・⚠ 公開にできませんでした（出品一覧で公開してください）') + (imgOk ? '' : '</b><b style="color:#b06000">・⚠ 明細の写真を付けられませんでした') + '</b>');
               setTimeout(() => { PA.data = null; paRender(true); }, 2500);
-            } catch (err) { bt.disabled = false; say('<b style="color:#d93025">⚠ ' + esc(String((err && err.message) || err).slice(0, 240)) + '</b>'); }
+            } catch (err) { if (!nidMade) bt.disabled = false; say('<b style="color:#d93025">⚠ ' + esc(String((err && err.message) || err).slice(0, 240)) + (nidMade ? '（作った' + esc(mark) + ' ' + esc(nidMade) + ' は非公開で残っています。もう一度押すと2冊目ができるので、ボタンは押せなくしました）' : '') + '</b>'); }
           });
           return;
         }
@@ -49291,8 +49315,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           try {
             const img = e.img ? (/^https?:/.test(e.img) ? e.img : IMG_CDN + e.img) : '';
             const live = await paLiveSrc(sid, e);   /* ★2026-11-03 高-5：足す前に元の明細の今の名前と在庫を確かめる */
+            if (!(live.stock > 0)) throw new Error('元の明細の在庫が0なので移していません');
+            /* ★2026-11-13 事業本部のレビュー3：元を先に在庫0にしてから移し先に足す（両方で売れて売り越さない）。足せなければ元の在庫を戻す */
+            const setSrcM = async (v) => { try { await openapiUpdate('update_stock', { shop_id: sid, item_id: e.item_id, model_id: String(e.model_id), model_name: String(e.vari || e.name || ''), stock: v }); return true; } catch (eZ) { await new Promise(r => setTimeout(r, 8000)); try { const lv2 = await paLiveSrc(sid, e); return lv2.stock === v; } catch (_) { return false; } } };
+            if (!(await setSrcM(0))) throw new Error('元の明細を在庫0にできなかったので移していません（元はそのまま売れます）');
             const ar = await openapiAddVariation(tsid, tgt, { option: e.vari || e.name, price: want, stock: live.stock, sku: e.sku || '', image: img });
-            if (!ar || !ar.ok) throw new Error('移し先に足せませんでした（元はそのまま）：' + paErrJa(String((ar && ar.error) || '失敗')));
+            if (!ar || !ar.ok) { const back = await setSrcM(live.stock); throw new Error('移し先に足せませんでした（' + (back ? '元の在庫は ' + live.stock + ' に戻しました' : '元は在庫0のまま＝出品一覧で在庫を戻してください') + '）：' + paErrJa(String((ar && ar.error) || '失敗'))); }
             // 元から消す：末尾かどうかは最新の明細で決める（途中なら詰め直し）
             const dr = await paDelSrc(sid, e);   /* ★11/12 共通の口 */
             /* ★2026-11-03 付け替えは gasCallShift の中で行う（2回やると1つずれる） */
