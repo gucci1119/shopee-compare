@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261113-0215'
+var SRC_VER = '20261113-0235'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -276,7 +276,7 @@ var _ufExt = null;
 /* ★2026-10-24 子機でも【同じ Google アカウント】で動く別の GAS の分は足す（05 情報システム部の判断＝安全弁が慎重になる向き）。
    4台目（child3・gutiken）は「取込GAS 窓口（Smart Reply用）」と同じアカウントなのに、その分（uf_acct4_ingest）を一度も足していなかった
    ＝自前の数え 2,705 のまま 19:23 に Google に断られた。スクリプト プロパティ UF_SAME_ACCT_KEYS（カンマ区切り）があればそれ、無ければ下の表 */
-var UF_SAME_ACCT_BY_RUNNER = { child3: 'uf_acct4_ingest' };
+var UF_SAME_ACCT_BY_RUNNER = { child3: 'uf_acct4_ingest', child2: 'uf_acct3_mado' };   /* ★2026-11-13 3台目（child2）に取込GAS 窓口を移した（4台目が本人確認で止まった間・事業本部の決め） */
 function ufSameAcctKeys_() {
   var k = ''; try { k = String(P_().getProperty('UF_SAME_ACCT_KEYS') || '').trim(); } catch (e) {}
   if (!k) { try { k = UF_SAME_ACCT_BY_RUNNER[baRunnerId_()] || ''; } catch (e2) {} }
