@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261113-0235'
+var SRC_VER = '20261113-0345'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2973,7 +2973,7 @@ function callShop_(shopId, path, query, method, body, beforeFetch) {
   if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + ((lastErr && lastErr.message) || lastErr));
   var j = JSON.parse(txt);
   if (j.error) { var _fl = ''; try { var _f = (j.response || {}).failure_list; if (_f && _f.length) _fl = ' failure_list=' + JSON.stringify(_f).slice(0, 300); } catch (eFl) {}   /* ★2026-10-18 unlist_item 等は上の error が「all failed」だけで、本当の理由は response.failure_list[].failed_reason に入る。これを捨てていたので『公開失敗＝枠満杯』と決めつけ、172/1,000 の TH 2店舗目に満杯の印を付けていた */
-    throw new Error(path + ' error=' + j.error + ' ' + (j.message || '') + _fl); }
+    var _se = new Error(path + ' error=' + j.error + ' ' + (j.message || '') + _fl); _se.shopeeError = String(j.error); _se.shopeeMsg = String(j.message || '').slice(0, 300); throw _se; }   /* ★2026-11-13 中19：Shopee が返事で断った印（通信の失敗・JSON でない返事と見分ける） */
   return j;
 }
 function shopInfo_(shopId) { var j = callShop_(shopId, '/api/v2/shop/get_shop_info', null, 'get'); return { region: j.region, shop_name: j.shop_name }; }
@@ -3026,8 +3026,18 @@ function priceLockRekey_(itemId, moves, gone) {
   if (n) { v.at = new Date().toISOString(); baKvSet_('price_lock', v); PRICE_LOCK_ = null; }
   return { n: n };
 }
+/* ★2026-11-13 全体レビュー 高3：VN の明細は 909,090 VND を超えると出品ごと非公開になる（2026-10-09 Shopee 通知）。止めは addVariationsBulk0_・新規作成（addItem_）にしか無く、
+   1件足す口（addVariation_）と値段を書く口（updatePriceList_・updatePrice_）は素通りだった。→ 同じ形で、超えたら Shopee に送らずに理由つきで失敗にする。
+   国は店のトークン（getToken_＝プロパティ・通信なし）から。分からない時は止めない（今までどおり） */
+function vnPriceCapCheck_(shopId, prices, what) {
+  var cc = ''; try { cc = baCcOfShop_(shopId); } catch (eCc) { cc = ''; }
+  if (cc !== 'VN') return;
+  var over = (prices || []).filter(function (x) { return parseFloat(x.price) > 909090; });
+  if (over.length) throw new Error('VN の明細は 909,090 VND までです（超えると出品ごと非公開）。上限超え ' + over.length + '件：' + over.slice(0, 4).map(function (x) { return String(x.label || x.model_id || '').slice(0, 30) + ' ' + x.price; }).join(' / ') + '（' + (what || '値段') + 'は Shopee に送っていません）。PayPal 併用で Shopee の掲載額を下げてください');
+}
 function updatePrice_(shopId, itemId, modelId, price) {
   { var sp0 = priceLockSplit_(itemId, [{ model_id: modelId, price: price }]); if (sp0.skip.length) return { lockSkipped: sp0.skip, note: '本人の値段（' + sp0.skip[0].lock + '）なので書いていません' }; }
+  vnPriceCapCheck_(shopId, [{ model_id: modelId, price: price }], '値段');   /* ★2026-11-13 高3（同じ型） */
   var body = { item_id: parseInt(itemId, 10), price_list: [{ model_id: parseInt(modelId, 10) || 0, original_price: parseFloat(price) }] };
   var j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body);
   /* ★2026-11-05 洗い出し6（03 営業部）：明細ごとに断られたのに「変えた」と値段の記録を書いていた＝見積もりと出品の額がずれる。断られた時は記録を書かない（投げない＝呼び出し元の流れはそのまま・ポータルの口は ok:false で返す） */
@@ -3254,6 +3264,7 @@ function updatePriceList_(shopId, itemId, list) {
   list = spL.keep;
   var pl = (list || []).map(function (x) { return { model_id: parseInt(x.model_id, 10) || 0, original_price: parseFloat(x.price) }; }).filter(function (x) { return !isNaN(x.original_price); });
   if (!pl.length) throw new Error('価格リストが空');
+  vnPriceCapCheck_(shopId, pl.map(function (x) { return { model_id: x.model_id, price: x.original_price }; }), '値段');   /* ★2026-11-13 高3：1件でも超えたら全部送らない（Shopee に送る前） */
   var body = { item_id: parseInt(itemId, 10), price_list: pl }, j, promo = null;
   try { j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body); }
   catch (eP) {
@@ -5305,6 +5316,7 @@ function addVariation_(shopId, itemId, optionName, price, stock, sku, imageUrl) 
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   optionName = String(optionName || '').trim();
   if (!optionName) throw new Error('追加するバリエ名が空です');
+  vnPriceCapCheck_(shopId, [{ label: optionName, price: price }], '明細');   /* ★2026-11-13 高3：test の書き換え・画像の取り込みより前に止める */
   /* ★2026-11-07 1件だけ足す口も、仮の明細 test（写真なし・在庫0）だけのカタログなら test を書き換える（avFillPlaceholder_・chk.sh 7-11） */
   { var _ph1 = null; try { _ph1 = avFillPlaceholder_(shopId, itemId, [{ option: optionName, price: price, stock: stock, sku: sku, image: imageUrl }]); } catch (ePh1) { throw new Error('仮の明細 test を書き換えられませんでした（明細は足していません）: ' + String((ePh1 && ePh1.message) || ePh1).slice(0, 160)); }
     if (_ph1) return { ok: true, item_id: itemId, option: optionName, model_id: _ph1.model_id, tier_index: 0, filledTest: true, verifyNote: '仮の明細 test を「' + optionName + '」に書き換えました' }; }
@@ -5997,6 +6009,21 @@ function shop3PublishReceipt_(claim, phase, itemId) {
   } finally { lock.releaseLock(); }
 }
 
+/* ★2026-11-13 全体レビュー 高2：第三店の明細の仕入れ目安・JAN・型番の確かめと控え */
+function shop3CostOk_(v) { var c = Number(v && v.cost); return isFinite(c) && c > 0; }
+function shop3Jan_(v) { var j = String((v && v.jan) || '').trim(); return /^\d{8,14}$/.test(j) ? j : ''; }
+function shop3Mpn_(v) { var m = String((v && v.mpn) || '').trim(); return (m && m.length <= 60) ? m : ''; }
+function shop3LlogCostSave_(cc, itemId, vars, rows) {
+  var kk = 'llog_cost_shop3', add = {}, at = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  (vars || []).forEach(function (v, i) { var r = (rows || [])[i]; if (!r || !r.model_id || !shop3CostOk_(v)) return;
+    add[cc + '|' + itemId + '|' + r.model_id] = { c: Math.round(Number(v.cost)), src: String(v.src || '').slice(0, 200), srcTitle: String(v.srcTitle || '').slice(0, 60), srcPrice: Math.round(Number(v.cost)), from: 'amazon', asin: String(v.sku || '').slice(4, 14), ja: String(v.ja || '').slice(0, 80), en: String(v.name || '').slice(0, 120), sku: String(v.sku || '').slice(0, 100), jan: shop3Jan_(v), mpn: shop3Mpn_(v), jc: 0, at: at }; });
+  var n = Object.keys(add).length; if (!n) return 0;
+  var cur = baKvFresh_(kk); if (BA_KV_FAIL[kk]) throw new Error('読めなかった（空で上書きしないため書いていません）');
+  cur = (cur && typeof cur === 'object' && !Array.isArray(cur)) ? cur : {}; cur.m = cur.m || {};
+  Object.keys(add).forEach(function (k) { cur.m[k] = add[k]; }); cur.at = new Date().toISOString(); cur.src = 'gas';
+  baKvSet_(kk, cur);
+  return n;
+}
 function shop3CandidatePublish_(body) {
   var attempt = { claim:null, submitted:false };
   try {
@@ -6004,7 +6031,7 @@ function shop3CandidatePublish_(body) {
     return addItem_(body, attempt);
   }
   catch (err) {
-    var retry = !attempt.submitted && !(err && err.shop3Conflict) && !(attempt.claim && attempt.claim.writeUncertain);
+    var retry = (!attempt.submitted || !!attempt.rejected) && !(err && err.shop3Conflict) && !(attempt.claim && attempt.claim.writeUncertain);   /* ★2026-11-13 中19：Shopee が返事で断った時は作られていない＝控えを外して押し直せるように */
     if (retry && attempt.claim && attempt.claim.reserved) {
       try { shop3PublishReceipt_(attempt.claim, 'release'); }
       catch (releaseError) {
@@ -6086,6 +6113,10 @@ function addItem_(body, attempt) {
         }) || body.price !== Math.min.apply(null, vars.map(function (v) { return v.price; }))) {
       throw new Error('第3店の出品条件を確認できません');
     }
+    /* ★2026-11-13 全体レビュー 高2：本人の【絶対】10/16「出品には仕入れ目安と JAN（無ければ型番）を必ず付ける・無い物は出さない」。第三店の公開の口は値段と ASIN しか見ていなかった
+       → 明細ごとに cost（仕入れ目安・円・0より大きい）と jan（8〜14桁）か mpn（型番）が無ければ、何も送らずに断る（控えも取らない＝押し直せる） */
+    var _s3NoCJ = vars.filter(function (v) { return !shop3CostOk_(v) || !(shop3Jan_(v) || shop3Mpn_(v)); });
+    if (_s3NoCJ.length) throw new Error('第3店の出品には明細ごとの仕入れ目安（cost・円）と JAN（jan・8〜14桁。無ければ型番 mpn）が要ります（本人の決まり 10/16「無い物は出さない」）。足りない明細 ' + _s3NoCJ.length + '件：' + _s3NoCJ.slice(0, 4).map(function (v) { return String(v.name || v.sku || '').slice(0, 30) + '（' + (shop3CostOk_(v) ? '' : '仕入れ目安なし ') + ((shop3Jan_(v) || shop3Mpn_(v)) ? '' : 'JAN・型番なし') + '）'; }).join(' / ') + '。何も送っていません');
     if (!bgAllowed_()) throw new Error('第3店の出品用接続枠が不足しています');
     attempt.claim = { shopId:shopId, asins:vars.map(function (v) { return v.sku.slice(4); }),
       at:Date.now(), owner:Utilities.getUuid() };
@@ -6108,6 +6139,7 @@ function addItem_(body, attempt) {
   }
   // Locker系を除いた使える全チャネルを有効化（高額品がLockerのmax price上限で弾かれるのを防ぐ＝手動出品と同じ）
   var logisticInfo = body.logistic_id ? [{ logistic_id: parseInt(body.logistic_id, 10), enabled: true }] : resolveLogisticInfo_(shopId);
+  var _s3Rows = null;   /* 第三店：公式照会で確かめた明細の番号（vars と同じ順） */
   var _imgCache = {}; // 同一URLは1回だけアップロード（カタログ×バリエで重複するURLの二重アップを防ぐ＝枠/時間節約）
   function _upImg(u) { u = String(u || ''); if (!u) return null; if (!/^https?:\/\//i.test(u)) return u;   /* ★2026-10-06 URLでなければShopeeの画像ID＝そのまま使う */
     if (_imgCache[u]) return _imgCache[u]; var id = uploadImageUrl_(u); if (id) _imgCache[u] = id; return id; }
@@ -6153,10 +6185,18 @@ function addItem_(body, attempt) {
      「No／否」系の選択肢があるもの（成人向けか？等）を埋めて1回だけ作り直す。平常時は呼ばない＝接続枠は増えない。 */
   var j;
   if (candidate) {
-    j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload, function () {
-      shop3PublishReceipt_(attempt.claim, 'pending');
-      attempt.submitted = true;
-    });
+    /* ★2026-11-13 全体レビュー 中19：Shopee が返事で断った（属性の不足など）時も submitted・控え p: が残り、原因を直して押し直しても「公開控えがあります」で止まった。
+       → Shopee の返事の error で断られた時だけ「作られていない」として控えを外す（shop3CandidatePublish_ の release）。
+         通信の失敗・JSON でない返事・Shopee 側の中の失敗（server・inner・timeout 等＝作られたか分からない）は今までどおり控えを残す */
+    try {
+      j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload, function () {
+        shop3PublishReceipt_(attempt.claim, 'pending');
+        attempt.submitted = true;
+      });
+    } catch (eS3) {
+      if (eS3 && eS3.shopeeError && attempt.submitted && !/server|inner|internal|timeout|time\s*out|system|busy|network|unknown|retry|try again/i.test(String(eS3.shopeeError) + ' ' + String(eS3.shopeeMsg || ''))) attempt.rejected = String(eS3.shopeeError);
+      throw eS3;
+    }
   } else try {
     try { j = callShop_(shopId, '/api/v2/product/add_item', null, 'post', payload); }
     catch (eAdd0) {
@@ -6259,6 +6299,7 @@ function addItem_(body, attempt) {
           stockRows = shop3CandidateStockRows_(shopId, itemId, payload, tvBody);
         }
         if (!stockRows) throw new Error('公式照会の商品・明細・画像・価格・在庫が一致しません');
+        _s3Rows = stockRows;   /* ★2026-11-13 高2：明細の番号が分かった＝仕入れ目安の控えに使う */
         updateStockList_(shopId, itemId, stockRows, function () {
           shop3PublishReceipt_(attempt.claim, 'stockPending', itemId);
         });
@@ -6268,6 +6309,13 @@ function addItem_(body, attempt) {
         result.stock_warn = String((err && err.message) || err).slice(0, 300);
       }
     }
+  }
+  /* ★2026-11-13 全体レビュー 高2：公開できた第三店の明細の仕入れ目安・JAN・型番を、出品ログが読む控え（app_kv llog_cost_shop3・鍵 国|item|model）に書く。
+     書けなくても公開は失敗にしない（結果の llog_cost_warn に出す）。product_ids（数MB）は丸ごと読み書きしか無いのでここでは書かない */
+  if (candidate && itemId) {
+    if (_s3Rows) { try { result.llog_cost = shop3LlogCostSave_(String(body.market || ''), itemId, vars, _s3Rows); } catch (eLc) { result.llog_cost_warn = '仕入れ目安の控え（llog_cost_shop3）を書けませんでした: ' + String((eLc && eLc.message) || eLc).slice(0, 160); } }
+    else result.llog_cost_warn = '明細の番号を確かめられなかったので、仕入れ目安の控え（llog_cost_shop3）を書いていません';
+    result.product_ids_note = 'JAN・型番は product_ids（大物）には書いていません（丸ごと読み書きになるため）';
   }
   /* ★2026-09-26 統一動画は作った【後】に update_item で付ける（add_item では送らない＝cloneItem_ の実測に合わせる）。失敗しても作成は成功のまま */
   if (itemId && _promo) { try { promoAfterCreate_(shopId, itemId, _promo, result); } catch (ePa) { result.promo_warn = String((ePa && ePa.message) || ePa).slice(0, 160); } }
@@ -7041,22 +7089,55 @@ function cancelStockGuard_() {
   }
   var cur = rows[0].v || {}; cur.items = cur.items || {};
   var todo = cancels.filter(function (o) { return !cur.items[String(o.sn)]; }).slice(0, 20);
-  var out = { checked: cancels.length, todo: todo.length, fixed: [], errors: [] }, done = {}, recs = [], skips = [];
-  todo.forEach(function (o) {
-    var g = cancelGuardOrder_(o, ctx, nowIso);
-    done[String(o.sn)] = { at: nowIso, r: g.res.join(' / ').slice(0, 300), by: 'sync' };   // 一部失敗でも「済み」＝引いた分を二重に引かない（失敗は🔔に出す）
-    recs = recs.concat(g.fixed); skips = skips.concat(g.skip);
-    if (g.err) out.errors.push(o.cc + ' ' + o.sn);
-    out.fixed.push(o.cc + ' ' + o.sn + '：' + g.res.join(' / ').slice(0, 120));
-  });
-  if (todo.length) cancelGuardSave_(done, recs, skips, nowIso);
+  /* ★2026-11-13 全体レビュー 中16：「処理中」の印のまま止まった注文（在庫を減らす前に印を付けた後、6分切れ等で止まった）は二度と引かず、🔔に出して「済み」にする。
+     15分の見張りは静かな回に印を読まない（中17）ので、ここ（1時間ごと・もともと印を読む）で拾う */
+  var staleN = cancelGuardStaleKeys_(cur.items).length;
+  var out = { checked: cancels.length, todo: todo.length, fixed: [], errors: [], stale: staleN };
+  if (!todo.length && !staleN) return out;
+  var plans = todo.map(function (o) { return { o: o, g: cancelGuardOrder_(o, ctx, nowIso) }; });   // 一部失敗でも「済み」＝引いた分を二重に引かない（失敗は🔔に出す）
+  var cm = cancelGuardCommit_(plans, 'sync', nowIso);
+  out.fixed = cm.lines; out.errors = cm.errors;
   return out;
+}
+/* ★2026-11-13 全体レビュー 中16：前は在庫を減らした【後】に済みの印をまとめて書いていた＝印を書けない（Supabase の失敗・6分切れ）と、次の回に同じ注文をもう一度引いた。
+   → ①読むだけで計画（cancelGuardOrder_）②減らす注文だけ「処理中」の印を1回でまとめて書く（書けなければ投げる＝1件も減らさない）③減らす ④結果で印を上書き。
+   ④が書けずに「処理中」が残った注文は、二度と引かずに🔔へ出す（cancelGuardSave_ が20分より古い「処理中」を拾う）。増える通信は減らす物がある回だけ読み1＋書き1 */
+var CANCEL_ING_STALE_MS = 20 * 60000;
+function cancelGuardStaleKeys_(items) {
+  var lim = Date.now() - CANCEL_ING_STALE_MS;
+  return Object.keys(items || {}).filter(function (k) { var e = items[k]; if (!e || !e.ing) return false; var t = Date.parse(e.at || ''); return !t || t < lim; });
+}
+function cancelGuardCommit_(plans, by, nowIso) {
+  var out = { fixed: 0, skip: 0, errors: [], lines: [] }, ing = {}, done = {}, recs = [], skips = [];
+  (plans || []).forEach(function (p) { if ((p.g.writes || []).length) ing[String(p.o.sn)] = { at: nowIso, r: '処理中（在庫を減らす前に付けた印）', by: by, ing: 1, cc: String(p.o.cc || '') }; });
+  var tk = {}; if (Object.keys(ing).length) { var sv0; try { sv0 = cancelGuardSave_(ing, [], [], nowIso); } catch (ePre) { if (ePre && typeof ePre === 'object') ePre.stage = 'pre'; throw ePre; } (sv0.taken || []).forEach(function (sn) { tk[sn] = 1; }); }   /* 書けなければここで投げる＝1件も減らさない（次の回にもう一度）。もう済みの印があった注文は減らさない */
+  (plans || []).forEach(function (p) {
+    var sn = String(p.o.sn); if (tk[sn]) { out.lines.push(p.o.cc + ' ' + sn + '：ほかの回がもう済みにしていた＝触らない'); return; }
+    var g = cancelGuardApply_(p.o, p.g, nowIso);
+    done[sn] = { at: nowIso, r: g.res.join(' / ').slice(0, 300), by: by };
+    recs = recs.concat(g.fixed); skips = skips.concat(g.skip); out.fixed += g.fixed.length; out.skip += g.skip.length;
+    if (g.err) out.errors.push(p.o.cc + ' ' + sn);
+    out.lines.push(p.o.cc + ' ' + sn + '：' + g.res.join(' / ').slice(0, 120));
+  });
+  cancelGuardSave_(done, recs, skips, nowIso);
+  return out;
+}
+/* 計画（cancelGuardOrder_ の writes）どおりに在庫を減らす。失敗は res・skip（🔔）に足す */
+function cancelGuardApply_(o, g, nowIso) {
+  var shop = parseInt(o.shop_id, 10);
+  (g.writes || []).forEach(function (w) {
+    try { updateStockList_(shop, w.iid, w.list); g.fixed = g.fixed.concat(w.pend); }
+    catch (e) { g.err = true; var em = String((e && e.message) || e).slice(0, 80); g.res.push(w.iid + ' 失敗 ' + em); g.skip.push({ at: nowIso, cc: o.cc, sn: String(o.sn), r: '引き戻しに失敗しました：' + w.iid + ' ' + em }); }
+  });
+  return g;
 }
 /* 引き戻しに要る決め（自動で戻す数・リクエスト品・手で戻した記録）を1回だけ読む。読めない時は何もしない */
 function cancelGuardCtx_() {
   var srBy = {}; try { (sbSelect_('app_kv', 'select=k,v&k=in.(stock_restore_cfg,stock_restore_rules,req_items,stock_restore_manual)') || []).forEach(function (r) { srBy[r.k] = r.v; }); } catch (eSr) { return { err: '自動で戻す決めが読めない' }; }
-  var srRules = srBy.stock_restore_rules || {};
-  var keepOf = function (name, sku) { if (/\blimited\b|限定|特装|豪華|collector|black\s*box|premium\s*box/i.test(String(name || ''))) return 0; var sk = String(sku || '').trim(); if (!sk) return 0; var r = srRules[srRuleKey_('', '', sk)]; if (!r) return 0; if (parseInt(r.q, 10) > 0) return Math.min(99, parseInt(r.q, 10)); return 0; };
+  /* ★2026-11-13 全体レビュー 高1：11/7 の15分見張り（b6708ce）で `return r.m === 'auto' ? srQ : 0` が `return 0` になっていた（記録に意図は無い）。
+     「自動で戻す」に決め、数（q）を決めていない商品が発送前にキャンセルされると 0 まで引き、自動復活（発送待ち以降の注文しか見ない）が戻さず在庫0のまま止まる＝10/22 09:5x に本人の OK で直した型。10/22 の形に戻す */
+  var srRules = srBy.stock_restore_rules || {}, srQ = Math.max(1, parseInt((srBy.stock_restore_cfg || {}).qty, 10) || 1);
+  var keepOf = function (name, sku) { if (/\blimited\b|限定|特装|豪華|collector|black\s*box|premium\s*box/i.test(String(name || ''))) return 0; var sk = String(sku || '').trim(); if (!sk) return 0; var r = srRules[srRuleKey_('', '', sk)]; if (!r) return 0; if (parseInt(r.q, 10) > 0) return Math.min(99, parseInt(r.q, 10)); return r.m === 'auto' ? srQ : 0; };
   return { srBy: srBy, keepOf: keepOf, man: srBy.stock_restore_manual || {} };
 }
 /* 1つのキャンセルの注文を引き戻す。o = {cc, sn, shop_id, items:[{item_id, model_id, qty, variation, name}], cancelAt(ISO・分かる時だけ)}
@@ -7064,8 +7145,8 @@ function cancelGuardCtx_() {
    ★2026-11-07 手で変えた跡：①今の在庫がキャンセルの数より少ない（Shopee が戻しただけならキャンセルの数以上ある）②キャンセルの後に、ポータルで「手で戻した」記録がある → 減らさずに🔔
    今の在庫が0なら、もう誰かが引き戻した＝何もしない（🔔にも出さない） */
 function cancelGuardOrder_(o, ctx, nowIso) {
-  var shop = parseInt(o.shop_id, 10), res = [], fixed = [], skip = [], err = false;
-  if (!shop) return { res: ['shop_id なし'], fixed: [], skip: [{ at: nowIso, cc: o.cc, sn: String(o.sn), r: '店が分からない（shop_id なし）＝引き戻していません' }], err: true };
+  var shop = parseInt(o.shop_id, 10), res = [], fixed = [], skip = [], err = false, writes = [];   /* ★2026-11-13 中16：ここでは読むだけ。在庫を書くのは cancelGuardApply_（先に「処理中」の印を書いてから） */
+  if (!shop) return { res: ['shop_id なし'], fixed: [], skip: [{ at: nowIso, cc: o.cc, sn: String(o.sn), r: '店が分からない（shop_id なし）＝引き戻していません' }], err: true, writes: [] };
   var byItem = {};
   (o.items || []).forEach(function (it) { var iid = String(it.item_id || ''); if (!iid) return; (byItem[iid] = byItem[iid] || []).push({ mid: Number(it.model_id) || 0, q: Math.max(1, Number(it.qty) || 1), vn: String(it.variation || it.model_name || ''), cn: String(it.name || '') }); });
   Object.keys(byItem).forEach(function (iid) {
@@ -7090,24 +7171,32 @@ function cancelGuardOrder_(o, ctx, nowIso) {
         if (nv !== now) { list.push({ model_id: x.mid, stock: nv }); pend.push({ at: nowIso, cc: o.cc, sn: String(o.sn), item_id: iid, model_id: x.mid, name: (x.cn || '').slice(0, 80), vn: (mname || x.vn || '').slice(0, 60), before: now, after: nv }); }
         res.push(iid + '#' + x.mid + ' ' + now + '→' + nv);
       });
-      if (list.length) { updateStockList_(shop, iid, list); fixed = fixed.concat(pend); }
+      if (list.length) writes.push({ iid: iid, list: list, pend: pend });
     } catch (e) { err = true; var em = String((e && e.message) || e).slice(0, 80); res.push(iid + ' 失敗 ' + em); skip.push({ at: nowIso, cc: o.cc, sn: String(o.sn), r: '引き戻しに失敗しました：' + iid + ' ' + em }); }
   });
   /* ★2026-11-04 全体レビュー 新-7：名前が合わず触らなかった（＝Shopee が戻した在庫がそのまま残る）件も🔔へ */
   var skp = res.filter(function (t) { return /触らない|もう無い/.test(t) && !/手で/.test(t); }); if (skp.length) skip.push({ at: nowIso, cc: o.cc, sn: String(o.sn), r: skp.join(' / ').slice(0, 240) });
-  return { res: res, fixed: fixed, skip: skip, err: err };
+  return { res: res, fixed: fixed, skip: skip, err: err, writes: writes };
 }
 /* 済みの印（cancel_stock_done）・引き戻しの記録（log）・🔔（cancel_stock_skip）を書く。書く直前に読み直して重ねる（ほかの台・1時間ごとの分を消さない） */
 function cancelGuardSave_(done, recs, skips, nowIso) {
   var r0 = sbSelect_('app_kv', 'select=v&k=eq.cancel_stock_done'); if (!Array.isArray(r0) || !r0.length) throw new Error('cancel_stock_done を読み直せない＝書きません');
   var cur = r0[0].v || {}; cur.items = cur.items || {};
-  Object.keys(done).forEach(function (sn) { if (!cur.items[sn]) cur.items[sn] = done[sn]; });
+  /* ★2026-11-13 中16：この回が付けた「処理中」の印は結果で上書きする（ほかの済みの印は今までどおり触らない） */
+  var taken = [];
+  Object.keys(done).forEach(function (sn) { var e0 = cur.items[sn]; if (!e0 || (e0.ing && !done[sn].ing)) cur.items[sn] = done[sn]; else if (done[sn].ing) taken.push(sn); });
+  /* 20分より古い「処理中」＝在庫を減らす前後で止まった。減らしたか分からないので二度と引かず、🔔に出して済みにする */
+  skips = (skips || []).slice();
+  cancelGuardStaleKeys_(cur.items).forEach(function (sn) { var e1 = cur.items[sn] || {};
+    cur.items[sn] = { at: nowIso, r: '途中で止まった（在庫を減らす前の印のまま・' + String(e1.at || '').slice(0, 16) + '）＝二重に引かないよう触っていません', by: 'stale' };
+    skips.push({ at: nowIso, cc: String(e1.cc || ''), sn: sn, r: '引き戻しが途中で止まりました（在庫を減らす前の印のまま ' + String(e1.at || '').slice(0, 16) + '）。二重に引かないよう触っていません＝今の在庫を確かめてください' }); });
   var cutoff = Date.now() - 60 * 86400000;
   Object.keys(cur.items).forEach(function (k) { var t = Date.parse((cur.items[k] || {}).at || ''); if (t && t < cutoff) delete cur.items[k]; });
   cur.at = nowIso;
   sbUpsert_('app_kv', [{ k: 'cancel_stock_done', v: cur, updated_at: nowIso }], 'k');
   if (recs.length) { try { var lg0 = baKvFresh_('cancel_stock_log') || {}; var la = Array.isArray(lg0.items) ? lg0.items : []; baKvSet_('cancel_stock_log', { items: recs.concat(la).slice(0, 300), at: nowIso }); } catch (eL) { Logger.log('cancel_stock_log を書けませんでした ' + String(eL).slice(0, 100)); } }   /* 引き戻しの記録（ポータルの🔔の画面で見る・小さい控えに分ける） */
   if (skips.length) { try { var cs0 = baKvFresh_('cancel_stock_skip') || {}; var arr = Array.isArray(cs0.items) ? cs0.items : []; baKvSet_('cancel_stock_skip', { items: skips.concat(arr).slice(0, 100), at: nowIso }); } catch (eS) { Logger.log('cancel_stock_skip を書けませんでした ' + String(eS).slice(0, 100)); } }
+  return { taken: taken };
 }
 /* ★2026-11-07 本人「基本的にキャンセルされた時に在庫は戻さないようにしてほしいです。Shopee の仕様がそうなっていても、強制的に戻さないようにしてください」：
    15分おきに、全部の店（13）で「update_time が前回から変わったキャンセルの注文」だけを Shopee から読み、まだ済みでない物をすぐ引き戻す。
@@ -7122,10 +7211,11 @@ function cancelWatchRun_() {
   if (!syncGate_('cancelStockGuard', 600)) return { skip: 'gate' };
   var st = baKvFresh_(CANCEL_WATCH_KEY); if (BA_KV_FAIL[CANCEL_WATCH_KEY]) return { skip: '前回の時刻が読めない' };
   st = (st && typeof st === 'object' && !Array.isArray(st)) ? st : {}; st.last = st.last || {};
-  var rows = sbSelect_('app_kv', 'select=v&k=eq.cancel_stock_done'); if (!Array.isArray(rows) || !rows.length) return { skip: '済みの印が読めない' };
-  var doneNow = (rows[0].v || {}).items || {};
-  var ctx = cancelGuardCtx_(); if (ctx.err) return { skip: ctx.err };
-  var now = now_(), nowIso = new Date().toISOString(), out = { shops: 0, cancels: 0, todo: 0, fixed: 0, skip: 0, errors: [] }, done = {}, recs = [], skips = [];
+  var now = now_(), nowIso = new Date().toISOString(), out = { shops: 0, cancels: 0, todo: 0, fixed: 0, skip: 0, errors: [] };
+  /* ★2026-11-13 全体レビュー 中17：前はキャンセルが無い回も、先に済みの印（cancel_stock_done・60日分）と決め4本を読んでいた。
+     → ①全店のキャンセルの一覧（get_order_list）を先に読む ②一覧に注文があった時だけ済みの印を読む ③まだ済みでない注文があった時だけ決めを読む。
+     静かな回は 取り札＋状態の読み＋店の数＋状態の書き込み（印と決めの2回が減る）。店ごとの一覧の読みは見張りそのもの＝減らせていない */
+  var shops = [];
   listTokens_().forEach(function (tok) {
     if (!tok || !tok.shop_id) return;
     var sid = String(tok.shop_id), from = Math.max(now - 14 * 86400, (parseInt(st.last[sid], 10) || (now - 1800)) - 180);
@@ -7138,25 +7228,50 @@ function cancelWatchRun_() {
         if (!r.more || !r.next_cursor) break; cursor = r.next_cursor;
       }
       out.shops++; out.cancels += sns.length;
-      var nw = sns.filter(function (sn) { return !doneNow[sn] && !done[sn]; });
-      for (var i = 0; i < nw.length; i += 50) {
-        var jd = callShop_(tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: nw.slice(i, i + 50).join(','), response_optional_fields: 'item_list,order_status,update_time' }, 'get');
-        (((jd.response || {}).order_list) || []).forEach(function (od) {
-          if (String(od.order_status || '') !== 'CANCELLED') return;
-          out.todo++;
-          var o = { cc: tok.cc, sn: String(od.order_sn), shop_id: tok.shop_id, cancelAt: od.update_time ? new Date(od.update_time * 1000).toISOString() : '',
-            items: (od.item_list || []).map(function (it) { return { item_id: it.item_id, model_id: it.model_id, qty: it.model_quantity_purchased || 1, variation: it.model_name || '', name: it.item_name || '' }; }) };
-          var g = cancelGuardOrder_(o, ctx, nowIso);
-          done[o.sn] = { at: nowIso, r: g.res.join(' / ').slice(0, 300), by: 'watch' };
-          recs = recs.concat(g.fixed); skips = skips.concat(g.skip); out.fixed += g.fixed.length; out.skip += g.skip.length;
-          if (g.err) out.errors.push(o.cc + ' ' + o.sn);
-        });
-      }
-      st.last[sid] = now;   /* 読めた店だけ時刻を進める（読めなかった店は次の回にまた同じ窓から） */
-    } catch (e) { out.errors.push(String(tok.cc || '') + ' ' + sid + ' ' + String((e && e.message) || e).slice(0, 100)); }
+      shops.push({ tok: tok, sid: sid, sns: sns });
+    } catch (e) { out.errors.push(String(tok.cc || '') + ' ' + sid + ' ' + String((e && e.message) || e).slice(0, 100)); }   /* 読めなかった店は時刻を進めない（次の回にまた同じ窓から） */
   });
-  if (Object.keys(done).length) cancelGuardSave_(done, recs, skips, nowIso);
-  st.lastAt = nowIso; st.lastOut = out; baKvSet_(CANCEL_WATCH_KEY, st);
+  var doneNow = null, seen = {}, hold = false;   /* hold＝引き戻すべき物があるのに引き戻せなかった回＝lastAt を進めない（50分でポータルが赤く出す） */
+  if (shops.some(function (x) { return x.sns.length; })) {
+    var rows = null; try { rows = sbSelect_('app_kv', 'select=v&k=eq.cancel_stock_done'); } catch (eRd) { rows = null; }
+    if (Array.isArray(rows) && rows.length) doneNow = (rows[0].v || {}).items || {}; else { hold = true; out.errors.push('済みの印が読めない＝この回は引き戻さない'); }
+  }
+  var need = [];
+  shops.forEach(function (x) {
+    if (!x.sns.length) { st.last[x.sid] = now; return; }
+    if (!doneNow) return;
+    x.nw = x.sns.filter(function (sn) { if (doneNow[sn] || seen[sn]) return false; seen[sn] = 1; return true; });
+    if (!x.nw.length) { st.last[x.sid] = now; return; }
+    need.push(x);
+  });
+  if (need.length) {
+    var ctx = cancelGuardCtx_();
+    if (ctx.err) { hold = true; out.errors.push(ctx.err + '＝この回は引き戻さない'); }
+    else {
+      var plans = [], okShops = [];
+      need.forEach(function (x) {
+        try {
+          var mine = [];
+          for (var i = 0; i < x.nw.length; i += 50) {
+            var jd = callShop_(x.tok.shop_id, '/api/v2/order/get_order_detail', { order_sn_list: x.nw.slice(i, i + 50).join(','), response_optional_fields: 'item_list,order_status,update_time' }, 'get');
+            (((jd.response || {}).order_list) || []).forEach(function (od) {
+              if (String(od.order_status || '') !== 'CANCELLED') return;
+              var o = { cc: x.tok.cc, sn: String(od.order_sn), shop_id: x.tok.shop_id, cancelAt: od.update_time ? new Date(od.update_time * 1000).toISOString() : '',
+                items: (od.item_list || []).map(function (it) { return { item_id: it.item_id, model_id: it.model_id, qty: it.model_quantity_purchased || 1, variation: it.model_name || '', name: it.item_name || '' }; }) };
+              mine.push({ o: o, g: cancelGuardOrder_(o, ctx, nowIso) });
+            });
+          }
+          plans = plans.concat(mine); okShops.push(x); out.todo += mine.length;
+        } catch (e2) { out.errors.push(String(x.tok.cc || '') + ' ' + x.sid + ' ' + String((e2 && e2.message) || e2).slice(0, 100)); }
+      });
+      if (plans.length) {
+        try { var cm = cancelGuardCommit_(plans, 'watch', nowIso); out.fixed += cm.fixed; out.skip += cm.skip; out.errors = out.errors.concat(cm.errors); okShops.forEach(function (x) { st.last[x.sid] = now; }); }
+        catch (eC) { hold = true; out.errors.push((eC && eC.stage === 'pre' ? '「処理中」の印を書けなかった＝1件も減らしていない（次の回にもう一度）：' : '減らした後の結果の印を書けなかった＝「処理中」のまま残り、二重には引かない（1時間ごとの回が20分後に🔔へ）：') + String((eC && eC.message) || eC).slice(0, 100)); }   /* どちらも時刻を進めない */
+      } else okShops.forEach(function (x) { st.last[x.sid] = now; });
+    }
+  }
+  if (!hold) st.lastAt = nowIso;   /* ★2026-11-13：引き戻せなかった回は lastAt を進めない（前は戻って書かなかった＝同じく赤になる）。試した時刻と中身は残す */
+  st.lastTryAt = nowIso; st.lastOut = out; baKvSet_(CANCEL_WATCH_KEY, st);
   return out;
 }
 function cancelWatchTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'cancelWatchTick') ScriptApp.deleteTrigger(t); }); }
@@ -11160,7 +11275,7 @@ function boshuAutoTick(manual) {
     // 国ごとに、家族カタログの空きへ
     /* ★2026-09-23 家族カタログの名前（①②の印は外す）。その国にまだ無い時は、この名前で1つ作る（baEnsureFam_） */
     var _famName = '';
-    Object.keys(famRows).forEach(function (c2) { if (_famName) return; var r0 = (famRows[c2] || [])[0]; if (r0 && r0.name) _famName = String(r0.name); });
+    Object.keys(famRows).forEach(function (c2) { if (_famName) return; var r0 = (famRows[c2] || []).filter(function (r) { return r && r.name && !baWorkMarked_(r.name); })[0]; if (r0 && r0.name) _famName = String(r0.name); });   /* ★2026-11-13 レビュー7：作業の印（削除予定 など）の付いた名前を、ほかの国の新しいカタログの名前に写さない（11/13 の8件のうち4件はこれで頭の印まで写った） */
     var touchedShops = {};
     ccsHw.forEach(function (cc) {
       if (Date.now() - t0 > DEADLINE) return;
@@ -11170,7 +11285,12 @@ function boshuAutoTick(manual) {
       /* ★2026-09-23 本人「switchが少ない原因は何？」。TW の Switch カタログの複製が毎回「Adult products」で失敗していたのに何も覚えず、
          その国だけが空いている同じ20作品（他国で売れた順の先頭＝Among Us / Aria Chronicle…）を15分ごとに選び直していた＝Switch の枠が丸ごと空回り。
          カタログを作れない・複製できない国は【6時間その機種×国を候補から外す】→ 次の作品に回る。6時間たてば自動で再挑戦（直っていれば通る）。 */
-      if (/失敗|作れ|カタログ群なし/.test(String(r.note || ''))) { try { var cf = baKvFresh_('boshu_cc_fail') || {}; cf[hw + '|' + cc] = { at: new Date().toISOString(), why: String(r.note).slice(0, 120) }; baKvSet_('boshu_cc_fail', cf); baLog_(st, '⏸ ' + cc + '：' + hw + ' は6時間この国を外します（' + String(r.note).slice(0, 60) + '）'); } catch (eCf) {} }
+      /* ★2026-11-13 全体レビュー 中21：前は読めない時（baKvSet_ が黙って書かない）も「⏸ 6時間外します」と記録し、書き込みの失敗は catch (eCf) {} で消えていた＝書けないと毎巡回同じ国で作り直した。
+         読めない・書けない時は記録に残す（外したことにしない） */
+      if (/失敗|作れ|カタログ群なし/.test(String(r.note || ''))) { try { var cf = baKvFresh_('boshu_cc_fail');
+          if (BA_KV_FAIL['boshu_cc_fail']) baLog_(st, '⚠ ' + cc + '：' + hw + ' を6時間外す印（boshu_cc_fail）を読めなかったので外せていません（' + String(r.note).slice(0, 60) + '）');
+          else { cf = (cf && typeof cf === 'object') ? cf : {}; cf[hw + '|' + cc] = { at: new Date().toISOString(), why: String(r.note).slice(0, 120) }; baKvSet_('boshu_cc_fail', cf); baLog_(st, '⏸ ' + cc + '：' + hw + ' は6時間この国を外します（' + String(r.note).slice(0, 60) + '）'); }
+        } catch (eCf) { baLog_(st, '⚠ ' + cc + '：' + hw + ' を6時間外す印（boshu_cc_fail）を書けませんでした: ' + String((eCf && eCf.message) || eCf).slice(0, 100)); } }
     });
     // 入った明細のJANを台帳（product_ids）へ＝ポータルの重複検知・JAN表示がすぐ効く
     try { if (BA_JAN_Q.length) { var jw = baWriteJan_(BA_JAN_Q); if (jw) baLog_(st, 'JANを台帳に ' + jw + '件'); } } catch (eJ) { baLog_(st, 'JAN書きに失敗: ' + String(eJ).slice(0, 160)); }
@@ -11952,7 +12072,8 @@ function baCountryNames_(cc) {
 }
 function baFreeNo_(cc, name, extraNames) {
   var b = baNameBase_(name), used = {};
-  baCountryNames_(cc).concat(extraNames || []).forEach(function (n) { if (baNameBase_(n) !== b) return; var m = String(n).match(/[①-⑳]/); used[m ? (BA_CIRC.indexOf(m[0]) + 1) : 0] = 1; });
+  b = baNameBase_(baStripWorkMark_(name));   /* ★2026-11-13 レビュー7：印の付いた名前（削除予定 X ①）も同じ系列の番号として数える＝印を外した後に ① が2つにならない */
+  baCountryNames_(cc).concat(extraNames || []).forEach(function (n) { if (baNameBase_(baStripWorkMark_(n)) !== b) return; var m = String(n).match(/[①-⑳]/); used[m ? (BA_CIRC.indexOf(m[0]) + 1) : 0] = 1; });
   var no = 1; while (used[no]) no++;
   return no;
 }
@@ -11962,7 +12083,8 @@ function baFreeNo_(cc, name, extraNames) {
 function baUsedNos_(cc, name) {
   var b = baNameBase_(name), used = {}, names = baCountryNames_(cc);
   try { (sbSelectAll_('listings', 'select=name&cc=eq.' + encodeURIComponent(cc) + '&status=in.(1,8)') || []).forEach(function (r) { names.push(String(r.name || '')); }); } catch (e) {}
-  names.forEach(function (n) { if (baNameBase_(n) !== b) return; var m = String(n).match(/[①-⑳]/); used[m ? (BA_CIRC.indexOf(m[0]) + 1) : 1] = 1; });
+  b = baNameBase_(baStripWorkMark_(name));   /* ★2026-11-13 レビュー7：印の付いた名前も同じ系列に数える */
+  names.forEach(function (n) { if (baNameBase_(baStripWorkMark_(n)) !== b) return; var m = String(n).match(/[①-⑳]/); used[m ? (BA_CIRC.indexOf(m[0]) + 1) : 1] = 1; });
   return used;
 }
 function baWithNo_(name, no) { var nm = String(name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim(); return nm + ' ' + (BA_CIRC[no - 1] || ('(' + no + ')')); }
@@ -11986,16 +12108,27 @@ function baCloneToSub_(cc, base, newName, st, hw, role) {
   try { pr = (base.models || []).map(function (m) { return Number(m.price) || 0; }).filter(function (x) { return x > 0; })[0] || 0; } catch (e) {}
   /* ★2026-09-23 2店舗目に同じ名前のカタログが既にあると `product duplicates an existing product` で弾かれる（実測 TH）。
      1店舗目の複製と同じく、①②③…の番号を送って5回まで試す。 */
-  var CIRC2 = '①②③④⑤⑥⑦⑧⑨⑩', r = null, lastErr = '';
+  /* ★2026-11-13 全体レビュー 中18：前は毎回 nm2 = newName からやり直し、国の番号（_usedS）も変わらない＝2〜5回目も同じ名前を送って重複で断られ、枠を無駄に食っていた。
+     番号の表（CIRC2）が⑩までなので⑪以上の名前は番号を見つけられず「名前 ⑪ ⑫」と2つ付いた。
+     → 断られた名前を覚えて外す（baAddBatch_ の _triedNames と同じ）・番号は BA_CIRC（⑳まで）で探す・国の番号は1回だけ読む（前は毎回 listings を読んでいた）。
+       番号は【送る名前（newName）の系列】で数える（baEnsureFam_ から来る時は base.name と系列が違い得る） */
+  var r = null, lastErr = '', nm0 = String(newName || ''), nm2 = nm0, _tried = {}, _usedS = null;
+  if (baWorkMarked_(nm0)) { nm0 = baStripWorkMark_(nm0); nm2 = nm0; }   /* レビュー7：作業の印は写さない */
+  var _mk = function (no) { var mark = BA_CIRC[no - 1] || ('(' + no + ')'), cur = (nm0.match(/[①-⑳]/) || [])[0]; return cur ? nm0.replace(cur, mark) : (nm0.replace(/\s*\(\d+\)\s*$/, '').trim() + ' ' + mark); };
   for (var tn = 0; tn < 5 && !r; tn++) {
-    var nm2 = String(newName || '');
-    if (tn) { var cur = CIRC2.split('').filter(function (c) { return nm2.indexOf(c) >= 0; })[0]; var _curNo = cur ? (CIRC2.indexOf(cur) + 1) : 1, _usedS = {}; try { _usedS = baUsedNos_(cc, base.name); } catch (eUs) {} var _nn = _curNo + 1; while (_usedS[_nn] && _nn < 40) _nn++; var nxt = BA_CIRC[_nn - 1] || ('(' + _nn + ')'); nm2 = cur ? nm2.replace(cur, nxt) : (nm2.trim() + ' ' + nxt); }   /* ★2026-11-12 送る番号も国の中で使っていない物（前は ②③… を順に試し、別の店の名前と重なり得た） */
+    if (tn) {
+      _tried[nm2] = 1;
+      if (!_usedS) { _usedS = {}; try { _usedS = baUsedNos_(cc, nm0); } catch (eUs) {} }
+      var _pn = /\((\d+)\)\s*$/.exec(nm2), _nn = (/[①-⑳]/.test(nm2) ? baSeriesNo_(nm2) : (_pn ? parseInt(_pn[1], 10) : 1)) + 1; while ((_usedS[_nn] || _tried[_mk(_nn)]) && _nn < 40) _nn++;   /* ⑳ の次は (21)・(22)… */
+      nm2 = _mk(_nn);
+    }
     var rr = seedShopCatalog_({ src_shop_id: base.shop_id, dst_shop_id: sub, item_id: base.item_id, price: pr, name: nm2 });
     if (rr && rr.ok && rr.item_id) { r = rr; newName = nm2; break; }
     lastErr = String((rr && rr.error) || '');
     if (!/duplicat/i.test(lastErr)) break;
-    baLog_(st, cc + '：2店舗目に同じ名前のカタログがある→番号を送ります');
+    baLog_(st, cc + '：2店舗目に同じ名前のカタログがある（' + nm2.slice(0, 50) + '）→番号を送ります');
   }
+  if (!r && /duplicat/i.test(lastErr)) baFamFailMark_(st, hw, cc, lastErr, 'clone:' + baNameBase_(nm0));   /* ★2026-11-13 中21：5回とも重複で断られた系列×国は、その日は複製しない（baAddBatch_ の入口で見る） */
   if (!r || !r.item_id) { baLog_(st, cc + '：2店舗目にカタログを作れませんでした ' + lastErr.slice(0, 160)); return null; }
   /* ★2026-09-23 親SKUを家族のもの（SWITCH 等）にそろえる。付けないと次の回の🤖がこのカタログを家族と見分けられず、
      毎回あたらしい空カタログを作り直していた（実測：TH の2店舗目に親SKU空のカタログが5つ）。 */
@@ -12019,7 +12152,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
   /* 名前は【他の国の家族カタログ】から借りる（無ければ作らない） */
   /* ★2026-09-23 どの国にも家族カタログが無い機種（md/ss/ps5/xbox/xbox360）は、設定の name を使って作る。
      これが無いと「他の国にも家族カタログがありません」で永久に始まらない（＝その機種は一生出ない）。 */
-  var srcName = String(famName || fam.name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim();
+  var srcName = baStripWorkMark_(String(famName || fam.name || '').replace(/[①-⑳]/g, '').replace(/\s+/g, ' ').trim());   /* ★2026-11-13 レビュー7：作業の印は写さない */
   /* ★2026-10-13 本人「基本、現地語はヒットしやすいので」「検索で」：トレカの新しいカタログは TW/TH/VN/BR では現地語の名前で作る（10/13 に既存69件も同じ形へ）。
      英語の Card/TCG は残す＝トレカの巡回はカタログ名か親SKUに card/tcg がある物だけ読む */
   if (!famName) { var _loc = tcgLocalFamName_(hw, cc); if (_loc) srcName = _loc; }
@@ -12033,7 +12166,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
      → 元にするのは【同じ家族】＝親SKUが家族のもの、または番号を外した名前が家族の名前と同じカタログだけ。無ければ作らない（間違った表紙で出すより出さない） */
   var _fb = baNameBase_(srcName);
   var _isFamSrc = function (r) { var h = baHwsOf_(r.name); if (h.length && h.indexOf(hw) < 0) return false; return (wantSku && String(r.parent_sku || '').trim() === wantSku) || baNameBase_(r.name) === _fb; };   /* ★2026-09-27 名前の機種が違うカタログは元にしない（親SKUが同じでも） */
-  var src = pool.filter(function (r) { return _isFamSrc(r) && r.status === 1; })[0] || pool.filter(function (r) { return _isFamSrc(r); })[0];
+  var src = pool.filter(function (r) { return _isFamSrc(r) && r.status === 1 && !baWorkMarked_(r.name); })[0] || pool.filter(function (r) { return _isFamSrc(r) && !baWorkMarked_(r.name); })[0];   /* ★2026-11-13 レビュー7：印の付いたカタログは複製の元にしない */
   /* ★2026-09-23 同じ機種が1つも無い国がある（実測：MY は gc の Variation カタログが0・TW は3）。
      その時は【同じ国の別機種の Variation カタログ】を元にする。引き継ぐのは説明文・状態写真・カテゴリ・重さで、
      これらは機種が違っても同じ定型なので実害は小さい。名前と親SKUはこのあと家族のものに書き換える。
@@ -12046,7 +12179,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
     var other = null;
     Object.keys(allRowsAll).forEach(function (c2) {
       if (c2 === cc || other) return;
-      var r2 = (allRowsAll[c2] || []).filter(function (r) { return (r.hws || []).length === 1 && r.hws[0] === hw && !/series/i.test(String(r.name || '').replace(/series\s+(software|disc|disk|umd|cartridge)/ig, '')) && r.status === 1; })[0];   /* ★2026-09-26 他の国からも作品シリーズのカタログは元にしない／★2026-09-27 親SKUが同じでも【名前の機種がちょうど同じ】ものだけ（実測：MY Wii U ② が TH Wii の写真で作られた＝旧 wii の型が「Wii U」にも当たっていた） */
+      var r2 = (allRowsAll[c2] || []).filter(function (r) { return (r.hws || []).length === 1 && r.hws[0] === hw && !baWorkMarked_(r.name) && !/series/i.test(String(r.name || '').replace(/series\s+(software|disc|disk|umd|cartridge)/ig, '')) && r.status === 1; })[0];   /* ★2026-09-26 他の国からも作品シリーズのカタログは元にしない／★2026-09-27 親SKUが同じでも【名前の機種がちょうど同じ】ものだけ（実測：MY Wii U ② が TH Wii の写真で作られた＝旧 wii の型が「Wii U」にも当たっていた） */
       if (r2) other = r2;
     });
     if (other) {
@@ -12075,7 +12208,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
     var _any = null;
     /* 型の選び方：①機種が1つの汎用カタログ（説明文が定型・名前を置き換えれば他機種の語が残らない）②無ければ公開中のバリエカタログ③最後は何でも */
     try {
-      var _pool = allRowsAll[cc] || [];
+      var _pool = (allRowsAll[cc] || []).filter(function (r) { return r && !baWorkMarked_(r.name); });   /* ★2026-11-13 レビュー7：印の付いたカタログは型にしない */
       /* ★2026-10-11 トレカのシリーズは【同じ国のポケカの家族カタログ】を型にする（カテゴリ・説明文・属性がカード用。ゲームのカタログを型にすると Others カテゴリの遊戯王ができる） */
       var _tplRe = hw === 'acnh' ? /amiibo/i : hw === 'goods_amiibo' ? /amiibo(?!.*card)/i : hw === 'moncolle' ? /moncolle/i : /pok[eé]mon\s*card\s*game/i;   /* 🪙 小物は同じ国の既存カタログ（amiibo／moncolle）を型に。無ければポケカ */
       if (TCG_HW_JA[hw]) _any = (_pool.filter(function (r) { return _tplRe.test(String(r.name || '')) && r.status === 1 && (r.models || []).length > 1; })[0]) || (_pool.filter(function (r) { return _tplRe.test(String(r.name || '')); })[0]) || (_pool.filter(function (r) { return /pok[eé]mon\s*card\s*game/i.test(String(r.name || '')) && r.status === 1; })[0]) || null;
@@ -12110,6 +12243,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
   /* ★2026-09-26 1店舗目の出品枠が満杯なのに1店舗目へ作っていた＝作ったカタログは公開できず、次の回は「満杯の店の非公開カタログ」として無視され、
      また新しく作る…を毎日くり返していた（実測：TH の PS2 ① が1店舗目に4つ・GBA ① が2つ・どれも明細は仮の test だけ）。満杯なら2店舗目へ作る。2店舗目が無ければ作らない */
   if (baShopFull_(cc, src.shop_id)) {
+    if (baFamFailToday_(st, hw, cc, 'clone:' + baNameBase_(srcName))) { baLog_(st, cc + '：' + hw + ' の汎用カタログは今日2店舗目で「重複」で断られたので、今日はもう作りません'); return null; }   /* ★2026-11-13 中21：baCloneToSub_ が付けたその日の印 */
     var srcF = {}; Object.keys(src).forEach(function (k) { srcF[k] = src[k]; }); srcF.parent_sku = wantSku;   /* 2店舗目のカタログの親SKUは【家族のもの】（元にした別カタログの親SKUではない） */
     var subF = baCloneToSub_(cc, srcF, srcName, st, hw, 'fam');
     if (!subF) { baLog_(st, cc + '：' + hw + ' の汎用カタログは1店舗目が満杯・2店舗目にも作れないので作りません'); return null; }
@@ -12287,6 +12421,12 @@ function baWorkKeys_(hw, p) {
 }
 function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger, st, famName, allRowsAll) {
   var res = { added: 0, skipped: 0, note: '' };
+  /* ★2026-11-13 事業本部のレビュー7：家族が印（削除予定 など）の付いたカタログだけの国は、baAddBatch_ の守りで毎回「名前を直すまで足さない」で止まっていた。
+     → 印の付いた家族は入れ先から外す。印の無い家族が残らなければ、下の今までの道（baEnsureFam_・1日の上限つき）が印を外した名前で新しい家族を作る。
+       シリーズの入れ先も印の付いた物は外す（無くなれば家族のカタログへ）。印の付いたカタログそのものには触らない */
+  { var _wmF = (famRows || []).filter(function (r) { return r && baWorkMarked_(r.name); });
+    if (_wmF.length) { famRows = famRows.filter(function (r) { return !(r && baWorkMarked_(r.name)); });
+      var _wmK = 'wm|' + hw + '|' + cc; if (!BA_FAMFAIL_LOGGED[_wmK]) { BA_FAMFAIL_LOGGED[_wmK] = 1; baLog_(st, cc + '：名前が作業の印で始まる家族カタログ ' + _wmF.length + '件（' + _wmF.slice(0, 3).map(function (x) { return x.item_id; }).join('・') + '）は入れ先・複製の元にしない' + (famRows.length ? '' : '＝印の無い家族が無いので、印を外した名前で新しく作る（1日の上限つき）')); } } }
   var todo = picks.filter(function (p) {
     if (p.need && p.need.indexOf(cc) < 0) return false;                       // その国には既に出している（候補づくりで判定済み）
     var d = (ledger[p.key] || {})[cc]; if (d && String(d).indexOf('skip:') !== 0 && !(p.need && p.need.indexOf(cc) >= 0)) return false;   /* ★2026-09-26 候補づくり（baCandidates_）は満杯の店の非公開カタログに埋もれた明細を「未出品」と見て need に入れるのに、ここで台帳の済みで捨てていた＝ds/3ds の18作品が毎回7か国「対象なし」 */
@@ -12301,7 +12441,7 @@ function baAddToCc_(cfg, cc, hw, fam, famRows, allRows, picks, listedSet, ledger
     if (p.ser) { var _tag = ' ' + p.ser + ' Series', _tk = 'T:' + p.ser; if (!groups[_tk]) { groups[_tk] = { rows: famRows.filter(function (r) { return String(r.name || '').indexOf(_tag) >= 0; }), todo: [], series: '', ser: p.ser }; order.push(_tk); } groups[_tk].todo.push(p); return; }
     /* ★2026-10-15 本人「Wii/Wii U ハンドル マリオ…絶対違うやん」の調べで実例：BR のバトスピ「Ryuki Survive SEC 26RCB01-X05」が『関連するバリエカタログ』の仕組み（名前のシリーズ鍵 kamen rider）で
        【仮面ライダーのゲームソフトのカタログ】に入っていた（10/12）。トレカ・グッズは家族カタログ（親SKU）以外に入れない＝シリーズ鍵の寄せ先は使わない */
-    var sr = (TCG_HW_JA[hw] || /^goods_/.test(String(hw))) ? [] : baSeriesRowsFor_(p, allRows, hw); var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
+    var sr = (TCG_HW_JA[hw] || /^goods_/.test(String(hw))) ? [] : baSeriesRowsFor_(p, allRows, hw).filter(function (r) { return !(r && baWorkMarked_(r.name)); });   /* ★2026-11-13 レビュー7 */ var gk = sr.length ? ('S:' + sr[0].skey) : 'F'; if (!groups[gk]) { groups[gk] = { rows: sr.length ? sr : famRows, todo: [], series: sr.length ? sr[0].skey : '' }; order.push(gk); } groups[gk].todo.push(p); });
   /* ★2026-10-19 本人「枠空いているバリエーションにとりあえず入れてほしい」：その国の全部の店が出品枠いっぱい（＝新しいカタログを作っても公開できない）なら、
      シリーズ名が違っても、同じ区分（家族）で【公開中・明細に空きがある】カタログを入れ先に足す（シリーズのカタログを先、他はその後ろ）。価格の幅はこれまで通り守る。
      実測 10/18：TH は SV ①② が100で満杯・① 3つに空き 214、TW は SV② 83・MC① 26・S① 86 の空き。PH/SG は空き 3〜4 でほぼ無い */
@@ -12396,7 +12536,9 @@ function baBrNewRec_(itemId, name, shopId, hw, sku) {
 }
 /* ★2026-11-13 事業本部・01 の調べ（「削除予定」の名前のカタログ8件＝TH 6・MY 2・明細540）：作業用の日本語の印（削除予定 など）で始まる名前のカタログは、
    明細の足し先にも複製の元にもしない。複製で名前を作る時も、頭の印を写さない（お客さんに見える題名に日本語の作業の印を入れない） */
-var BA_WORK_MARK_RE = /^[\s\u3000]*(?:[【\[]\s*)?(?:削除予定|削除|要確認|確認用|テスト|仮置き|仮|保留|非公開予定)(?:\s*[】\]])?[\s\u3000:：・\-]*/;
+/* ★2026-11-13 事業本部のレビュー7：前の形は「仮」の後ろに何も要らず「仮面ライダー」も印になった（テスト→テストドライブ も同じ）。
+   作品名の頭になり得る短い語（削除・テスト・仮・保留）は、後ろに区切り（空白・：・】・] ・－ 等）か終わりがある時だけ印にする。長い語（削除予定・非公開予定・要確認・確認用・仮置き）は今までどおり */
+var BA_WORK_MARK_RE = /^[\s\u3000]*(?:[【\[]\s*)?(?:削除予定|非公開予定|要確認|確認用|仮置き|(?:削除|テスト|仮|保留)(?=[\s\u3000:：・\-】\]]|$))(?:\s*[】\]])?[\s\u3000:：・\-]*/;
 function baWorkMarked_(name) { return BA_WORK_MARK_RE.test(String(name || '')); }
 function baStripWorkMark_(name) { var s = String(name || ''), prev = null; while (prev !== s) { prev = s; s = s.replace(BA_WORK_MARK_RE, ''); } return s.trim(); }
 function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series) {
@@ -12490,6 +12632,12 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var curMark = CIRC[baSeriesNo_(base.name) - 1], nm0 = String(base.name || '');
       var newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, mark) : (nm0.trim() + ' ' + mark);
       if (baWorkMarked_(newName)) { var _nn0 = newName; newName = baStripWorkMark_(newName); baLog_(st, cc + '：複製の名前から作業の印を外した「' + _nn0.slice(0, 40) + '」→「' + newName.slice(0, 40) + '」'); }
+      if (baWorkMarked_(nm0)) nm0 = baStripWorkMark_(nm0);   /* 番号を送る時（下の5回）も印の無い名前から作る */
+      /* ★2026-11-13 全体レビュー 中21：重複で断られた国は失敗に数えない（0cd5d6a）ので、6時間の休みが明けるたびに複製を5回＝1つの系列で1日最大20回試していた。
+         5回とも重複で断られた系列×国は、その日はもう複製を試さない（印は st.famFail＝家族の「その日は作らない」と同じ・app_kv の書き込みに頼らない） */
+      var _cfKey = 'clone:' + baNameBase_(nm0);
+      /* note は「作れ」を含む＝呼び出し側の6時間外し（boshu_cc_fail）に当たり、同じ作品を15分ごとに選び直さない。「失敗・エラー・error・作れません」は含まない＝ブレーキ（_realFail）には数えない */
+      if (baFamFailToday_(st, hw, cc, _cfKey)) { res.note = '今日はこの系列の複製をもう作れない（この国で今日「重複」で断られた）'; if (!BA_FAMFAIL_LOGGED[baFamFailKey_(hw, cc, _cfKey)]) { BA_FAMFAIL_LOGGED[baFamFailKey_(hw, cc, _cfKey)] = 1; baLog_(st, cc + '：' + res.note + '「' + nm0.slice(0, 40) + '」'); } break; }
       /* ★2026-09-20 VN PS2 で「This product duplicates an existing product」。①②の番号は【家族のカタログ】だけを見て決めていたが、
          同じ名前で親SKUが空のカタログ（＝家族に入らない）が既に ② を使っていた。重複と言われたら番号を送って最大5回試す */
       /* ★2026-09-23 1店舗目の出品枠が満杯なら、複製せずに【2店舗目】へ作る（本人「2アカウント目に出せばいいんじゃないんですか？」）。
@@ -12523,7 +12671,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         catch (e) { dupErr = String((e && e.message) || e); if (!/duplicate/i.test(dupErr)) break; _triedNames.push(newName); baLog_(st, cc + ' 同じ名前のカタログが既にある→番号を送る: ' + newName); }
       }
       if (!tgt) {
-        if (!cl) { res.note = '複製失敗: ' + dupErr.slice(0, 160); baLog_(st, cc + ' ' + res.note); if (_bn) { var _fn = baBrNewFail_(st, false); baLog_(st, 'BR：新しい総称カタログを作れなかった（今日 続けて ' + _fn + '/' + Math.max(1, Number((cfg.brNewCat || {}).failMax) || 3) + ' 回）'); } break; }
+        if (!cl) { res.note = '複製失敗: ' + dupErr.slice(0, 160); baLog_(st, cc + ' ' + res.note); if (/duplicate/i.test(dupErr)) baFamFailMark_(st, hw, cc, dupErr, _cfKey);   /* ★2026-11-13 中21：重複で断られ続けた系列×国はその日は試さない */ if (_bn) { var _fn = baBrNewFail_(st, false); baLog_(st, 'BR：新しい総称カタログを作れなかった（今日 続けて ' + _fn + '/' + Math.max(1, Number((cfg.brNewCat || {}).failMax) || 3) + ' 回）'); } break; }
         if (!cl.item_id) { res.note = '複製失敗'; if (_bn) baBrNewFail_(st, false); break; }
         if (_bn) baBrNewFail_(st, true);
         baTcgPreorder_(base.shop_id, cl.item_id, hw, st, cc);   /* ★2026-10-11 トレカの新カタログは予約出品（DTS 7日） */
@@ -12800,7 +12948,7 @@ function baPartialRepair_(st) {
       if (!cur) continue;   /* 明細が無い＝消えた。直す物が無い */
       var okName = String(cur.name || '').trim() === String(p.en).trim();
       var okPrice = Math.abs((Number(cur.price) || 0) - Number(p.price)) < Math.max(1, Number(p.price) * 0.02);
-      if (!okPrice) { updatePrice_(p.shop_id, p.item_id, p.model_id, p.price); }
+      if (!okPrice) { updatePriceList_(p.shop_id, p.item_id, [{ model_id: p.model_id, price: p.price }]); }   /* ★2026-11-13 全体レビュー 中23：updatePrice_ は販促（まとめ買い割引など）に入ったカタログで毎回断られ、この一覧に戻り続けた＝販促を外して書いて戻す方へ */
       if (p.sku && String(cur.sku || '') !== String(p.sku)) { try { updateModelSku_(p.shop_id, p.item_id, [{ model_id: p.model_id, sku: p.sku }]); } catch (eS) {} }
       if (okName && (okPrice || true)) {
         var g2 = getModels_(p.shop_id, p.item_id) || {}, c2 = null; (g2.models || []).forEach(function (m) { if (String(m.model_id) === String(p.model_id)) c2 = m; });
@@ -12958,7 +13106,7 @@ function baReuseTestSlot_(shopId, itemId, it, st, cc) {
           「0にしたつもり」で先に進むと**元の在庫のまま名前と価格だけ変わる**＝一番まずい形（Codex指摘・裏取り済み）。
           通ったことを確かめてから次へ進む。 */
     if (!baStockOk_(updateStock_(shopId, itemId, tm.model_id, 0))) { baLog_(st, cc + '：仮の明細の在庫を0にできなかったので上書きしません'); return null; }
-    updatePrice_(shopId, itemId, tm.model_id, it.price);             /* ② 価格（名前の付け替えでは移らないので必ず単独で） */
+    updatePriceList_(shopId, itemId, [{ model_id: tm.model_id, price: it.price }]);   /* ② 価格（名前の付け替えでは移らないので必ず単独で）。★2026-11-13 中23：販促中は外して書いて戻す方（updatePriceList_）。断られたら投げる＝名前を変える前に止まり、下の catch で在庫0のまま null（呼び出し側は普通に足す） */
     /* ③ 名前・画像・SKU を**1回の update_tier_variation でまとめて**差し替える。
           ★画像を別呼び出しにすると、そこだけ失敗した時に**前の作品の写真のまま在庫が戻る**（Codex指摘）。
             写真違いは出してはいけない側の間違いなので、名前と一緒に原子的に入れる。
@@ -14101,8 +14249,8 @@ function tcgTick(manual) {
       if (!yahooOk) { var _e = tPre[c.key]; if (!(_e && _e.imgs && _e.imgs.length)) continue; }   /* 弾かれ中は控えのあるカードだけ・飛ばした分は試した数に入れない */
       tried++;
       var ph = tcgPhoto_(hw, c, cfg, st, judged, capN, yahooOk);
+      if (ph.unknown) yahooOk = false;   /* ★11/12 形が読めなかった後は、その回の残りのカードでヤフオクを叩かない（休みにはしない）。★2026-11-13 全体レビュー 中20：tcgPhoto_ は {nosrc:1, unknown:1} を返す＝下の nosrc で抜ける前に見る（前は届かず叩き続けた） */
       if (ph.nosrc) { nosrc++; tried--; continue; }
-      if (ph.unknown) yahooOk = false;   /* ★11/12 形が読めなかった後は、その回の残りのカードでヤフオクを叩かない（休みにはしない） */
       if (ph.blocked) { blocked = true; yahooOk = false; st.blockedUntil = baYhRestUntil_(2); baBlockRec_(st, ph.src || 'Yahoo!フリマ', ph.code, st.blockedUntil, 'tcg:' + hw); baLog_(st, (ph.src || 'Yahoo!フリマ') + 'の検索に弾かれた（HTTP ' + ph.code + '）→約2時間はメルカリの写真の控えがあるカードだけ続ける'); tried--; continue; }
       if (ph.stop) { baLog_(st, 'AI判定が止まった（' + ph.stop + '）→この回はここまで'); break; }
       if (!ph.img) { miss++; st.tried[c.key] = tr + 1; continue; }
