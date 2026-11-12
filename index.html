@@ -3469,7 +3469,8 @@
      返事は {ok, error} の形で返す（例外にしない＝呼ぶ側が「外せなかった＝二重に売れる」と必ず出せるように） */
   async function paDelSrc(sid, e) {
     const base = { token: settings.writeToken, shop_id: sid, item_id: e.item_id, mids: String(e.model_id), vnames: String(e.vari || '') };
-    const shift = async () => { try { return await gasCallShift(Object.assign({ action: 'delete_variation_shift' }, base), 300000); } catch (err) { return { ok: false, error: String((err && err.message) || err) }; } };
+    if (!String(e.vari || '').trim()) return { ok: false, error: '明細名が無いので外していません（番号だけでは外さない）' };   /* ★11/12 3回目 低10 */
+    const shift = async () => { try { return await gasCallShift(Object.assign({ action: 'delete_variation_shift' }, base), 300000); } catch (err) { const em = String((err && err.message) || err); if (/__DISCONNECTED__|通信が切れ/.test(em)) return { ok: false, unknown: true, error: '外せたか分かりません（通信が途中で切れました）。出品一覧で元のカタログを確かめてください' }; return { ok: false, error: em }; } };   /* ★3回目 中3 */
     let tail = false;
     try { const md = await openapiGetModels(sid, e.item_id); const ms = ((md && md.models) || []).map(m => ({ id: m.model_id, ti: Number(Array.isArray(m.tier_index) ? m.tier_index[0] : m.tier_index) || 0 }));
       const me = ms.find(m => String(m.id) === String(e.model_id)); if (!me) return { ok: false, error: '元の明細が Shopee の今のカタログに見当たりません（外していません）' };
@@ -9562,6 +9563,7 @@
     "一番くじ・種類別": "Ichiban Kuji by type"
   });
   const I18N_PAT = [
+    [/^元から外す（続きだけ）$/, 'Remove from the original catalog (finish only)'], [/^単品が無いのを確かめた（印を外す）$/, 'I checked there is no single listing (clear the mark)'], [/^➕ 単品で出す（(.+)）$/, '➕ List as a single item ($1)'], [/^本人が画面で押した時だけ動きます$/, 'Works only when pressed on screen'],
     [/^在庫0にしていません：(.+)$/, 'Stock not set to 0: $1'], [/^在庫0にしました（(.+)$/, 'Set stock to 0 ($1'], [/^試し（書いていません）：(.+)$/, 'Dry run (nothing written): $1'], [/^試し（Shopee には書いていません）：(.+)$/, 'Dry run (nothing written to Shopee): $1'],
     [/^⚠ 出品ログの自動の反映に失敗しました（30分後にもう一度）：(.+)$/, '⚠ Auto-update of the listing log failed (retrying in 30 min): $1'],
     [/^🆕 最新の明細（日をまたいで新しい順・([\d,]+)件まで）$/, '🆕 Latest variations (newest first across days, up to $1)'], [/^（([\d,]+)件まで）$/, '(up to $1)'], [/^並び：(.+)$/, 'Sort: $1'], [/^新しい方から ([\d,]+)件まで出します$/, 'Show up to the newest $1'], [/^([A-Z]{2}) の中の店で絞り込みます（「すべての店」で外れます）$/, 'Filter by shop in $1 (choose "All shops" to clear)'], [/^・出品日 (.+)$/, '· listed $1'],
@@ -48855,9 +48857,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             const bt = ev.currentTarget, st2 = box.querySelector('.pa-make2-st'), mk = box.querySelector('.pa-make2'); bt.disabled = true; if (mk) mk.disabled = true;
             const say = (h) => { st2.innerHTML = h; };
             const stop = (t) => { say('<b style="color:#d93025">⚠ ' + esc(t) + '</b>'); bt.disabled = false; if (mk) mk.disabled = false; };   /* 何も作っていない時だけ（押し直せる） */
-            const stopKeep = (t) => { say('<b style="color:#d93025">⚠ ' + esc(t) + '</b>'); };   /* ★高2：単品ができた後・作れたか分からない時はボタンを戻さない（二重に作らない） */
+            let pubTried = false;
+            /* ★3回目 中1・中2：単品を非公開で残す時は、単品の在庫を0にしてから止める（一括の公開・遅れて効いた公開で表に出ても売れない） */
+            const parkSingle = async () => { if (!nid) return false; try { await openapiUpdate('update_stock', { shop_id: dstShop, item_id: nid, stock: 0 }); return true; } catch (_) { return false; } };
+            const stopKeep = async (t) => { let ex = ''; if (nid && !pubTried) { const ok = await parkSingle(); ex = ok ? '（単品の在庫は0にしました＝あとで公開されても売れません）' : '（⚠ 単品の在庫を0にできたか分かりません）'; }
+              say('<b style="color:#d93025">⚠ ' + esc(t + ex) + '</b>');
+              if (nid) { try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: dstShop, ids: String(nid) }, 120000); } catch (_) {} } };   /* ★高2：単品ができた後・作れたか分からない時はボタンを戻さない（二重に作らない）・★3回目 低6：単品を一覧の表に載せる */
             const lockK = 'pa_single_lock_' + e.cc + '_' + e.item_id + '_' + e.model_id;
             let nid = null, zeroed = false;
+            /* ★3回目 中3・中4・低12：「元から外す（続きだけ）」。先に Shopee の今の元の明細を読み、もう無ければ「外れていた」として印を消す。失敗の文はボタンと別の所に出す（ボタンを消さない） */
+            const wireDel = () => { const db = st2.querySelector('.pa-single-del'); if (!db) return; db.addEventListener('click', async ev3 => { if (!ev3.isTrusted) return; db.disabled = true; const mm = st2.querySelector('.pa-single-msg'); const msgOut = (h) => { if (mm) mm.innerHTML = h; };
+              let gone = false; try { await paLiveSrc(sid, e); } catch (eG) { if (/見つかりません|入れ替わって/.test(String((eG && eG.message) || eG))) gone = true; }
+              const d2 = gone ? { ok: true, already: true } : await paDelSrc(sid, e);
+              if (d2 && d2.ok) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(lockK)); } catch (_) {} say('<b style="color:#1a7f37">✅ ' + (gone ? '元のカタログからはもう外れていました' : '元のカタログから外しました') + '（単品 ' + esc(String(nid || '')) + ' は公開中）</b>'); try { logAct('価格調整', '単品の続き：元から外した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), e.item_id + '→' + nid + (gone ? '（もう外れていた）' : '')); } catch (_) {} try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(e.item_id) }, 120000); } catch (_) {} setTimeout(() => { PA.data = null; paRender(true); }, 2500); }
+              else { db.disabled = false; msgOut('<b style="color:#d93025">⚠ ' + (d2 && d2.unknown ? '外せたか分かりません（通信が切れました）。出品一覧で確かめてから、もう一度押してください' : 'まだ外せません：' + esc(String((d2 && d2.error) || '').slice(0, 120))) + '</b>'); } }); };
             try {
               const gw = await guardWriteCountries([e.cc]); if (!gw.ok) { alert(gw.msg); bt.disabled = false; if (mk) mk.disabled = false; return; }
               /* ★高2：前に押して作った（作り中の）印があれば作らない（2台の PC・押し直し・画面の開き直しでも二重にしない） */
@@ -48866,8 +48879,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
                 const sameItem = lv && (!lv.wasName || nzL(lv.wasName) === nzL(e.vari || e.name));   /* ★再レビュー中4：詰め直しで同じ番号に別の作品が入った時は、前の印を見ない */
                 if (lv && sameItem && (lv.nid || lv.unknown || Date.now() - (Number(lv.at) || 0) < 30 * 60000)) {   /* ★再レビュー中7：「作れたか分からない」の印は時間で切らさない */
                   say('<b style="color:#d93025">⚠ この明細はもう単品にしています（' + esc(lv.nid ? '単品 ' + lv.nid : lv.unknown ? '作れたか分からない・' + new Date(Number(lv.at)).toLocaleString('ja-JP') : '作り中・' + new Date(Number(lv.at)).toLocaleTimeString('ja-JP')) + '）。二重には作りません。出品一覧で確かめてください</b>'
-                    + ' <button class="smd-btn pa-single-unlock" style="font-size:10.5px;padding:0 6px" title="出品一覧で、単品が無い（作られていない）のを確かめた時だけ押してください。印を外すと、もう一度単品で出せます">単品が無いのを確かめた（印を外す）</button>');
-                  const ub = st2.querySelector('.pa-single-unlock'); if (ub) ub.addEventListener('click', async ev2 => { if (!ev2.isTrusted) return; ub.disabled = true; try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(lockK)); say('<span class="smd-dim">印を外しました。もう一度「単品で出す」を押せます</span>'); bt.disabled = false; if (mk) mk.disabled = false; } catch (eU) { ub.disabled = false; say('<b style="color:#d93025">⚠ 印を外せませんでした：' + esc(String((eU && eU.message) || eU).slice(0, 80)) + '</b>'); } });
+                    + (lv.nid && lv.pub ? ' <button class="smd-btn b-write pa-single-del" style="font-size:10.5px;padding:0 6px" title="単品は公開済みです。元のカタログからこの明細を外す所だけをやり直します">元から外す（続きだけ）</button>' : '')
+                    + ' <button class="smd-btn pa-single-unlock" style="font-size:10.5px;padding:0 6px" title="出品一覧で、単品が無い（作られていない）のを確かめた時だけ押してください。印を外すと、もう一度単品で出せます">単品が無いのを確かめた（印を外す）</button><span class="pa-single-msg" style="margin-left:4px"></span>');
+                  if (lv.nid && lv.pub) { nid = lv.nid; wireDel(); }
+                  const ub = st2.querySelector('.pa-single-unlock'); if (ub) ub.addEventListener('click', async ev2 => { if (!ev2.isTrusted) return; ub.disabled = true; try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(lockK)); say('<span class="smd-dim">印を外しました。もう一度「単品で出す」を押せます</span>'); bt.disabled = false; if (mk) mk.disabled = false; } catch (eU) { ub.disabled = false; const mm = st2.querySelector('.pa-single-msg'); if (mm) mm.innerHTML = '<b style="color:#d93025">⚠ 印を外せませんでした：' + esc(String((eU && eU.message) || eU).slice(0, 80)) + '</b>'; } });
                   return; } }
               if (titleCut) return stop('明細の名前が途中で縮められていて（…）、元の英語名も控えに無いので、題名を作れません。何もしていません');
               /* 本人の決まり（10/16）：仕入れ目安と JAN（無ければ型番）が無い物は出さない */
@@ -48883,12 +48898,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               if (!jan && !mpn) return stop('JAN も型番も無いので単品にしません（決まり）。先にこの明細の JAN か型番を入れてください。何もしていません');
               /* ★高5：写真は明細の写真だけ（表紙に落とさない） */
               const live0 = await paLiveSrc(sid, e);   /* 元の明細の今の名前・在庫・写真 */
+              if (!(live0.stock > 0)) return stop('元の明細の今の在庫が0です（売れた・止めている）。単品にはしません。何もしていません');   /* ★3回目 低7 */
               const mImg = String((mObj && mObj.img) || live0.img || '').trim(), img = mImg ? (/^https?:/.test(mImg) ? mImg : IMG_CDN + mImg) : '';
               if (!img) return stop('この明細に写真が無いので単品にしません（明細の実物の写真が要ります・表紙は使いません）。何もしていません');
               /* ★高2・中13：作る直前に、国の全店で同じ題名が無いかを読み直す */
               { const r0 = state.rawRead; state.rawRead = true; let pq; try { pq = sbGetAll('listings', 'select=item_id,shop_id,status,name&cc=eq.' + e.cc + '&status=in.(1,8)&name=ilike.' + encodeURIComponent(sTitle.slice(0, 40).replace(/[*,()%]/g, '_') + '*')); }   /* ★再レビュー中7：先頭40字で（店の上限で題名が切られても当たる） */ finally { state.rawRead = r0; }
                 const dupR = await pq.catch(() => null); if (!Array.isArray(dupR)) return stop('同じ題名の出品があるかを読めませんでした（二重に作らないため止めます）');
-                if (dupR.length) return stopKeep('この国（どこかの店）に同じ題名の出品がもうあります（' + dupR.map(x => x.item_id).slice(0, 3).join('・') + '）。二重には作りません'); }
+                const nzT = t => String(t || '').trim().toLowerCase().replace(/\s+/g, ' '), tt = nzT(sTitle);
+                const dup2 = dupR.filter(x => { const xn = nzT(x.name); return xn === tt || (xn.length >= 40 && tt.indexOf(xn) === 0); });   /* ★3回目 中5：全体が同じか、店の上限で切られた長さまで同じ時だけ */
+                if (dup2.length) return stop('この国（どこかの店）に同じ題名の出品がもうあります（' + dup2.map(x => x.item_id).slice(0, 3).join('・') + '）。二重には作りません。何もしていません'); }
               const live = live0;
               say('<span class="smd-dim"><span class="smd-spin"></span>元のカタログの中身（カテゴリ・説明・属性）を読んでいます…</span>');
               const bi = await gasCall({ action: 'api_probe', token: settings.writeToken, shop_id: sid, path: '/api/v2/product/get_item_base_info', q: JSON.stringify({ item_id_list: String(e.item_id) }) }, 60000);
@@ -48910,9 +48928,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
                 try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(lockK)); } catch (_) {}
                 return stop('単品を作れませんでした（元はそのまま）：' + paErrJa(em)); }
               nid = cr && cr.item_id; if (!nid) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(lockK)); } catch (_) {} return stop('単品を作れませんでした（元はそのまま）：' + paErrJa(String((cr && cr.error) || '返事に商品番号が無い'))); }
-              try { await lockPut({ nid: String(nid), shop: String(dstShop) }); } catch (_) {}
+              let lockNote = ''; try { await lockPut({ nid: String(nid), shop: String(dstShop) }); } catch (_) { try { await new Promise(r => setTimeout(r, 2000)); await lockPut({ nid: String(nid), shop: String(dstShop), unknown: true }); } catch (_) { lockNote = '二重に作らない印（' + nid + '）を書けませんでした＝30分たつと、もう一度作れてしまいます。押さないでください'; } }   /* ★3回目 低6 */
               say('<span class="smd-dim"><span class="smd-spin"></span>SKU・予約出品・仕入れ目安・JAN を引き継いでいます…</span>');
-              let carryNote = [];
+              let carryNote = []; if (lockNote) carryNote.push(lockNote);
               /* SKU（低14：作った直後は断られうる＝5秒おいて1回やり直す）と予約出品（中10） */
               const pre = base.pre_order && base.pre_order.is_pre_order ? { is_pre_order: true, days_to_ship: Number(base.pre_order.days_to_ship) || 10 } : null;
               const upd = async () => openapiUpdateItem(Object.assign({ shop_id: dstShop, item_id: nid }, String(e.sku || '').trim() ? { sku: String(e.sku).trim() } : {}, pre ? { preorder: JSON.stringify(pre) } : {}));
@@ -48936,7 +48954,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               zeroed = await setSrcStock(0);
               try { await lockPut({ nid: String(nid), shop: String(dstShop), zeroed: zeroed, was: liveB.stock }); } catch (_) {}
               if (!zeroed) { try { logAct('価格調整', '単品を作った（元を在庫0にできたか分からず・非公開のまま）', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), e.item_id + '→' + nid + '・元の在庫 ' + liveB.stock); } catch (_) {} return stopKeep('単品（' + nid + '・非公開）は作れましたが、元の明細を在庫0にできたか確かめられませんでした。公開していません。元の明細の在庫が 0 なら ' + liveB.stock + ' に戻すか、単品を公開して元から外してください（元の在庫は ' + liveB.stock + ' でした）'); }
-              try { await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: dstShop, item_id: nid, unlist: '0' }, 120000); } catch (_) {}
+              pubTried = true; let pubErr = false; try { await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: dstShop, item_id: nid, unlist: '0' }, 120000); } catch (_) { pubErr = true; }   /* ★3回目 中2：公開の返事が切れても後から効くことがある */
               /* ★中6：数秒おいて最大3回読む */
               let stNow = '', nmNow = '';
               for (let k = 0; k < 3 && stNow !== 'NORMAL'; k++) { if (k) await new Promise(r => setTimeout(r, 4000)); try { const b2 = await gasCall({ action: 'api_probe', token: settings.writeToken, shop_id: dstShop, path: '/api/v2/product/get_item_base_info', q: JSON.stringify({ item_id_list: String(nid) }) }, 60000); const it2 = (((((b2 || {}).data || {}).response || {}).item_list || [])[0]) || {}; stNow = String(it2.item_status || ''); nmNow = String(it2.item_name || ''); if (stNow === 'NORMAL' && pre && !(it2.pre_order && it2.pre_order.is_pre_order)) stNow = 'NORMAL（予約出品なし）'; } catch (_) {} }
@@ -48946,17 +48964,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
                 /* ★再レビュー中5：単品を非公開に戻し、非公開を読み直して確かめてから元の在庫を戻す（後で単品が公開になって二重に売れないように） */
                 let unl = ''; try { await gasCall({ action: 'unlist_item', token: settings.writeToken, shop_id: dstShop, item_id: nid, unlist: '1' }, 120000); } catch (_) {}
                 for (let k = 0; k < 3 && unl !== 'UNLIST'; k++) { await new Promise(r => setTimeout(r, 3000)); try { const b3 = await gasCall({ action: 'api_probe', token: settings.writeToken, shop_id: dstShop, path: '/api/v2/product/get_item_base_info', q: JSON.stringify({ item_id_list: String(nid) }) }, 60000); unl = String(((((((b3 || {}).data || {}).response || {}).item_list || [])[0]) || {}).item_status || ''); } catch (_) {} }
-                let back = false; if (unl === 'UNLIST') back = await setSrcStock(liveB.stock);
-                stopKeep('単品（' + nid + '・' + sTitle.slice(0, 40) + '）は作れましたが、公開を確かめられませんでした（今 ' + (stNow || '読めず') + '）。' + (unl === 'UNLIST' ? '単品は非公開に戻しました。' : '⚠ 単品を非公開に戻せたか確かめられません（今 ' + (unl || '読めず') + '）。') + (back ? '元の明細の在庫は ' + liveB.stock + ' に戻しました＝元はそのまま売れます。' : '⚠ 元の明細は在庫0のままです（' + (unl === 'UNLIST' ? '戻せませんでした' : '単品が公開かもしれないので戻していません') + '・元の在庫は ' + liveB.stock + '）。') + '出品一覧で単品と元の明細を確かめてください');
+                const parked = await parkSingle();   /* ★3回目 中1・中2：先に単品の在庫を0（あとで公開が効いても、一括の公開でも売れない） */
+                let back = false; if (parked && unl === 'UNLIST' && !pubErr) back = await setSrcStock(liveB.stock);
+                stopKeep('単品（' + nid + '・' + sTitle.slice(0, 40) + '）は作れましたが、公開を確かめられませんでした（今 ' + (stNow || '読めず') + '）。' + (parked ? '単品は在庫0にしました（売れません）・' : '⚠ 単品の在庫を0にできたか分かりません・') + (unl === 'UNLIST' ? '非公開に戻しました。' : '非公開に戻せたか確かめられません（今 ' + (unl || '読めず') + '）。') + (back ? '元の明細の在庫は ' + liveB.stock + ' に戻しました＝元はそのまま売れます。' : '⚠ 元の明細は在庫0のままです（' + (!parked ? '単品が売れる状態かもしれないので戻していません' : pubErr ? '公開の返事が切れていて後から公開が効くかもしれないので戻していません' : unl !== 'UNLIST' ? '単品が公開かもしれないので戻していません' : '戻せませんでした') + '・元の在庫は ' + liveB.stock + '）。') + '出品一覧で単品と元の明細を確かめてください');
                 try { logAct('価格調整', '単品を作った（公開を確かめられず）', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), e.item_id + '→' + nid + '（' + sTitle + '・店 ' + dstShop + '・' + (stNow || '読めず') + '・元の在庫 ' + (back ? '戻した' : '0のまま') + '）'); } catch (_) {}
                 return; }
+              try { await lockPut({ nid: String(nid), shop: String(dstShop), pub: true, zeroed: true, was: liveB.stock }); } catch (_) {}
               say('<span class="smd-dim"><span class="smd-spin"></span>公開を確かめました。元のカタログから明細を外しています…</span>');
               const dr = await paDelSrc(sid, e);   /* ★高3：共通の口（Shopee の今の明細で末尾かを決め、途中なら詰め直し・失敗は返す） */
               try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: sid, ids: String(e.item_id) }, 120000); await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: dstShop, ids: String(nid) }, 120000); } catch (_) {}
               try { logAct('価格調整', '値段の差で単品にして移した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), `${e.item_id}→${nid}（${sTitle}・単品・公開・店 ${dstShop}） ${paLoc(e.cc, want)} 仕入れ目安 ¥${Math.round(e.cost)}・${jan ? 'JAN ' + jan : '型番 ' + mpn} 元から外す:${dr && dr.ok ? 'OK' : '失敗（在庫0のまま） ' + ((dr && dr.error) || '')}`); } catch (_) {}
               if (!dr || !dr.ok) {   /* ★再レビュー中6：在庫0でも、元の明細の前の注文が取り消されると在庫が戻って二重に売れる＝正直に書き、続き（外す）だけをやれるボタンを出す */
-                say('<b style="color:#b06000">⚠ 単品（' + esc(String(nid)) + '）は公開しましたが、元のカタログから明細を外せませんでした（' + esc(String((dr && dr.error) || '').slice(0, 120)) + '）。元の明細は在庫0にしてありますが、前の注文が取り消されると Shopee が在庫を戻すことがあり、その時は二重に売れます。</b> <button class="smd-btn b-write pa-single-del" style="font-size:10.5px;padding:0 6px">元から外す（続きだけ）</button>' + (carryNote.length ? '<span class="smd-dim">／' + esc(carryNote.join('／')) + '</span>' : ''));
-                const db = st2.querySelector('.pa-single-del'); if (db) db.addEventListener('click', async ev3 => { if (!ev3.isTrusted) return; db.disabled = true; const d2 = await paDelSrc(sid, e); if (d2 && d2.ok) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(lockK)); } catch (_) {} say('<b style="color:#1a7f37">✅ 元のカタログから外しました（単品 ' + esc(String(nid)) + ' は公開中）</b>'); try { logAct('価格調整', '単品の続き：元から外した', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), e.item_id + '→' + nid); } catch (_) {} } else { db.disabled = false; say('<b style="color:#d93025">⚠ まだ外せません：' + esc(String((d2 && d2.error) || '').slice(0, 120)) + '</b>'); } });
+                say('<b style="color:#b06000">⚠ 単品（' + esc(String(nid)) + '）は公開しました。' + (dr && dr.unknown ? '元のカタログから明細を外せたか分かりません（通信が途中で切れました）。出品一覧で元のカタログを確かめてください。' : '元のカタログから明細を外せませんでした（' + esc(String((dr && dr.error) || '').slice(0, 120)) + '）。') + '元の明細は在庫0にしてありますが、前の注文が取り消されると Shopee が在庫を戻すことがあり、その時は二重に売れます。</b> <button class="smd-btn b-write pa-single-del" style="font-size:10.5px;padding:0 6px" title="単品は公開済みです。元のカタログからこの明細を外す所だけをやり直します（もう外れていれば、印を消して終わります）">元から外す（続きだけ）</button><span class="pa-single-msg" style="margin-left:4px"></span>' + (carryNote.length ? '<span class="smd-dim">／' + esc(carryNote.join('／')) + '</span>' : ''));
+                wireDel();
                 return; }
               try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(lockK)); } catch (_) {}   /* ★再レビュー中4：全部できたら印を外す（同じ番号に次の作品が入っても止めない） */
               say('<b style="color:#1a7f37">✅ 単品にして移しました（' + esc(sTitle.slice(0, 60)) + '・' + esc(paLoc(e.cc, want)) + '・公開・元のカタログは残しています）</b>' + (carryNote.length ? '<b style="color:#b06000">・⚠ ' + esc(carryNote.join('／')) + '</b>' : ''));
