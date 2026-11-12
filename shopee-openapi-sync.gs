@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261112-0745'
+var SRC_VER = '20261113-0215'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -12394,8 +12394,16 @@ function baBrNewRec_(itemId, name, shopId, hw, sku) {
   cur.items[String(itemId)] = it; cur.n = Object.keys(cur.items).length; cur.at = it.at;
   baKvSet_(BR_NEWCAT_KEY, cur); return true;
 }
+/* ★2026-11-13 事業本部・01 の調べ（「削除予定」の名前のカタログ8件＝TH 6・MY 2・明細540）：作業用の日本語の印（削除予定 など）で始まる名前のカタログは、
+   明細の足し先にも複製の元にもしない。複製で名前を作る時も、頭の印を写さない（お客さんに見える題名に日本語の作業の印を入れない） */
+var BA_WORK_MARK_RE = /^[\s\u3000]*(?:[【\[]\s*)?(?:削除予定|削除|要確認|確認用|テスト|仮置き|仮|保留|非公開予定)(?:\s*[】\]])?[\s\u3000:：・\-]*/;
+function baWorkMarked_(name) { return BA_WORK_MARK_RE.test(String(name || '')); }
+function baStripWorkMark_(name) { var s = String(name || ''), prev = null; while (prev !== s) { prev = s; s = s.replace(BA_WORK_MARK_RE, ''); } return s.trim(); }
 function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series) {
   var res = { added: 0, skipped: 0, note: '' };
+  { var _wm = (rows || []).filter(function (x) { return x && baWorkMarked_(x.name); });
+    if (_wm.length) { rows = rows.filter(function (x) { return !(x && baWorkMarked_(x.name)); }); baLog_(st, cc + '：名前が作業の印（削除予定 など）で始まるカタログ ' + _wm.length + '件は足し先・複製の元にしない（' + _wm.slice(0, 3).map(function (x) { return x.item_id; }).join('・') + '）');
+      if (!rows.length) { res.note = '足し先が「削除予定」などの印の付いたカタログだけ＝名前を直すまで足さない（次の回にもう一度）'; baLog_(st, cc + '：' + res.note); return res; } } }
   var _bn = baBrNewMode_(cfg, cc, hw, series, st);   /* ★2026-10-25 BR の新しい総称カタログ（上の説明）。null＝今までどおり */
   /* 本店の切り替え前のカタログ・2店舗目のカタログ＝0（入れない）。05 のレビュー：2店舗目に空きがあると、新しいカタログを作らずに本店向けの明細が2店舗目へ流れて試しが始まらない。
      新しいカタログを作れない時（1日の上限・重複で5回断られた・複製の失敗）は、2店舗目に落とさず、その回の BR は足さずに次の回へ回す（下の break） */
@@ -12481,6 +12489,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳', mark = CIRC[nextNo - 1] || ('(' + nextNo + ')');
       var curMark = CIRC[baSeriesNo_(base.name) - 1], nm0 = String(base.name || '');
       var newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, mark) : (nm0.trim() + ' ' + mark);
+      if (baWorkMarked_(newName)) { var _nn0 = newName; newName = baStripWorkMark_(newName); baLog_(st, cc + '：複製の名前から作業の印を外した「' + _nn0.slice(0, 40) + '」→「' + newName.slice(0, 40) + '」'); }
       /* ★2026-09-20 VN PS2 で「This product duplicates an existing product」。①②の番号は【家族のカタログ】だけを見て決めていたが、
          同じ名前で親SKUが空のカタログ（＝家族に入らない）が既に ② を使っていた。重複と言われたら番号を送って最大5回試す */
       /* ★2026-09-23 1店舗目の出品枠が満杯なら、複製せずに【2店舗目】へ作る（本人「2アカウント目に出せばいいんじゃないんですか？」）。
