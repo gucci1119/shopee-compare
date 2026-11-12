@@ -9545,6 +9545,7 @@
     "一番くじ・種類別": "Ichiban Kuji by type"
   });
   const I18N_PAT = [
+    [/^在庫0にしていません：(.+)$/, 'Stock not set to 0: $1'], [/^在庫0にしました（(.+)$/, 'Set stock to 0 ($1'], [/^試し（書いていません）：(.+)$/, 'Dry run (nothing written): $1'], [/^試し（Shopee には書いていません）：(.+)$/, 'Dry run (nothing written to Shopee): $1'],
     [/^⚠ 出品ログの自動の反映に失敗しました（30分後にもう一度）：(.+)$/, '⚠ Auto-update of the listing log failed (retrying in 30 min): $1'],
     [/^🆕 最新の明細（日をまたいで新しい順・([\d,]+)件まで）$/, '🆕 Latest variations (newest first across days, up to $1)'], [/^（([\d,]+)件まで）$/, '(up to $1)'], [/^並び：(.+)$/, 'Sort: $1'], [/^新しい方から ([\d,]+)件まで出します$/, 'Show up to the newest $1'], [/^([A-Z]{2}) の中の店で絞り込みます（「すべての店」で外れます）$/, 'Filter by shop in $1 (choose "All shops" to clear)'], [/^・出品日 (.+)$/, '· listed $1'],
     /* ★2026-11-12 出品ログ：アカウントごと */
@@ -11656,6 +11657,52 @@
     pcQuote.addBusy = true; if (btn) btn.disabled = true;
     try { return await pcQuoteAddReq0(); } finally { pcQuote.addBusy = false; if (btn) btn.disabled = false; pcRateGate(); }
   }
+  /* ★2026-11-12 03 営業部（quote-card-spec 23.6・本人「一回この『まとめ購入』のリンクで出したのを分けろって言われてるんだけど、その分ける機能とかも欲しいんだけど。」）
+     元のまとめの明細を売れないようにする（在庫0）。Shopee は明細1つだけ非公開にできないため在庫0にする。消す口は作らない。
+     呼び方：#pricecalc?zero=1&src=sr|wa&o=<開いた元>&cc=&item_id=&model_id=&model_name=（または sku=）&buyer=&ref=&rid=[&dry=1]
+     書かない時：開いた元が webchat・WhatsApp の窓でない／Request page でない／SKU が REQ_ で始まらない／明細名・SKU が控えと違う／sold がある／注文（取り消し以外・未発送を含む）がある。
+     書く時は今の在庫の口（update_stock）に明細名と SKU を渡す＝GAS が Shopee の今の明細と照らし、違えば書かない。返事は { smdReqZero:'ok'|'err', msg, dry, blocked, … } */
+  async function pcReqZero(p) {
+    const m0 = document.getElementById('pc-q-msg'), dry = p.get('dry') === '1', to = pcChatOrigin(p.get('o'));
+    const cc = String(p.get('cc') || '').toUpperCase(), itemId = String(p.get('item_id') || '').replace(/\D/g, ''), mid = String(p.get('model_id') || '').replace(/\D/g, '');
+    const mname = String(p.get('model_name') || '').trim(), skuIn = String(p.get('sku') || '').trim();
+    const tell = (ok, msg, extra) => { const t = String(msg || '').slice(0, 300); if (m0) m0.textContent = (ok ? '✅ ' : '⚠ ') + t;
+      try { const op = window.opener; if (to && op && !op.closed) op.postMessage(Object.assign({ smdReqZero: ok ? 'ok' : 'err', msg: t, dry: dry, cc: cc, item_id: itemId, model_id: mid, buyer: p.get('buyer') || '', ref: p.get('ref') || '', rid: p.get('rid') || '' }, extra || {}), to); } catch (_) {} };
+    const no = (why, extra) => tell(false, '在庫0にしていません：' + why, extra);
+    const why0 = pcChatOpenerWhy(p); if (why0) return no(why0);
+    if (!/^[A-Z]{2}$/.test(cc) || !itemId || !mid) return no('国・item_id・model_id がそろっていません');
+    if (!mname && !skuIn) return no('明細名（model_name）か SKU（sku）が要ります（番号だけでは書きません＝消した後に番号が別の明細へ移ることがある）');
+    const nz = (x) => String(x == null ? '' : x).trim().toLowerCase().replace(/\s+/g, ' ');
+    let L = null, ords = null;
+    try { const st0 = state.rawRead; state.rawRead = true; let pL, pO;
+      try { pL = sbGet('listings', 'select=cc,item_id,shop_id,name,models&cc=eq.' + encodeURIComponent(cc) + '&item_id=eq.' + itemId);
+        pO = sbGetAll('orders', 'select=sn,status,tab,items&cc=eq.' + encodeURIComponent(cc) + '&items=cs.' + encodeURIComponent(JSON.stringify([{ item_id: Number(itemId) }]))); } finally { state.rawRead = st0; }
+      const [rL, rO] = await Promise.all([pL, pO]); L = (rL || [])[0] || null; ords = rO; }
+    catch (e) { return no('出品の控えか注文を読めませんでした（' + String((e && e.message) || e).slice(0, 120) + '）'); }
+    if (!L) return no('その出品が控えにありません（' + cc + '・' + itemId + '）');
+    if (!/request page|solicitar/i.test(String(L.name || ''))) return no('Request page ではありません（' + String(L.name || '').slice(0, 60) + '）');
+    let ms = L.models; if (!Array.isArray(ms)) { try { ms = JSON.parse(ms || '[]'); } catch (_) { ms = []; } }
+    const m = (ms || []).find(x => x && String(x.id) === mid);
+    if (!m) return no('その明細が控えにありません（番号 ' + mid + '）');
+    if (mname && nz(m.n) !== nz(mname)) return no('明細名が違います（控え「' + String(m.n || '').slice(0, 40) + '」・渡された「' + mname.slice(0, 40) + '」）');
+    const mSku = String(m.sku || m.model_sku || '').trim();
+    if (skuIn && mSku && mSku.toUpperCase() !== skuIn.toUpperCase()) return no('SKU が違います（控え「' + mSku + '」・渡された「' + skuIn + '」）');
+    const sku = skuIn || mSku;
+    if (!/^REQ_/i.test(sku)) return no('SKU が REQ_ で始まりません（依頼品の明細だけ在庫0にします）');
+    if (Number(m.sold) > 0) return no('注文が付いているので触りません（sold ' + Number(m.sold) + '）', { blocked: 'sold' });
+    if (!Array.isArray(ords)) return no('注文を確かめられませんでした');
+    const hit = ords.filter(o => String(o.status || '').toUpperCase() !== 'CANCELLED' && (Array.isArray(o.items) ? o.items : []).some(it => it && String(it.item_id) === itemId
+      && (String(it.model_id) === mid || (nz(it.variation) && nz(it.variation) === nz(m.n)) || (!!sku && String(it.model_sku || it.sku || '').trim().toUpperCase() === sku.toUpperCase()))));
+    if (hit.length) return no('注文が付いているので触りません（注文 ' + hit.slice(0, 3).map(o => o.sn).join('・') + (hit.length > 3 ? ' ほか' + (hit.length - 3) + '件' : '') + '・取り消し以外）', { blocked: 'order', orders: hit.slice(0, 10).map(o => ({ sn: o.sn, status: o.status })) });
+    if (Number(m.stock) === 0) return tell(true, 'もう在庫0です（' + String(m.n || '') + '）', { already: true, stock: 0, model_name: m.n, sku: sku });
+    if (dry) return tell(true, '試し（書いていません）：在庫0にできます（明細「' + String(m.n || '') + '」・今の在庫 ' + (Number(m.stock) || 0) + '・注文なし）', { stock: Number(m.stock) || 0, model_name: m.n, sku: sku });
+    if (m0) m0.textContent = '⏳ 在庫0にしています…（' + String(m.n || '') + '）';
+    try { await openapiUpdate('update_stock', { shop_id: L.shop_id, item_id: itemId, model_id: mid, model_name: String(m.n || ''), expect_sku: mSku ? sku : '', stock: 0 }); }
+    catch (e) { return no('Shopee が断りました（' + String((e && e.message) || e).slice(0, 160) + '）'); }
+    try { logAct('出品', '依頼品のまとめの明細を在庫0にした', String(m.n || ''), cc + ' ' + itemId + '・' + sku + '・買い手 ' + (p.get('buyer') || '')); } catch (_) {}
+    try { refreshOneListing(cc, itemId, L.shop_id); } catch (_) {}
+    tell(true, '在庫0にしました（明細「' + String(m.n || '') + '」・' + cc + ' ' + itemId + '）。お客さんが取り消した注文があると、Shopee が在庫を戻すことがあります', { stock: 0, model_name: m.n, sku: sku });
+  }
   /* ★2026-11-07 本人「これって、カタログ名じゃないとわからん」：入れ先のカタログは番号だけでなく「カタログ名（国・番号）」で出す */
   function pcReqCatLabel(c, cc) { const nm = String((c && c.name) || '').trim(); return (nm || 'Request page') + '（' + (cc || '') + '・' + String((c && c.item_id) || '') + '）'; }
   function pcReqProfitCheck(quote, prices, context, stage, receipt, agreed) {
@@ -11728,7 +11775,8 @@
     const BQ = pcBundleLive() ? window._pcBundle : null;
     const unitQ = ((regionByCc(L.cc) || {}).priceUnit || 1), rqU = (v) => Math.round(Math.round(v / unitQ) * unitQ * 100) / 100;
     let pList = [price];
-    if (BQ) { const sumC = BQ.items.reduce((a, x) => a + x.cost, 0) || 1; let acc = 0;
+    if (BQ && BQ.perItem) pList = BQ.items.map(x => rqU(x.price));   /* ★2026-11-12 23.6：品物ごとの値段（本人が直した額）で1明細ずつ */
+    else if (BQ) { const sumC = BQ.items.reduce((a, x) => a + x.cost, 0) || 1; let acc = 0;
       pList = BQ.items.map((x, i) => { if (i === BQ.items.length - 1) return rqU(price - acc); const v = Math.max(unitQ, rqU(price * x.cost / sumC)); acc += v; return v; });
       if (pList.some(v => !(v > 0))) { msg.textContent = '⚠ まとめ買いの値段を品物ごとに割り振れませんでした（' + pList.join(' / ') + '）。品物ごとに見積もり直してください'; return; } }
     const pMin = Math.min.apply(null, pList), pMax = Math.max.apply(null, pList), nAdd = pList.length;
@@ -11843,7 +11891,7 @@
     /* ★2026-11-06 事業本部・本人「この場合は作っていいやろ」：入る Request page が無い（100明細で満杯・値段の差 BR 4倍／他 5倍）時は止めずに新しく作る。
        名前は既存と同じ付け方で番号を進める（pcReqNewPage）・作る前に店の出品の上限を確かめる・仮の明細 test の値段を今の値段にする＝高い物用／安い物用に分かれて次から入りやすい。
        足した後は test を消して写真を付け、公開まで自動（▶ 公開する は出さない） */
-    if (!pick && all.length && pcQuote.dryOnly) { msg.innerHTML = '🧪 <b>試しの結果</b>：' + esc(L.cc) + ' に入る Request page がありません（明細100個で満杯か、値段の差が ' + lim + '倍を超える）。本番では、店の出品の上限を確かめてから新しい Request page を作って足します（試しでは作りません）'; return; }
+    if (!pick && all.length && pcQuote.dryOnly) { pcQuote.dryRes = { pass: true, newPage: true, blockers: [], note: L.cc + ' に入る Request page が無いので、本番では新しく作ります（店の出品の上限を確かめてから）', models: (BQ ? BQ.items.map(x => x.en) : [L.title || '']).map((n, i) => ({ en: n, price: pList[i] })) }; msg.innerHTML = '🧪 <b>試しの結果</b>：' + esc(L.cc) + ' に入る Request page がありません（明細100個で満杯か、値段の差が ' + lim + '倍を超える）。本番では、店の出品の上限を確かめてから新しい Request page を作って足します（試しでは作りません）'; return; }
     if (!pick && all.length) {
       if (verifyProfit()) return;
       try { msg.textContent = L.cc + ' に入る Request page が無いので、新しく作っています…（1分ほど）'; _mk('新しい Request page'); pick = await pcReqNewPage(L, all, pMax); madeNew = true; }
@@ -11954,9 +12002,11 @@
             pcQuote.req = { itemId: String(pick.c.item_id), modelName: nm, modelImg: '', preDays: dr.pre ? (Number(dr.dts) || null) : null, listed: String(dr.st || '') === 'NORMAL', madeNew: false, already: true, catalogName: String(pick.c.name || ''), rid: _rf };
             msg.innerHTML = '✅ もう足してあります（' + esc(pcReqCatLabel(pick.c, L.cc)) + '・' + esc(dr.blockers.join('／').slice(0, 120)) + '）。二重には足しません：<a href="' + esc(linkK) + '" target="_blank" rel="noopener">' + esc(linkK) + '</a>';
             return; }
+          if (!dr.pass && pcQuote.dryOnly) pcQuote.dryRes = { pass: false, blockers: dr.blockers || [], fixes: dr.fixes || [], target: pcReqCatLabel(pick.c, L.cc), itemId: String(pick.c.item_id), models: names.map((n, i) => ({ name: n, price: pList[i], sku: skuOf(i), en: BQ ? BQ.items[i].en : '' })), src: String(dr.src || '') };
           if (!dr.pass) { try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(kv)); } catch (_) {} throw new Error('足していません（足す前の確かめで止まる所があります）：' + (dr.blockers || []).join('／') + '（入れ先：' + pcReqCatLabel(pick.c, L.cc) + '）'); }
           if (pcQuote.dryOnly) {   /* ★2026-11-07 試しだけ：結果を画面に出して終わる（Shopee には書かない・試し用の控えも消す） */
             try { await sbDelete('app_kv', 'k=eq.' + encodeURIComponent(kv)); } catch (_) {}
+            pcQuote.dryRes = { pass: !!dr.pass, newPage: !!madeNew, blockers: dr.blockers || [], fixes: dr.fixes || [], notes: dr.notes || [], target: pcReqCatLabel(pick.c, L.cc), itemId: String(pick.c.item_id), listed: String(dr.st || '') === 'NORMAL', preDays: dr.pre ? (Number(dr.dts) || null) : null, bundleDeal: BQ ? pcBundleDealPct() : 0, models: names.map((n, i) => ({ name: n, price: pList[i], sku: skuOf(i), en: BQ ? BQ.items[i].en : '' })), src: String(dr.src || '') };   /* ★2026-11-12 23.6：&dry=1 の返事に入れる */
             const li = (a, c) => (a || []).length ? '<ul style="margin:2px 0 2px 18px;padding:0;color:' + c + '">' + a.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '<span class="smd-dim">なし</span>';
             msg.innerHTML = '🧪 <b>試しの結果：' + (dr.pass ? '<span style="color:#1a7f37">通ります</span>' : '<span style="color:#d93025">止まります</span>') + '</b>（Shopee には何も書いていません・GAS 版 ' + esc(String(dr.src || '?')) + '）<br>入れ先：<b>' + esc(pcReqCatLabel(pick.c, L.cc)) + '</b>（' + esc(String(dr.st || '?')) + '・予約' + (dr.pre ? 'あり ' + esc(String(dr.dts)) + '日' : 'なし') + '・明細 ' + esc(String(dr.models)) + '）'
               + '<br>止まる所：' + li(dr.blockers, '#d93025') + '自動で直す所：' + li(dr.fixes, '#b45309') + (dr.notes && dr.notes.length ? '気になる所：' + li(dr.notes, '#5a6b8c') : '');
@@ -12770,7 +12820,7 @@
         pcQuote.updateMode = update; pcQuote._updPick = null;
         try { await pcQuoteAddReq(); } finally { pcQuote.reqProfitApproved = null; pcQuote.updateMode = false; }
       }; }
-      { const dq = document.getElementById('pc-q-dryreq'); if (dq) dq.onclick = async () => { pcQuote.dryOnly = true; try { await pcQuoteAddReq(); } finally { pcQuote.dryOnly = false; } }; }
+      { const dq = document.getElementById('pc-q-dryreq'); if (dq) dq.onclick = async () => { pcQuote.dryOnly = true; try { await pcQuoteAddReq(); } finally { pcQuote.dryOnly = false; pcQuote.dryRes = null; } }; }
       { const uq = document.getElementById('pc-q-updreq'); if (uq) uq.onclick = async () => { pcQuote.updateMode = true; pcQuote._updPick = null; try { await pcQuoteAddReq(); } finally { pcQuote.updateMode = false; } }; }   /* ★2026-11-07 本人「必ず実機確認もしてくださいね」：本番を押す前に画面で試しの結果を見る */
       { const tc = document.getElementById('pc-q-tochat'); if (tc) tc.onclick = () => pcQuoteToChat(); }
       /* ★2026-10-24 本人「一度、通してやってくれて構わん」：作成後に userscript がリンクをコピーする→ここで1回押せば欄に入って文面も描き直す */
@@ -12804,6 +12854,7 @@
       /* チャットから来た時：#pricecalc?q=…&cc=…&buyer=…&src=sr|wa */
       const fromChat = () => { const h = String(location.hash || ''); const i = h.indexOf('?'); if (h.indexOf('pricecalc') < 0 || i < 0) return; const p = new URLSearchParams(h.slice(i + 1));
         /* ★2026-11-06 レビュー：Smart Reply・WA はまとめ買いの時 &q・&url・&cost・&t を送らない（spec 17.5）＝ここで止まり、まとめ買いの見積もりも出品も動いていなかった。q が無くて &bundle がある時は品物の英語名をつないだ物を q にする */
+        if (p.get('zero') === '1') { if (window._pcLastHash === h) return; window._pcLastHash = h; pcReqZero(p); return; }   /* ★2026-11-12 03（23.6）：元のまとめの明細を在庫0にする（本人がボタンを押した時だけ） */
         let q = p.get('q'); if (!q && (parseInt(p.get('bundle'), 10) || 0) >= 2) { try { const bi0 = JSON.parse(p.get('bi') || 'null'); if (Array.isArray(bi0)) q = bi0.map(x => String((x && (x.en || x.ja)) || '').trim()).filter(Boolean).join(' + '); } catch (_) {} }
         if (!q || window._pcLastHash === h) return; window._pcLastHash = h;
         /* ★2026-11-04 03 営業部（quote-card-spec 17）本人「これ２つなの？画像１個しかないけど」「タイトル何かぐちゃぐちゃになってない？」：まとめ買いの見積もり。
@@ -12813,12 +12864,17 @@
         { const bn = parseInt(p.get('bundle'), 10) || 0;
           if (bn >= 2 && (p.get('mode') === 'quote' || p.get('auto') === '1')) {   /* ★2026-11-05 03-12：&auto=1 は品物ごとに明細を分けて Request page に足す（pcQuoteAddReq0） */
             let its = null; try { its = JSON.parse(p.get('bi') || 'null'); } catch (_) { its = null; }
-            its = Array.isArray(its) ? its.slice(0, 20).map(x => ({ url: String((x && x.url) || ''), cost: Math.round(Number(String((x && x.cost) || '').replace(/[^0-9.]/g, '')) || 0), ja: String((x && x.ja) || '').slice(0, 120), en: String((x && x.en) || '').replace(/\s+/g, ' ').trim().slice(0, 80), img: String((x && x.img) || ''), w: Math.round(Number(x && x.w) || 0) })) : [];
+            its = Array.isArray(its) ? its.slice(0, 20).map(x => ({ url: String((x && x.url) || ''), cost: Math.round(Number(String((x && x.cost) || '').replace(/[^0-9.]/g, '')) || 0), ja: String((x && x.ja) || '').slice(0, 120), en: String((x && x.en) || '').replace(/\s+/g, ' ').trim().slice(0, 80), img: String((x && x.img) || ''), w: Math.round(Number(x && x.w) || 0),
+              price: Math.round((Number(String((x && x.price) != null ? x.price : '').replace(/[^0-9.]/g, '')) || 0) * 100) / 100 })) : [];   /* ★2026-11-12 03（quote-card-spec 23.6 ✂ 品物ごとに分ける）：各組の price＝現地通貨の1点ずつの値段（本人が直した額） */
+            const nPr = its.filter(x => x.price > 0).length, perItem = its.length > 0 && nPr === its.length;
             const bad = !its.length ? '品物の組（&bi）を読めません' : its.length !== bn ? '品物の数（' + its.length + '）が bundle=' + bn + ' と合いません' : its.some(x => !(x.cost > 0)) ? '仕入れ額の無い品物があります'
+              : (nPr > 0 && !perItem) ? '品物ごとの値段（price）が一部の品物にしかありません（' + nPr + '／' + its.length + '）'
+              : (perItem && (p.get('plan') || '1') !== '1') ? '品物ごとの値段は ① Shopee だけの払い方で使えます（plan=' + p.get('plan') + '）'
               : its.some(x => !x.en || /[\u3040-\u30ff\u4e00-\u9fff]/.test(x.en) || pcLooksLikeSentence(x.en)) ? '英語名が ' + bn + '点分そろっていません（日本語・空の品物があります）' : '';
             const fr = p.get('front') === '1', lp = c => fr ? SRC_CAP_FRONT : (c > SRC_CAP_HICOST ? Math.ceil(c * SRC_CAP_RATE) : SRC_CAP_LINE);
             its.forEach(x => { x.lineProfit = lp(x.cost); if (!x.img) { const mid = (x.url.match(/\/item\/(m\d{8,})/) || [])[1] || ''; if (mid) x.img = 'https://static.mercdn.net/item/detail/orig/photos/' + mid + '_1.jpg'; } });
-            window._pcBundle = { n: bn, items: its, err: bad, noDeal: p.get('bd') === '0' };
+            window._pcBundle = { n: bn, items: its, err: bad, noDeal: p.get('bd') === '0' || perItem, perItem: perItem && !bad };   /* 品物ごとの値段の時はまとめ買い割引を入れない（1点ずつの値段のため） */
+            if (perItem && !bad) { const u0 = ((regionByCc((p.get('cc') || 'BR').toUpperCase()) || {}).priceUnit || 1); const sumP = its.reduce((a, x) => a + Math.round(Math.round(x.price / u0) * u0 * 100) / 100, 0); p.set('price', String(Math.round(sumP * 100) / 100)); }   /* 見積もりの Shopee の額＝品物ごとの値段の合計 */
             /* ★2026-11-05 実測：まとめ買い割引に入っている Request page は20ページ中5（BR 2・MY 1・PH 1・TW 1・SG/TH/VN 0）。
                控え app_kv req_bundle_map（{cc:{国:[item_id…]}}）を読み、その国に割引の入ったページが無ければ Bundle Deal は入れない（想定値引きだけ）。
                読めない時は入れる側（値段が少し高め＝粗利は線より上）。足した時に Shopee から読み直して控えを直す（pcQuoteAddReq0） */
@@ -12921,7 +12977,7 @@
               if (why0) { const t9 = '⚠ 自動では進めません：' + why0 + '。中身を確かめて、要る時だけ下のボタンを手で押してください'; if (m0) m0.textContent = t9; try { toast(t9, 8000); } catch (_) {} return; } }
             if (p.get('mode') === 'quote') { pcQuoteApiReply(p); return; }   /* ★2026-10-24 チャットで完結 */
             if (p.get('auto') === '1') {
-              const tell = (ok, m) => { try { const op = window.opener; const to = pcChatOrigin(pcQuote.o); if (to && op && !op.closed) op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 300), buyer: p.get('buyer') || '', price: Number((pcQuote.last || {}).shopL) || null, iso: (pcQuote.last || {}).ISO || '', plan: (pcQuote.last || {}).plan || planP, stage: ((document.getElementById('pc-q-stage') || {}).value) || stageP, ref: pcQuote.ref || '', text: String((document.getElementById('pc-q-text') || {}).value || '').slice(0, 4000), link: pcQuote.link || '', option: pcQuote.optName || '', ...pcReqFields(), ...(pcQuote.reqProfitBlock ? { profitCheck: pcQuote.reqProfitBlock } : {}), rid: p.get('rid') || pcQuote.ref || '' }, to); } catch (_) {} };   /* ★2026-11-04 WA が出した額と合っているか確かめるため price・stage を返す／★2026-11-05 03-22・03：英文（text）・リンク（link）・quote-card-spec 19.6 の項目と照合番号（rid）を毎回返す */
+              const tell = (ok, m) => { try { const op = window.opener; const to = pcChatOrigin(pcQuote.o); if (to && op && !op.closed) op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 300), buyer: p.get('buyer') || '', price: Number((pcQuote.last || {}).shopL) || null, iso: (pcQuote.last || {}).ISO || '', plan: (pcQuote.last || {}).plan || planP, stage: ((document.getElementById('pc-q-stage') || {}).value) || stageP, ref: pcQuote.ref || '', text: String((document.getElementById('pc-q-text') || {}).value || '').slice(0, 4000), link: pcQuote.link || '', option: pcQuote.optName || '', ...pcReqFields(), ...(pcQuote.reqProfitBlock ? { profitCheck: pcQuote.reqProfitBlock } : {}), ...(pcQuote.dryRes ? { dry: pcQuote.dryRes } : {}), rid: p.get('rid') || pcQuote.ref || '' }, to); } catch (_) {} };   /* ★2026-11-04 WA が出した額と合っているか確かめるため price・stage を返す／★2026-11-05 03-22・03：英文（text）・リンク（link）・quote-card-spec 19.6 の項目と照合番号（rid）を毎回返す */
               pcQuote.tell = tell;
               const mm = document.getElementById('pc-q-msg') || document.createElement('div');   /* 一瞬（長く回さない） */
               /* ★2026-10-24 本人「目的は、リクエスト商品にかける時間を少なく効率化すること」：値段が来ていない時は止めずに、計算の値段（選んだ払い方の Shopee の額）で進める */
@@ -12941,7 +12997,13 @@
                   if (shopAmt0 > 0) { const L9 = pcQuote.last || {}, u9 = ((regionByCc(cc) || {}).priceUnit || 1); if (L9.plan !== planP || Math.abs((Number(L9.shopL) || 0) - shopAmt0) > (u9 < 1 ? 0.005 : 0.5)) { const t9b = 'Shopee の額が ' + shopAmt0 + ' になりません（計算は ' + (L9.shopL || '') + '・払い方 ' + (L9.plan || '') + '）。この画面で確かめて 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t9b; tell(false, t9b); return; } }
                   const updM = p.get('update') === '1';
                   pcQuote.updateMode = updM; pcQuote._updPick = null;   /* ★2026-11-07 作り直し（SR・WA から &update=1） */
-                  try { await pcQuoteAddReq(); } finally { pcQuote.updateMode = false; }
+                  const dryM = p.get('dry') === '1'; pcQuote.dryRes = null;   /* ★2026-11-12 03（23.6）：&dry=1＝Shopee に書かず、入れ先・明細名・値段・SKU・止まる所だけ返す */
+                  if (dryM) pcQuote.dryOnly = true;
+                  try { await pcQuoteAddReq(); } finally { pcQuote.updateMode = false; if (dryM) pcQuote.dryOnly = false; }
+                  if (dryM) { const dR = pcQuote.dryRes; pcQuote.link = ''; pcQuote.req = null; pcQuote.optName = ''; pcQuote.optList = null; pcQuote.pick = null;
+                    if (pcQuote.reqProfitBlock) { tell(false, '試し：' + pcQuote.reqProfitBlock.msg); pcQuote.dryRes = null; return; }
+                    tell(!!(dR && dR.pass), dR ? ('試し（Shopee には書いていません）：' + (dR.pass ? '通ります' : '止まります：' + (dR.blockers || []).join('／')) + '・入れ先 ' + (dR.target || (dR.newPage ? '新しい Request page' : '?'))) : ('試しができませんでした：' + String((mm && mm.textContent) || '').slice(0, 240)));
+                    pcQuote.dryRes = null; return; }
                   if (pcQuote.reqProfitBlock) {
                     pcQuote.link = ''; pcQuote.req = null; pcQuote.optName = ''; pcQuote.optList = null; pcQuote.pick = null;
                     tell(false, pcQuote.reqProfitBlock.msg);
@@ -28277,6 +28339,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-12', items: [
+      '✂ <b>まとめで出した見積もりを、品物ごとの明細に分けられるようにしました（Smart Reply などから呼ぶ口）</b>（本人「一回この『まとめ購入』のリンクで出したのを分けろって言われてるんだけど、その分ける機能とかも欲しい」）：①まとめの品物ごとに値段（本人が直した額）を渡すと、その値段で1明細ずつ足し、まとめ買い割引は入れません（SKU は REQ_番号-1・-2…）②試し（dry=1）で、入れ先・明細名・値段・SKU・止まる所を Shopee に書かずに返します ③元のまとめの明細を在庫0にする口（本人がボタンを押した時だけ・Request page の REQ_ の明細だけ・sold や注文〔取り消し以外〕が付いていれば断って理由を返す・消す口は作らない）。',
       '📶 <b>出品ログの自動の反映が10分ごとに丸読みを繰り返していたのを止めました</b>（Supabase の通信量・事業本部）：11/11 2時〜11/12 16時、出品ログへの書き込みが毎回「項目がそろっていない（PGRST102）」で断られ、そのたびに出品（明細付き）と出品ログを丸ごと読み直していました（1日 約48回→約166回）。①仮の行（明細の番号0）の日付も読み、日付が空の行を作らない ②失敗したら30分あけてやり直し、理由を画面に出す。',
       '🏪 <b>上の「対象アカウント」で第3（maneki_neko_japan）を選ぶと、TW の店（登録簿の名前は manekineko_japan）も入るようにしました</b>。登録簿の名前は変えていません。注文・アクセス・損益・出品ログなど、同じ選択欄を使う画面は全部同じです。',
       '🧭 <b>出品ログの「その日に出した商品」を、日をまたいだ最新順でも見られるようにし、上の操作を1つの帯にまとめました</b>（本人「これ、日毎じゃなくて最新順とかで見れないの？」「ほんで見にくくなってきてるからUI整理して」）。①「見る」で <b>📅 日ごと</b>／<b>🆕 最新順（日をまたぐ・100／300／1,000件）</b>を切り替えます（最新順のカードには日付と時刻）。棒グラフの日を押すと日ごとに戻ります。②国ごとの件数・並び・列・アカウントごとの件数・国の中の店の丸（約20個）を、ふだんは「いま 📅 11-12 の分・🏪 すべての店・並び：新しい順・国ごとの列」の1行にし、「⚙ 変える ▸」で開く帯にしました。店は国ごとの選択欄（PH すべて／第1／第2／第3）です。③🤖の稼働・収支・これまでに出した明細の3つの箱を1つの箱にまとめました。',
