@@ -9545,6 +9545,7 @@
     "一番くじ・種類別": "Ichiban Kuji by type"
   });
   const I18N_PAT = [
+    [/^⚠ 出品ログの自動の反映に失敗しました（30分後にもう一度）：(.+)$/, '⚠ Auto-update of the listing log failed (retrying in 30 min): $1'],
     [/^🆕 最新の明細（日をまたいで新しい順・([\d,]+)件まで）$/, '🆕 Latest variations (newest first across days, up to $1)'], [/^（([\d,]+)件まで）$/, '(up to $1)'], [/^並び：(.+)$/, 'Sort: $1'], [/^新しい方から ([\d,]+)件まで出します$/, 'Show up to the newest $1'], [/^([A-Z]{2}) の中の店で絞り込みます（「すべての店」で外れます）$/, 'Filter by shop in $1 (choose "All shops" to clear)'], [/^・出品日 (.+)$/, '· listed $1'],
     /* ★2026-11-12 出品ログ：アカウントごと */
     [/^(.+) の全部の国の店の分だけに絞り込みます$/, 'Show only $1 shops in all countries'], [/^🏪 (.+) の分だけに絞り込みます$/, '🏪 Show only $1'], [/^第(\d) (.+)$/, 'No.$1 $2'],
@@ -28276,6 +28277,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-12', items: [
+      '📶 <b>出品ログの自動の反映が10分ごとに丸読みを繰り返していたのを止めました</b>（Supabase の通信量・事業本部）：11/11 2時〜11/12 16時、出品ログへの書き込みが毎回「項目がそろっていない（PGRST102）」で断られ、そのたびに出品（明細付き）と出品ログを丸ごと読み直していました（1日 約48回→約166回）。①仮の行（明細の番号0）の日付も読み、日付が空の行を作らない ②失敗したら30分あけてやり直し、理由を画面に出す。',
       '🏪 <b>上の「対象アカウント」で第3（maneki_neko_japan）を選ぶと、TW の店（登録簿の名前は manekineko_japan）も入るようにしました</b>。登録簿の名前は変えていません。注文・アクセス・損益・出品ログなど、同じ選択欄を使う画面は全部同じです。',
       '🧭 <b>出品ログの「その日に出した商品」を、日をまたいだ最新順でも見られるようにし、上の操作を1つの帯にまとめました</b>（本人「これ、日毎じゃなくて最新順とかで見れないの？」「ほんで見にくくなってきてるからUI整理して」）。①「見る」で <b>📅 日ごと</b>／<b>🆕 最新順（日をまたぐ・100／300／1,000件）</b>を切り替えます（最新順のカードには日付と時刻）。棒グラフの日を押すと日ごとに戻ります。②国ごとの件数・並び・列・アカウントごとの件数・国の中の店の丸（約20個）を、ふだんは「いま 📅 11-12 の分・🏪 すべての店・並び：新しい順・国ごとの列」の1行にし、「⚙ 変える ▸」で開く帯にしました。店は国ごとの選択欄（PH すべて／第1／第2／第3）です。③🤖の稼働・収支・これまでに出した明細の3つの箱を1つの箱にまとめました。',
       '🏪 <b>出品ログの「アカウントごとの件数」と「アカウントごとの列」に、その日0件の店も出すようにしました</b>（本人「第３アカウントがないですよ」）。🔑登録簿にある店は全部、0件なら薄く出します。TW の3店舗目（登録簿の名前が manekineko_japan）も第3 maneki_neko_japan に数えます。',
@@ -44772,7 +44774,9 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const last = Number(localStorage.getItem('smdListLogAutoAt') || 0);
     if (Date.now() - last < LISTLOG_EVERY_MS) return;
     localStorage.setItem('smdListLogAutoAt', String(Date.now()));
-    syncListingLog().catch(() => { try { localStorage.removeItem('smdListLogAutoAt'); } catch (_) {} });
+    /* ★2026-11-12 egress（事業本部）：失敗した時に印を消すと10分ごと（開いているタブの数だけ）丸読み（出品約8ページ＋出品ログ約86ページ）をやり直していた。
+       失敗したら30分あけてもう一度・理由は画面に出す */
+    syncListingLog().catch((e) => { try { localStorage.setItem('smdListLogAutoAt', String(Date.now() - LISTLOG_EVERY_MS + 30 * 60 * 1000)); } catch (_) {} try { console.warn('[出品ログ] 自動の反映に失敗', e); toast('⚠ 出品ログの自動の反映に失敗しました（30分後にもう一度）：' + String((e && e.message) || e).slice(0, 120), true); } catch (_) {} });
   } catch (_) {} };
   setTimeout(listLogAutoTick, 3 * 60 * 1000); setInterval(listLogAutoTick, 10 * 60 * 1000);   // 3分後に1回・以後10分ごとに「1時間たったか」を見る
   // 📅 明細ごとの「更新日」（本人 2026-09-20「いつ出品したかといつ更新したかを明細ごとに表示できる？列追加して」）。
@@ -44811,11 +44815,14 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     if (!settings.sbSecret) throw new Error('このPCは書き込みキーが未設定です（⚙️設定で登録してください）');
     /* ★2026-10-24 全体レビュー（出品管理 #40②）：この同期は全部の店を読む（店の絞り込みを外す）。sbGetAll は呼んだ瞬間に絞り込みを決めるので、呼ぶ間だけ外してすぐ戻す */
     const _rr0 = state.rawRead; let _pL, _pK; state.rawRead = true;
-    try { _pL = sbGetAll('listings', 'select=cc,item_id,name,image,create_time,models,parent_sku'); _pK = sbGetAll('listing_log', 'select=cc,item_id,model_id'); } finally { state.rawRead = _rr0; }
-    const [live, known, baKv] = await Promise.all([
+    /* ★2026-11-12 egress（事業本部）：仮行（model_id=0）の日付も読む。known は ymd を読んでいないので、仮行の日付の引き継ぎで ymd が undefined になり、
+       JSON で ymd の項目だけ抜けて「PGRST102 項目がそろっていない」で書き込みが毎回 400 → 自動の反映が10分ごとに丸読みをやり直していた（11/11 02時〜11/12 16時） */
+    let _pZ; try { _pL = sbGetAll('listings', 'select=cc,item_id,name,image,create_time,models,parent_sku'); _pK = sbGetAll('listing_log', 'select=cc,item_id,model_id'); _pZ = sbGetAll('listing_log', 'select=cc,item_id,ymd&model_id=eq.0').catch(() => []); } finally { state.rawRead = _rr0; }
+    const [live, known, baKv, _llZero] = await Promise.all([
       _pL,
       _pK,
       baKvGet('boshu_auto_status').then(v => (v ? [{ v }] : [])).catch(() => []),   /* 担当が2か所でも合算して読む */
+      _pZ,
     ]);
     // ★2026-09-20 出品ログの日付は「出品した日」でなく「このログが気づいた日」だった：🤖が 9/12〜9/20 に足した 83明細のうち 78件が、全部 9/20 の出品として入っていた。
     //   🤖の記録（boshu_auto_status.added）には実際に足した日時が残っているので、その明細はその日付で記録する
@@ -44837,6 +44844,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     //   新規ではなく“仮行の実体化”とみなし、日付を仮行の日に引き継いで仮行そのものを消す。
     const zeroYmd = new Map();
     known.forEach(k => { if (!k.model_id) zeroYmd.set(k.cc + '|' + k.item_id, k.ymd); });
+    (_llZero || []).forEach(z => { if (z && z.ymd) zeroYmd.set(z.cc + '|' + z.item_id, z.ymd); });   /* ★11/12 仮行の本当の日付 */
     const zeroDone = [];
     const today = jstDate(Date.now());
     const mOf = (L) => { const m = L.models; if (Array.isArray(m)) return m; try { return JSON.parse(m || '[]'); } catch (_) { return []; } };
@@ -44870,7 +44878,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         kset.add(key);
         let ymd = itemYmd;
         { const bw = baWhen.get(r.cc + '|' + r.item_id + '|' + String(m.n || '').toLowerCase().trim()); if (bw) ymd = bw; }
-        if (m.id && !String(m.n || '').trim() && zeroYmd.has(ik)) { ymd = zeroYmd.get(ik); zeroDone.push(r.cc + '\u0000' + r.item_id); }
+        if (m.id && !String(m.n || '').trim() && zeroYmd.has(ik)) { ymd = zeroYmd.get(ik) || ymd; zeroDone.push(r.cc + '\u0000' + r.item_id); }
+        if (!ymd) ymd = today;   /* ★11/12 日付が空の行を作らない（1行でも項目が欠けると束ごと 400） */
         add.push({ cc: r.cc, item_id: r.item_id, model_id: m.id || 0, ymd,
           name: String(r.name || '').slice(0, 200), model_name: String(m.n || '').slice(0, 120),
           image: m.img || r.image || '', price: (m.price != null && m.price !== '' ? Number(m.price) : null),
