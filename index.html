@@ -18970,7 +18970,8 @@
     if (!Array.isArray(r)) throw new Error('読めませんでした');
     let complete = r.length < 700;
     /* ★2026-11-13 03（spec 23.11 の3）：✂ で分けて、まだ送っていない見積もり（state=draft）は、送った人の表・営業の数えに入れない（送ったら sent になって出てくる） */
-    const rows = r.filter(x => String(x.k).indexOf('qlog:') === 0).map(x => Object.assign({ _k: x.k }, x.v || {})).filter(x => x.state !== 'draft');
+    const allQ = r.filter(x => String(x.k).indexOf('qlog:') === 0).map(x => Object.assign({ _k: x.k }, x.v || {}));
+    const rows = allQ.filter(x => x.state !== 'draft');
     const flags = r.filter(x => String(x.k).indexOf('qflag:') === 0).map(x => x.v || {}).filter(x => x.flag);
     /* ★2026-11-13 03（ui-rules 24）：🔒 ロック（未返信に残す・follow:*・🚩 後で追う人を1つにまとめた物）も同じ印として数える。bkey の形は決め打ちにしない（zalo:… viber:… も入る）。読めなくても見積もりの表は出す */
     try { const fr = await read('app_kv', 'select=v&k=like.follow:*&order=updated_at.desc&limit=500'); if (Array.isArray(fr)) fr.forEach(x => { const v = x.v || {}; if (v.on && v.tool && v.cc && v.bkey) flags.push({ id: [v.tool, v.cc, String(v.bkey).trim()].join('|'), flag: true, follow: true, note: v.note || '' }); }); } catch (_) {}
@@ -18980,8 +18981,8 @@
       const q = await read('app_kv', 'select=k,v&k=like.req_quote_*&order=updated_at.desc&limit=300');
       if (!Array.isArray(q)) throw new Error('読めませんでした');
       complete = complete && q.length < 300;
-      const refs = new Set(rows.map(x => String(x.ref || '')).filter(Boolean));
-      const who = new Set(rows.map(x => String(x.cc || '') + '|' + String(x.bkey || x.buyer || '').trim().toLowerCase()));
+      const refs = new Set(allQ.map(x => String(x.ref || '')).filter(Boolean));   /* ★11/13 レビュー12：下書きの見積もりも照らす＝Request page の控えから「作った」として足し戻さない */
+      const who = new Set(allQ.map(x => String(x.cc || '') + '|' + String(x.bkey || x.buyer || '').trim().toLowerCase()));
       q.forEach(x => {
         const v = x.v || {}, b = String(v.buyer || '').trim(); if (!b) return;
         const key = String(v.cc || '') + '|' + b.toLowerCase();
@@ -45707,7 +45708,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     if (!logState.view) { try { logState.view = localStorage.getItem('llogView') || 'day'; } catch (_) { logState.view = 'day'; } }
     if (!logState.latestN) { try { logState.latestN = Number(localStorage.getItem('llogLatestN')) || 300; } catch (_) { logState.latestN = 300; } }
     const _llLatest = logState.view === 'latest', _llN = logState.latestN;
-    const _selKey = _llLatest ? 'latest:' + _llN : sel;
+    const _selKey = (_llLatest ? 'latest:' + _llN : sel) + '|' + (state.acct || '') + '|' + (logState.liveOnly ? 1 : 0);   /* ★11/13 レビュー10：対象アカウント・今の出品だけを替えたら読み直す */
     const _latestRows = _llLatest ? (() => {
       const key = rows.length + '|' + _llN + '|' + state.acct + '|' + (logState.liveOnly ? 1 : 0) + '|' + (rows.length ? rows[rows.length - 1].id : '');
       if (logState._latC && logState._latC.key === key && logState._latC.src === logState.rows) return logState._latC.out;
@@ -45734,7 +45735,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     /* ★2026-10-14 本人「このページめちゃめちゃ重くなっている気がする」：上の読み直しが【その日の全件】（2,700行＋出品データ）を1分ごとに読んでいた。
        2回目からは【前回より後に記録された行】と【まだ読んでいないカタログ】だけ読む・間隔は5分。名前は控え（_nameMap）から毎回当てる */
     const _same = logState._detailDay === _selKey;
-    if ((!_same || (_dN > (logState._detailN || 0) && Date.now() - (logState._detailAt || 0) > 300000)) && !logState._detailBusy) {
+    if ((!_same || (_dN > (logState._detailN || 0) && Date.now() - (logState._detailAt || 0) > 300000)) && !logState._detailBusy && !(_llLatest && !_latMin)) {   /* ★11/13 レビュー10：最新順で0件の時は created_at=gte.（空）で読まない */
       logState._detailBusy = true; logState._detailN = _dN; logState._detailAt = Date.now();
       if (!_same) { logState._nameMap = {}; logState._detailSince = ''; logState._detailItems = new Set(); logState.skuMap = null; logState.stockMap = null; }
       const _inc = _same && !!logState._detailSince;
@@ -48987,7 +48988,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       { const jy = tr.querySelector('.pa-jpy'); if (jy) jy.textContent = paJpy(e, P); }
       const ck = tr.querySelector('.pa-ck'); if (ck && !ck.checked) { ck.checked = true; PA.sel.add(e.key); try { selCount(); } catch (_) {} }
     }));
-    const sa = root.querySelector('#pa-selall'); if (sa) sa.addEventListener('click', () => { view.slice(0, PA.limit).forEach(e => { if (e.sug != null && !e.blocked) PA.sel.add(e.key); });   /* ★2026-09-28 Codex：画面に出ていない提案（表示上限より後ろ）まで選んでいた */ root.querySelectorAll('.pa-ck').forEach(c => { c.checked = true; }); selCount(); });
+    const sa = root.querySelector('#pa-selall'); if (sa) sa.addEventListener('click', () => { view.slice(0, PA.limit).forEach(e => { if (e.sug != null && !e.blocked) PA.sel.add(e.key); });   /* ★2026-09-28 Codex：画面に出ていない提案（表示上限より後ろ）まで選んでいた */ root.querySelectorAll('.pa-ck').forEach(c => { c.checked = PA.sel.has(c.dataset.k); }); selCount(); });   /* ★11/13 レビュー11：提案の値段が無い行には ☑ を付けない（選んだ物だけ印を付ける） */
     const sn = root.querySelector('#pa-selnone'); if (sn) sn.addEventListener('click', () => { PA.sel.clear(); root.querySelectorAll('.pa-ck').forEach(c => { c.checked = false; }); selCount(); });
     if (applyBtn) applyBtn.addEventListener('click', (ev) => { if (applyBtn._busy) return; applyBtn._busy = true; Promise.resolve(paApply(byKey, !!(ev && ev.isTrusted))).finally(() => { applyBtn._busy = false; }); });   /* ★レビュー（低）：読み直しの間の2回押しで同じ値段を2回書かない */
     /* ★2026-10-03 フロントの決め（下限・候補の条件）：打ち終えたら（change）その場で区分けし直し→裏で保存。失敗したら戻す */
