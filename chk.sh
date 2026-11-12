@@ -261,4 +261,12 @@ B12=""
 grep -q "kind: 'trkdup'" index.html || B12="$B12 ポータルの同じ追跡番号の🔔"
 grep -q "kind: 'trkchg'" index.html || B12="$B12 ポータルの付け替えの🔔"
 if [ -n "$B12" ]; then echo "NG  追跡番号のずれの守りが消えている:$B12"; NG=1; else echo "OK  追跡番号のずれの守り（取引IDの確かめ3か所・変更後送り状番号・付け替えの控え・🔔2つ）"; fi
+# 7-13 ★2026-11-12 一括の置き換え（pcQuote.dryOnly→DRY）が宣言の行まで巻き込み「const DRY = !!DRY;」になった＝構文チェックは通るのに、呼ぶたびに実行時エラーで Request page に足す処理が全部9分止まった。
+#     宣言の右側で同じ名前をそのまま読む形（const/let X = X ・ = !X ・ = !!X）を止める
+B13=$(python3 -c 'import re,sys
+rx=re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*!*\1\b")
+for f in sys.argv[1:]:
+    for i,l in enumerate(open(f,encoding="utf-8"),1):
+        if rx.search(l): print(f+":"+str(i)+": "+l.strip()[:120])' index.html shopee-openapi-sync.gs | head -5)
+if [ -n "$B13" ]; then echo "NG  宣言の右側で同じ名前を読んでいる（実行時に Cannot access … before initialization で止まる）"; echo "$B13"; NG=1; else echo "OK  宣言の右側で同じ名前を読む形は無い"; fi
 exit $NG
