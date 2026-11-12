@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261113-0345'
+var SRC_VER = '20261113-0600'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -3258,13 +3258,16 @@ function getAttributeTree_(shopId, catId, lang, strict) {
   return order.map(function (id) { return byId[id]; });
 }
 // ★価格を複数モデルまとめて更新（update_price price_list）。list=[{model_id,price}]（バリエ無しはmodel_id:0）
-function updatePriceList_(shopId, itemId, list) {
+/* ★2026-11-13 事業本部レビュー⑤ 高2・中7：opt.copyOnly＝詰め直し・やり直しで「今ある値段を写すだけ」（VN の上限の確かめを飛ばす＝上限超えの行が1つあっても、ずらした明細を隣の作品の値段のまま残さない）。
+   opt.keepDiscount＝🤖の裏の書き込み（test の使い回し・部分修理）。値下げ（Discount）に入っていたら外さずに失敗にする（1明細のためにカタログ全体の値下げを黙って消さない） */
+function updatePriceList_(shopId, itemId, list, opt) {
+  opt = opt || {};
   var spL = priceLockSplit_(itemId, list || []);
   if (spL.skip.length && !spL.keep.length) return { updated: 0, lockSkipped: spL.skip, note: '本人の値段の明細なので書いていません（' + spL.skip.length + '件）' };
   list = spL.keep;
   var pl = (list || []).map(function (x) { return { model_id: parseInt(x.model_id, 10) || 0, original_price: parseFloat(x.price) }; }).filter(function (x) { return !isNaN(x.original_price); });
   if (!pl.length) throw new Error('価格リストが空');
-  vnPriceCapCheck_(shopId, pl.map(function (x) { return { model_id: x.model_id, price: x.original_price }; }), '値段');   /* ★2026-11-13 高3：1件でも超えたら全部送らない（Shopee に送る前） */
+  if (!opt.copyOnly) vnPriceCapCheck_(shopId, pl.map(function (x) { return { model_id: x.model_id, price: x.original_price }; }), '値段');   /* ★2026-11-13 高3：1件でも超えたら全部送らない（Shopee に送る前）。写すだけ（copyOnly）は確かめない */
   var body = { item_id: parseInt(itemId, 10), price_list: pl }, j, promo = null;
   try { j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body); }
   catch (eP) {
@@ -3274,7 +3277,7 @@ function updatePriceList_(shopId, itemId, list) {
          値下げ（Discount Promotions＝いいね10%など）は外したまま戻さない：赤字直しの値上げに10%引きが重なると目標の利益を割るため。
          それ以外の販促（Flash Sale 等）は触らずに失敗のまま返す */
     if (!/has promotion|in_promotion/i.test(String((eP && eP.message) || eP))) throw eP;
-    promo = priceUnlockPromo_(shopId, itemId);
+    promo = priceUnlockPromo_(shopId, itemId, { keepDiscount: !!opt.keepDiscount });
     if (promo.other.length) { priceRelockPromo_(shopId, itemId, promo); throw new Error(String(eP.message || eP).slice(0, 200) + ' ／外せない販促: ' + promo.other.join(',')); }
     if (!promo.bundleOut.length && !promo.discountOut.length) throw new Error(String((eP && eP.message) || eP).slice(0, 220) + ' ／販促を読んだ結果: ' + String(promo.raw || '').slice(0, 300));
     Utilities.sleep(1500);
@@ -3293,11 +3296,13 @@ function updatePriceList_(shopId, itemId, list) {
 function avStillInPromo_(shopId, itemId, pid) {
   try { Utilities.sleep(1500); var g = callShop_(shopId, '/api/v2/product/get_item_promotion', { item_id_list: String(itemId) }, 'get'); var it = (((g || {}).response || {}).success_list || [])[0]; if (!it) return null; return (it.promotion || []).some(function (pr) { return Number(pr.promotion_id) === Number(pid); }); } catch (e) { return null; }
 }
-function priceUnlockPromo_(shopId, itemId) {
+function priceUnlockPromo_(shopId, itemId, opt) {
   var out = { bundleOut: [], discountOut: [], other: [], bundleBack: [], bundleBackErr: [] };
   var gj = callShop_(shopId, '/api/v2/product/get_item_promotion', { item_id_list: String(itemId) }, 'get');
   try { out.raw = JSON.stringify(gj.response || gj).slice(0, 400); } catch (eR) {}
   var it = (((gj || {}).response || {}).success_list || [])[0] || {};
+  /* ★2026-11-13 中7：keepDiscount の時は、値下げ（Discount）が1つでもあれば何も外さずに返す（呼び元が失敗にする） */
+  if (opt && opt.keepDiscount && (it.promotion || []).some(function (pr) { var stg = String(pr.promotion_staging || ''); return /discount/i.test(String(pr.promotion_type || '')) && (!stg || /ongoing|upcoming/i.test(stg)); })) { out.other.push('値下げ（Discount）に入っている＝裏の書き込みでは外さない'); return out; }
   (it.promotion || []).forEach(function (pr) {
     var ty = String(pr.promotion_type || ''), pid = Number(pr.promotion_id), stg = String(pr.promotion_staging || '');
     if (stg && !/ongoing|upcoming/i.test(stg)) return;
@@ -4680,7 +4685,7 @@ function shiftPendCheck_(onlyKey, maxN) {
     });
     var err = [];
     PRICE_LOCK_BYPASS[String(parseInt(iid, 10))] = 1;
-    try { if (pr.length) updatePriceList_(sid, iid, pr); } catch (e1) { err.push('価格 ' + String(e1.message || e1).slice(0, 80)); } finally { delete PRICE_LOCK_BYPASS[String(parseInt(iid, 10))]; }
+    try { if (pr.length) updatePriceList_(sid, iid, pr, { copyOnly: true }); } catch (e1) { err.push('価格 ' + String(e1.message || e1).slice(0, 80)); } finally { delete PRICE_LOCK_BYPASS[String(parseInt(iid, 10))]; }
     var stOk = true; try { if (st.length) updateStockList_(sid, iid, st); } catch (e2) { stOk = false; err.push('在庫 ' + String(e2.message || e2).slice(0, 80)); }
     if (stOk) rec.stockDone = true;   /* ★2026-11-04 全体レビュー 新-4②：失敗した時は立てない（以後その作品の在庫を直さなくなる） */
     try { for (var f = 0; f < sk.length; f += 50) updateModelSku_(sid, iid, sk.slice(f, f + 50)); } catch (e3) { err.push('SKU ' + String(e3.message || e3).slice(0, 80)); }
@@ -4812,7 +4817,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
             if (String(m.model_sku || '') !== String(src.model_sku || '')) _k2.push({ model_id: m.model_id, sku: String(src.model_sku || '') }); });
           /* ★2026-11-04 全体レビュー 10/31 中-3：値段・在庫・SKU を1つの try で順に書いていた＝値段が busy で落ちると在庫と SKU は書かれない。別々に・失敗したら4秒おいて1回だけやり直す */
           var _fxErr = [], _w3 = function (label, fn) { try { fn(); } catch (e1) { Utilities.sleep(4000); try { fn(); } catch (e2) { _fxErr.push(label + ' ' + String((e2 && e2.message) || e2).slice(0, 80)); } } };
-          if (_p2.length) _w3('価格', function () { updatePriceList_(shopId, itemId, _p2); });
+          if (_p2.length) _w3('価格', function () { updatePriceList_(shopId, itemId, _p2, { copyOnly: true }); });
           if (_s2.length) _w3('在庫', function () { updateStockList_(shopId, itemId, _s2); });
           for (var f2 = 0; f2 < _k2.length; f2 += 50) { (function (sl) { _w3('SKU', function () { updateModelSku_(shopId, itemId, sl); }); })(_k2.slice(f2, f2 + 50)); }
           if (_fxErr.length) _fx.fix_error = _fxErr.join(' / ').slice(0, 160);
@@ -4852,7 +4857,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
      書き込みは失敗したら4秒おいて1回だけやり直す（値段・在庫・SKU は同じ値を送り直しても害がない） */
   var _w2 = function (label, fn) { try { fn(); } catch (e1) { Utilities.sleep(4000); try { fn(); } catch (e2) { fixErr.push(label + ' ' + String((e2 && e2.message) || e2).slice(0, 100)); } } };
   for (var f1 = 0; f1 < fixSku.length; f1 += 50) { (function (sl) { _w2('SKU', function () { updateModelSku_(shopId, itemId, sl); }); })(fixSku.slice(f1, f1 + 50)); }
-  if (fixPr.length) _w2('価格', function () { updatePriceList_(shopId, itemId, fixPr); });
+  if (fixPr.length) _w2('価格', function () { updatePriceList_(shopId, itemId, fixPr, { copyOnly: true }); });
   if (fixSt.length) _w2('在庫', function () { updateStockList_(shopId, itemId, fixSt); });
   /* ★2026-10-25 仕入れ目安の控え（llog_cost_<hw>）と🤖の台帳（boshu_auto_done_<hw>）も中身と一緒に引っ越す（下の baLlogRekey_）。
      ①で Shopee の中身はもう動いているので、②③で止まっても付け替える＝ここで呼ぶ（戻り値の所だけだと、途中で止まった時に付け替わらない） */
@@ -4945,7 +4950,7 @@ function removeVariationShift_(shopId, itemId, midCsv, vnames) {
     var rp = bad4.filter(function (b) { return Math.abs(b.now.price - b.want.price) > 0.001 && b.want.price > 0; }).map(function (b) { return { model_id: b.model_id, price: b.want.price }; });
     var rs = bad4.filter(function (b) { return b.now.stock !== b.want.stock && !isNaN(b.want.stock); }).map(function (b) { return { model_id: b.model_id, stock: b.want.stock }; });
     var rk = bad4.filter(function (b) { return b.now.sku !== b.want.sku; }).map(function (b) { return { model_id: b.model_id, sku: b.want.sku }; });
-    if (rp.length) { Utilities.sleep(1500); _w2('価格(やり直し)', function () { updatePriceList_(shopId, itemId, rp); }); }
+    if (rp.length) { Utilities.sleep(1500); _w2('価格(やり直し)', function () { updatePriceList_(shopId, itemId, rp, { copyOnly: true }); }); }
     if (rs.length) _w2('在庫(やり直し)', function () { updateStockList_(shopId, itemId, rs); });
     for (var fk = 0; fk < rk.length; fk += 50) { (function (sl) { _w2('SKU(やり直し)', function () { updateModelSku_(shopId, itemId, sl); }); })(rk.slice(fk, fk + 50)); }
     Utilities.sleep(4000); var _r4c = _rd(); if (_r4c) { r4 = _r4c; bad4 = compare(r4); }
@@ -6054,7 +6059,7 @@ function shop3CandidateStockRows_(shopId, itemId, payload, tvBody) {
   if (String(base.item_id) !== String(itemId) || String((full.model || {}).item_id) !== String(itemId) ||
       (base.shop_id != null && String(base.shop_id) !== String(shopId)) ||
       base.item_status !== 'NORMAL' || base.condition !== 'NEW' ||
-      Number(base.category_id) !== payload.category_id || Number((base.brand || {}).brand_id) !== payload.brand.brand_id ||
+      Number(base.category_id) !== payload.category_id || Number((base.brand || {}).brand_id || 0) !== payload.brand.brand_id ||   /* ★11/13 No Brand：brand が返らない時も 0 */
       Math.abs(Number(base.weight) - payload.weight) >= 0.0001 || !Number.isFinite(Number(base.weight)) ||
       !Object.keys(payload.dimension).every(function (k) { return Number((base.dimension || {})[k]) === payload.dimension[k]; }) ||
       normalize(base.item_name) !== normalize(payload.item_name) ||
@@ -6101,7 +6106,7 @@ function addItem_(body, attempt) {
     if (!Object.prototype.hasOwnProperty.call(SHOP3_IDS_BY_MARKET, market) || body.shop_id !== SHOP3_IDS_BY_MARKET[market] ||
         body.condition !== 'NEW' || body.publish !== true || body.promo !== false || body.stock !== 1 ||
         !body.dimension || !Number.isSafeInteger(body.category_id) || body.category_id < 1 ||
-        !Number.isSafeInteger(body.brand_id) || body.brand_id < 1 || !Array.isArray(body.attribute_list) ||
+        !Number.isSafeInteger(body.brand_id) || body.brand_id < 0 || !Array.isArray(body.attribute_list) ||   /* ★2026-11-13 本人「ブランドなければノーブランドで出しちゃえばいいから」＝0（No Brand）も通す（読み直しの照らしも 0 同士で合う） */
         !/^\[New\] .+/.test(String(body.item_name || '')) || baCondFor_(body.item_name, body.condition) !== 'NEW' ||
         !/^(Color|Pack size|Packaging)$/.test(body.tier_name) ||
         !Array.isArray(vars) || vars.length < 2 || vars.length > 10 || vars.some(function (v) {
@@ -7138,7 +7143,7 @@ function cancelGuardCtx_() {
      「自動で戻す」に決め、数（q）を決めていない商品が発送前にキャンセルされると 0 まで引き、自動復活（発送待ち以降の注文しか見ない）が戻さず在庫0のまま止まる＝10/22 09:5x に本人の OK で直した型。10/22 の形に戻す */
   var srRules = srBy.stock_restore_rules || {}, srQ = Math.max(1, parseInt((srBy.stock_restore_cfg || {}).qty, 10) || 1);
   var keepOf = function (name, sku) { if (/\blimited\b|限定|特装|豪華|collector|black\s*box|premium\s*box/i.test(String(name || ''))) return 0; var sk = String(sku || '').trim(); if (!sk) return 0; var r = srRules[srRuleKey_('', '', sk)]; if (!r) return 0; if (parseInt(r.q, 10) > 0) return Math.min(99, parseInt(r.q, 10)); return r.m === 'auto' ? srQ : 0; };
-  return { srBy: srBy, keepOf: keepOf, man: srBy.stock_restore_manual || {} };
+  return { srBy: srBy, keepOf: keepOf, man: srBy.stock_restore_manual || {}, vstock: {} };   /* vstock＝この回で引いた後の在庫（店|品物|明細）＝同じ明細の取り消しが同じ回に2件あっても両方引く（レビュー⑤ 高1） */
 }
 /* 1つのキャンセルの注文を引き戻す。o = {cc, sn, shop_id, items:[{item_id, model_id, qty, variation, name}], cancelAt(ISO・分かる時だけ)}
    返す物：res（文の記録）・fixed（引き戻した明細：国・注文番号・明細・前→後・時刻）・skip（🔔に出す物：名前違い・もう無い・手で変えた跡・失敗）
@@ -7163,11 +7168,14 @@ function cancelGuardOrder_(o, ctx, nowIso) {
           if (!m) { res.push(iid + '#' + x.mid + ' 明細がもう無い'); return; } now = Number(m.stock) || 0; mname = String(m.name || ''); keep = (isReqModel_(x.cn, m.sku) || isReqItem_(ctx.srBy.req_items, o.cc, iid)) ? 0 : ctx.keepOf(m.name, m.sku); }   /* ★2026-11-03 リクエスト品は0まで引き戻す */
         else { var b = callShop_(shop, '/api/v2/product/get_item_base_info', { item_id_list: iid }, 'get'); var it0 = (((b.response || {}).item_list) || [])[0]; if (!it0) { res.push(iid + ' 出品がもう無い'); return; } now = stockOfV2_(it0.stock_info_v2); mname = String(it0.item_name || ''); }
         var mk = o.cc + '|' + iid + '|' + x.mid, manAt = String((ctx.man || {})[mk] || '');
+        /* ★11/13 レビュー⑤ 高1（再）：この回で同じ明細（単品は明細 0）を先に引いていれば、その後の数（vstock）から引く。「手で変えた跡」の判定は読んだ実際の在庫（real）で行う */
+        var vk0 = shop + '|' + iid + '|' + x.mid, real = now, hasV = !!(ctx.vstock && Object.prototype.hasOwnProperty.call(ctx.vstock, vk0)); if (hasV) now = ctx.vstock[vk0];
         if (now <= 0) { res.push(iid + '#' + x.mid + ' もう0（引き戻し済み）'); return; }
-        if (now < x.q) { res.push(iid + '#' + x.mid + ' 今 ' + now + '＜キャンセルの数 ' + x.q + '＝手で変えた跡・触らない'); skip.push({ at: nowIso, cc: o.cc, sn: String(o.sn), r: '手で変えた跡があるので引き戻していません：' + (x.cn || iid).slice(0, 40) + (mname ? '／' + mname.slice(0, 30) : '') + '（今の在庫 ' + now + '・キャンセルの数 ' + x.q + '）' }); return; }
+        if (!hasV && real < x.q) { res.push(iid + '#' + x.mid + ' 今 ' + real + '＜キャンセルの数 ' + x.q + '＝手で変えた跡・触らない'); skip.push({ at: nowIso, cc: o.cc, sn: String(o.sn), r: '手で変えた跡があるので引き戻していません：' + (x.cn || iid).slice(0, 40) + (mname ? '／' + mname.slice(0, 30) : '') + '（今の在庫 ' + now + '・キャンセルの数 ' + x.q + '）' }); return; }
         if (o.cancelAt && manAt && manAt >= String(o.cancelAt)) { res.push(iid + '#' + x.mid + ' キャンセルの後に手で戻した記録＝触らない'); skip.push({ at: nowIso, cc: o.cc, sn: String(o.sn), r: '手で変えた跡があるので引き戻していません：' + (x.cn || iid).slice(0, 40) + (mname ? '／' + mname.slice(0, 30) : '') + '（キャンセルの後にポータルで手で戻した記録 ' + manAt.slice(0, 16) + '）' }); return; }
         var nv = Math.max(0, now - x.q);
         if (keep > 0) nv = Math.min(now, Math.max(nv, keep));   /* 自動で戻す決めの数は残す */
+        if (ctx.vstock) ctx.vstock[vk0] = nv;   /* ★高1：次の注文はこの後の数から引く（単品も） */
         if (nv !== now) { list.push({ model_id: x.mid, stock: nv }); pend.push({ at: nowIso, cc: o.cc, sn: String(o.sn), item_id: iid, model_id: x.mid, name: (x.cn || '').slice(0, 80), vn: (mname || x.vn || '').slice(0, 60), before: now, after: nv }); }
         res.push(iid + '#' + x.mid + ' ' + now + '→' + nv);
       });
@@ -12948,7 +12956,7 @@ function baPartialRepair_(st) {
       if (!cur) continue;   /* 明細が無い＝消えた。直す物が無い */
       var okName = String(cur.name || '').trim() === String(p.en).trim();
       var okPrice = Math.abs((Number(cur.price) || 0) - Number(p.price)) < Math.max(1, Number(p.price) * 0.02);
-      if (!okPrice) { updatePriceList_(p.shop_id, p.item_id, [{ model_id: p.model_id, price: p.price }]); }   /* ★2026-11-13 全体レビュー 中23：updatePrice_ は販促（まとめ買い割引など）に入ったカタログで毎回断られ、この一覧に戻り続けた＝販促を外して書いて戻す方へ */
+      if (!okPrice) { try { updatePriceList_(p.shop_id, p.item_id, [{ model_id: p.model_id, price: p.price }], { keepDiscount: true }); } catch (eKd) { if (/値下げ（Discount）/.test(String((eKd && eKd.message) || eKd))) { baLog_(st, p.cc + '：♻️ 「' + String(p.en).slice(0, 26) + '」は値下げ（Discount）中のカタログなので値段を直していません（値下げを外さない・在庫0のまま）。Seller Center で値下げから外すか、値段を直してください'); continue; } throw eKd; } }   /* ★11/13 レビュー⑤ 中7（再）：値下げで断られた物は一覧から外す（毎回3件の枠を使い切らない） */   /* ★2026-11-13 全体レビュー 中23：updatePrice_ は販促（まとめ買い割引など）に入ったカタログで毎回断られ、この一覧に戻り続けた＝販促を外して書いて戻す方へ */
       if (p.sku && String(cur.sku || '') !== String(p.sku)) { try { updateModelSku_(p.shop_id, p.item_id, [{ model_id: p.model_id, sku: p.sku }]); } catch (eS) {} }
       if (okName && (okPrice || true)) {
         var g2 = getModels_(p.shop_id, p.item_id) || {}, c2 = null; (g2.models || []).forEach(function (m) { if (String(m.model_id) === String(p.model_id)) c2 = m; });
@@ -13106,7 +13114,7 @@ function baReuseTestSlot_(shopId, itemId, it, st, cc) {
           「0にしたつもり」で先に進むと**元の在庫のまま名前と価格だけ変わる**＝一番まずい形（Codex指摘・裏取り済み）。
           通ったことを確かめてから次へ進む。 */
     if (!baStockOk_(updateStock_(shopId, itemId, tm.model_id, 0))) { baLog_(st, cc + '：仮の明細の在庫を0にできなかったので上書きしません'); return null; }
-    updatePriceList_(shopId, itemId, [{ model_id: tm.model_id, price: it.price }]);   /* ② 価格（名前の付け替えでは移らないので必ず単独で）。★2026-11-13 中23：販促中は外して書いて戻す方（updatePriceList_）。断られたら投げる＝名前を変える前に止まり、下の catch で在庫0のまま null（呼び出し側は普通に足す） */
+    updatePriceList_(shopId, itemId, [{ model_id: tm.model_id, price: it.price }]);   /* ★11/13 レビュー⑤ 中7（再）：ここで断っても同じ回の明細の追加（addVariationsBulk_）が値下げを外すので、守りが効かず通信だけ増える＝元の形のまま。 ② 価格（名前の付け替えでは移らないので必ず単独で）。★2026-11-13 中23：販促中は外して書いて戻す方（updatePriceList_）。断られたら投げる＝名前を変える前に止まり、下の catch で在庫0のまま null（呼び出し側は普通に足す） */
     /* ③ 名前・画像・SKU を**1回の update_tier_variation でまとめて**差し替える。
           ★画像を別呼び出しにすると、そこだけ失敗した時に**前の作品の写真のまま在庫が戻る**（Codex指摘）。
             写真違いは出してはいけない側の間違いなので、名前と一緒に原子的に入れる。
