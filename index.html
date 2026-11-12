@@ -6320,6 +6320,7 @@
     "列＝国、行＝作品。同じ作品はどの国に出したかが横一列で見えます": "Columns = countries, rows = titles. You can see in one row which countries each title went to.",
     "選んだ店に出した明細はありません（「✕ 店の絞り込みを外す」で外せます）": "Nothing was listed in the selected shop (use \"✕ Clear shop filter\")",
     "出品ログ：いまの見方": "Listing log: current view",
+    "✂ <b>品物ごとに分けた見積もりで、本人が粗利を直した品物は、線より下でも明細を作れるようにしました</b>（本人「今回はもうこの金額でいいんだけど」）：止めるのは赤字の時だけで、その時は「どの品の値段を上げれば進むか」を出します。作った時の知らせに「本人の指定の粗利で作りました（線より ¥… 下）」と出ます。": "✂ <b>Split quotes: items whose profit you set yourself can now be listed even below the profit line</b>: it stops only on a loss, and then says which item's price to raise. The result says \"Created with your profit (¥… below the line)\".",
     "いま選んでいる見方（日ごと／最新順・店・並び・列）。「⚙ 変える」で開いて変えます": "The view you have chosen now (by day / latest, shop, sort, columns). Open \"⚙ Change\" to change it.",
     "アカウントごとの列": "Columns by account",
     "国の中の店": "Shops in each country",
@@ -11784,6 +11785,15 @@
     if (!Number.isFinite(targetJpy) || targetJpy <= 0) {
       return fail('target', tr('必要粗利を計算できません。目標粗利を入力してください。', 'The required profit could not be calculated. Enter a gross profit target.'));
     }
+    /* ★2026-11-13 spec 23.14（本人「今回はもうこの金額でいいんだけど」「これ別に私が指定すれば別にオッケーだから」）：
+       本人が粗利を指定した時は、線より下でも止めない＝止めるのは赤字（粗利が0未満）の時だけ。線より下の額は返事の文に出す */
+    if (context.userSet && grossJpy < targetJpy) {
+      const nm = context.itemName ? '「' + context.itemName + '」' : '';
+      if (grossJpy < 0) return fail('loss', tr(`${nm || 'この見積もり'}は赤字です（粗利 ${yen(grossJpy)}）。${nm ? nm + 'の' : ''}値段を上げてから、もう一度押してください。`,
+        `${context.itemName || 'This quote'} would lose money (gross profit ${yen(grossJpy)}). Raise its price and press again.`), { grossJpy, targetJpy });
+      if (Array.isArray(context.notes)) context.notes.push((nm || '合計') + ' 粗利 ' + yen(grossJpy) + '・線より ' + yen(targetJpy - grossJpy) + ' 下');
+      return null;
+    }
     if (grossJpy < targetJpy) {
       const shortfallJpy = targetJpy - grossJpy;
       const weight = context.weightEntered == null ? tr(`（標準重量 ${opt.weightG}g）`, ` (default weight ${opt.weightG}g)`) : '';
@@ -11800,7 +11810,7 @@
     pcQuote.reqProfitReview = null;
     const continueProfit = document.getElementById('pc-q-profit-continue');
     if (continueProfit) continueProfit.hidden = true;
-    pcQuote._unk = false; pcQuote._updNoop = false; pcQuote.reqProfitBlock = null;   /* ★11/7 全体レビュー 高4・高5：前の回の印を持ち越さない */
+    pcQuote._unk = false; pcQuote._updNoop = false; pcQuote.reqProfitBlock = null; pcQuote.userProfitNote = '';   /* ★11/7 全体レビュー 高4・高5：前の回の印を持ち越さない */
     /* ★2026-11-05 03 営業部（本人「明細たすの遅すぎますね」）：手順ごとの秒数を操作ログに残す（どこが遅いかを数えて言えるように） */
     const _T0 = Date.now(), _TS = [], _mk = (l) => { _TS.push(l + ' ' + ((Date.now() - _T0) / 1000).toFixed(1) + '秒'); try { window.__reqT = _TS.slice(); } catch (_) {} };
     { const B8 = window._pcBundle; if (B8 && B8.mapDone === false) { const tw = Date.now(); while (B8.mapDone === false && Date.now() - tw < 8000) await new Promise(z => setTimeout(z, 300)); } }   /* ★2026-11-06 レビュー：値段を取る前に、まとめ買い割引の控えを読み終える */
@@ -11856,12 +11866,15 @@
         code: 'quote_changed',
         msg: i18nOn() ? 'Listing was stopped. The quote changed. Check the current quote and try again.' : '出品していません。見積もりの条件が変わりました。現在の条件を確認してください。'
       });
-      const issue = pcReqProfitCheck(L, pList, profitContext, readStage(), receipt(), pcQuote.agreedReq);
+      const upNotes = [], anyUser = !!(BQ && BQ.perItem && BQ.items.some(x => x.pfUser));   /* ★2026-11-13 spec 23.14：本人の指定がある時は合計の線でも止めない */
+      pcQuote.userProfitNote = '';
+      const issue = pcReqProfitCheck(L, pList, anyUser ? Object.assign({}, profitContext, { userSet: true, notes: upNotes }) : profitContext, readStage(), receipt(), pcQuote.agreedReq);
       if (issue && reportProfitBlock(issue)) return true;   /* ★11/12 再レビュー中2：承認済み（false）なら品物ごとの確かめへ進む */
       /* ★2026-11-12 レビュー高2（23.6）：品物ごとの値段の明細は1点ずつ別の注文で買える＝品物ごとに、その品物の仕入れ・重さ・1件分の線で粗利を確かめる（重さが無い品は合計の重さ＝高めの送料で見る） */
       if (BQ && BQ.perItem) { for (let ii = 0; ii < BQ.items.length; ii++) { const x = BQ.items[ii], o0 = profitContext.opt || {};
-        const iss = pcReqProfitCheck(L, [pList[ii]], Object.assign({}, profitContext, { cost: x.cost, opt: Object.assign({}, o0, x.w > 0 ? { weightG: x.w } : {}), grossT: 0, marginT: 0, roiT: 0 }), readStage(), receipt(), null);
+        const iss = pcReqProfitCheck(L, [pList[ii]], Object.assign({}, profitContext, { cost: x.cost, opt: Object.assign({}, o0, x.w > 0 ? { weightG: x.w } : {}), grossT: 0, marginT: 0, roiT: 0, userSet: !!x.pfUser, notes: upNotes, itemName: x.en || ('品物' + (ii + 1)) }), readStage(), receipt(), null);
         if (iss && reportProfitBlock(Object.assign({}, iss, { msg: iss.msg + '（品物ごとの値段：' + (x.en || ('品物' + (ii + 1))) + ' ' + pList[ii] + '・この品だけ買われた時）', item: ii }))) return true; } }   /* 承認済みの品は次へ */
+      pcQuote.userProfitNote = upNotes.length ? '本人の指定の粗利で作りました（' + upNotes.join('／') + '）' : '';
       return false;
     };
     msg.textContent = 'Request page を探しています…';
@@ -12921,7 +12934,8 @@
             let its = null; try { its = JSON.parse(p.get('bi') || 'null'); } catch (_) { its = null; }
             its = Array.isArray(its) ? its.slice(0, 20).map(x => ({ url: String((x && x.url) || ''), cost: Math.round(Number(String((x && x.cost) || '').replace(/[^0-9.]/g, '')) || 0), ja: String((x && x.ja) || '').slice(0, 120), en: String((x && x.en) || '').replace(/\s+/g, ' ').trim().slice(0, 80), img: String((x && x.img) || ''), w: Math.round(Number(x && x.w) || 0),
               price: (x && typeof x.price === 'number' && isFinite(x.price)) ? Math.round(x.price * 100) / 100 : (x && /^\d+(\.\d+)?$/.test(String(x.price == null ? '' : x.price).trim())) ? Math.round(Number(x.price) * 100) / 100 : 0,
-              priceBad: !!(x && x.price != null && x.price !== '' && !(typeof x.price === 'number' && isFinite(x.price)) && !/^\d+(\.\d+)?$/.test(String(x.price).trim())) })) : [];   /* ★11/12 レビュー低11：「45,90」「1.273,50」を読み違えない＝数か「199.9」の形だけ */   /* ★2026-11-12 03（quote-card-spec 23.6 ✂ 品物ごとに分ける）：各組の price＝現地通貨の1点ずつの値段（本人が直した額） */
+              priceBad: !!(x && x.price != null && x.price !== '' && !(typeof x.price === 'number' && isFinite(x.price)) && !/^\d+(\.\d+)?$/.test(String(x.price).trim())),
+              pfUser: !!(x && (x.pfUser === 1 || x.pfUser === true || x.pfUser === '1')) })) : [];   /* ★2026-11-13 spec 23.14：本人が粗利を自分で直した品物の印 */   /* ★11/12 レビュー低11：「45,90」「1.273,50」を読み違えない＝数か「199.9」の形だけ */   /* ★2026-11-12 03（quote-card-spec 23.6 ✂ 品物ごとに分ける）：各組の price＝現地通貨の1点ずつの値段（本人が直した額） */
             const nPr = its.filter(x => x.price > 0).length, perItem = its.length > 0 && nPr === its.length;
             const bad = !its.length ? '品物の組（&bi）を読めません' : its.length !== bn ? '品物の数（' + its.length + '）が bundle=' + bn + ' と合いません' : its.some(x => !(x.cost > 0)) ? '仕入れ額の無い品物があります'
               : its.some(x => x.priceBad) ? '品物の値段（price）は数で渡してください（例 199.9・区切りのカンマは付けない）'
@@ -13034,7 +13048,7 @@
               if (why0) { const t9 = '⚠ 自動では進めません：' + why0 + '。中身を確かめて、要る時だけ下のボタンを手で押してください'; if (m0) m0.textContent = t9; try { toast(t9, 8000); } catch (_) {} return; } }
             if (p.get('mode') === 'quote') { pcQuoteApiReply(p); return; }   /* ★2026-10-24 チャットで完結 */
             if (p.get('auto') === '1') {
-              const tell = (ok, m) => { try { const op = window.opener; const to = pcChatOrigin(pcQuote.o); if (to && op && !op.closed) op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 300), buyer: p.get('buyer') || '', price: Number((pcQuote.last || {}).shopL) || null, iso: (pcQuote.last || {}).ISO || '', plan: (pcQuote.last || {}).plan || planP, stage: ((document.getElementById('pc-q-stage') || {}).value) || stageP, ref: pcQuote.ref || '', text: String((document.getElementById('pc-q-text') || {}).value || '').slice(0, 4000), link: pcQuote.link || '', option: pcQuote.optName || '', ...pcReqFields(), ...(pcQuote.reqProfitBlock ? { profitCheck: pcQuote.reqProfitBlock } : {}), ...(pcQuote.dryRes ? { dry: pcQuote.dryRes } : {}), rid: p.get('rid') || pcQuote.ref || '' }, to); } catch (_) {} };   /* ★2026-11-04 WA が出した額と合っているか確かめるため price・stage を返す／★2026-11-05 03-22・03：英文（text）・リンク（link）・quote-card-spec 19.6 の項目と照合番号（rid）を毎回返す */
+              const tell = (ok, m) => { const upN = (ok && pcQuote.userProfitNote) ? String(pcQuote.userProfitNote) : ''; if (upN && String(m || '').indexOf(upN) < 0) m = upN + '。' + String(m || ''); try { const op = window.opener; const to = pcChatOrigin(pcQuote.o); if (to && op && !op.closed) op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 400), userProfit: upN, buyer: p.get('buyer') || '', price: Number((pcQuote.last || {}).shopL) || null, iso: (pcQuote.last || {}).ISO || '', plan: (pcQuote.last || {}).plan || planP, stage: ((document.getElementById('pc-q-stage') || {}).value) || stageP, ref: pcQuote.ref || '', text: String((document.getElementById('pc-q-text') || {}).value || '').slice(0, 4000), link: pcQuote.link || '', option: pcQuote.optName || '', ...pcReqFields(), ...(pcQuote.reqProfitBlock ? { profitCheck: pcQuote.reqProfitBlock } : {}), ...(pcQuote.dryRes ? { dry: pcQuote.dryRes } : {}), rid: p.get('rid') || pcQuote.ref || '' }, to); } catch (_) {} };   /* ★2026-11-04 WA が出した額と合っているか確かめるため price・stage を返す／★2026-11-05 03-22・03：英文（text）・リンク（link）・quote-card-spec 19.6 の項目と照合番号（rid）を毎回返す */
               pcQuote.tell = tell;
               const mm = document.getElementById('pc-q-msg') || document.createElement('div');   /* 一瞬（長く回さない） */
               /* ★2026-10-24 本人「目的は、リクエスト商品にかける時間を少なく効率化すること」：値段が来ていない時は止めずに、計算の値段（選んだ払い方の Shopee の額）で進める */
@@ -28398,6 +28412,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-13', items: [
+      '✂ <b>品物ごとに分けた見積もりで、本人が粗利を直した品物は、線より下でも明細を作れるようにしました</b>（本人「今回はもうこの金額でいいんだけど」）：止めるのは赤字の時だけで、その時は「どの品の値段を上げれば進むか」を出します。作った時の知らせに「本人の指定の粗利で作りました（線より ¥… 下）」と出ます。',
       '🧭 <b>値付けの見直しを、押さずに分かる形に作り直しました</b>（本人「もう全部直感的に操作できるようにしてください」・事業本部の OK）：①一番上に「次にやること」の箱（☑した N件の値段を書き込む・赤字の行だけ・移すが要る行）②1明細＝1枚のカード（3段：☑と印／写真・名前・数字と直せる値段／ボタンと理由1行）③値段の差で断られる明細は、カードが見えたら移し先・「単品で出す」「②を作って移す」をそのまま出す（おすすめは赤橙の1番ボタン・印はカードの上）④🗑 消すは sold・いいねが付いていれば出さない（灰色で「売れた記録があるので消せません」・押した時ももう一度確かめる）⑤「↕ 並び」で前の表の並べ方を全部選べる ⑥散布図・入金の状況・候補・見直しの記録・使い方は「その他」に畳む。書く・移す・消す・単品で出すの動きは前と同じ。',
       '🃏 <b>トレカの Claude 判定の候補を、4台目が使えない時はほかの台から取るようにしました</b>：4台目の GAS が止まると候補が1件も取れず、判定が全部0件になっていました。4台目→3台目→2台目の順に替えます（中身は同じ）。',
     ] },
