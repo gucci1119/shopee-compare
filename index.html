@@ -26577,10 +26577,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     /* ★2026-11-07 02 の調べ（95件の入金明細）：SLS+ の補償は ①seller_lost_compensation か ②入金の調整（total_adjustment_amount がプラス・返金 seller_return_refund が引かれている＝返金のほぼ半額）に入る。
        返金が引かれていない返品（seller_return_refund が無い）は損が無い＝対象外（損なし）。adj が無い注文は今までどおり（判らない） */
     const incK = new Map(), incWhy = new Map(), noLossK = new Set();
+    /* ★2026-11-13 全体レビュー高8：入金を読んだ後に来た返品は、まだ返金が引かれていないだけ＝損なしにしない。adj.at（入金の項目を読んだ時刻）が返品の最後の更新より後の時だけ損なし */
+    const retUpd = new Map(); (rets || []).forEach(r => { const k0 = r.cc + ':' + r.order_sn, t = Number(r.update_time) || Number(r.create_time) || 0, ms = t > 0 ? (t < 1e12 ? t * 1000 : t) : 0; if (ms > (retUpd.get(k0) || 0)) retUpd.set(k0, ms); });
     (incL || []).forEach(x => { const a = (x && x.adj) || {}, k = x.cc + ':' + x.sn, lost = Number(a.seller_lost_compensation) || 0, tadj = Number(a.total_adjustment_amount) || 0, rr = Number(a.seller_return_refund) || 0;
       if (lost > 0) { incK.set(k, lost); incWhy.set(k, '補償の項目'); }
       else if (tadj > 0 && rr < 0) { incK.set(k, tadj); incWhy.set(k, '入金の調整 +' + tadj + '（返金 ' + rr + ' の ' + Math.round(tadj / -rr * 100) + '%）'); }
-      else if (!(rr < 0) && !(tadj < 0)) noLossK.add(k); });   /* 返金は入金の調整のマイナスで引かれることもある（BR 260527GWWSHAX0 など）＝調整もマイナスでない時だけ損なし */
+      else if (!(rr < 0) && !(tadj < 0)) { const atMs = Date.parse(String(a.at || '')) || 0, ru = retUpd.get(k) || 0; if (atMs > 0 && atMs > ru) noLossK.add(k); } });   /* 返金は入金の調整のマイナスで引かれることもある（BR 260527GWWSHAX0 など）＝調整もマイナスでない時だけ損なし */
     /* 返品の注文日（orders から・返品は数百件まで） */
     const rSn = [...new Set((rets || []).map(r => String(r.order_sn || '')).filter(Boolean))];
     const odOf = new Map();
@@ -26599,7 +26601,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const gotAt = gotBy === 'adj' ? ymd(compPay.get(k)) : gotBy === 'man' ? String(manK.get(k) || '').slice(0, 10) : '';
       /* ★2026-11-07 本人「倉庫でスキャンされる前のオーダーで返金依頼が来た場合はSLS+の保証はないし商品も戻ってくる」＝スキャン前は対象外（日本の中で戻る）。分からない物は残して「スキャン不明」 */
       const sc = scanStateOf_(ex.o || {}, { stage: stageK.get(k) || '', got: !!gotBy, ret: kind === '返品' });
-      const st = gotBy ? 'got' : sc.st === 'before' ? 'pre' : (kind === '返品' && noLossK.has(k)) ? 'noloss' : cl && cl.st === 'na' ? 'na' : cl && cl.st === 'applied' ? 'applied' : 'todo';   /* ★11/7 返金が引かれていない返品＝損なし */
+      const st = gotBy ? 'got' : sc.st === 'before' ? 'pre' : cl && cl.st === 'applied' ? 'applied' : (kind === '返品' && noLossK.has(k)) ? 'noloss' : cl && cl.st === 'na' ? 'na' : 'todo';   /* ★11/13 高8：申請済みは損なしより先 */   /* ★11/7 返金が引かれていない返品＝損なし */
       const lastB = [od, rd].filter(Boolean).sort().pop() || '', dlMax = lastB ? jstDate(toMs(lastB) + lim * dayMs) : '';   /* 申請の区分（A・B）は、注文日と返金日の遅い方（どちらかの数え方で間に合う物）で見る */
       rows.push({ k, cc, sn, kind, reason: String(reason || ''), od, rd, start, lim, dl, left, st, at: (cl && cl.at) || '', nm: nm || '', rsn: rsn || '', limGuess: !(Number(daysCfg[cc]) > 0) && cc !== 'BR', dlMax, amt: Number(amt) || 0, trk: String(trk || ''),
         items: ex.items || [], ret: ex.ret || null, cxr: ex.cxr || '', scan: sc.st, scanWhy: sc.why, gotBy, gotAt, incWhy: incWhy.get(k) || '' });
