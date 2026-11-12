@@ -48859,7 +48859,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             const stop = (t) => { say('<b style="color:#d93025">⚠ ' + esc(t) + '</b>'); bt.disabled = false; if (mk) mk.disabled = false; };   /* 何も作っていない時だけ（押し直せる） */
             let pubTried = false;
             /* ★3回目 中1・中2：単品を非公開で残す時は、単品の在庫を0にしてから止める（一括の公開・遅れて効いた公開で表に出ても売れない） */
-            const parkSingle = async () => { if (!nid) return false; try { await openapiUpdate('update_stock', { shop_id: dstShop, item_id: nid, stock: 0 }); return true; } catch (_) { return false; } };
+            const parkSingle = async () => { if (!nid) return false; try { await openapiUpdate('update_stock', { shop_id: dstShop, item_id: nid, stock: 0 }); } catch (_) {}
+              /* ★4回目 中2：書いた返事でなく、読み直して0を確かめる（前の書き込みが後から効いて上書きされていないか） */
+              for (let k = 0; k < 2; k++) { if (k) await new Promise(r => setTimeout(r, 5000)); try { const b4 = await gasCall({ action: 'api_probe', token: settings.writeToken, shop_id: dstShop, path: '/api/v2/product/get_item_base_info', q: JSON.stringify({ item_id_list: String(nid) }) }, 60000);
+                const it4 = (((((b4 || {}).data || {}).response || {}).item_list || [])[0]) || {}, sv = it4.stock_info_v2 || {}, ss = ((sv.seller_stock || [])[0] || {}).stock, su = (sv.summary_info || {}).total_available_stock;
+                const v4 = ss != null ? Number(ss) : su != null ? Number(su) : NaN; if (v4 === 0) return true; if (isFinite(v4) && k === 0) { try { await openapiUpdate('update_stock', { shop_id: dstShop, item_id: nid, stock: 0 }); } catch (_) {} } } catch (_) {} }
+              return false; };
             const stopKeep = async (t) => { let ex = ''; if (nid && !pubTried) { const ok = await parkSingle(); ex = ok ? '（単品の在庫は0にしました＝あとで公開されても売れません）' : '（⚠ 単品の在庫を0にできたか分かりません）'; }
               say('<b style="color:#d93025">⚠ ' + esc(t + ex) + '</b>');
               if (nid) { try { await gasCall({ action: 'listings_refetch', token: settings.writeToken, shop_id: dstShop, ids: String(nid) }, 120000); } catch (_) {} } };   /* ★高2：単品ができた後・作れたか分からない時はボタンを戻さない（二重に作らない）・★3回目 低6：単品を一覧の表に載せる */
@@ -48936,7 +48941,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               const upd = async () => openapiUpdateItem(Object.assign({ shop_id: dstShop, item_id: nid }, String(e.sku || '').trim() ? { sku: String(e.sku).trim() } : {}, pre ? { preorder: JSON.stringify(pre) } : {}));
               let updFail = '';
               if (String(e.sku || '').trim() || pre) { try { await upd(); } catch (_) { await new Promise(r => setTimeout(r, 5000)); try { await upd(); } catch (eU) { updFail = String((eU && eU.message) || eU).slice(0, 60); carryNote.push('SKU' + (pre ? '・予約出品' : '') + 'を付けられませんでした（' + updFail + '）'); } } }
-              if (pre && updFail) { try { logAct('価格調整', '単品を作った（予約出品を付けられず・非公開のまま）', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), e.item_id + '→' + nid); } catch (_) {} return stopKeep('単品（' + nid + '・非公開）は作れましたが、元が予約出品なのに予約出品を付けられませんでした（' + updFail + '）。公開していません（元はそのまま売れます）。Seller Center で単品に予約出品（' + pre.days_to_ship + '日）を付けてから公開し、元から外してください'); }   /* ★再レビュー中3 */
+              if (pre && updFail) { try { logAct('価格調整', '単品を作った（予約出品を付けられず・非公開のまま）', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), e.item_id + '→' + nid); } catch (_) {} return stopKeep('単品（' + nid + '・非公開）は作れましたが、元が予約出品なのに予約出品を付けられませんでした（' + updFail + '）。公開していません（元はそのまま売れます）。単品を使う時は、Seller Center で単品に予約出品（' + pre.days_to_ship + '日）を付け、単品の在庫を ' + live.stock + ' に戻してから公開し、その後で元から外してください'); }   /* ★4回目 中1 */   /* ★再レビュー中3 */
               /* JAN・型番＝台帳（product_ids）の新しい鍵（id:<商品番号>）に元の明細の行を写す */
               try { const t0 = Date.now(); productIds['id:' + nid] = Object.assign({}, pidRec, jan ? { jan } : {}, mpn ? { mpn } : {}); saveProductIds(); const ok = await pidSaveWait(t0, 20000); if (!ok) carryNote.push('JAN の台帳の保存を確かめられませんでした'); } catch (eP) { carryNote.push('JAN の台帳に書けませんでした'); }
               /* 仕入れ目安＝小さな控えの鍵 llog_cost_single。★高4：en は単品の題名（値付けの見直しの単品の行の名前と照らすため）・sku は空（単品の行は明細 SKU を持たない）・元の明細名は was に */
@@ -48950,7 +48955,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               /* ★再レビュー中2：作っている間に元が売れていないか、在庫0にする直前に読み直す */
               let liveB = null; try { liveB = await paLiveSrc(sid, e); } catch (eL) { return stopKeep('単品（' + nid + '・非公開）は作れましたが、元の明細を読み直せませんでした（' + String((eL && eL.message) || eL).slice(0, 80) + '）。公開していません（元はそのまま売れます）'); }
               if (liveB.stock <= 0) { try { logAct('価格調整', '単品を作った（元が売れて在庫0・非公開のまま）', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), e.item_id + '→' + nid); } catch (_) {} return stopKeep('作っている間に元の明細が売れて在庫0になりました。単品（' + nid + '）は非公開のままにしています（二重に売らないため）'); }
-              if (liveB.stock !== live.stock) { try { await openapiUpdate('update_stock', { shop_id: dstShop, item_id: nid, stock: liveB.stock }); carryNote.push('作っている間に元の在庫が ' + live.stock + '→' + liveB.stock + ' に変わったので単品の在庫を合わせました'); } catch (_) { return stopKeep('作っている間に元の在庫が ' + live.stock + '→' + liveB.stock + ' に変わり、単品（' + nid + '・非公開）の在庫を合わせられませんでした。公開していません'); } }
+              if (liveB.stock !== live.stock) { try { await openapiUpdate('update_stock', { shop_id: dstShop, item_id: nid, stock: liveB.stock }); carryNote.push('作っている間に元の在庫が ' + live.stock + '→' + liveB.stock + ' に変わったので単品の在庫を合わせました'); } catch (_) { return stopKeep('作っている間に元の在庫が ' + live.stock + '→' + liveB.stock + ' に変わり、単品（' + nid + '・非公開）の在庫を合わせられませんでした。公開していません（元はそのまま売れます）。単品を使う時は、単品の在庫を ' + liveB.stock + ' にしてから公開し、その後で元から外してください'); } }   /* ★4回目 中1 */
               zeroed = await setSrcStock(0);
               try { await lockPut({ nid: String(nid), shop: String(dstShop), zeroed: zeroed, was: liveB.stock }); } catch (_) {}
               if (!zeroed) { try { logAct('価格調整', '単品を作った（元を在庫0にできたか分からず・非公開のまま）', e.cc + ' ' + String(e.vari || e.name).slice(0, 40), e.item_id + '→' + nid + '・元の在庫 ' + liveB.stock); } catch (_) {} return stopKeep('単品（' + nid + '・非公開）は作れましたが、元の明細を在庫0にできたか確かめられませんでした。公開していません。元の明細の在庫が 0 なら ' + liveB.stock + ' に戻すか、単品を公開して元から外してください（元の在庫は ' + liveB.stock + ' でした）'); }
