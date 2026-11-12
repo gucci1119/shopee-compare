@@ -49222,7 +49222,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               const wKg = Number(base.weight) > 0 ? Number(base.weight) : (Number(e.weightG) > 0 ? Number(e.weightG) / 1000 : 0.3);
               /* 作り中の印（30分）を先に置く */
               const lockPut = (o) => sbUpsert('app_kv', [{ k: lockK, v: Object.assign({ at: Date.now(), title: sTitle, wasName: String(e.vari || e.name || ''), was: live.stock }, o || {}), updated_at: new Date().toISOString() }], 'k');
-              try { await lockPut({}); } catch (_) { return stop('作り中の印を書けませんでした（二重に作らないため止めます）'); }
+              const myPc = (typeof PC !== 'undefined' && PC.id) || ''; const myTok = myPc + ':' + Math.random().toString(36).slice(2, 8);
+              try { await lockPut({ pc: myTok }); } catch (_) { return stop('作り中の印を書けませんでした（二重に作らないため止めます）'); }
+              /* ★2026-11-13 事業本部のレビュー9：2台の PC でほぼ同時に押すと、どちらも「印が無い」と読んで両方作れた＝書いた後に読み直し、自分の印でなければ止める */
+              { await new Promise(z => setTimeout(z, 1500)); const lk2 = await sbGet('app_kv', 'select=v&k=eq.' + encodeURIComponent(lockK)).catch(() => null); const v2 = Array.isArray(lk2) && lk2[0] && lk2[0].v;
+                if (!v2 || v2.pc !== myTok) return stop('ほかの PC か画面が同じ明細を単品にしている最中です（二重に作らないため止めます）。何もしていません'); }
               say('<span class="smd-dim"><span class="smd-spin"></span>単品を作っています…（非公開で作り、確かめてから公開します・最大2分）</span>');
               let cr;
               try { cr = await openapiAddItem({ shop_id: Number(dstShop), item_name: sTitle, description: desc || sTitle, images: [img], price: want, stock: live.stock, weight: wKg, category_id: Number(base.category_id), brand_id: Number(((base.brand || {}).brand_id) || 0), condition: base.condition || 'USED', publish: false, attribute_list: attrs, ...(dim ? { dimension: dim } : {}) }); }
@@ -49297,13 +49301,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             try {
               const gw = await guardWriteCountries([e.cc]); if (!gw.ok) { alert(gw.msg); bt.disabled = false; return; }
               const live = await paLiveSrc(sid, e);   /* ★2026-11-03 高-5：作る前に元の明細の今の名前と在庫を確かめる */
+              /* ★2026-11-13 事業本部のレビュー9：②の作り中の印もサーバーに置く（2台の PC・画面の開き直しでも2冊目を作らない）。書いた後に読み直して自分の印か確かめる */
+              { const lk = await sbGet('app_kv', 'select=v&k=eq.' + encodeURIComponent(lockK)).catch(() => null); if (!Array.isArray(lk)) { bt.disabled = false; say('<b style="color:#d93025">⚠ 前に作った印を読めませんでした（二重に作らないため止めます）。少し待ってもう一度</b>'); return; }
+                const lv = lk[0] && lk[0].v; if (lv && (lv.nid || Date.now() - (Number(lv.at) || 0) < 30 * 60000)) { say('<b style="color:#b06000">⚠ この明細の' + esc(mark) + 'は' + (lv.nid ? 'もう作ってあります（' + esc(String(lv.nid)) + '）' : 'ほかの PC か画面で作っている最中です') + '。出品一覧で確かめてください。もう一度作ると同じ中身のカタログが2つになり、Shopee に片方を消されることがあります</b>'); return; }
+                const tok = ((typeof PC !== 'undefined' && PC.id) || '') + ':' + Math.random().toString(36).slice(2, 8);
+                try { await sbUpsert('app_kv', [{ k: lockK, v: { pc: tok, at: Date.now() }, updated_at: new Date().toISOString() }], 'k'); } catch (_) { bt.disabled = false; say('<b style="color:#d93025">⚠ 作り中の印を書けませんでした（二重に作らないため止めます）</b>'); return; }
+                await new Promise(z => setTimeout(z, 1500)); const lk2 = await sbGet('app_kv', 'select=v&k=eq.' + encodeURIComponent(lockK)).catch(() => null); const v2 = Array.isArray(lk2) && lk2[0] && lk2[0].v;
+                if (!v2 || v2.pc !== tok) { say('<b style="color:#b06000">⚠ ほかの PC か画面が同じ明細の' + esc(mark) + 'を作っている最中です（二重に作らないため止めます）</b>'); return; } }
               say('<span class="smd-dim"><span class="smd-spin"></span>' + esc(mark) + 'を作っています…</span>');
               const nsid = dstShop;   /* 新しいカタログの店（元の店が満杯なら空きのある店） */
               let cr = null;
               try { cr = nsid === String(sid) ? await gasCall({ action: 'clone_item', token: settings.writeToken, shop_id: sid, item_id: e.item_id, name: newName }, 300000)
                 : await gasCall({ action: 'seed_shop', token: settings.writeToken, src_shop_id: sid, dst_shop_id: nsid, item_id: e.item_id, price: want, name: newName }, 300000); }
               catch (eC) { if (eC && eC.res && eC.res.item_id) cr = eC.res; else throw eC; }   /* ★11/13 レビュー4：GAS が ok:false でも item_id があれば作られている＝拾う */
-              if (cr && cr.item_id) { nidMade = String(cr.item_id); try { localStorage.setItem(lockK, JSON.stringify({ nid: nidMade, shop: nsid, at: Date.now(), name: newName })); } catch (_) {} }   /* ★11/12 別の店へは GAS の seed_shop（🤖の満杯の時と同じ口） */   /* 作る時は非公開（仮の明細 test が買えてしまうので）→ 本物を入れて test を消したら最後に公開する */
+              if (cr && cr.item_id) { nidMade = String(cr.item_id); try { localStorage.setItem(lockK, JSON.stringify({ nid: nidMade, shop: nsid, at: Date.now(), name: newName })); } catch (_) {} try { await sbUpsert('app_kv', [{ k: lockK, v: { nid: nidMade, shop: nsid, at: Date.now(), name: newName }, updated_at: new Date().toISOString() }], 'k'); } catch (_) {} }   /* ★11/12 別の店へは GAS の seed_shop（🤖の満杯の時と同じ口） */   /* 作る時は非公開（仮の明細 test が買えてしまうので）→ 本物を入れて test を消したら最後に公開する */
               if (cr && cr.item_id && cr.ok === false) throw new Error('カタログ（' + cr.item_id + '）は作られましたが、途中で止まりました（元はそのまま・作られたカタログは非公開のまま残っています＝消していません）：' + paErrJa(String(cr.error || '')));   /* ★11/12 再レビュー低9 */
               const nid = cr && cr.item_id; if (!nid) throw new Error('カタログを作れませんでした（元はそのまま）：' + paErrJa(String((cr && cr.error) || '失敗')) + (/duplicat/i.test(String((cr && cr.error) || '')) ? '（同じ店に同じ中身と判断された＝表紙を変える必要があります）' : ''));
               say('<span class="smd-dim"><span class="smd-spin"></span>明細を入れています…</span>');
@@ -49341,7 +49352,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
               if (!dr || !dr.ok) { say('<b style="color:#b06000">⚠ ' + esc(mark) + 'に入れましたが、元から消せませんでした（' + esc(String((dr && dr.error) || '').slice(0, 120)) + '）。元の明細は在庫0にするか、もう一度消してください</b>'); return; }
               say('<b style="color:#1a7f37">✅ ' + esc(mark) + 'を作って移しました（' + esc(newName.slice(0, 60)) + '）' + (pubOk ? '・公開しました' : '</b><b style="color:#b06000">・⚠ 公開にできませんでした（出品一覧で公開してください）') + (imgOk ? '' : '</b><b style="color:#b06000">・⚠ 明細の写真を付けられませんでした') + '</b>');
               setTimeout(() => { PA.data = null; paRender(true); }, 2500);
-            } catch (err) { if (!nidMade) bt.disabled = false; say('<b style="color:#d93025">⚠ ' + esc(String((err && err.message) || err).slice(0, 240)) + (nidMade ? '（作った' + esc(mark) + ' ' + esc(nidMade) + ' は非公開で残っています。もう一度押すと2冊目ができるので、ボタンは押せなくしました）' : '') + '</b>'); }
+            } catch (err) { if (!nidMade) { bt.disabled = false; try { sbDelete('app_kv', 'k=eq.' + encodeURIComponent(lockK)).catch(() => {}); } catch (_) {} } say('<b style="color:#d93025">⚠ ' + esc(String((err && err.message) || err).slice(0, 240)) + (nidMade ? '（作った' + esc(mark) + ' ' + esc(nidMade) + ' は非公開で残っています。もう一度押すと2冊目ができるので、ボタンは押せなくしました）' : '') + '</b>'); }
           });
           return;
         }
