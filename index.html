@@ -1661,7 +1661,14 @@
   <!-- 📱 返信（スマホ用・読むだけ） -->
   <div id="page-mreply" style="display:none">
     <div class="smd-pagehead">📱 返信 <span class="smd-dim" style="font-weight:400;font-size:13px">（スマホ用・読むだけ）</span>
-      <button class="smd-btn" id="mr-refresh" title="未返信・ロック・会話・定型文を読み直します" style="margin-left:10px;font-size:13px">🔄 更新</button></div>
+      <button class="smd-btn" id="mr-refresh" title="未返信・ロック・会話・定型文を読み直します" style="margin-left:10px;font-size:13px">🔄 更新</button>
+      <button class="smd-btn" id="mr-help-btn" type="button" title="この画面の使い方を出します（もう一度押すと閉じます）" style="margin-left:6px;font-size:13px">？ 使い方</button></div>
+    <div id="mr-help" class="pagehelp" style="display:none;margin:8px 12px 0;font-size:13px;line-height:1.7">
+      <b>📮 未返信</b>：返していないお客さん（7日以内・Smart Reply の📮と同じ数え方）。待たせている順。<br>
+      <b>🔒 ロック</b>：後で追うためにロックした人（Shopee・WhatsApp・Zalo・Viber）。<br>
+      <b>見積もりあり</b>＝この人に見積もりを送った記録がある／<b>3日以上</b>＝3日以上返していない／<b>一次返答済み</b>＝「確認して返します」は送ってある。<br>
+      行を押すと、最後の発言3件（和訳つき）・前の見積もり・送る英文（Smart Reply の定型文）が出ます。<b>📋 コピー</b>を押して、Shopee のセラーアプリのその人のチャットに貼って送ってください。<br>
+      このページからは送りません・何も書き込みません。和訳は Google 翻訳（1日400件まで・超えたら原文だけ）。</div>
     <div class="pagehelp" style="margin:8px 12px 0"><b>この画面：返していないお客さんと、送る英文をスマホで見ます。</b><span style="color:#5a6b8c;font-size:13px">※英文はコピーして Shopee のセラーアプリで貼って送ります。このページからは送りません。</span></div>
     <div id="mr-body" style="padding:8px 12px"></div>
   </div>
@@ -32393,13 +32400,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function mrWhen(ms) { if (!ms) return ''; const d = new Date(ms); return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
   /* 和訳：覚えている物はそのまま。無い物だけ5件ずつ取込GAS へ。訳せなかった時は空（原文だけ出す） */
   async function mrTranslate(texts) {
-    const need = [...new Set(texts.map(t => String(t || '').trim()).filter(t => t && !/^\[[a-z_]+\]$/i.test(t) && mr.tr[t] == null))];
-    for (let i = 0; i < need.length; i += 5) {
-      const part = need.slice(i, i + 5).map(t => t.slice(0, 300));
+    const need = [...new Set(texts.map(t => String(t || '').trim().slice(0, 300)).filter(t => t && !/^\[[a-z_]+\]$/i.test(t) && mr.tr[t] == null))];
+    /* 束は URL にした後の長さで切る（タイ語・ベトナム語は1字が9字ほどになる）。1つの束が失敗しても次へ進む */
+    const packs = []; let cur = [];
+    need.forEach(t => { const next = cur.concat([t]); if (cur.length && (cur.length >= 5 || encodeURIComponent(JSON.stringify(next)).length > 1800)) { packs.push(cur); cur = [t]; } else cur = next; });
+    if (cur.length) packs.push(cur);
+    let fails = 0;
+    for (const part of packs) {
       try {
-        const r = await mrGas('tr_ja', { qs: JSON.stringify(part) }, 40000);
-        if (r && r.ok && Array.isArray(r.ja)) { part.forEach((t, j) => { if (r.ja[j]) mr.tr[t] = r.ja[j]; }); mr.trLeft = r.left; }
-      } catch (_) { break; }
+        const r = await mrGas('tr_ja', { qs: JSON.stringify(part.map(t => encodeURIComponent(JSON.stringify([t])).length > 1800 ? t.slice(0, 120) : t)) }, 40000);
+        if (r && r.ok && Array.isArray(r.ja)) { part.forEach((t, j) => { if (r.ja[j]) mr.tr[t] = r.ja[j]; }); mr.trLeft = r.left; } else fails++;
+      } catch (_) { fails++; if (fails >= 3) break; }
     }
     try { const ks = Object.keys(mr.tr); if (ks.length > 400) ks.slice(0, ks.length - 400).forEach(k => delete mr.tr[k]); localStorage.setItem('mrTr', JSON.stringify(mr.tr)); } catch (_) {}
   }
@@ -32418,7 +32429,6 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (f.status === 'fulfilled' && Array.isArray(f.value)) mr.lock = f.value.map(x => x.v || {}).filter(v => v.on && v.cc && v.bkey).sort((a, b) => (Number(a.at) || 0) - (Number(b.at) || 0));
       else mr.err += (mr.err ? '／' : '') + '🔒 ロックを読めませんでした';
       try { await qlLoad(false); } catch (_) {}
-      await mrTranslate((mr.un || []).map(x => x.text));
     })().finally(() => { mr.loading = null; });
     return mr.loading;
   }
@@ -32466,7 +32476,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     };
     draw();
     try { await mrLoad(force); } catch (e) { mr.err = esc(String((e && e.message) || e).slice(0, 100)); }
-    if (!mr.sel && document.getElementById('mr-body') === host) draw();
+    if (mr.sel || document.getElementById('mr-body') !== host) return;
+    draw();
+    /* 和訳は一覧を出した後に、待たせている順の上から20人だけ（訳せたら描き直す） */
+    const top = (mr.un || []).slice().sort((a, b) => b.waitMin - a.waitMin).slice(0, 20).map(x => x.text);
+    if (top.some(t => { const k = String(t || '').trim().slice(0, 300); return k && mr.tr[k] == null; })) { await mrTranslate(top); if (!mr.sel && mr.tab === 'un' && document.getElementById('mr-body') === host) draw(); }
   }
   async function mrTplLoad() {
     if (mr.tpl) return mr.tpl;
@@ -32527,6 +32541,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (e.target.closest('#mr-back')) { mr.sel = null; renderMreply(); window.scrollTo(0, 0); return; }
       const row = e.target.closest('.mr-row'); if (row) { mr.sel = { cc: row.dataset.cc, b: row.dataset.b, bk: row.dataset.bk }; mrRenderOne(); window.scrollTo(0, 0); }
     });
+    const hb = document.getElementById('mr-help-btn'), hp = document.getElementById('mr-help'); if (hb && hp) hb.addEventListener('click', () => { hp.style.display = hp.style.display === 'none' ? '' : 'none'; });
     const rf = document.getElementById('mr-refresh'); if (rf) rf.addEventListener('click', () => { mr.msgs = {}; mr.tpl = null; mr.tplErr = ''; try { localStorage.removeItem('mrTpl'); } catch (_) {} if (mr.sel) mrRenderOne(); else renderMreply(true); });
   }
 
