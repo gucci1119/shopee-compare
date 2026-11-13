@@ -1165,7 +1165,7 @@
         <option value="ok">✓現物あり</option>
         <option value="ng">✗現物なし</option>
       </select>
-      <input type="text" id="stock-search" placeholder="ItemID・SKU・商品名・仕入元・棚・注文番号（ハンディスキャナ可）" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="width:360px;min-width:280px">
+      <input type="text" id="stock-search" placeholder="ItemID・SKU・商品名・仕入元・棚・注文番号・送り状（ハンディスキャナ可）" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="width:360px;min-width:280px">
       <button class="smd-btn" id="stock-scan" title="カメラで在庫QRを読み取って検索">📷 QRスキャン</button>
       <button class="smd-btn" id="stock-refresh" title="Supabaseから最新を再取得">🔄 更新</button>
       <span class="smd-dim" id="stock-note"></span>
@@ -4845,6 +4845,34 @@
     try { t = t.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (_) {}  // é→e
     return t.toLowerCase();
   }
+  /* ★2026-11-13 在庫の検索（本人「在庫表 検索しても出てこない メルカリから取り込まれてる？」・事業本部）：
+     英語名・日本語名・略称・ローマ数字のゆれを1つに寄せた鍵（FF7＝FINAL FANTASY VII＝ファイナルファンタジーⅦ）。英日の言い換えは仕入れ検索の JP_DICT をそのまま使う */
+  const STK_ROMAN = { XV: '15', XIV: '14', XIII: '13', XII: '12', XI: '11', X: '10', IX: '9', VIII: '8', VII: '7', VI: '6', V: '5', IV: '4', III: '3', II: '2', I: '1' };
+  function stkSearchKey(s) {
+    let t = String(s || '');
+    try { t = t.normalize('NFKC'); } catch (_) {}   /* Ⅶ→VII・全角→半角 */
+    t = t.replace(/\b(FF|DQ)\s*(XV|XIV|XIII|XII|XI|IX|X|VIII|VII|VI|IV|V|III|II|I|\d{1,2})\b/gi, (m, a, n) => (a.toUpperCase() === 'FF' ? ' final fantasy ' : ' dragon quest ') + (STK_ROMAN[n.toUpperCase()] || n) + ' ');
+    t = t.replace(/ドラクエ/g, 'ドラゴンクエスト').replace(/\bFF\b/gi, ' final fantasy ').replace(/\bDQ\b/gi, ' dragon quest ');
+    let dict = []; try { dict = JP_DICT; } catch (_) {}   /* 読み込みの途中で呼ばれても止めない */
+    for (const p of dict) { if (Array.isArray(p) && p[0] instanceof RegExp && typeof p[1] === 'string') { try { t = t.replace(p[0], ' ' + p[1] + ' '); } catch (_) {} } }
+    t = t.replace(/\b(XV|XIV|XIII|XII|XI|VIII|VII|VI|IX|IV|III|II)\b/gi, m => STK_ROMAN[m.toUpperCase()]);
+    t = t.replace(/(ファイナルファンタジー|ドラゴンクエスト)\s*(X|V|I)\b/gi, (m, a, n) => a + STK_ROMAN[n.toUpperCase()]);
+    try { t = t.normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch (_) {}
+    return t.toLowerCase().replace(/[\s・\-_:：.,'"!！?？()（）\[\]【】]/g, '');
+  }
+  const _stkKeyCache = new WeakMap(); let _stkQ = { q: null, k: '', ws: [] };
+  function stkRowMatch(r, q) {   /* q は kwNorm 済みの字。今までの「そのまま含む」に、送り状の番号・仕入れ先の URL と番号・ゆれの鍵を足した */
+    if (!q) return true;
+    const raw = kwNorm([r.item_id, r.sku, r.name, r.name_supplier, r.supplier, r.seller, r.bin, r.shopee_sn, r.tracking_no, r.supplier_url, r.supplier_order].map(x => x || '').join(' '));
+    if (raw.includes(q)) return true;
+    const qd = q.replace(/[\s\-ー－‐]/g, '');
+    if (/^\d{8,}$/.test(qd) && [r.tracking_no, r.shopee_sn, r.supplier_order].some(x => String(x || '').replace(/\D/g, '').indexOf(qd) >= 0)) return true;   /* 送り状のバーコード（ハイフン・空白の違いを見ない） */
+    let c = _stkKeyCache.get(r); if (!c || c.src !== raw) { c = { src: raw, key: stkSearchKey([r.name, r.name_supplier, r.sku].map(x => x || '').join(' ')) }; _stkKeyCache.set(r, c); }
+    if (_stkQ.q !== q) { const ws0 = q.split(/\s+/).filter(Boolean); _stkQ = { q: q, k: stkSearchKey(q), ws: ws0.length > 1 ? ws0.map(w => ({ w: w, k: stkSearchKey(w) })) : [] }; }   /* 検索語の変換は1回だけ */
+    if (_stkQ.k && c.key.includes(_stkQ.k)) return true;
+    if (_stkQ.ws.length) return _stkQ.ws.every(x => raw.includes(x.w) || (x.k && c.key.includes(x.k)));
+    return false;
+  }
   const srcKeyOf = (u) => String(u || '').trim().toLowerCase()
     .replace(/[?#].*$/, '').replace(/\/$/, '')
     .replace(/^https?:\/\/(www\.)?/, '');
@@ -6323,6 +6351,9 @@
     "列＝国、行＝作品。同じ作品はどの国に出したかが横一列で見えます": "Columns = countries, rows = titles. You can see in one row which countries each title went to.",
     "選んだ店に出した明細はありません（「✕ 店の絞り込みを外す」で外せます）": "Nothing was listed in the selected shop (use \"✕ Clear shop filter\")",
     "出品ログ：いまの見方": "Listing log: current view",
+    "絞り込みを外して出す": "Clear filters and show all",
+    "状態・仕入元などの絞り込みを外して、検索に当たった物を全部出します": "Clears the status, supplier and other filters and shows everything the search matched",
+    "🔎 <b>在庫管理の検索で、送り状の番号・仕入れ先の番号・英語名と日本語名のゆれでも当たるようにしました</b>（本人「在庫表 検索しても出てこない」）：送り状のバーコードを読む（ハイフンありなしどちら）・メルカリの商品番号（m…）・「FF7」「ファイナルファンタジーⅦ」「FINAL FANTASY VII」のどれでも同じ物が出ます。状態などの絞り込みで外れた時は「絞り込みの外に 1件（入庫待ち 1件）」と出し、ボタンで絞り込みを外せます。": "🔎 <b>Stock search now finds items by tracking number, supplier item number, and English/Japanese name variants</b> (\"I search the stock table and nothing comes up\"): scanning a shipping label barcode (with or without hyphens), a Mercari item number (m…), or typing \"FF7\", \"Final Fantasy Ⅶ\" or \"FINAL FANTASY VII\" all find the same item. When a status filter hides matches, it shows \"1 more outside the filter (1 awaiting arrival)\" with a button to clear the filters.",
     "🧮 <b>見積もりで、Shopee だけの値段と、PayPal 併用の合計を別々に打てるようにしました</b>（本人の値下げの見積もり「Shopee だけ 363」「併用 180＋153＝333」・営業部の依頼）：併用の合計を打つと、②③はその合計で計算し、粗利・ROI・円もその額で返します。粗利が線より下でも止めずに知らせます。": "🧮 <b>Quotes can now take a Shopee-only price and a separate total for Shopee + PayPal</b> (price-cut quotes such as \"Shopee only 363\" and \"split 180 + 153 = 333\"; requested by Sales): with a split total, ② and ③ are calculated on that total and profit, ROI and yen follow it. If profit falls below the line, the quote is still returned with a notice.",
     "🧭 <b>全画面の点検の直し</b>：アカウント・アクセス・返品のタブ・転記・営業・ダッシュボード・損益などの約60か所に、かざすと出る説明を付けました。転記の「▶ 実行」3つは何をするかの名前に（注文明細を入れ替え・入金予定額を転記・商品画像を転記）。業界ニュースの見出しを切らずに全部出します。🔔 に「値下げに戻せていない見込みの品物」を足しました。「🔒 本人の値段」は「🔒 手で決めた値段」に。": "🧭 <b>Fixes from the full-screen check</b>: about 60 hover guides added, the three '▶ Run' buttons renamed, full news titles, a new 🔔 box for items possibly not returned to a Discount, and 'owner price' renamed to 'manually set price'.",
     "🔤 <b>画面の言葉を、初めて見る人にも分かる言い方にそろえました</b>（言い換えの表 tools/ui-words.md どおり・約300か所）：例「ブリッジ」→「中継（Tampermonkey）」・「打ち替え」→「手で入れ直す」・「段階」（営業）→「進み具合」・「控え」→「記録」・「基準の線」→「目標の粗利」。英語版の辞書も合わせました。": "🔤 <b>Screen wording made plain for first-time users</b> (about 300 places, per tools/ui-words.md); the English dictionary was updated to match.",
@@ -8347,7 +8378,7 @@
     "ハード（機種）で絞り込み。商品名から自動判定しています（セルで手直し可）": "Filter by console. Detected automatically from the item name (you can correct it in the cell).",
     "カテゴリで絞り込み。商品名から自動判定しています（セルで手直し可）": "Filter by category. Detected automatically from the item name (you can correct it in the cell).",
     "棚卸（現物の確認）の状態で絞り込み。現物を数えながら「未確認のみ」にしておくと、残りが減っていくのが見えます": "Filter by stocktake state. Set it to “unchecked only” while counting and you can watch the remainder go down.",
-    "ItemID・SKU・商品名・仕入元・棚・注文番号（ハンディスキャナ可）": "Item ID, SKU, item name, supplier, shelf or order number (barcode scanner works)",
+    "ItemID・SKU・商品名・仕入元・棚・注文番号・送り状（ハンディスキャナ可）": "Item ID, SKU, item name, supplier, shelf, order number or tracking number (barcode scanner works)",
     "カメラで在庫QRを読み取って検索": "Search by reading a stock QR code with the camera",
     "Supabaseから最新を再取得": "Fetch the latest from Supabase",
     "いまShopeeに出している全商品の一覧・検索・在庫確認": "List, search and check stock for everything currently live on Shopee",
@@ -17987,9 +18018,12 @@
     if (stock.hw) rows = rows.filter(r => invHw(r) === stock.hw);
     if (stock.cat) rows = rows.filter(r => invCat(r) === stock.cat);
     if (stock.tak) rows = rows.filter(r => { const t = takOf(r.item_id); return stock.tak === 'todo' ? !t : t === stock.tak; });
-    if (stock.q) rows = rows.filter(r =>
-      kwNorm((r.item_id || '') + ' ' + (r.sku || '') + ' ' + (r.name || '') + ' ' + (r.name_supplier || '') + ' ' +
-       (r.supplier || '') + ' ' + (r.seller || '') + ' ' + (r.bin || '') + ' ' + (r.shopee_sn || '')).includes(stock.q));
+    if (stock.q) rows = rows.filter(r => stkRowMatch(r, stock.q));
+    /* ★2026-11-13 状態などの絞り込みで外れた時は、外れた所に何件あるかを出す（本人「検索しても出てこない」＝入庫待ちだった） */
+    let stkOutHtml = '';
+    if (stock.q) { const hitAll = all.filter(r => stkRowMatch(r, stock.q)), inSet = new Set(rows), out = hitAll.filter(r => !inSet.has(r));
+      if (out.length) { const by = {}; out.forEach(r => { const k = r.status || '状態なし'; by[k] = (by[k] || 0) + 1; });
+        stkOutHtml = '絞り込みの外に ' + out.length + '件（' + Object.keys(by).map(k => esc(k) + ' ' + by[k] + '件').join('・') + '）'; } }
     // 🏚 死に筋（滞留）：在庫保管中のまま仕入から90日超。値下げ・再出品の検討対象を素早く洗い出す。
     // ※滞留の実態は「仕入れてから何日経ったか」なので、登録(created_at)ではなく仕入日(invPurDate)で数える（DBは一括取込のためcreated_atが最近に寄る）。仕入日が無い分だけcreated_atで代替。
     const DEAD_DAYS = 90;
@@ -18034,7 +18068,9 @@
     }
     const filtVal = rows.reduce((s, r) => s + (r.price || 0), 0);
     const filtPriced = rows.filter(r => r.price != null).length;
-    document.getElementById('stock-note').textContent = `${rows.length}件 ・ 仕入額合計 ${fmtJpy(filtVal)}（判明${filtPriced}件）`;
+    { const nt = document.getElementById('stock-note'); nt.textContent = `${rows.length}件 ・ 仕入額合計 ${fmtJpy(filtVal)}（判明${filtPriced}件）`;
+      if (stkOutHtml) { nt.insertAdjacentHTML('beforeend', ` <span style="color:#b26a00;font-weight:700">⚠ ${stkOutHtml}</span> <button class="smd-btn" id="stk-clrf" data-guide="状態・仕入元などの絞り込みを外して、検索に当たった物を全部出します" style="padding:1px 8px;font-size:11.5px">絞り込みを外して出す</button>`);
+        const cb = document.getElementById('stk-clrf'); if (cb) cb.onclick = () => { stock.st = ''; stock.sup = ''; stock.origin = ''; stock.hw = ''; stock.cat = ''; stock.tak = ''; stock.needFix = false; stock.dead = false; stock.page = 1; ['stock-st', 'stock-sup', 'stock-hw', 'stock-cat', 'stock-origin', 'stock-tak'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; }); try { localStorage.setItem('smdStockFilter', JSON.stringify({ st: '', q: stock.q, sup: '', origin: '', hw: '', cat: '', tak: '' })); } catch (_) {} stockRender(); }; } }
     const stkPer = 100;                            // 1ページ100件（CSV/選択は rows=全件のまま）
     const stkPages = Math.max(1, Math.ceil(rows.length / stkPer));
     const stkPage = Math.min(Math.max(1, stock.page || 1), stkPages);
@@ -28676,6 +28712,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-13', items: [
+      '🔎 <b>在庫管理の検索で、送り状の番号・仕入れ先の番号・英語名と日本語名のゆれでも当たるようにしました</b>（本人「在庫表 検索しても出てこない」）：送り状のバーコードを読む（ハイフンありなしどちら）・メルカリの商品番号（m…）・「FF7」「ファイナルファンタジーⅦ」「FINAL FANTASY VII」のどれでも同じ物が出ます。状態などの絞り込みで外れた時は「絞り込みの外に 1件（入庫待ち 1件）」と出し、ボタンで絞り込みを外せます。',
       '🧮 <b>見積もりで、Shopee だけの値段と、PayPal 併用の合計を別々に打てるようにしました</b>（本人の値下げの見積もり「Shopee だけ 363」「併用 180＋153＝333」・営業部の依頼）：併用の合計を打つと、②③はその合計で計算し、粗利・ROI・円もその額で返します。粗利が線より下でも止めずに知らせます。',
       '📣 <b>✂ で分けて、まだ送っていない見積もり（下書き）は、見積もりを送った人の表と営業の数えに入れないようにしました</b>：送った時に「送った」として入ります。',
       '🧮 <b>Smart Reply などからの見積もりで、渡した仕入れ額と違う額で計算した値段は返さないようにしました</b>（本人「単品の値段が3,042 BRLってのめっちゃおかしくない？」）：返事に、計算に使った仕入れ額と仕入れ先も入れます。',
