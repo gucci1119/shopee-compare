@@ -11694,18 +11694,26 @@
           try { Object.assign(r, r.st); out.sameTotal = {}; ['2', '3'].forEach(pl => { const o3 = mkPlan(pl); o3.profitPlus = Math.round(o3.profit - (out.plans['1'].profit || 0)); out.sameTotal[pl] = o3; }); }
           catch (eS) { delete out.sameTotal; } finally { Object.assign(r, keepR); }
         }
+        /* ★2026-11-13 spec 23.21：③の Shopee 分（&shop3）の結果。新しい名前 shop3Input・se3（s3・min・below・lossJpy・skipped）。③の案（plans['3']）はもう shop3 で作ってある */
+        if (r && r.se3) {
+          out.shop3Input = window._pcShop3 ? window._pcShop3.v : null; out.se3 = Object.assign({}, r.se3);
+          if (r.se3.skipped === 'vn_cap') out.warn = [out.warn, '③の Shopee 分（' + r.se3.s3 + '）が VN の1明細の上限 909,090 を超えるので使いません（今までの③のまま）'].filter(Boolean).join(' ／ ');
+          else if (r.se3.skipped === 'over_total') out.warn = [out.warn, '③の Shopee 分（' + r.se3.s3 + '）が合計以上なので使いません（PayPal が 0 以下になる）'].filter(Boolean).join(' ／ ');
+          else if (r.se3.below) out.warn = [out.warn, '③の Shopee 分（' + r.se3.s3 + '）が③の最低額（' + r.se3.min + '）より安いので、Shopee 側が約 ¥' + r.se3.lossJpy + ' の赤字です（止めずに出します）'].filter(Boolean).join(' ／ ');
+        }
         /* ★2026-10-30 quote-card-spec 16.10：②の Shopee 分を打ち替えた2案（shopEdit）。計算の行 r の②の値を一時的に入れ替えて同じ作り方で出し、必ず元に戻す */
         if (r && r.se) {
           const se = r.se, w5 = []; out.shop2Input = window._pcShop2 ? window._pcShop2.v : null;
           if (se.below) w5.push('Shopee に載せる額（' + se.s2 + '）が③の最低額（' + se.min + '）より安いので、Shopee 側が赤字になります（手で入れ直す値段の計算は返しません）');
           else if (se.over) w5.push('Shopee に載せる額（' + se.s2 + '）が今の②の合計（' + se.tot + '）以上なので、手で入れ直す値段の計算は返しません（PayPal が 0 以下になる）');
-          else {
+          if (!se.over && (se.kp || se.kt)) {
             const KS = ['lowLocal', 'lowPf', 'ppAsk', 'ppFee', 'ppNet'], keepR = {}; KS.forEach(k => { keepR[k] = r[k]; });
             const p2 = out.plans['2'] || {};
             try {
               out.shopEdit = {};
-              Object.assign(r, se.kp); { const a = mkPlan('2'); a.profitPlus = Math.round(a.profit - (Number(p2.profit) || 0)); out.shopEdit.keepProfit = a; }
-              Object.assign(r, se.kt); { const b = mkPlan('2'); b.profitPlus = Math.round(b.profit - (Number(p2.profit) || 0)); out.shopEdit.keepTotal = b; }
+              if (se.kp) { Object.assign(r, se.kp); const a = mkPlan('2'); a.profitPlus = Math.round(a.profit - (Number(p2.profit) || 0)); out.shopEdit.keepProfit = a; }
+              if (se.kt) { Object.assign(r, se.kt); const b = mkPlan('2'); b.profitPlus = Math.round(b.profit - (Number(p2.profit) || 0)); if (se.below) { b.below = true; b.lossJpy = se.lossJpy; } out.shopEdit.keepTotal = b; }   /* ★2026-11-13 spec 23.21：③より安い時の「合計そのまま」には below と Shopee 側の赤字（円） */
+              if (se.below) out.shopEdit.lossJpy = se.lossJpy;
               /* ★2026-11-04 レビュー 10/31 中-16：PayPal が 0 の案は返さない（文面が「+ 0 BRL via PayPal」「Step 1 Amount: 0」になる） */
               ['keepProfit', 'keepTotal'].forEach(k5 => { const o5 = out.shopEdit[k5]; if (o5 && !(Number(o5.pp) > 0)) { delete out.shopEdit[k5]; w5.push((k5 === 'keepProfit' ? '「粗利そのまま」' : '「合計そのまま」') + 'の案は PayPal が 0 になるので返しません（Shopee だけの①を使ってください）'); } });
               if (!Object.keys(out.shopEdit).length) delete out.shopEdit;
@@ -12433,7 +12441,9 @@
       const splitP = (!sample && window._pcSplitSale && window._pcSplitSale.cc === cc) ? roundLocal(Number(window._pcSplitSale.v) || 0, rg.priceUnit || 1) : 0;   /* ★2026-11-13 &splitSale（②③の合計だけ） */
       const saleTot = splitP || (saleP ? local : 0);
       { const sh2 = splitP && window._pcShop2 && window._pcShop2.cc === cc ? roundLocal(Number(window._pcShop2.v) || 0, rg.priceUnit || 1) : 0;   /* splitSale と shop2 が両方＝②の Shopee 分は shop2 */
-        if (sh2 > 0 && sh2 < splitP) { lowLocal = sh2; lowPf = priceProfitFor(cc, cost, lowLocal, opt); } }
+        if (sh2 > 0 && sh2 < splitP) { lowLocal = sh2; lowPf = priceProfitFor(cc, cost, lowLocal, opt); }
+        /* ★2026-11-13 03（spec 23.21・本人「合計入れたら、した勝手に入らんの？」）：合計だけ（&splitSale だけ・&shop2 なし）の時、VN は②の Shopee 分を1明細の上限 909,090 ドン以内に（ドンの丸めで 909,000） */
+        else if (!(sh2 > 0) && splitP && cc === 'VN') { const capV = Math.floor(909090 / (rg.priceUnit || 1)) * (rg.priceUnit || 1); if (lowLocal > capV) { lowLocal = capV; lowPf = priceProfitFor(cc, cost, lowLocal, opt); } } }
       if (saleTot && lowLocal > saleTot) { lowLocal = saleTot; lowPf = priceProfitFor(cc, cost, lowLocal, opt); }
       const need = Math.max(0, pf.profit - lowPf.profit);                      // ①に届かせるのに要る手取り(円)
       const ppAsk = saleTot ? Math.floor(Math.max(0, saleTot - lowLocal) * rg.rateJpy + 1e-9) : (need > 0 ? Math.round((need + ppFix) / (1 - ppRate)) : 0);  // 買い手に請求するPayPal額
@@ -12448,8 +12458,18 @@
       const fixedL = Number((settings.priceFixedFee || {})[cc]) || 0;        // 現地通貨の固定控除
       const minRaw = (slsL + fixedL) / Math.max(0.05, (1 - disc3) * feeKeep(cc));
       let minLocal = Number(pcOvShop['3'][cc]) > 0 ? roundLocal(Number(pcOvShop['3'][cc]), unit) : Math.max(unit, Math.ceil(minRaw / unit) * unit);      // 切り上げ（下回るとShopee側が赤字）
+      /* ★2026-11-13 03（spec 23.21・本人「ほんで、内訳のとこも」）：&shop3（新しい名前）＝③の Shopee 分。&splitSale と一緒の時だけ、③は Shopee 分＝shop3・PayPal＝合計−shop3（最低額の所を shop3 に替える）。
+         最低額より安くても止めない（赤字の円を se3.lossJpy で返す）。合計以上・VN の上限 909,090 超えは使わない（今のまま）。&shop2・pcOvShop['3'] は変えない */
+      let se3 = null;
+      { const shop3P = (!sample && splitP && window._pcShop3 && window._pcShop3.cc === cc) ? roundLocal(Number(window._pcShop3.v) || 0, unit) : 0;
+        if (shop3P > 0) {
+          const minAuto = minLocal, capOver = cc === 'VN' && shop3P > 909090;
+          if (!capOver && shop3P < splitP) { minLocal = shop3P; se3 = { s3: shop3P, min: minAuto, below: shop3P < minAuto }; }
+          else se3 = { s3: shop3P, min: minAuto, below: false, skipped: capOver ? 'vn_cap' : 'over_total' };
+        } }
       if (saleTot && minLocal > saleTot) minLocal = saleTot;   /* 売値が③の最低額より安い＝全部 Shopee（PayPal 0） */
       const minPf = priceProfitFor(cc, cost, minLocal, opt);
+      if (se3 && se3.below) se3.lossJpy = Math.max(0, -Math.round(minPf.payoutJpy));
       const need3 = Math.max(0, pf.profit - minPf.profit);
       const pp3Ask = saleTot ? Math.floor(Math.max(0, saleTot - minLocal) * rg.rateJpy + 1e-9) : (need3 > 0 ? Math.round((need3 + ppFix) / (1 - ppRate)) : 0);
       const pp3Net = Math.max(0, Math.round(pp3Ask - (pp3Ask * ppRate + ppFix)));
@@ -12468,6 +12488,11 @@
           se.kp = Object.assign({ lowLocal: s2, lowPf: s2Pf }, ppOf(needK > 0 ? Math.round((needK + ppFix) / (1 - ppRate)) : 0));
           se.kt = Object.assign({ lowLocal: s2, lowPf: s2Pf }, ppOf(Math.floor(Math.max(0, tot2 - s2) * rg.rateJpy + 1e-9)));
         }
+        /* ★2026-11-13 03（spec 23.21）：③の最低額より安い時も「合計そのまま」（kt）だけは作る（決めるのは本人＝止めずに赤で出す）。Shopee 側の赤字の円＝新しい名前 lossJpy（今ある below・min・kp・kt は変えない・kp は作らない） */
+        else if (se.below && !se.over) {
+          se.lossJpy = Math.max(0, -Math.round(s2Pf.payoutJpy));
+          se.kt = Object.assign({ lowLocal: s2, lowPf: s2Pf }, ppOf(Math.floor(Math.max(0, tot2 - s2) * rg.rateJpy + 1e-9)));
+        }
       }
       let st = null;
       if (!saleP && !splitP) {
@@ -12476,7 +12501,7 @@
         const sMin = Math.min(minLocal, T), sMinPf = sMin === minLocal ? minPf : priceProfitFor(cc, cost, sMin, opt), sAsk3 = stAsk(sMin);
         st = { lowLocal: sLow, lowPf: sLowPf, ppAsk: sAsk, ppFee: sAsk > 0 ? Math.round(sAsk * ppRate + ppFix) : 0, ppNet: stNet(sAsk), minLocal: sMin, minPf: sMinPf, pp3Ask: sAsk3, pp3Net: stNet(sAsk3) };
       }
-      return { rg, cc, local, pf, lowLocal, lowPf, ppAsk, ppFee, ppNet, minLocal, minPf, pp3Ask, pp3Net, ov: !!ovP, basis: basis, st: st, se: se };
+      return { rg, cc, local, pf, lowLocal, lowPf, ppAsk, ppFee, ppNet, minLocal, minPf, pp3Ask, pp3Net, ov: !!ovP, basis: basis, st: st, se: se, se3: se3 };
     });
     if (marginNg.length) msg.textContent = '⚠ 目標の利益率 ' + marginT + '% は ' + marginNg.join('・') + ' では届きません（手数料・送料などで、売り値に対する粗利の上限を超えています）。その国は ⚙️の表の値段のままです';
     window._pcRows = rows; window._pcRunAt = Date.now(); try { pcSrcCapPaint(); } catch (_) {} try { pcQuoteRender(); } catch (eQ) { console.warn('[pcQuote]', eQ); }
@@ -13126,6 +13151,9 @@
              返事の shopEdit に「粗利そのまま」「合計そのまま」の2案を足す。見積もりの小窓の時だけ */
           { const s2 = Number(String(p.get('shop2') || '').replace(/[^0-9.]/g, '')) || 0;
             window._pcShop2 = (isQ && s2 > 0 && s2 <= 1e9) ? { cc: String(p.get('cc') || 'BR').toUpperCase(), v: s2 } : null; }
+          /* ★2026-11-13 03（spec 23.21）：&shop3=③の Shopee に載せる額（&splitSale と一緒の時だけ効く）。見積もりの小窓の時だけ */
+          { const s3 = Number(String(p.get('shop3') || '').replace(/[^0-9.]/g, '')) || 0;
+            window._pcShop3 = (isQ && s3 > 0 && s3 <= 1e9) ? { cc: String(p.get('cc') || 'BR').toUpperCase(), v: s3 } : null; }
           /* ★2026-11-13 03（spec 23.17・本人の値下げの見積もり「Shopee だけ 363」「併用 180＋153＝333」）：&splitSale=②③のお客さんが払う合計（現地通貨）。
              あれば②③の合計はこの額（PayPal＝splitSale−Shopee に載せる額）・&sale は①だけに効く。&shop2 も来たら②は shop2＋PayPal（splitSale−shop2）。無い時は今のまま */
           { const sp = Number(String(p.get('splitSale') || '').replace(/[^0-9.]/g, '')) || 0;
@@ -28728,6 +28756,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-13', items: [
+      '🧮 <b>見積もりの併用の合計（VN）を直しました</b>（本人「合計入れたら、した勝手に入らんの？自分で調整できないの？」「ほんで、内訳のとこも」・03 営業部）：①合計だけの時、VN の②の Shopee 分を1明細の上限（909,090）以内に ②②の Shopee 分が③の最低額より安くても「合計そのまま」の案を出し、Shopee 側の赤字（円）を添える（決めるのは本人・止めない） ③③の Shopee 分も打ち替えられるように（&shop3・最低額より安くても止めずに赤字の円を添える・VN の上限超えは使わない）',
       '✉️ <b>メルカリのあいさつの見回りが止まった時に 🔔 に出すようにしました</b>（事業本部「見回りのタブが閉じられて止まった時に、黙って止まらないように」）：見回りのタブ（購入した商品）が最後に動いてから30分を過ぎると「見回りが止まっています」と出します。',
       '🧾 <b>スプシ（在庫表）に入っていない仕入を 🔔 に出すようにしました</b>（本人「スプシの方とポータルの在庫を同じにしてって言ったじゃん」「絶対今後抜けないようにしてください」）：番号が PITM- のまま30分を過ぎた仕入を、写真・品名・仕入れ先・注文番号付きで出します。メールの取り込みでスプシの行を取れなかった分は、取込GAS が15分ごとに自動でスプシに足して ITM- にそろえます。',
       '🔎 <b>在庫管理の検索で、送り状の番号・仕入れ先の番号・英語名と日本語名のゆれでも当たるようにしました</b>（本人「在庫表 検索しても出てこない」）：送り状のバーコードを読む（ハイフンありなしどちら）・メルカリの商品番号（m…）・「FF7」「ファイナルファンタジーⅦ」「FINAL FANTASY VII」のどれでも同じ物が出ます。状態などの絞り込みで外れた時は「絞り込みの外に 1件（入庫待ち 1件）」と出し、ボタンで絞り込みを外せます。',
