@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261114-0010'
+var SRC_VER = '20261114-0100'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -1223,6 +1223,56 @@ function doGetInner_(e) {
        返事：{ ok, found, cc, ref, sku, item_id, shop_id, model_id, name, price, stock, img, cat_status, read, at } / 見つからない時 found:false と読んだカタログの番号
        ★鍵：WRITE_TOKEN（token か rk）か、読むだけの鍵 rq＝SHA-256(WRITE_TOKEN + '|req_find_v1') の16進の先頭24字（ポータルの window.__smdReqKey() が同じ値を作る）。rq は req_find にだけ効く（書ける鍵を道具に配らないため・03 の決め）
        full=1：カタログの get_item_base_info も読み、予約出品（pre_order・days_to_ship）と Shopee 上の公開（item_status）を返す（Shopee を1回多く読む・本人がボタンを押した時だけ） */
+    /* ★2026-11-14 03（spec 23.24 F・本人の決め「まだ買われていない Request page の明細は在庫0でかまわない・買った後なら触らずに止める」）：
+       req_stock0 {ref, item_id, model_id, dry, token}＝Request page の、見積もり番号の明細1つだけを在庫0に。消さない・位置を動かさない（在庫だけ）。
+       止める：Request page でない／明細の SKU が REQ_<ref> でも名前が <ref> で始まるでもない／その明細に注文がある（未発送・発送済みとも・キャンセルは数えない）。
+       dry=1 は書かずに「0にできます」か止める理由。書いた後は読み直して stock0:true／false */
+    if (p.action === 'req_stock0') {
+      var r0cb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), r0out;
+      try {
+        var r0wt = P_().getProperty('WRITE_TOKEN');
+        if (!r0wt || p.token !== r0wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var r0ref = String(p.ref || '').trim(); if (!/^[A-Za-z0-9_-]{4,40}$/.test(r0ref)) throw new Error('ref（見積もり番号）が要ります');
+        var r0item = String(p.item_id || p.itemId || '').replace(/\D/g, ''), r0mid = String(p.model_id || p.modelId || '').replace(/\D/g, '');
+        if (!r0item || !r0mid) throw new Error('item_id と model_id が要ります');
+        var r0dry = String(p.dry || '') === '1';
+        var r0rows = sbSelect_('listings', 'select=item_id,shop_id,cc,name&item_id=eq.' + r0item + '&limit=1') || [];
+        var r0shop = parseInt(p.shop_id || (r0rows[0] && r0rows[0].shop_id) || 0, 10);
+        if (!r0shop || !getToken_(r0shop)) throw new Error('店が分かりません（shop_id）');
+        var r0b = callShop_(r0shop, '/api/v2/product/get_item_base_info', { item_id_list: r0item, need_tax_info: 'false', need_complaint_policy: 'false' }, 'get');
+        var r0base = (((r0b.response || {}).item_list) || [])[0] || {};
+        var r0name = String(r0base.item_name || (r0rows[0] && r0rows[0].name) || '');
+        var r0cc = String((r0rows[0] && r0rows[0].cc) || p.cc || '').toUpperCase();
+        if (!/request\s*page|solicitar/i.test(r0name)) { r0out = { ok: true, stopped: true, why: 'Request page のカタログではないので触りません', item_name: r0name.slice(0, 80) }; }
+        else {
+          var r0ms = ((getModels_(r0shop, r0item, true) || {}).models) || [], r0m = null;
+          r0ms.forEach(function (m) { if (String(m.model_id) === r0mid) r0m = m; });
+          if (!r0m) r0out = { ok: true, stopped: true, why: 'その明細が今のカタログに無い（model_id ' + r0mid + '）' };
+          else {
+            var r0sku = String(r0m.sku || '').trim(), r0mn = String(r0m.name || '');
+            if (r0sku.toUpperCase() !== ('REQ_' + r0ref).toUpperCase() && r0mn.toLowerCase().indexOf(r0ref.toLowerCase()) !== 0) r0out = { ok: true, stopped: true, why: 'この見積もり番号の明細ではないので触りません（SKU「' + r0sku + '」・名前「' + r0mn.slice(0, 40) + '」）' };
+            else {
+              var r0or = ['items.cs.' + JSON.stringify([{ sku: ('REQ_' + r0ref).slice(0, 40) }])]; if (r0mn) r0or.push('items.cs.' + JSON.stringify([{ variation: r0mn }]));
+              var r0q = 'select=sn,status,tab&or=(' + encodeURIComponent(r0or.join(',')) + ')' + (r0cc ? '&cc=eq.' + r0cc : '') + '&limit=20';
+              var r0od = sbSelect_('orders', r0q);
+              if (!Array.isArray(r0od)) throw new Error('注文を読めませんでした（読めない時は触りません）');
+              var r0live = r0od.filter(function (o) { return !/cancel/i.test(String(o.status || '')) && Number(o.tab) !== 700; });
+              if (r0live.length) r0out = { ok: true, stopped: true, why: '注文があるので触りません', orders: r0live.map(function (o) { return o.sn; }).slice(0, 5) };
+              else if (r0dry) r0out = { ok: true, dry: true, canZero: true, msg: '0にできます', stock: r0m.stock, model_name: r0mn, sku: r0sku };
+              else {
+                var r0w = updateStock_(r0shop, r0item, parseInt(r0mid, 10), 0);
+                avFailList_({ response: r0w }, '在庫');
+                Utilities.sleep(1500);
+                var r0after = null; (((getModels_(r0shop, r0item, true) || {}).models) || []).forEach(function (m) { if (String(m.model_id) === r0mid) r0after = m; });
+                r0out = { ok: true, written: true, stock0: !!(r0after && Number(r0after.stock) === 0), stock: r0after ? r0after.stock : null, model_name: r0mn, sku: r0sku };
+              }
+            }
+          }
+        }
+        if (r0out) Object.assign(r0out, { ref: r0ref, item_id: r0item, model_id: r0mid, shop_id: String(r0shop) });
+      } catch (err) { r0out = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(r0cb + '(' + JSON.stringify(r0out) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'req_find') {
       var rfcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), rfout;
       try {
