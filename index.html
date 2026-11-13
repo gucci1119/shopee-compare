@@ -3549,7 +3549,7 @@
   async function openapiGetModels(shopId, itemId) {
     if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const qs = 'action=get_models&rk=' + encodeURIComponent(settings.writeToken || '') + '&shop_id=' + encodeURIComponent(shopId) + '&item_id=' + encodeURIComponent(itemId);
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    const res = await oaJsonpFailover(qs, 60000);
     if (!res || !res.ok) throw new Error((res && res.error) || '公式APIモデル取得に失敗');
     return res.data;
   }
@@ -3641,11 +3641,25 @@
       item_status: base.item_status || ''
     };
   }
+  /* ★2026-11-14 00（本体は毎朝枯れる前提で業務を止めない）：本体に直に投げていた発送の手配・読むだけの口も、本体が今日もう枯れている時は別の台へ、
+     枯れで断られたら別の台で1回ずつやり直す（openapiUpdateModelList の作りと同じ）。枯れの断りは Shopee に届く前の断りなので、やり直しても二重にならない */
+  async function oaJsonpFailover(qs, ms, once) {
+    let base = settings.openapiUrl;
+    if (ufUrlBlocked(base)) { const a0 = gasPeerUrl(base); if (a0) base = a0; }
+    let res = null;
+    for (let hop = 0; hop < 4; hop++) {
+      res = await jsonp(base + (base.includes('?') ? '&' : '?') + qs, ms || 60000, once);
+      const er = String((res && res.error) || '');
+      if (res && !res.ok && /1\s*日に|for one day|接続枠が尽きている|urlfetch/i.test(er)) { ufMarkBlocked(base, er); const alt = gasPeerUrl(base); if (alt && alt !== base) { try { toast('⛔ 本体の接続枠が尽きたので、別のGoogleアカウントでやり直します', 3000); } catch (_) {} base = alt; continue; } }
+      break;
+    }
+    return res;
+  }
   // 発送(読取)：get_shipping_parameter＝この注文が集荷/持込/自動のどれで必要IDは何かを返す
   async function openapiShipParam(shopId, sn) {
     if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const qs = 'action=ship_param&shop_id=' + encodeURIComponent(shopId) + '&order_sn=' + encodeURIComponent(sn);
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000);
+    const res = await oaJsonpFailover(qs, 60000);
     if (!res || !res.ok) throw new Error((res && res.error) || '発送情報の取得に失敗');
     return res.data;
   }
@@ -3655,7 +3669,7 @@
     if (!settings.writeToken) throw new Error('書き込みキーが未設定です（⚙️設定）');
     const q = Object.assign({ action: 'ship_order', token: settings.writeToken }, params);
     const qs = Object.keys(q).filter(k => q[k] != null && q[k] !== '').map(k => k + '=' + encodeURIComponent(q[k])).join('&');
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 60000, true);
+    const res = await oaJsonpFailover(qs, 60000, true);
     if (!res) throw new Error('応答なし');
     return res;
   }
@@ -28882,6 +28896,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-14', items: [
+      '📦 <b>本体の接続枠が尽きた日も、発送の手配が止まらないようにしました</b>：発送の手配（集荷・持込の確かめと手配）と、明細・属性の読み込みは、本体が今日もう尽きている時や、尽きて断られた時に、別の Google アカウントの台でやり直します（価格・在庫の書き込みと同じ作り）。尽きた時の断りは Shopee に届く前の断りなので、二重の手配にはなりません。',
       '🧮 <b>同じ品を N 個の見積もりで、まとめ買い割引の後の数字を返すようにしました</b>（03 営業部）：道具から &qty=N（2〜99）で頼むと、割引（2点5%・3点以上10%）を入れた後のお客さんの払う額・1個の粗利・合計の粗利を返します（その国の Request page が割引に入っていない時は割引0）。今までの数字はそのままです。',
       '📱 <b>スマホ用の返信のページ「📱 返信」を作りました</b>（本人の見本 OK・00 の決め）：📮 返していないお客さん（Smart Reply と同じ数え方・7日以内）と 🔒 ロックした人を、写真・国・最後の発言と和訳つきで並べます。押すとその人の最後の発言3件・前の見積もり・送る英文（Smart Reply の定型文の写しを読むだけ）が出て、📋 でコピーして Shopee のセラーアプリで貼って送ります。<b>このページからは送りません・書き込みもしません。</b>スマホでは右下の「📱 返信」から開けます。和訳は Google 翻訳（料金なし・1日400件まで）。',
       '🛒 <b>Request page に同じ品を N 個で足せるようにしました</b>（03 営業部・本人の決め「同じ品を N 個買いたい人には1つの明細を在庫 N で」）：道具から &qty=N で頼むと、その明細の在庫を N にして足します（値段は1個の値段・無ければ今どおり1）',
@@ -34075,7 +34090,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!settings.openapiUrl) throw new Error('サーバー接続先が未設定です（⚙️設定）');
     const q = { action: 'get_attributes', shop_id: shopId, category_id: catId, language: lang || 'en' };
     const qs = Object.keys(q).map(k => k + '=' + encodeURIComponent(q[k])).join('&');
-    const res = await jsonp(settings.openapiUrl + (settings.openapiUrl.includes('?') ? '&' : '?') + qs, 30000);
+    const res = await oaJsonpFailover(qs, 30000);
     if (!res || !res.ok) throw new Error((res && res.error) || 'get_attributes失敗');
     return res.data || [];
   }
