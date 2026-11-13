@@ -11353,7 +11353,7 @@
      Shopee Smart Reply・WA Smart Reply はどちらも名前つきの window.open で開く＝opener が残る（チャットで届いたリンクを押した時は残らない） */
   function pcChatOrigin(o) { o = String(o || ''); return /^https:\/\/(seller\.shopee\.(ph|tw|sg|co\.th|com\.my|com\.br)|banhang\.shopee\.vn|web\.whatsapp\.com)$/.test(o) ? o : ''; }
   /* quote-card-spec 19.6：返事に毎回入れる項目（足していなければ空・false） */
-  function pcReqFields() { const q = pcQuote.req || {}; return { added: !!q.itemId, itemId: q.itemId || '', catalog_name: q.catalogName || '', catalogName: q.catalogName || '', updated: !!q.updated, unk: !!pcQuote._unk, changes: q.changes || null, guideAdded: !!q.guideAdded, already: !!q.already, modelName: q.modelName || pcQuote.optName || '', modelImg: q.modelImg || '', preDays: q.preDays == null ? null : (Number(q.preDays) || 0), modelPrice: q.modelPrice == null ? null : Number(q.modelPrice), listed: !!q.listed, madeNew: !!q.madeNew, models: q.models || null, bundleDeal: Number(q.bundleDeal) || 0, bundleDealIn: q.bundleDealIn == null ? null : !!q.bundleDealIn }; }   /* ★2026-11-05 03-12：まとめ買いは models＝[{name,price,sku,en}]・bundleDeal＝見積もりで入れた率・bundleDealIn＝入れ先が割引に入っているか（読めない時 null） */   /* ★2026-11-05 03 営業部：added＝Request page に明細を足したか（入力欄に入ったかとは別・msg の語で判断しない） */
+  function pcReqFields() { const q = pcQuote.req || {}; return { belowLine: pcQuote.belowLine || null, added: !!q.itemId, itemId: q.itemId || '', catalog_name: q.catalogName || '', catalogName: q.catalogName || '', updated: !!q.updated, unk: !!pcQuote._unk, changes: q.changes || null, guideAdded: !!q.guideAdded, already: !!q.already, modelName: q.modelName || pcQuote.optName || '', modelImg: q.modelImg || '', preDays: q.preDays == null ? null : (Number(q.preDays) || 0), modelPrice: q.modelPrice == null ? null : Number(q.modelPrice), listed: !!q.listed, madeNew: !!q.madeNew, models: q.models || null, bundleDeal: Number(q.bundleDeal) || 0, bundleDealIn: q.bundleDealIn == null ? null : !!q.bundleDealIn }; }   /* ★2026-11-05 03-12：まとめ買いは models＝[{name,price,sku,en}]・bundleDeal＝見積もりで入れた率・bundleDealIn＝入れ先が割引に入っているか（読めない時 null） */   /* ★2026-11-05 03 営業部：added＝Request page に明細を足したか（入力欄に入ったかとは別・msg の語で判断しない） */
   /* ★2026-11-05 03-22・03 営業部・03-11：開いた元（Smart Reply・WA）からの「公開して」（smdReqPublish）・「今の英文をちょうだい」（smdReqText）を受ける。
      受けるのは、送り元が開いた元の窓（opener）で、その origin が決まった画面（webchat・WhatsApp）と同じ、かつ buyer と ref が今の見積もりと同じ時だけ＝別の人のページを公開しない。
      返事は tell と同じ smdReqStatus（text・link 入り）。公開した時の msg に「非公開」の語を入れない（Smart Reply が /新しく作りました|非公開/ で非公開の印を立てる）。
@@ -11933,6 +11933,7 @@
       if (grossJpy < 0) return fail('loss', tr(`${nm || 'この見積もり'}は赤字です（粗利 ${yen(grossJpy)}）。${nm ? nm + 'の' : ''}値段を上げてから、もう一度押してください。`,
         `${context.itemName || 'This quote'} would lose money (gross profit ${yen(grossJpy)}). Raise its price and press again.`), { grossJpy, targetJpy });
       if (Array.isArray(context.notes)) context.notes.push((nm || '合計') + ' 粗利 ' + yen(grossJpy) + '・目標の粗利より ' + yen(targetJpy - grossJpy) + ' 少ない');
+      if (context.belowOut && !context.belowOut.need) { context.belowOut.need = targetJpy; context.belowOut.got = grossJpy; }   /* ★2026-11-13 spec 23.25：通した時に線より下だったことを返事へ（新しい名前 belowLine） */
       return null;
     }
     if (grossJpy < targetJpy) {
@@ -12007,9 +12008,14 @@
         code: 'quote_changed',
         msg: i18nOn() ? 'Listing was stopped. The quote changed. Check the current quote and try again.' : '出品していません。見積もりの条件が変わりました。現在の条件を確認してください。'
       });
-      const upNotes = [], anyUser = !!(BQ && BQ.perItem && BQ.items.some(x => x.pfUser));   /* ★2026-11-13 spec 23.14：本人の指定がある時は合計の線でも止めない */
-      pcQuote.userProfitNote = '';
-      const issue = pcReqProfitCheck(L, pList, anyUser ? Object.assign({}, profitContext, { userSet: true, notes: upNotes }) : profitContext, readStage(), receipt(), pcQuote.agreedReq);
+      /* ★2026-11-13 03（spec 23.25・23.17・23.21「本人の額は止めない・目標割れは赤で出す」・joaochalegre の ⑤）：見積もりが &sale・&splitSale・&shop2・&shop3（本人が額を決めた）の時も、
+         23.14 と同じく赤字の時だけ止め、線より下は文に出して通す。見積もりの小窓の印（window._pc…）が無い流れもあるので、開いた URL の値でも見分ける */
+      const userAmt = !!(window._pcSale || window._pcSplitSale || window._pcShop2 || window._pcShop3) || /[?&](sale|splitSale|shop2|shop3)=\d/.test(String(location.hash || ''));
+      const upNotes = [], anyUser = !!(BQ && BQ.perItem && BQ.items.some(x => x.pfUser)) || userAmt;   /* ★2026-11-13 spec 23.14：本人の指定がある時は合計の線でも止めない */
+      pcQuote.userProfitNote = ''; pcQuote.belowLine = null;
+      const belowOut = {};
+      const issue = pcReqProfitCheck(L, pList, anyUser ? Object.assign({}, profitContext, { userSet: true, notes: upNotes, belowOut }) : profitContext, readStage(), receipt(), pcQuote.agreedReq);
+      if (!issue && belowOut.need) pcQuote.belowLine = { need: belowOut.need, got: belowOut.got };
       if (issue && reportProfitBlock(issue)) return true;   /* ★11/12 再レビュー中2：承認済み（false）なら品物ごとの確かめへ進む */
       /* ★2026-11-12 レビュー高2（23.6）：品物ごとの値段の明細は1点ずつ別の注文で買える＝品物ごとに、その品物の仕入れ・重さ・1件分の線で粗利を確かめる（重さが無い品は合計の重さ＝高めの送料で見る） */
       if (BQ && BQ.perItem) { for (let ii = 0; ii < BQ.items.length; ii++) { const x = BQ.items[ii], o0 = profitContext.opt || {};
@@ -28756,6 +28762,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-13', items: [
+      '🛒 <b>本人が額を決めた見積もり（売値・合計・Shopee 分を打った物）は、粗利が線より下でも出品を止めないようにしました</b>（03 営業部・決まり「本人の額は止めない」）：止めるのは赤字の時だけ。線より下だった時は、道具に「目標の粗利と実際の粗利」を返して赤で出します',
       '🧮 <b>見積もりの併用の合計（VN）を直しました</b>（本人「合計入れたら、した勝手に入らんの？自分で調整できないの？」「ほんで、内訳のとこも」・03 営業部）：①合計だけの時、VN の②の Shopee 分を1明細の上限（909,090）以内に ②②の Shopee 分が③の最低額より安くても「合計そのまま」の案を出し、Shopee 側の赤字（円）を添える（決めるのは本人・止めない） ③③の Shopee 分も打ち替えられるように（&shop3・最低額より安くても止めずに赤字の円を添える・VN の上限超えは使わない）',
       '✉️ <b>メルカリのあいさつの見回りが止まった時に 🔔 に出すようにしました</b>（事業本部「見回りのタブが閉じられて止まった時に、黙って止まらないように」）：見回りのタブ（購入した商品）が最後に動いてから30分を過ぎると「見回りが止まっています」と出します。',
       '🧾 <b>スプシ（在庫表）に入っていない仕入を 🔔 に出すようにしました</b>（本人「スプシの方とポータルの在庫を同じにしてって言ったじゃん」「絶対今後抜けないようにしてください」）：番号が PITM- のまま30分を過ぎた仕入を、写真・品名・仕入れ先・注文番号付きで出します。メールの取り込みでスプシの行を取れなかった分は、取込GAS が15分ごとに自動でスプシに足して ITM- にそろえます。',
