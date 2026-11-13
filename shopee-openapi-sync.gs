@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261114-0130'
+var SRC_VER = '20261114-0630'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -409,7 +409,7 @@ function ufIsBlocked_() {
 var UF_PROBE_NOTE = '';
 function ufProbeMaybe_(o) {
   var now = Date.now(), last = Number(o.probeAt || 0) || Date.parse(o.at || '') || now;
-  if (now - last < 3600000) return false;
+  if (now - last < 600000) return false;   /* ★2026-11-14 00（業務を止めない）：11/14 05:50 の1回の断りで本体が1時間止まった（その後も同じアカウントから外へ届いていた）＝試し直しを1時間後→10分後に。断られ続ける時は10分ごとに軽い1回だけ使う */
   o.probeAt = now; try { P_().setProperty('ufBlocked', JSON.stringify(o)); } catch (eP) { return false; }   /* 先に試した印＝同じ時刻に何本も試さない */
   try {
     ufBump_(1, '接続枠の試し直し');
