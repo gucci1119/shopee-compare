@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261113-1400'
+var SRC_VER = '20261114-0010'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -6267,7 +6267,13 @@ function addItem_(body, attempt) {
   var _promo = null;
   if (body.promo !== false) { try { _promo = promoForNew_(shopId, imgIds, body.promo_assets || null); if (_promo) imgIds = _promo.imgs; } catch (ePm) { _promo = null; } }
   var listingName = shopNameFit_(shopId, body.item_name);
-  if (candidate && listingName !== body.item_name) throw new Error('第3店の出品条件を確認できません');
+  /* ★2026-11-14 01（第3の毎晩の出品）：TW の名前が店の上限を超えて縮み、同じ「確認できません」で断られて理由が分からなかった＝上限と今の字数を返す（どの国でも同じ形） */
+  if (candidate && listingName !== body.item_name) {
+    var nmLim = 0; try { nmLim = shopNameLimit_(shopId) || 0; } catch (eNl) { nmLim = 0; }
+    var nmNow = String(body.item_name || '').length, nmCc = String(body.market || '');
+    if (nmLim && nmNow > nmLim) throw new Error(nmCc + ' の商品名が上限（' + nmLim + '字）を超えています（今 ' + nmNow + '字）');
+    throw new Error(nmCc + ' の商品名が出品の決まりで書き換わるので出せません（' + nmNow + '字・上限 ' + (nmLim || '不明') + '字）');
+  }
   var payload = {
     original_price: parseFloat(body.price),
     description: (function (d) { d = String(d || ''); return d.length >= 20 ? d : (d + ' ' + String(body.item_name || '') + ' 日本の商品です。丁寧に梱包して発送します。').slice(0, 3000); })(body.description || body.item_name || ''), // Shopeeは説明20字以上必須→短ければ自動補完
