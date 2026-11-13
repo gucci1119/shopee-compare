@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261113-0700'
+var SRC_VER = '20261113-1400'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -4723,6 +4723,26 @@ function shiftPendDrop_(shopId, itemId) {
   var k = shiftPendKey_(shopId, itemId); if (!cur.items[k]) return false;
   delete cur.items[k]; cur.at = new Date().toISOString(); baKvSet_('shift_pending', cur); return true;
 }
+/* ★2026-11-13 事業本部（ゼルダ スカイウォードソード HD を本人の指示で在庫0）：自動で在庫を戻す所（詰め直しの後からの付け直し・🤖の途中止まりの直し）は、
+   ポータルの「在庫0固定」（listing_meta の keep0／keep0m）と、自動復活の「様子見」（stock_restore_rules の m:'watch'＝SKU の鍵、または明細の名前の鍵）を見て、当たれば在庫を書かない。
+   どちらかが読めない時も書かない（戻さない側に倒す）。1回の実行で1回だけ読む */
+var _STOCK_HOLD_KV = undefined;
+/* 返り値：{ why: 理由（空なら戻してよい）, soft: true＝読めない等の一時的な理由（控えを残して次の回に回す） }。
+   modelIds は照らす明細番号の並び（詰め直しの直後は、元の番号と今の番号の両方で照らす）。名前の鍵は SKU が空の時だけ */
+function stockHoldWhy_(itemId, modelIds, modelName, sku) {
+  if (_STOCK_HOLD_KV === undefined) _STOCK_HOLD_KV = baKvFreshMany_(['listing_meta', 'stock_restore_rules']) || 'FAIL';   /* 読めなかった時は、この実行の中では読み直さない（大きな鍵を重ねて読まない）＝次の実行で読み直す */
+  var kv = _STOCK_HOLD_KV; if (!kv || kv === 'FAIL') return { why: '在庫0固定・様子見を読めない', soft: true };
+  try {
+    var lm = (kv.listing_meta && kv.listing_meta.items) || {}, mt = lm[String(itemId)] || null, ids = (modelIds || []).filter(function (x) { return x != null && x !== ''; }).map(String);
+    if (mt && mt.keep0) return { why: '在庫0固定', soft: false };
+    if (mt && mt.keep0m) { for (var q = 0; q < ids.length; q++) if (mt.keep0m[ids[q]]) return { why: '在庫0固定', soft: false }; }
+    var rules = kv.stock_restore_rules || {}, sk = String(sku || '').trim().toUpperCase();
+    if (sk) { if (rules['sku:' + sk] && rules['sku:' + sk].m === 'watch') return { why: '様子見（SKU）', soft: false }; return { why: '', soft: false }; }
+    var mn = srKey_(modelName || '');
+    if (mn) { var ks = Object.keys(rules); for (var i = 0; i < ks.length; i++) { var k = ks[i], r = rules[k]; if (r && r.m === 'watch' && k.indexOf('sku:') !== 0 && k.slice(-(' | ' + mn).length) === ' | ' + mn) return { why: '様子見（明細の名前）', soft: false }; } }
+  } catch (e) { return { why: '在庫0固定・様子見を確かめられない', soft: true }; }
+  return { why: '', soft: false };
+}
 function shiftPendCheck_(onlyKey, maxN) {
   var out = { checked: 0, fixed: 0, dropped: 0, notes: [] };
   var cur; try { cur = baKvFresh_('shift_pending'); } catch (e0) { return out; }
@@ -4748,7 +4768,7 @@ function shiftPendCheck_(onlyKey, maxN) {
       if (!ok2) { delete it[key]; ch = true; out.dropped++; out.notes.push(key + ' 並びが別の形に変わっていたので触らず控えを捨てた'); return; } }
     if (rec.fixedNow && !isNew) { delete it[key]; ch = true; out.dropped++; out.notes.push(key + ' その場で書き戻し済み（途中まで）なので触らず控えを捨てた'); return; }   /* ★2026-11-04 新-A */
     /* 新しい並び（または途中まで）＝名前で付け直す */
-    var pr = [], st = [], sk = [];
+    var pr = [], st = [], sk = [], holdSoft = false;   /* holdSoft＝在庫0固定・様子見を読めなかった＝在庫は済みにせず次の回に回す */
     mm.forEach(function (m) {
       var oi = (m.tier_index || [])[0], nm = String(((opt[oi] || {}).option) || ''), nn = vnNorm_(nm);
       var pi = (m.price_info || [])[0] || {}, pNow = parseFloat(pi.original_price != null ? pi.original_price : pi.current_price) || 0;
@@ -4757,14 +4777,16 @@ function shiftPendCheck_(onlyKey, maxN) {
       var ex = (rec.snap || {})[nn]; if (!ex) return;
       if (ex.id && String(ex.id) === String(m.model_id)) return;   /* ★2026-11-04 レビュー：同じ明細（中身が動いていない）は書かない＝その後に変えた値段・在庫を戻さない */
       if (ex.p > 0 && Math.abs(pNow - ex.p) > 0.001) pr.push({ model_id: m.model_id, price: ex.p });
-      if (!rec.stockDone && !isNaN(ex.s) && sNow !== ex.s) st.push({ model_id: m.model_id, stock: ex.s });   /* ★2026-11-04 在庫は1回だけ（毎回戻すと売れた分がまた買える） */
+      if (!rec.stockDone && !isNaN(ex.s) && sNow !== ex.s && !(rec.stDoneIds && rec.stDoneIds[String(m.model_id)])) { var hw = (ex.s > sNow) ? stockHoldWhy_(iid, [m.model_id, ex.id], nm, m.model_sku || ex.k) : { why: '' }; if (hw.why) { out.notes.push(key + ' ' + nm.slice(0, 24) + '：' + hw.why + 'なので在庫を戻さない'); if (hw.soft) holdSoft = true; } else st.push({ model_id: m.model_id, stock: ex.s }); }   /* ★2026-11-04 在庫は1回だけ（毎回戻すと売れた分がまた買える）／★11/13 増やす時だけ在庫0固定・様子見を見る */
       if (String(m.model_sku || '') !== String(ex.k || '')) sk.push({ model_id: m.model_id, sku: String(ex.k || '') });
     });
     var err = [];
     PRICE_LOCK_BYPASS[String(parseInt(iid, 10))] = 1;
     try { if (pr.length) updatePriceList_(sid, iid, pr, { copyOnly: true }); } catch (e1) { err.push('価格 ' + String(e1.message || e1).slice(0, 80)); } finally { delete PRICE_LOCK_BYPASS[String(parseInt(iid, 10))]; }
     var stOk = true; try { if (st.length) updateStockList_(sid, iid, st); } catch (e2) { stOk = false; err.push('在庫 ' + String(e2.message || e2).slice(0, 80)); }
-    if (stOk) rec.stockDone = true;   /* ★2026-11-04 全体レビュー 新-4②：失敗した時は立てない（以後その作品の在庫を直さなくなる） */
+    if (stOk && !holdSoft) rec.stockDone = true;
+    if (stOk && holdSoft && st.length) { rec.stDoneIds = rec.stDoneIds || {}; st.forEach(function (x) { rec.stDoneIds[String(x.model_id)] = 1; }); }   /* ★11/13 次の回に回す時、この回で書けた明細は飛ばす（売れた分をもう一度戻さない） */
+    if (holdSoft) err.push('在庫0固定・様子見を読めなかった（在庫は次の回に）');   /* ★2026-11-04 全体レビュー 新-4②：失敗した時は立てない（以後その作品の在庫を直さなくなる） */
     try { for (var f = 0; f < sk.length; f += 50) updateModelSku_(sid, iid, sk.slice(f, f + 50)); } catch (e3) { err.push('SKU ' + String(e3.message || e3).slice(0, 80)); }
     if (isNew && rec.moves && rec.moves.length && !rec.llogDone) { try { priceLockRekey_(iid, rec.moves, rec.gone || []); } catch (ePl) { err.push('本人の値段の印 ' + String(ePl).slice(0, 60)); } try { baLlogRekey_(sid, iid, rec.moves, rec.gone || [], rec.nameOf || {}); rec.llogDone = true; } catch (e4) { err.push('控え ' + String(e4).slice(0, 60)); } }
     /* ★2026-11-04 全体レビュー 2回目 新2-1：後から効いた時、ポータルの JAN・型番・状態（product_ids）と在庫0固定（keep0m）は誰も付け替えていなかった＝結果を src:'pending' で残す（ポータルの担当の PC が読んで1回だけ当て、appliedAt を付ける） */
@@ -13029,6 +13051,7 @@ function baPartialRepair_(st) {
       var g = getModels_(p.shop_id, p.item_id) || {}, ms = g.models || [], cur = null;
       for (var j = 0; j < ms.length; j++) if (String(ms[j].model_id) === String(p.model_id)) { cur = ms[j]; break; }
       /* ★2026-10-24 全体レビュー（出品管理 #10）：詰め直し削除の後は同じ番号に別の作品が入る＝名前が違えば名前で探し直す（1つに決まる時だけ）。無ければ何も書かない */
+      var _mid0 = p.model_id;   /* ★11/13 名前で探し直す前の番号（在庫0固定を両方で照らす） */
       if (cur && vnNorm_(cur.name) !== vnNorm_(p.en)) { var _hp = ms.filter(function (m) { return vnNorm_(m.name) === vnNorm_(p.en); }); cur = _hp.length === 1 ? _hp[0] : null; if (cur) p.model_id = cur.model_id; }
       if (!cur) continue;   /* 明細が無い＝消えた。直す物が無い */
       var okName = String(cur.name || '').trim() === String(p.en).trim();
@@ -13038,6 +13061,7 @@ function baPartialRepair_(st) {
       if (okName && (okPrice || true)) {
         var g2 = getModels_(p.shop_id, p.item_id) || {}, c2 = null; (g2.models || []).forEach(function (m) { if (String(m.model_id) === String(p.model_id)) c2 = m; });
         var okP2 = c2 && Math.abs((Number(c2.price) || 0) - Number(p.price)) < Math.max(1, Number(p.price) * 0.02);
+        if (okP2 && (Number(p.stock) || 0) > 0) { var hw2 = stockHoldWhy_(p.item_id, [p.model_id, _mid0], cur.name || p.en, cur.sku || p.sku); if (hw2.why) { if (hw2.soft) { keep.push(p); continue; } baLog_(st, p.cc + '：♻️ 途中止まりだった「' + String(p.en).slice(0, 26) + '」は' + hw2.why + 'なので在庫を戻しません'); continue; } }   /* ★2026-11-13 在庫0固定・様子見なら戻さない（控えは捨てる）・読めない時は控えに残して次の回に */
         if (okP2 && (Number(p.stock) || 0) > 0 && baStockOk_(updateStock_(p.shop_id, p.item_id, p.model_id, p.stock))) { baLog_(st, p.cc + '：♻️ 途中止まりだった「' + String(p.en).slice(0, 26) + '」の在庫を戻しました'); continue; }
         if (okP2 && !(Number(p.stock) || 0)) continue;   /* 在庫0で出す作品＝価格が入っていれば直った */
       }
