@@ -2,7 +2,7 @@
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @name:ja      【Shopeeチャット】📥 会話ログを取り込む（→ポータル）
 // @namespace    gucci-shopee-chat
-// @version      3.44.7
+// @version      3.44.8
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -396,6 +396,7 @@
   //     message_content: { id, from_user_name, to_user_name, type, content:{text|url}, ... }
   //   会話を開かないので **混線しない・既読にならない・画面が動かない**。
   const WS_SHOP2CC = { br: 'BR', ph: 'PH', vn: 'VN', my: 'MY', sg: 'SG', th: 'TH', tw: 'TW' };
+  const OWN_SHOP_RE = /^(gcsonlinestore|gs_japan_select|maneki_neko_japan)([._-][a-z0-9]{1,12})?$/i;   /* ★3.44.8 うちの全店（店を足したらここにも） */
   let wsGot = 0;
   function wsIngest(str) {
     // 取り込まなかった理由を数える＋**実物を1つずつ残す**（推測で実装して壊さないため）
@@ -412,11 +413,17 @@
     if (String(pay.message_type || '') !== 'message') { why('message以外'); return; }
     let mc; try { mc = JSON.parse(pay.message_content); } catch (_) { why('中身が壊れている'); return; }
     if (!mc || !mc.id) { why('IDなし'); return; }
-    const fromMe = /^gcsonlinestore/i.test(String(mc.from_user_name || ''));
-    const shopName = String(fromMe ? mc.from_user_name : mc.to_user_name || '');
-    const buyer = String((fromMe ? mc.to_user_name : mc.from_user_name) || '').trim();
-    if (!buyer || /^gcsonlinestore/i.test(buyer)) { why('相手が特定できない'); return; }
-    const cc = WS_SHOP2CC[(shopName.split('.').pop() || '').toLowerCase()] || CC;
+    /* ★3.44.8 2026-11-15 05（本人「なんでうちの店の GS JAPAN SELECT.tokyo が入ってきてるんですか」・03）：本店（gcsonlinestore）しか自分と見ておらず、
+       2店舗目・3店舗目の発言をお客さんの発言（in・buyer＝店の名前）として入れていた。うちの全店（OWN_SHOP_RE）を自分と見る。
+       国は店の名前の後ろ（.th など）から取る。本店以外で国が分からない時は、タブの国を当てずに取り込まない（TH のお客さんが BR になった）。 */
+    const fromName = String(mc.from_user_name || '').trim(), toName = String(mc.to_user_name || '').trim();
+    const fromMe = OWN_SHOP_RE.test(fromName);
+    const shopName = fromMe ? fromName : toName;
+    const buyer = fromMe ? toName : fromName;
+    if (!buyer || OWN_SHOP_RE.test(buyer)) { why('相手が特定できない（相手もうちの店）'); return; }
+    const sfx = (shopName.indexOf('.') >= 0 ? shopName.split('.').pop() : '').toLowerCase();
+    let cc = WS_SHOP2CC[sfx] || '';
+    if (!cc) { if (/^gcsonlinestore$/i.test(shopName) || !shopName) cc = CC; else { why('店の名前から国が分からない:' + shopName); return; } }
     const ty = String(mc.type || '');
     let text = '', msgType = 'text';
     const c = mc.content || {};
@@ -445,7 +452,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.44.7';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.44.8';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -915,7 +922,7 @@
             if (!mm) return false;
             const nm = mm[1];
             if (nm === me) return false;
-            if (/^gcsonlinestore/i.test(nm)) return false;   // 自分の店（AIアシスタント側）
+            if (/^(gcsonlinestore|gs_japan_select|maneki_neko_japan)/i.test(nm)) return false;   // 自分の店（AIアシスタント側）★3.44.8 全店
             return true;
           });
           if (bad) return;
@@ -1606,7 +1613,7 @@
       if (!buyer || !/^[\w.]{2,}$/.test(buyer)) return; // 名前らしくない行（見出し等）は無視
       const cc = (raw.match(/\(([A-Z]{2})\)/) || [])[1] || CC;
       const when = t.find(s => /^\d{1,2}:\d{2}$/.test(s) || /^\d{1,2}\/\d{1,2}$/.test(s) || /^(Yesterday|Today)$/i.test(s)) || '';
-      const prev = t.slice(1).find(s => s !== when && !SKIP_CHIP.test(s) && !/^\([A-Z]{2}\)/.test(s) && !/gcsonlinestore|gs_japan/i.test(s)) || '';
+      const prev = t.slice(1).find(s => s !== when && !SKIP_CHIP.test(s) && !/^\([A-Z]{2}\)/.test(s) && !/gcsonlinestore|gs_japan|maneki_neko/i.test(s)) || '';
       const key = cc + ':' + buyer;
       if (!acc[key]) n++;
       acc[key] = { buyer: buyer, cc: cc, when: when, prev: prev.slice(0, 140), overdue: /Overdue/i.test(raw) };
