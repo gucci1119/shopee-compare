@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0239'
+var SRC_VER = '20261115-0256'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9153,7 +9153,7 @@ var HB_KV_ = [
   ['profit_sheet', '利益管理表の取り込み', 1560, 'upd'],
   ['ai_actual', 'AI の実績（コスト画面のタブ）', 1800, 'at']
 ];
-function hbSel_(q) { try { return sbSelect_('app_kv', q); } catch (e1) { Utilities.sleep(3000); return sbSelect_('app_kv', q); } }   /* ★11/15 レビュー8：1回こけただけで赤にしない */
+function hbSel_(q) { q = String(q).replace(/>/g, '%3E'); try { return sbSelect_('app_kv', q); } catch (e1) { Utilities.sleep(3000); return sbSelect_('app_kv', q); } }   /* ★11/15 実測：UrlFetchApp は URL の「>」で Invalid argument になる（-> を %3E に） */   /* ★11/15 レビュー8：1回こけただけで赤にしない */
 function hbExecReq_(who, qs) { var u = HB_EXEC_[who]; return { url: u + (u.indexOf('?') >= 0 ? '&' : '?') + qs + '&callback=cb', muteHttpExceptions: true, followRedirects: true }; }
 function hbParse_(r) {
   try { var code = r.getResponseCode(), t = String(r.getContentText() || ''), m = t.match(/^\s*cb\(([\s\S]*)\)\s*;?\s*$/); var j = null; try { j = JSON.parse(m ? m[1] : t); } catch (e) { j = null; } return { http: code, j: j, err: j ? '' : ('返事が読めない（HTTP ' + code + '）') }; }
@@ -9235,7 +9235,7 @@ function hbWatchTick() {
   var C = CacheService.getScriptCache(); if (C.get('hb_running')) return; C.put('hb_running', String(Date.now()), 600);
   try {
     if (me === 'child2') {   /* 3台目は予備：4台目の見張りが90分以内に書いていれば何もしない */
-      var cur = null, rd = false; try { var r0 = sbSelect_('app_kv', 'select=updated_at,by:v->>by&k=eq.hb_watch'); rd = true; cur = r0 && r0[0]; } catch (e0) { cur = null; }
+      var cur = null, rd = false; try { var r0 = sbSelect_('app_kv', 'select=updated_at,by:v-%3E%3Eby&k=eq.hb_watch'); rd = true; cur = r0 && r0[0]; } catch (e0) { cur = null; }
       if (rd && cur && cur.by === 'child3' && Date.now() - Date.parse(cur.updated_at) < 90 * 60000) return;
     }
     var out = hbWatchRun_(me, true);
