@@ -28896,6 +28896,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-14', items: [
+      '🏪 <b>出品ログの「🆕 最新順」で店（第3 maneki_neko_japan など）を選ぶと0件になっていたのを直しました</b>（本人「なんで？」）。全部の店から新しい300件を取った後で店を絞っていたので、第1・第2が1日に数百件出すと第3の出品が300件に入りませんでした。店を選んだ時は、その店の新しい300件を出します。店の丸の数も「その店の新しい300件の数」にそろえました。',
       '📦 <b>本体の接続枠が尽きた日も、発送の手配が止まらないようにしました</b>：発送の手配（集荷・持込の確かめと手配）と、明細・属性の読み込みは、本体が今日もう尽きている時や、尽きて断られた時に、別の Google アカウントの台でやり直します（価格・在庫の書き込みと同じ作り）。尽きた時の断りは Shopee に届く前の断りなので、二重の手配にはなりません。',
       '🧮 <b>同じ品を N 個の見積もりで、まとめ買い割引の後の数字を返すようにしました</b>（03 営業部）：道具から &qty=N（2〜99）で頼むと、割引（2点5%・3点以上10%）を入れた後のお客さんの払う額・1個の粗利・合計の粗利を返します（その国の Request page が割引に入っていない時は割引0）。今までの数字はそのままです。',
       '📱 <b>スマホ用の返信のページ「📱 返信」を作りました</b>（本人の見本 OK・00 の決め）：📮 返していないお客さん（Smart Reply と同じ数え方・7日以内）と 🔒 ロックした人を、写真・国・最後の発言と和訳つきで並べます。押すとその人の最後の発言3件・前の見積もり・送る英文（Smart Reply の定型文の写しを読むだけ）が出て、📋 でコピーして Shopee のセラーアプリで貼って送ります。<b>このページからは送りません・書き込みもしません。</b>スマホでは右下の「📱 返信」から開けます。和訳は Google 翻訳（料金なし・1日400件まで）。',
@@ -46144,6 +46145,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     return new Set([String(a)]);
   }
   const llAcctPass = (set, sid) => !set || (set === 'none' ? !sid : (!!sid && set.has(String(sid))));
+  /* 出品ログの「店」の丸（logState.acctF）の判定。最新順で300件を取る前にも使う（11/14 本人「なんで？」＝第3を選ぶと0件） */
+  function llAfPassOf(af, r) { if (!af) return true; const sid = llShopOf(r.cc, r.item_id); if (af === 'unk') return !sid; if (af.indexOf('fam:') === 0) return !!sid && llShopFam(sid) === af.slice(4); return sid === af; }
   /* 系統の順（事業本部 11/12「第1 gcsonlinestore／第2 gs_japan_select／第3 maneki_neko_japan」）。ほかの系統はその後ろに名前順 */
   const LL_FAM_ORD = ['gcsonlinestore', 'gs_japan_select', 'maneki_neko_japan'];
   const llFamRank = (f) => { const i = LL_FAM_ORD.indexOf(f); return i < 0 ? 99 : i; };
@@ -46283,11 +46286,20 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     if (!logState.view) { try { logState.view = localStorage.getItem('llogView') || 'day'; } catch (_) { logState.view = 'day'; } }
     if (!logState.latestN) { try { logState.latestN = Number(localStorage.getItem('llogLatestN')) || 300; } catch (_) { logState.latestN = 300; } }
     const _llLatest = logState.view === 'latest', _llN = logState.latestN;
-    const _selKey = (_llLatest ? 'latest:' + _llN : sel) + '|' + (state.acct || '') + '|' + (logState.liveOnly ? 1 : 0);   /* ★11/13 レビュー10：対象アカウント・今の出品だけを替えたら読み直す */
+    const _selKey = (_llLatest ? 'latest:' + _llN + ':' + (logState.acctF || '') : sel) + '|' + (state.acct || '') + '|' + (logState.liveOnly ? 1 : 0);   /* ★11/14 最新順は店の丸を替えたら名前を読み直す（その店の新しい N 件が替わるため） */   /* ★11/13 レビュー10：対象アカウント・今の出品だけを替えたら読み直す */
+    /* ★2026-11-14 本人「なんで？」（最新順で第3 maneki_neko_japan を選ぶと0件）：全部の店から新しい300件を取った【後で】店を絞っていた＝
+       第1・第2 が1日に数百件出すと、第3 の出品は300件に入らず0件になる。店を選んだ時は【その店の】新しい300件を取る。
+       店ごとの件数の丸も「その店の新しい300件の数」（＝min(300, その店の全件)）で出す */
+    if (logState.acctF == null) { try { logState.acctF = localStorage.getItem('llogAcctF') || ''; } catch (_) { logState.acctF = ''; } }
+    const _latAf = logState.acctF || '';
     const _latestRows = _llLatest ? (() => {
-      const key = rows.length + '|' + _llN + '|' + state.acct + '|' + (logState.liveOnly ? 1 : 0) + '|' + (rows.length ? rows[rows.length - 1].id : '');
+      const key = rows.length + '|' + _llN + '|' + state.acct + '|' + (logState.liveOnly ? 1 : 0) + '|' + (rows.length ? rows[rows.length - 1].id : '') + '|' + _latAf + '|' + (lst && lst.byCc ? Object.keys(lst.byCc).length : 0);
       if (logState._latC && logState._latC.key === key && logState._latC.src === logState.rows) return logState._latC.out;
-      const out = rows.filter(r => r.created_at && !r.seeded).sort((a, b) => ((Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0)) || ((Number(b.id) || 0) - (Number(a.id) || 0))).slice(0, _llN);
+      const all = rows.filter(r => r.created_at && !r.seeded).sort((a, b) => ((Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0)) || ((Number(b.id) || 0) - (Number(a.id) || 0)));
+      const out = (_latAf ? all.filter(r => llAfPassOf(_latAf, r)) : all).slice(0, _llN);
+      const shopN = {}; let unkN = 0;
+      all.forEach(r => { const sid = llShopOf(r.cc, r.item_id); if (!sid) { unkN++; return; } shopN[sid] = (shopN[sid] || 0) + 1; });
+      logState._latShopN = { shop: shopN, unk: unkN, all: all.length };
       logState._latC = { key, src: logState.rows, out }; return out;
     })() : null;
     const _latMin = _llLatest && _latestRows.length ? _latestRows[_latestRows.length - 1].created_at : '';
@@ -46316,7 +46328,9 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const _inc = _same && !!logState._detailSince;
       (async () => {
         try {
-          const ds = await sbGetAll('listing_log', 'select=item_id,model_id,cc,name,model_name,image,created_at' + (_llLatest ? '&created_at=gte.' + encodeURIComponent(_latMin) : '&ymd=eq.' + encodeURIComponent(sel)) + (_inc ? '&created_at=gt.' + encodeURIComponent(logState._detailSince) : ''));
+          /* ★11/14 最新順で店を選んだ時は、その店の行が数週間前まで遡ることがある＝created_at だけで読むと全部の店の行を大量に読む。その店のカタログ番号でも絞る */
+          const _latIds = (_llLatest && _latAf) ? [...new Set(_latestRows.map(r => String(r.item_id)).filter(Boolean))].slice(0, 300) : null;
+          const ds = (_latIds && !_latIds.length) ? [] : await sbGetAll('listing_log', 'select=item_id,model_id,cc,name,model_name,image,created_at' + (_llLatest ? '&created_at=gte.' + encodeURIComponent(_latMin) : '&ymd=eq.' + encodeURIComponent(sel)) + (_latIds ? '&item_id=in.(' + _latIds.join(',') + ')' : '') + (_inc ? '&created_at=gt.' + encodeURIComponent(logState._detailSince) : ''));
           const nmap = logState._nameMap = logState._nameMap || {};
           (ds || []).forEach(x => { nmap[x.cc + '|' + x.item_id + '|' + x.model_id] = x; if (x.created_at && String(x.created_at) > String(logState._detailSince || '')) logState._detailSince = x.created_at; });
           (logState.rows || []).forEach(r => { const d = nmap[r.cc + '|' + r.item_id + '|' + r.model_id]; if (d) { r.name = d.name; r.model_name = d.model_name; r.image = d.image; } });
@@ -46421,7 +46435,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     /* ★2026-11-12 事業本部：その日の商品をアカウント（系統・国の中の店）で絞り込む。選んだ絞り込みは端末に覚える */
     if (logState.acctF == null) { try { logState.acctF = localStorage.getItem('llogAcctF') || ''; } catch (_) { logState.acctF = ''; } }
     const _llAF = logState.acctF;
-    const _llAfPass = (r) => { if (!_llAF) return true; const sid = llShopOf(r.cc, r.item_id); if (_llAF === 'unk') return !sid; if (_llAF.indexOf('fam:') === 0) return !!sid && llShopFam(sid) === _llAF.slice(4); return sid === _llAF; };
+    const _llAfPass = (r) => llAfPassOf(_llAF, r);
     const selRows = selRowsT.filter(_llAfPass);
     /* ★2026-11-12 本人「ほんで見にくくなってきてるからUI整理して」：その日の商品の上の操作（国ごとの件数・並び・列・アカウントごとの件数・国の中の店の丸）を
        1つの帯にまとめる。ふだんは「いま …」の1行・「⚙ 変える ▸」で開く（開いた・閉じたは smdLlogBand）。店は国ごとの選択欄（店の数だけ丸を並べない）。決まりは tools/ui-rules.md 12 */
@@ -46431,6 +46445,14 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       if (!logState.layout) { try { logState.layout = localStorage.getItem('llogLayout') || 'cc'; } catch (_) { logState.layout = 'cc'; } }
       const fam = {}, shop = {}, ccN = {}; let unk = 0;
       selRowsT.forEach(r => { ccN[r.cc] = (ccN[r.cc] || 0) + 1; const sid = llShopOf(r.cc, r.item_id); if (!sid) { unk++; return; } const f = llShopFam(sid); fam[f] = (fam[f] || 0) + 1; shop[sid] = (shop[sid] || 0) + 1; });
+      /* ★11/14 最新順：店の丸の数は「その店の新しい N 件」（店を選ぶとその店の新しい N 件を出すので、丸の数と出る件数をそろえる） */
+      if (_llLatest && logState._latShopN) {
+        const LS = logState._latShopN; Object.keys(shop).forEach(k => delete shop[k]); Object.keys(fam).forEach(k => delete fam[k]);
+        Object.keys(LS.shop).forEach(sid => { shop[sid] = Math.min(_llN, LS.shop[sid]); });
+        const famAll = {}; Object.keys(LS.shop).forEach(sid => { const f = llShopFam(sid); famAll[f] = (famAll[f] || 0) + LS.shop[sid]; });
+        Object.keys(famAll).forEach(f => { fam[f] = Math.min(_llN, famAll[f]); });
+        unk = Math.min(_llN, LS.unk || 0);
+      }
       llRegShops().forEach(sid => { if (!(sid in shop)) shop[sid] = 0; const f = llShopFam(sid); if (!(f in fam)) fam[f] = 0; });   /* 0件の店も出す（本人「第３アカウントがないですよ」） */
       const fams = Object.keys(fam).sort((a, b) => (llFamRank(a) - llFamRank(b)) || a.localeCompare(b));
       const sb = (cls, attr, v, label, on, tip, extra) => `<button class="ta-sb ${cls}${on ? ' on' : ''}" ${attr}="${av(v)}"${tip ? ` title="${av(tip)}"` : ''} style="${extra || ''}">${label}</button>`;
