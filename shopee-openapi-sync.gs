@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0256'
+var SRC_VER = '20261115-0330'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9153,7 +9153,8 @@ var HB_KV_ = [
   ['profit_sheet', '利益管理表の取り込み', 1560, 'upd'],
   ['ai_actual', 'AI の実績（コスト画面のタブ）', 1800, 'at']
 ];
-function hbSel_(q) { q = String(q).replace(/>/g, '%3E'); try { return sbSelect_('app_kv', q); } catch (e1) { Utilities.sleep(3000); return sbSelect_('app_kv', q); } }   /* ★11/15 実測：UrlFetchApp は URL の「>」で Invalid argument になる（-> を %3E に） */   /* ★11/15 レビュー8：1回こけただけで赤にしない */
+var HB_LAST_ERR = '';
+function hbSel_(q) { q = String(q).replace(/>/g, '%3E'); try { return sbSelect_('app_kv', q); } catch (e1) { Utilities.sleep(3000); try { return sbSelect_('app_kv', q); } catch (e2) { HB_LAST_ERR = String((e2 && e2.message) || e2).slice(0, 120); throw e2; } } }   /* ★11/15 00：読めなかった理由を残す（枠・鍵・読み先・版を分けるため） */   /* ★11/15 実測：UrlFetchApp は URL の「>」で Invalid argument になる（-> を %3E に） */   /* ★11/15 レビュー8：1回こけただけで赤にしない */
 function hbExecReq_(who, qs) { var u = HB_EXEC_[who]; return { url: u + (u.indexOf('?') >= 0 ? '&' : '?') + qs + '&callback=cb', muteHttpExceptions: true, followRedirects: true }; }
 function hbParse_(r) {
   try { var code = r.getResponseCode(), t = String(r.getContentText() || ''), m = t.match(/^\s*cb\(([\s\S]*)\)\s*;?\s*$/); var j = null; try { j = JSON.parse(m ? m[1] : t); } catch (e) { j = null; } return { http: code, j: j, err: j ? '' : ('返事が読めない（HTTP ' + code + '）') }; }
@@ -9245,12 +9246,12 @@ function hbWatchTick() {
 function hbWatchRun_(me, heal) {
   var now = Date.now(), items = [], P = P_(), tok = encodeURIComponent(P.getProperty('WRITE_TOKEN') || '');
   var add = function (it) { it.ageMin = (it.last ? Math.round((now - Date.parse(it.last)) / 60000) : null); items.push(it); };
-  var fin = function () { var red = items.filter(function (x) { return x.state === 'red'; }).length, warn = items.filter(function (x) { return x.state === 'warn'; }).length; return { at: new Date().toISOString(), by: me, src: SRC_VER, red: red, warn: warn, items: items }; };
+  var fin = function () { var red = items.filter(function (x) { return x.state === 'red'; }).length, warn = items.filter(function (x) { return x.state === 'warn'; }).length, blind = items.filter(function (x) { return x.state === 'blind'; }).length; return { at: new Date().toISOString(), by: me, byName: HB_NAME_[me] || me, src: SRC_VER, red: red, warn: warn, blind: blind, items: items };   /* ★11/15 00：見張り自身が読めなかった物は blind（赤の数に混ぜない・本人の画面に出さない・05 と 00 にだけ知らせる） */ };
   /* 見張りの台の枠が切れていたら、1行だけ書いて抜ける（4台とも「答えない」と取り違えない） */
   if (ufIsBlocked_()) { add({ id: 'watcher_quota', name: '見張りの台（' + (HB_NAME_[me] || me) + '）の接続枠', state: 'warn', why: 'Google の1日の枠に断られている＝この回は見ていない（日本時間 ' + ufResetJstStr_() + ' に戻る）', last: null }); return fin(); }
   /* ① 基準（4台分）を1回で読む */
   var bases = null; try { bases = {}; (hbSel_('select=k,v&k=in.(hb_trig_main,hb_trig_child,hb_trig_child2,hb_trig_child3)') || []).forEach(function (r) { bases[r.k] = r.v; }); } catch (eB) { bases = null; }
-  if (!bases) add({ id: 'trigbase_read', name: 'トリガーの基準の読み（Supabase）', state: 'red', why: '読めなかった＝この回はトリガーの欠けを見ていない', last: null });
+  if (!bases) add({ id: 'trigbase_read', name: 'トリガーの基準の読み（Supabase）', state: 'blind', why: '読めなかった＝この回はトリガーの欠けを見ていない' + (HB_LAST_ERR ? '（' + HB_LAST_ERR + '）' : ''), last: null });
   /* ② 相手の3台の /exec（並行・こけた台だけ1回やり直す）。自分の台は直接見る */
   var reqs = []; ['main', 'child', 'child2', 'child3'].forEach(function (w) { reqs.push({ id: w + ':st', who: w, qs: 'action=uf_status' }); if (w !== me) reqs.push({ id: w + ':tg', who: w, qs: 'action=promo_status&token=' + tok }); });   /* ★11/15 レビュー5：自分の台の /exec も外から確かめる（トリガーの一覧は直接） */
   var res = hbExecMany_(reqs);
@@ -9290,7 +9291,7 @@ function hbWatchRun_(me, heal) {
   var kvList = HB_KV_.slice();
   /* ★11/15 レビュー3：本体でキャンセルの見回りを off にしている（基準に無い）時は見ない */
   if (bases && bases.hb_trig_main && Array.isArray(bases.hb_trig_main.fns) && bases.hb_trig_main.fns.indexOf('cancelWatchTick') < 0) kvList = kvList.filter(function (x) { return x[0] !== 'cancel_watch_state'; });
-  if (!cfg) add({ id: 'cfg_read', name: '🤖・トレカの設定の読み', state: 'red', why: '読めなかった＝この回は🤖・トレカ・相場の見直しを見ていない', last: null });
+  if (!cfg) add({ id: 'cfg_read', name: '🤖・トレカの設定の読み', state: 'blind', why: '読めなかった＝この回は🤖・トレカ・相場の見直しを見ていない' + (HB_LAST_ERR ? '（' + HB_LAST_ERR + '）' : ''), last: null });
   else {
     var busy = function (o) { return o && typeof o === 'object' ? Object.keys(o).filter(function (r) { return o[r] && o[r].length; }) : []; };
     if (cfg.on === true) {
@@ -9312,7 +9313,7 @@ function hbWatchRun_(me, heal) {
   var keys = kvList.map(function (x) { return x[0]; });
   var rows = null; try { rows = hbSel_('select=k,updated_at,at:v->>at,lastAt:v->>lastAt,brake:v->brake&k=in.(' + keys.join(',') + ')'); } catch (eR) { rows = null; }
   if (rows) { try { var so = hbSel_('select=k,shops:v&k=eq.orders_sync_last'); rows.forEach(function (r) { if (r.k === 'orders_sync_last' && so && so[0]) r.shops = so[0].shops; }); } catch (eSo) { rows.forEach(function (r) { if (r.k === 'orders_sync_last') r.shopsErr = 1; }); } }   /* v の丸ごとは注文の同期（13店・小さい）だけ。🤖の状態などは大きいので時刻だけ */
-  if (!rows) add({ id: 'kv_read', name: '控えの読み（Supabase）', state: 'red', why: '読めなかった＝この回は時刻を見ていない（0件ではない）', last: null });
+  if (!rows) add({ id: 'kv_read', name: '控えの読み（Supabase）', state: 'blind', why: '読めなかった＝この回は時刻を見ていない（0件ではない）' + (HB_LAST_ERR ? '（' + HB_LAST_ERR + '）' : ''), last: null });
   else {
     var byK = {}; rows.forEach(function (r) { byK[r.k] = r; });
     kvList.forEach(function (x) {
@@ -9337,7 +9338,7 @@ function hbWatchRun_(me, heal) {
   }
   /* ④-2 Mac の予定タスク（app_kv hb_task_<名前>・~/.claude/skills/shopee-data/hb.sh が最後に書く）。Mac が寝ている・Claude が止まっている時もここで赤になる */
   var ht = null; try { ht = hbSel_('select=k,updated_at,at:v->>at,maxMin:v->>maxMin,ok:v->>ok,note:v->>note&k=like.hb_task_*&order=k.asc&limit=40'); } catch (eT) { ht = null; }
-  if (!ht) add({ id: 'task_read', name: 'Mac の予定タスクの印の読み', state: 'red', why: '読めなかった＝この回は予定タスクを見ていない', last: null });
+  if (!ht) add({ id: 'task_read', name: 'Mac の予定タスクの印の読み', state: 'blind', why: '読めなかった＝この回は予定タスクを見ていない' + (HB_LAST_ERR ? '（' + HB_LAST_ERR + '）' : ''), last: null });
   (ht || []).forEach(function (r) {
     var nmT = 'Mac の予定タスク ' + String(r.k).replace(/^hb_task_/, ''), lastT = r.at || r.updated_at, mxT = Math.max(30, Number(r.maxMin) || 1560), ageT = (now - Date.parse(lastT)) / 60000;
     if (ageT > 7 * 1440 && ageT > mxT * 3) { add({ id: r.k, name: nmT, last: lastT, maxMin: mxT, state: 'warn', why: '7日より古い印（名前を変えた・やめた予定タスクの見込み）' }); return; }
@@ -9346,7 +9347,7 @@ function hbWatchRun_(me, heal) {
   });
   /* ⑤ 道具（SR・WA・Zalo・Viber）の health_<tool>_<pc>（03 の道具が30分ごとに送る） */
   var hs = null; try { hs = hbSel_('select=k,v,updated_at&k=like.health_*&order=k.asc&limit=60'); } catch (eH2) { hs = null; }
-  if (!hs) add({ id: 'health_read', name: '道具の知らせの読み', state: 'red', why: '読めなかった＝この回は SR・WA・Zalo・Viber を見ていない', last: null });
+  if (!hs) add({ id: 'health_read', name: '道具の知らせの読み', state: 'blind', why: '読めなかった＝この回は SR・WA・Zalo・Viber を見ていない' + (HB_LAST_ERR ? '（' + HB_LAST_ERR + '）' : ''), last: null });
   (hs || []).forEach(function (r) {
     var v = (r.v && typeof r.v === 'object') ? r.v : {}, tag = String(v.tool || '').toUpperCase() + '（' + String(v.pc || '') + '）', at = Date.parse(r.updated_at);
     if (now - at > 3 * 86400000) { add({ id: r.k, name: tag + ' の道具', last: r.updated_at, maxMin: 90, state: 'warn', why: '3日より古い控え（PC の名前を変えた・使っていない PC の見込み）' }); return; }
