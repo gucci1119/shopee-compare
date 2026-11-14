@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0205'
+var SRC_VER = '20261115-0239'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -577,8 +577,8 @@ function doGetInner_(e) {
           var _hme = baRunnerId_(); if (_hme !== 'child3' && _hme !== 'child2') throw new Error('見張りは4台目・3台目だけ（この台は ' + _hme + '）');
           var _hhas = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'hbWatchTick'; });
           if (!_hhas) ScriptApp.newTrigger('hbWatchTick').timeBased().everyHours(1).create();
-          _ho = { ok: true, runner: _hme, had: _hhas, triggers: hbTrigNow_() };
-        } else { var _hr = hbWatchRun_(baRunnerId_()); if (p.write === '1') baKvSet_('hb_watch', _hr); _ho = { ok: true, wrote: p.write === '1', watch: _hr }; }
+          _ho = { ok: true, runner: _hme, had: _hhas, base: hbBaseEdit_('hbWatchTick', true), triggers: hbTrigNow_() };
+        } else { var _hr = hbWatchRun_(baRunnerId_(), p.heal === '1'); if (p.write === '1') baKvSet_('hb_watch', _hr); _ho = { ok: true, wrote: p.write === '1', healed: p.heal === '1', watch: _hr }; try { ufPersist_(); } catch (_hp) {} }   /* ★11/15 レビュー：見るだけの呼び出しで作り直さない（heal=1 の時だけ） */
       } catch (_he) { _ho = { ok: false, error: String((_he && _he.message) || _he) }; }
       return ContentService.createTextOutput(_hcb + '(' + JSON.stringify(_ho) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -1571,8 +1571,8 @@ function doGetInner_(e) {
       var cwcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), cwo;
       try {
         var cwwt = P_().getProperty('WRITE_TOKEN'); if (!cwwt || p.token !== cwwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        if (p.action === 'cancel_watch_on') { cancelWatchTriggerOff_(); ScriptApp.newTrigger('cancelWatchTick').timeBased().everyMinutes(15).create(); cwo = { ok: true, on: true }; }
-        else if (p.action === 'cancel_watch_off') { cancelWatchTriggerOff_(); cwo = { ok: true, on: false }; }
+        if (p.action === 'cancel_watch_on') { cancelWatchTriggerOff_(); ScriptApp.newTrigger('cancelWatchTick').timeBased().everyMinutes(15).create(); cwo = { ok: true, on: true, base: hbBaseEdit_('cancelWatchTick', true) }; }
+        else if (p.action === 'cancel_watch_off') { cancelWatchTriggerOff_(); cwo = { ok: true, on: false, base: hbBaseEdit_('cancelWatchTick', false) }; }   /* ★11/15 止まりの見張りが作り直さないよう基準からも外す */
         else if (p.action === 'cancel_watch_run') { cwo = { ok: true, out: cancelWatchTick() }; }
         else cwo = { ok: true, state: baKv_(CANCEL_WATCH_KEY) || null, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }).filter(function (h) { return h === 'cancelWatchTick'; }).length };
         cwo.src = SRC_VER;
@@ -9114,7 +9114,16 @@ function dailyAdjustmentsCheckBody_() {
    全部の自動処理の「最後に動いた時刻」を1か所（app_kv hb_watch）に集め、1時間ごとに見る。決めた時間を超えた物は赤。
    立て直し：止まった台のトリガーが「前に動いていた一覧」（app_kv hb_trig_<台>・hb_ensure&snap=1 で取る）から欠けていたら、その台の /exec hb_ensure で作り直す（1つの台につき3時間に1回まで）。
    動くのは4台目（child3）。4台目が止まった時（hb_watch が90分より古い）は3台目（child2）が代わりに見る。
-   読む物は小さい：app_kv の更新時刻だけ（中身は読まない・ai_actual と🤖の状態は必要な所だけ）＋4台の /exec を各2回（1時間8回・1日約190回） */
+   ★11/15 レビューで直した所：
+   - 鍵（LockService）はトレカ・🤖・索引と同じ鍵＝取り合いで黙って抜ける／相手を降ろす → CacheService の印（10分）に替えた
+   - わざと止めたトリガー（キャンセルの見回り off・トレカ off）を戻していた → off の口で基準からも外す（hbBaseEdit_）。自分で消える物（promoTick など）は基準に入れない
+   - tcgCron は間隔（5/10/15/30分）が分からない＝作り直さず知らせだけ
+   - 🤖・トレカ・相場の見直しは、設定で OFF・担当外の鍵を赤にしない（設定の小さい所だけ読む）
+   - キャンセルの見回りは lastAt（引き戻せた時刻）、注文の同期は店ごとの時刻と誤りで見る（更新時刻だと失敗しても緑）
+   - /exec が1回こけただけで赤にしない（3秒あけて1回だけやり直す）。見張りの台の枠が切れていたら1行だけ書いて抜ける
+   - 読めなかった物は「読めなかった」の赤（0件・「まだ無い」に化けさせない）
+   - 道具の health：古い行（3日）は警告・24時間より前の失敗だけで待ちが無い物は警告・並びを決めて60件まで
+   - 1回の通信：相手の3台の uf_status＋promo_status（並行・6回）＋Supabase の読み6回＋書き1回（3台目は見張らない回も毎時1回読む）。増える分は同じ日の boshu_auto_cfg の5分の覚え（1日約5,900回の読みを減らした）と組。自分の台は直接見る。最後に必ず ufPersist_ */
 var HB_EXEC_ = {
   main: 'https://script.google.com/macros/s/AKfycbwbCbQpW0ZrsnWQ4WMX5FXDinIEd8DkVwikbFSjxbkss2NFl72dhZoiLJt-mqUEBLG7yA/exec',
   child: 'https://script.google.com/macros/s/AKfycbzmh47e-hl6FvJA6-1CEjvdDSLkON-hQXXA6glvFdXRCQo9k6viM6RcawKLv9XGxlyi/exec',
@@ -9122,41 +9131,58 @@ var HB_EXEC_ = {
   child3: 'https://script.google.com/macros/s/AKfycbxV02tSfDsnAB82XXwZWSALAt2H1g41wZ5uMsn1D-u9TJ4lilLRZeAQWXLOfR-r2Qzasg/exec'
 };
 var HB_NAME_ = { main: '本体', child: '2台目', child2: '3台目', child3: '4台目' };
-/* 控えの鍵 → [名前, 何分より古いと赤, 中身の時刻の場所（無ければ更新時刻）] */
+/* 自分で消えるトリガー（基準に入れない・欠けても赤にしない） */
+var HB_TRANSIENT_ = { promoTick: 1, dnoteTick: 1, dimgTick: 1, probeReturns: 1 };
+/* 作り直さず知らせるだけの物（間隔が分からない・本人の off がある） */
+var HB_NOHEAL_ = { tcgCron: 1 };
+/* 控えの鍵 → [名前, 何分より古いと赤, 時刻の場所（'upd'＝更新時刻・それ以外は v の中の項目）] */
 var HB_KV_ = [
-  ['orders_sync_last', '注文の同期', 90],
-  ['sync_claim_syncAll', '同期（syncAll・在庫の自動復活ほか）', 90],
-  ['sync_claim_syncListingsRoundRobin', '出品の同期', 70],
-  ['sync_claim_boostTick', 'Bump', 70],
-  ['sync_claim_condIndexTick', '状態写真の索引', 40],
-  ['cancel_watch_state', 'キャンセルの見回り', 40],
-  ['boshu_auto_status', '🤖自動出品（2台目）', 60],
-  ['boshu_auto_status_child2', '🤖自動出品（3台目）', 60],
-  ['tcg_auto_status', '🃏トレカ（2台目）', 60],
-  ['tcg_auto_status_child2', '🃏トレカ（3台目）', 60],
-  ['tcg_auto_status_child3', '🃏トレカ（4台目）', 60],
-  ['boshu_revalue', '相場の見直し（4台目）', 180],
-  ['mam_patrol_seen', '購入後あいさつの見回り（メルカリのタブ）', 60],
-  ['rowsync_last', '利益管理表への転記（Seller Center のタブ）', 300],
-  ['chat_sender_hb', 'Shopee チャットの取り込み（webchat のタブ）', 60],
-  ['uf_ext_mercari', '仕入れの取り込み（取込GAS）', 90],
-  ['profit_sheet', '利益管理表の取り込み', 1560],
+  ['orders_sync_last', '注文の同期', 90, 'shops'],
+  ['sync_claim_syncAll', '同期（syncAll・在庫の自動復活ほか）の取り札', 90, 'upd'],
+  ['sync_claim_syncListingsRoundRobin', '出品の同期', 70, 'upd'],
+  ['sync_claim_boostTick', 'Bump', 70, 'upd'],
+  ['sync_claim_condIndexTick', '状態写真の索引', 40, 'upd'],
+  ['sync_claim_syncEscrowAll', '入金の同期', 420, 'upd'],
+  ['sync_claim_syncReturnsAll', '返品の同期', 420, 'upd'],
+  ['sync_claim_syncPayoutsAll', '振込の同期', 420, 'upd'],
+  ['cancel_watch_state', 'キャンセルの見回り（引き戻せた時刻）', 50, 'lastAt'],
+  ['mam_patrol_seen', '購入後あいさつの見回り（メルカリのタブ）', 60, 'upd'],
+  ['rowsync_last', '利益管理表への転記（Seller Center のタブ）', 300, 'upd'],
+  ['chat_sender_hb', 'Shopee チャットの取り込み（webchat のタブ）', 60, 'upd'],
+  ['uf_ext_mercari', '仕入れの取り込み（取込GAS）', 90, 'upd'],
+  ['profit_sheet', '利益管理表の取り込み', 1560, 'upd'],
   ['ai_actual', 'AI の実績（コスト画面のタブ）', 1800, 'at']
 ];
-function hbExec_(who, qs) {
-  var u = HB_EXEC_[who]; if (!u) return { http: 0, err: 'URL なし' };
-  try {
-    ufBump_(1, '見張り(/exec)');
-    var r = UrlFetchApp.fetch(u + (u.indexOf('?') >= 0 ? '&' : '?') + qs + '&callback=cb', { muteHttpExceptions: true, followRedirects: true });
-    var code = r.getResponseCode(), t = String(r.getContentText() || ''), m = t.match(/^\s*cb\(([\s\S]*)\)\s*;?\s*$/);
-    var j = null; try { j = JSON.parse(m ? m[1] : t); } catch (e) { j = null; }
-    return { http: code, j: j, err: j ? '' : ('返事が読めない（HTTP ' + code + '）') };
-  } catch (e) { return { http: 0, err: String((e && e.message) || e).slice(0, 120) }; }
+function hbSel_(q) { try { return sbSelect_('app_kv', q); } catch (e1) { Utilities.sleep(3000); return sbSelect_('app_kv', q); } }   /* ★11/15 レビュー8：1回こけただけで赤にしない */
+function hbExecReq_(who, qs) { var u = HB_EXEC_[who]; return { url: u + (u.indexOf('?') >= 0 ? '&' : '?') + qs + '&callback=cb', muteHttpExceptions: true, followRedirects: true }; }
+function hbParse_(r) {
+  try { var code = r.getResponseCode(), t = String(r.getContentText() || ''), m = t.match(/^\s*cb\(([\s\S]*)\)\s*;?\s*$/); var j = null; try { j = JSON.parse(m ? m[1] : t); } catch (e) { j = null; } return { http: code, j: j, err: j ? '' : ('返事が読めない（HTTP ' + code + '）') }; }
+  catch (e2) { return { http: 0, err: String((e2 && e2.message) || e2).slice(0, 120) }; }
 }
-/* その台の今のトリガー（関数名の一覧）。自分の台は直接読む */
+function hbExec_(who, qs) {
+  if (!HB_EXEC_[who]) return { http: 0, err: 'URL なし' };
+  try { ufBump_(1, '見張り(/exec)'); var q = hbExecReq_(who, qs); return hbParse_(UrlFetchApp.fetch(q.url, q)); }
+  catch (e) { return { http: 0, err: String((e && e.message) || e).slice(0, 120) }; }
+}
+/* 何台かへ並行で聞く。答えなかった台だけ3秒あけて1回やり直す（1回こけただけで赤にしない） */
+function hbExecMany_(list) {
+  var out = {}, run = function (ls) {
+    if (!ls.length) return;
+    ufBump_(ls.length, '見張り(/exec)');
+    var rs = null; try { rs = UrlFetchApp.fetchAll(ls.map(function (x) { return hbExecReq_(x.who, x.qs); })); } catch (e) { rs = null; try { ufNoteErr_(e); } catch (eN) {} }   /* ★11/15 レビュー10：枠切れなら印を立てる（相手の台の誤りと取り違えない） */
+    ls.forEach(function (x, i) { out[x.id] = rs ? hbParse_(rs[i]) : { http: 0, err: '並行の呼び出しが失敗' }; });
+  };
+  run(list);
+  var again = list.filter(function (x) { var r = out[x.id]; return !r || !r.j; });
+  if (again.length) { Utilities.sleep(3000); run(again); }
+  return out;
+}
+/* その台の今のトリガー（関数名の一覧） */
 function hbTrigNow_() { return ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }).sort(); }
 /* 欠けたトリガーを作る（作り方の表。表に無い物は作らない＝知らせだけ） */
 function hbMakeTrigger_(fn) {
+  if (HB_NOHEAL_[fn] || HB_TRANSIENT_[fn]) return false;
+  try { if (P_().getProperty('HB_OFF_' + fn)) return false; } catch (eOf) {}   /* ★11/15 レビュー2：本人・ポータルが off にした物は、基準を書き損ねても作らない（台のプロパティ＝通信なし） */
   var T = function (f) { return ScriptApp.newTrigger(f).timeBased(); };
   switch (fn) {
     case 'syncAll': case 'syncOrdersAll': T(fn).everyHours(1).create(); return true;
@@ -9165,7 +9191,7 @@ function hbMakeTrigger_(fn) {
     case 'backfillEscrowUnchanged': T(fn).everyDays(1).atHour(5).create(); return true;
     case 'syncListingStats': case 'boshuAutoRecheck': T(fn).everyDays(1).atHour(4).create(); return true;
     case 'dailyAdjustmentsCheck': T(fn).everyDays(1).atHour(7).create(); return true;
-    case 'syncListingsRoundRobin': case 'boostTick': case 'tcgCron': T(fn).everyMinutes(30).create(); return true;
+    case 'syncListingsRoundRobin': case 'boostTick': T(fn).everyMinutes(30).create(); return true;
     case 'condIndexTick': T(fn).everyMinutes(10).create(); return true;
     case 'cancelWatchTick': T(fn).everyMinutes(15).create(); return true;
     case 'boshuRevalueTick': case 'hbWatchTick': T(fn).everyHours(1).create(); return true;
@@ -9173,79 +9199,168 @@ function hbMakeTrigger_(fn) {
     default: return false;
   }
 }
+/* 本人・ポータルが off にした時、その台の基準から外す（add=true で戻す）。基準がまだ無ければ何もしない */
+function hbBaseEdit_(fn, add) {
+  try { var P0 = P_(); if (add) P0.deleteProperty('HB_OFF_' + fn); else P0.setProperty('HB_OFF_' + fn, new Date().toISOString()); } catch (eP) {}
+  try {
+    var key = 'hb_trig_' + baRunnerId_(), base = baKvFresh_(key);
+    if (BA_KV_FAIL[key]) return 'base_unread';
+    if (!base || !Array.isArray(base.fns)) return 'no_base';
+    var has = base.fns.indexOf(fn) >= 0;
+    if (add && !has) base.fns.push(fn); else if (!add && has) base.fns = base.fns.filter(function (f) { return f !== fn; }); else return 'same';
+    base.fns.sort(); base.editedAt = new Date().toISOString(); baKvSet_(key, base); return 'ok';
+  } catch (e) { try { Logger.log('hbBaseEdit_ ' + e); } catch (e2) {} return 'err ' + String(e).slice(0, 60); }
+}
 /* 前に動いていた一覧（app_kv hb_trig_<台>）と比べて、欠けた物を作る。snap=true の時は今の一覧を「前に動いていた一覧」として控える */
 function hbEnsureTriggers_(snap) {
   var me = baRunnerId_(), key = 'hb_trig_' + me, now = hbTrigNow_();
-  if (snap) { baKvSet_(key, { at: new Date().toISOString(), fns: now, src: SRC_VER }); return { ok: true, snap: true, runner: me, fns: now }; }
+  var uniq = function (a) { var s = {}; return a.filter(function (f) { if (s[f] || HB_TRANSIENT_[f]) return false; s[f] = 1; return true; }); };
+  if (snap) { var fs = uniq(now); baKvSet_(key, { at: new Date().toISOString(), fns: fs, src: SRC_VER }); return { ok: true, snap: true, runner: me, fns: fs }; }
   var base = baKvFresh_(key);
+  if (BA_KV_FAIL[key]) return { ok: false, runner: me, error: '前に動いていた一覧（' + key + '）を読めなかった（作り直しはしない）' };
   if (!base || !Array.isArray(base.fns)) return { ok: false, runner: me, error: '前に動いていた一覧（' + key + '）がまだ無い＝hb_ensure&snap=1 で先に取る', now: now };
-  var have = {}; now.forEach(function (f) { have[f] = (have[f] || 0) + 1; });
-  var missing = base.fns.filter(function (f) { return !have[f]; }), made = [], cant = [];
-  missing.forEach(function (f) { try { if (hbMakeTrigger_(f)) made.push(f); else cant.push(f); } catch (e) { cant.push(f + '（' + String((e && e.message) || e).slice(0, 60) + '）'); } });
-  return { ok: true, runner: me, missing: missing, made: made, cant: cant, now: hbTrigNow_() };
+  var C = CacheService.getScriptCache(); if (C.get('hb_ensure')) return { ok: false, runner: me, busy: true, error: 'この台で作り直しが走っている（次の回）' };   /* ★11/15 レビュー1：🤖・トレカと同じ鍵を使わない */
+  C.put('hb_ensure', '1', 120);
+  try {
+    var have = {}; hbTrigNow_().forEach(function (f) { have[f] = 1; });   /* 作る直前に読み直す（二重に作らない） */
+    var missing = uniq(base.fns).filter(function (f) { return !have[f]; }), made = [], cant = [];
+    missing.forEach(function (f) { try { if (hbMakeTrigger_(f)) { made.push(f); have[f] = 1; } else cant.push(f); } catch (e) { cant.push(f + '（' + String((e && e.message) || e).slice(0, 60) + '）'); } });
+    return { ok: true, runner: me, missing: missing, made: made, cant: cant, now: hbTrigNow_() };
+  } finally { try { C.remove('hb_ensure'); } catch (eL) {} }
 }
 function hbWatchTick() {
   var me = baRunnerId_();
   if (me !== 'child3' && me !== 'child2') return;
-  var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return;
+  /* 鍵（LockService）はトレカ・🤖・索引と同じ＝取り合いになる。見張りの二重起動は CacheService の印（10分）で止める */
+  var C = CacheService.getScriptCache(); if (C.get('hb_running')) return; C.put('hb_running', String(Date.now()), 600);
   try {
     if (me === 'child2') {   /* 3台目は予備：4台目の見張りが90分以内に書いていれば何もしない */
-      var cur = null; try { var r0 = sbSelect_('app_kv', 'select=updated_at,by:v->by&k=eq.hb_watch'); cur = r0 && r0[0]; } catch (e0) { cur = null; }
-      if (cur && cur.by === 'child3' && Date.now() - Date.parse(cur.updated_at) < 90 * 60000) return;
+      var cur = null, rd = false; try { var r0 = sbSelect_('app_kv', 'select=updated_at,by:v->>by&k=eq.hb_watch'); rd = true; cur = r0 && r0[0]; } catch (e0) { cur = null; }
+      if (rd && cur && cur.by === 'child3' && Date.now() - Date.parse(cur.updated_at) < 90 * 60000) return;
     }
-    var out = hbWatchRun_(me);
+    var out = hbWatchRun_(me, true);
     baKvSet_('hb_watch', out);
-  } finally { lock.releaseLock(); }
+  } finally { try { C.remove('hb_running'); } catch (eC) {} try { ufPersist_(); } catch (eP) {} }
 }
-function hbWatchRun_(me) {
-  var now = Date.now(), items = [], P = P_();
+function hbWatchRun_(me, heal) {
+  var now = Date.now(), items = [], P = P_(), tok = encodeURIComponent(P.getProperty('WRITE_TOKEN') || '');
   var add = function (it) { it.ageMin = (it.last ? Math.round((now - Date.parse(it.last)) / 60000) : null); items.push(it); };
-  /* ① 4台の /exec：答えるか・版がそろっているか・枠が止まっていないか・トリガーが欠けていないか */
+  var fin = function () { var red = items.filter(function (x) { return x.state === 'red'; }).length, warn = items.filter(function (x) { return x.state === 'warn'; }).length; return { at: new Date().toISOString(), by: me, src: SRC_VER, red: red, warn: warn, items: items }; };
+  /* 見張りの台の枠が切れていたら、1行だけ書いて抜ける（4台とも「答えない」と取り違えない） */
+  if (ufIsBlocked_()) { add({ id: 'watcher_quota', name: '見張りの台（' + (HB_NAME_[me] || me) + '）の接続枠', state: 'warn', why: 'Google の1日の枠に断られている＝この回は見ていない（日本時間 ' + ufResetJstStr_() + ' に戻る）', last: null }); return fin(); }
+  /* ① 基準（4台分）を1回で読む */
+  var bases = null; try { bases = {}; (hbSel_('select=k,v&k=in.(hb_trig_main,hb_trig_child,hb_trig_child2,hb_trig_child3)') || []).forEach(function (r) { bases[r.k] = r.v; }); } catch (eB) { bases = null; }
+  if (!bases) add({ id: 'trigbase_read', name: 'トリガーの基準の読み（Supabase）', state: 'red', why: '読めなかった＝この回はトリガーの欠けを見ていない', last: null });
+  /* ② 相手の3台の /exec（並行・こけた台だけ1回やり直す）。自分の台は直接見る */
+  var reqs = []; ['main', 'child', 'child2', 'child3'].forEach(function (w) { reqs.push({ id: w + ':st', who: w, qs: 'action=uf_status' }); if (w !== me) reqs.push({ id: w + ':tg', who: w, qs: 'action=promo_status&token=' + tok }); });   /* ★11/15 レビュー5：自分の台の /exec も外から確かめる（トリガーの一覧は直接） */
+  var res = hbExecMany_(reqs);
+  if (ufIsBlocked_()) { items.length = 0; add({ id: 'watcher_quota', name: '見張りの台（' + (HB_NAME_[me] || me) + '）の接続枠', state: 'warn', why: 'Google の1日の枠に断られた＝この回は見ていない（日本時間 ' + ufResetJstStr_() + ' に戻る）', last: null }); return fin(); }
   ['main', 'child', 'child2', 'child3'].forEach(function (who) {
-    var nm = HB_NAME_[who], st = hbExec_(who, 'action=uf_status');
-    if (!st.j || st.j.ok === false) { add({ id: 'exec_' + who, name: nm + 'の GAS（/exec）', state: 'red', why: '答えない：' + (st.err || ('HTTP ' + st.http)) + '＝アカウントのログイン・承認の切れの見込み（人の操作が要る）', last: null }); return; }
-    if (st.j.src && st.j.src !== SRC_VER) add({ id: 'src_' + who, name: nm + 'の GAS の版', state: 'warn', why: '版が違う（' + st.j.src + '・見張りの台は ' + SRC_VER + '）', last: null });
-    if (st.j.blocked) add({ id: 'quota_' + who, name: nm + 'の接続枠', state: 'warn', why: 'Google の1日の枠に断られて止まっている（' + String(st.j.blockedAt || '').slice(0, 16) + 'Z〜・翌日17時に戻る）', last: null });
-    var tg = hbExec_(who, 'action=promo_status&token=' + encodeURIComponent(P.getProperty('WRITE_TOKEN') || ''));
-    var fns = (tg.j && Array.isArray(tg.j.triggers)) ? tg.j.triggers : null;
-    var base = null; try { base = baKvFresh_('hb_trig_' + who); } catch (eB) { base = null; }
-    if (fns && base && Array.isArray(base.fns)) {
-      var have = {}; fns.forEach(function (f) { have[f] = 1; });
-      var miss = base.fns.filter(function (f) { return !have[f]; });
-      if (miss.length) {
-        var hk = 'HB_HEAL_' + who, last = Number(P.getProperty(hk) || 0), healed = null;
-        if (now - last > 3 * 3600 * 1000) { P.setProperty(hk, String(now)); var h = hbExec_(who, 'action=hb_ensure&token=' + encodeURIComponent(P.getProperty('WRITE_TOKEN') || '')); healed = h.j || { error: h.err }; }
-        add({ id: 'trig_' + who, name: nm + 'のトリガー', state: healed && healed.made && healed.made.length === miss.length ? 'warn' : 'red', why: '欠けていた：' + miss.join('・') + (healed ? '→ 作り直した：' + ((healed.made || []).join('・') || 'なし') + ((healed.cant || []).length ? '・作れない：' + healed.cant.join('・') : '') + (healed.error ? '・' + healed.error : '') : '（作り直しは3時間に1回まで・次の回）'), last: null });
+    var nm = HB_NAME_[who], fns = null;
+    var st = res[who + ':st'] || {};
+    if (who === me) { fns = hbTrigNow_(); if (!st.j || st.j.ok === false) add({ id: 'exec_' + who, name: nm + '（見張りの台）の GAS（/exec）', state: 'red', why: '2回続けて答えない：' + (st.err || ('HTTP ' + st.http)) + '＝トリガーは動くが /exec の口が止まっている（承認切れ・配備の誤りの見込み・推測）', last: null }); else if (st.j.src && st.j.src !== SRC_VER) add({ id: 'src_' + who, name: nm + 'の GAS の版', state: 'warn', why: '/exec の版（' + st.j.src + '）がトリガーの版（' + SRC_VER + '）と違う＝配備し直しが要る', last: null }); }
+    else {
+      if (!st.j || st.j.ok === false) { add({ id: 'exec_' + who, name: nm + 'の GAS（/exec）', state: 'red', why: '2回続けて答えない：' + (st.err || ('HTTP ' + st.http)) + '＝アカウントのログイン・承認の切れの見込み（推測・人の操作が要るかも）', last: null }); return; }
+      if (st.j.src && st.j.src !== SRC_VER) add({ id: 'src_' + who, name: nm + 'の GAS の版', state: 'warn', why: '版が違う（' + st.j.src + '・見張りの台は ' + SRC_VER + '）', last: null });
+      if (st.j.blocked) add({ id: 'quota_' + who, name: nm + 'の接続枠', state: 'warn', why: 'Google の1日の枠に断られて止まっている（日本時間 ' + (st.j.blockedAt ? Utilities.formatDate(new Date(st.j.blockedAt), 'Asia/Tokyo', 'MM/dd HH:mm') : '?') + '〜・' + ufResetJstStr_() + ' に戻る）', last: null });
+      var tg = res[who + ':tg'] || {};
+      fns = (tg.j && Array.isArray(tg.j.triggers)) ? tg.j.triggers : null;
+      if (!fns) { add({ id: 'trigread_' + who, name: nm + 'のトリガーの一覧', state: 'warn', why: '読めなかった（' + (tg.err || (tg.j && tg.j.error) || '形が違う') + '）＝この回は欠けを見ていない', last: null }); return; }
+    }
+    if (!bases) return;
+    var base = bases['hb_trig_' + who];
+    if (!base || !Array.isArray(base.fns)) { add({ id: 'trigbase_' + who, name: nm + 'のトリガーの基準', state: 'warn', why: '前に動いていた一覧がまだ無い（hb_ensure&snap=1 で取る）', last: null }); return; }
+    var have = {}; fns.forEach(function (f) { have[f] = 1; });
+    var seen = {}, miss = base.fns.filter(function (f) { if (seen[f] || HB_TRANSIENT_[f] || have[f]) return false; seen[f] = 1; return true; });
+    if (!miss.length) return;
+    var canHeal = miss.filter(function (f) { return !HB_NOHEAL_[f]; }), healed = null;
+    if (heal && canHeal.length) {
+      var hk = 'HB_HEAL_' + who, last = Number(P.getProperty(hk) || 0);
+      if (now - last > 3 * 3600 * 1000) {
+        if (who === me) { try { healed = hbEnsureTriggers_(false); } catch (eH) { healed = { error: String(eH).slice(0, 80) }; } }
+        else { var h = hbExec_(who, 'action=hb_ensure&token=' + tok); healed = h.j || { error: h.err }; }
+        if (healed && healed.ok && !healed.busy) P.setProperty(hk, String(now));   /* ★11/15 レビュー1：こけた・鍵待ちの時は印を立てない＝次の回にもう一度 */
       }
-    } else if (!base) add({ id: 'trigbase_' + who, name: nm + 'のトリガーの基準', state: 'warn', why: '前に動いていた一覧がまだ無い（hb_ensure&snap=1 で取る）', last: null });
+    }
+    var allMade = healed && healed.made && miss.every(function (f) { return healed.made.indexOf(f) >= 0; });
+    add({ id: 'trig_' + who, name: nm + 'のトリガー', state: allMade ? 'warn' : 'red', why: '欠けていた：' + miss.join('・') + (healed ? '→ 作り直した：' + ((healed.made || []).join('・') || 'なし') + ((healed.cant || []).length ? '・作れない：' + healed.cant.join('・') : '') + (healed.error ? '・' + healed.error : '') : (canHeal.length < miss.length ? '（' + miss.filter(function (f) { return HB_NOHEAL_[f]; }).join('・') + ' は間隔が分からないので作り直さない＝ポータルの設定で入れ直す）' : (heal ? '（作り直しは3時間に1回まで・次の回）' : '（見るだけの回）'))), last: null });
   });
-  /* ② 自動処理の控えの時刻（更新時刻だけ読む） */
-  var keys = HB_KV_.map(function (x) { return x[0]; });
-  var rows = null; try { rows = sbSelect_('app_kv', 'select=k,updated_at,at:v->>at,brake:v->brake&k=in.(' + keys.join(',') + ')'); } catch (eR) { rows = null; }
+  /* ③ 🤖・トレカ・相場の見直し：設定の小さい所だけ読み、ON で担当の台の鍵だけ見る */
+  var cfg = null; try { var c0 = hbSel_('select=on:v->on,runners:v->runners,tcgOn:v->tcg->on,tcgRunner:v->tcg->>runner,tcgRunners:v->tcg->runners,rvOn:v->revalue->on,rvRunner:v->revalue->>runner,runner:v->>runner,dupPause:v->dupPause&k=eq.boshu_auto_cfg'); cfg = c0 && c0[0]; } catch (eC) { cfg = null; }
+  var kvList = HB_KV_.slice();
+  /* ★11/15 レビュー3：本体でキャンセルの見回りを off にしている（基準に無い）時は見ない */
+  if (bases && bases.hb_trig_main && Array.isArray(bases.hb_trig_main.fns) && bases.hb_trig_main.fns.indexOf('cancelWatchTick') < 0) kvList = kvList.filter(function (x) { return x[0] !== 'cancel_watch_state'; });
+  if (!cfg) add({ id: 'cfg_read', name: '🤖・トレカの設定の読み', state: 'red', why: '読めなかった＝この回は🤖・トレカ・相場の見直しを見ていない', last: null });
+  else {
+    var busy = function (o) { return o && typeof o === 'object' ? Object.keys(o).filter(function (r) { return o[r] && o[r].length; }) : []; };
+    if (cfg.on === true) {
+      var hasRun = cfg.runners && typeof cfg.runners === 'object' && Object.keys(cfg.runners).length, br = busy(cfg.runners);
+      if (hasRun && !br.length) add({ id: 'boshu_none', name: '🤖自動出品', state: 'warn', why: cfg.dupPause && cfg.dupPause.at ? '重複が見つかったので全部の担当を止めてある（' + (cfg.dupPause.n || '?') + '件・ポータルで確かめて再開）' : '担当の台が1つも無い（設定で全部空）', last: null });
+      if (!hasRun) br = [String(cfg.runner || 'child')];
+      /* ★11/15 レビュー6：線はトリガーの間隔（60分）＋鍵待ち＋動く時間＝120分 */
+      br.forEach(function (r) { var k = (r === 'child' || r === 'main') ? 'boshu_auto_status' : 'boshu_auto_status_' + r; if (!kvList.some(function (x) { return x[0] === k; })) kvList.push([k, '🤖自動出品（' + (HB_NAME_[r] || r) + '）', 120, 'boshu']); });
+    }
+    if (cfg.tcgOn === true) {
+      /* ★11/15 レビュー11：トレカ本体（tcgTick の SK）と同じ決め方：担当分けがあれば主担当（runner・既定は空）以外は _<台>、無ければ runner（既定 child2）が tcg_auto_status。off にした台（基準に tcgCron が無い）は見ない */
+      var tr = busy(cfg.tcgRunners), main0 = String(cfg.tcgRunner || '');
+      if (!tr.length) { main0 = String(cfg.tcgRunner || 'child2'); tr = [main0]; }
+      tr.forEach(function (r) { var bt = bases && bases['hb_trig_' + r]; if (bt && Array.isArray(bt.fns) && bt.fns.indexOf('tcgCron') < 0) return; var k = (r === main0) ? 'tcg_auto_status' : 'tcg_auto_status_' + r; kvList.push([k, '🃏トレカ（' + (HB_NAME_[r] || r) + '）', 60, 'upd']); });
+    }
+    if (cfg.rvOn === true) kvList.push(['boshu_revalue', '相場の見直し（' + (HB_NAME_[String(cfg.rvRunner || 'child3')] || cfg.rvRunner) + '）', 180, 'upd']);
+  }
+  /* ④ 控えの時刻（更新時刻と時刻の項目だけ読む・orders_sync_last は13店ぶんで小さい） */
+  var keys = kvList.map(function (x) { return x[0]; });
+  var rows = null; try { rows = hbSel_('select=k,updated_at,at:v->>at,lastAt:v->>lastAt,brake:v->brake&k=in.(' + keys.join(',') + ')'); } catch (eR) { rows = null; }
+  if (rows) { try { var so = hbSel_('select=k,shops:v&k=eq.orders_sync_last'); rows.forEach(function (r) { if (r.k === 'orders_sync_last' && so && so[0]) r.shops = so[0].shops; }); } catch (eSo) { rows.forEach(function (r) { if (r.k === 'orders_sync_last') r.shopsErr = 1; }); } }   /* v の丸ごとは注文の同期（13店・小さい）だけ。🤖の状態などは大きいので時刻だけ */
   if (!rows) add({ id: 'kv_read', name: '控えの読み（Supabase）', state: 'red', why: '読めなかった＝この回は時刻を見ていない（0件ではない）', last: null });
   else {
     var byK = {}; rows.forEach(function (r) { byK[r.k] = r; });
-    HB_KV_.forEach(function (x) {
-      var r = byK[x[0]], last = r ? (x[3] === 'at' ? (r.at || r.updated_at) : r.updated_at) : null;
+    kvList.forEach(function (x) {
+      var r = byK[x[0]], last = null, extra = '';
+      if (r) {
+        if (x[3] === 'at') last = r.at || r.updated_at;
+        else if (x[3] === 'lastAt') last = r.lastAt || null;
+        else if (x[3] === 'shops' && r.shopsErr) { last = r.updated_at; extra = '店ごとの中身を読めなかった（更新時刻だけで見た）'; }
+        else if (x[3] === 'shops') {   /* 店ごとの最新の時刻のうち一番新しい物・最後の回に誤りの店があれば書く */
+          var sh = (r.shops && typeof r.shops === 'object') ? r.shops : {}, ts = 0, errs = [];
+          Object.keys(sh).forEach(function (sid) { var o = sh[sid] || {}, t = Date.parse(o.at || 0) || 0; if (t > ts) ts = t; });
+          Object.keys(sh).forEach(function (sid) { var o = sh[sid] || {}; if (o.err && (Date.parse(o.at || 0) || 0) >= ts - 5 * 60000) errs.push((o.cc || sid) + '：' + String(o.err).slice(0, 40)); });
+          last = ts ? new Date(ts).toISOString() : null;
+          if (errs.length) extra = '最後の回に誤りの店 ' + errs.length + '：' + errs.slice(0, 3).join('／');
+        } else last = r.updated_at;
+      }
       var age = last ? (now - Date.parse(last)) / 60000 : null;
-      var it = { id: 'kv_' + x[0], name: x[1], last: last, maxMin: x[2], state: (!last || age > x[2]) ? 'red' : 'ok', why: !last ? '記録が無い' : (age > x[2] ? Math.round(age) + '分動いていない（線 ' + x[2] + '分）' : '') };
-      if (r && r.brake && r.brake.at && /^boshu_auto_status/.test(x[0])) { it.state = 'red'; it.why = '🛑 ブレーキで止まっている（' + String(r.brake.why || '').slice(0, 80) + '）＝ポータルの ▶ 再開が要る'; }
+      var it = { id: 'kv_' + x[0], name: x[1], last: last, maxMin: x[2], state: (!last || age > x[2]) ? 'red' : (extra ? 'warn' : 'ok'), why: !last ? (r ? '時刻の項目が無い' : '記録が無い') : (age > x[2] ? Math.round(age) + '分動いていない（線 ' + x[2] + '分）' : '') + (extra ? (age > x[2] ? '・' : '') + extra : '') };
+      if (r && r.brake && r.brake.at && x[3] === 'boshu') { it.state = 'red'; it.why = '🛑 ブレーキで止まっている（' + String(r.brake.why || '').slice(0, 80) + '）＝ポータルの ▶ 再開が要る'; }
       add(it);
     });
   }
-  /* ③ 道具（SR・WA・Zalo・Viber）の health_<tool>_<pc>（03 の道具が30分ごとに送る） */
-  var hs = null; try { hs = sbSelect_('app_kv', 'select=k,v,updated_at&k=like.health_*&limit=40'); } catch (eH) { hs = null; }
+  /* ④-2 Mac の予定タスク（app_kv hb_task_<名前>・~/.claude/skills/shopee-data/hb.sh が最後に書く）。Mac が寝ている・Claude が止まっている時もここで赤になる */
+  var ht = null; try { ht = hbSel_('select=k,updated_at,at:v->>at,maxMin:v->>maxMin,ok:v->>ok,note:v->>note&k=like.hb_task_*&order=k.asc&limit=40'); } catch (eT) { ht = null; }
+  if (!ht) add({ id: 'task_read', name: 'Mac の予定タスクの印の読み', state: 'red', why: '読めなかった＝この回は予定タスクを見ていない', last: null });
+  (ht || []).forEach(function (r) {
+    var nmT = 'Mac の予定タスク ' + String(r.k).replace(/^hb_task_/, ''), lastT = r.at || r.updated_at, mxT = Math.max(30, Number(r.maxMin) || 1560), ageT = (now - Date.parse(lastT)) / 60000;
+    if (ageT > 7 * 1440 && ageT > mxT * 3) { add({ id: r.k, name: nmT, last: lastT, maxMin: mxT, state: 'warn', why: '7日より古い印（名前を変えた・やめた予定タスクの見込み）' }); return; }
+    if (ageT > mxT) add({ id: r.k, name: nmT, last: lastT, maxMin: mxT, state: 'red', why: Math.round(ageT) + '分 動いていない（線 ' + mxT + '分）＝Mac が寝ている・Claude が止まっている・予定タスクが外れた見込み（推測）' });
+    else if (String(r.ok) === 'false') add({ id: r.k, name: nmT, last: lastT, maxMin: mxT, state: 'red', why: '最後の回が失敗：' + String(r.note || '').slice(0, 100) });
+  });
+  /* ⑤ 道具（SR・WA・Zalo・Viber）の health_<tool>_<pc>（03 の道具が30分ごとに送る） */
+  var hs = null; try { hs = hbSel_('select=k,v,updated_at&k=like.health_*&order=k.asc&limit=60'); } catch (eH2) { hs = null; }
+  if (!hs) add({ id: 'health_read', name: '道具の知らせの読み', state: 'red', why: '読めなかった＝この回は SR・WA・Zalo・Viber を見ていない', last: null });
   (hs || []).forEach(function (r) {
-    var v = r.v || {}, tag = String(v.tool || '').toUpperCase() + '（' + String(v.pc || '') + '）', at = Date.parse(r.updated_at);
-    if (now - at > 90 * 60000) { add({ id: r.k, name: tag + ' の道具', last: r.updated_at, maxMin: 90, state: 'red', why: Math.round((now - at) / 60000) + '分 知らせが来ない＝タブが閉じた・止まった見込み' }); return; }
-    (v.items || []).forEach(function (f) {
+    var v = (r.v && typeof r.v === 'object') ? r.v : {}, tag = String(v.tool || '').toUpperCase() + '（' + String(v.pc || '') + '）', at = Date.parse(r.updated_at);
+    if (now - at > 3 * 86400000) { add({ id: r.k, name: tag + ' の道具', last: r.updated_at, maxMin: 90, state: 'warn', why: '3日より古い控え（PC の名前を変えた・使っていない PC の見込み）' }); return; }
+    if (now - at > 90 * 60000) { add({ id: r.k, name: tag + ' の道具', last: r.updated_at, maxMin: 90, state: 'red', why: Math.round((now - at) / 60000) + '分 知らせが来ない＝タブが閉じた・止まった見込み（推測）' }); return; }
+    (Array.isArray(v.items) ? v.items : []).forEach(function (f) {
+      if (!f || !f.fn) return;
       var mx = Number(f.maxMin) || 60, ok = Number(f.okAt) || 0, fail = Number(f.failAt) || 0, pend = Number(f.pending) || 0;
       var stale = !ok || (now - ok) / 60000 > mx, bad = stale && (fail > ok || pend > 0);
-      if (bad) add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: 'red', why: (f.why ? String(f.why).slice(0, 120) : (pend ? '待ち ' + pend + '件があるのに' : '失敗の後') + ' ' + mx + '分 成功が無い') });
+      if (!bad) return;
+      var old = !pend && fail && now - fail > 86400000;   /* 押した時だけ動く物の昔の失敗は警告 */
+      add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: old ? 'warn' : 'red', why: (f.why ? String(f.why).slice(0, 120) : (pend ? '待ち ' + pend + '件があるのに' : '失敗の後') + ' ' + mx + '分 成功が無い') });
     });
   });
-  var red = items.filter(function (x) { return x.state === 'red'; }).length, warn = items.filter(function (x) { return x.state === 'warn'; }).length;
-  return { at: new Date().toISOString(), by: me, src: SRC_VER, red: red, warn: warn, items: items };
+  return fin();
 }
 
 function setupTriggers() {
@@ -9286,7 +9401,9 @@ function setupTriggers() {
   ScriptApp.newTrigger('dailyAdjustmentsCheck').timeBased().everyDays(1).atHour(7).create();
   /* ★2026-11-15 05（型 E）：上で全部消すので、一覧に無いトリガー（cancelWatchTick・tcgCron・boshuRevalueTick・hbWatchTick など）は前に動いていた一覧（hb_trig_<台>）から戻す。一覧がまだ無ければ何もしない */
   var _hbE = null; try { _hbE = hbEnsureTriggers_(false); } catch (eHb) { _hbE = { ok: false, error: String(eHb).slice(0, 80) }; }
-  Logger.log('✅ トリガー設定' + (_hbE ? ' ' + JSON.stringify(_hbE).slice(0, 200) : '')); return _hbE && _hbE.made && _hbE.made.length ? ('ok・戻した ' + _hbE.made.join(',')) : 'ok';
+  /* ★11/15 レビュー4：毎日の販促の見回り（promoTick・終わった後は毎日1回）も上で消えるので戻す */
+  try { var _pj = baKvFresh_('promo_job') || {}; if (_pj.on && _pj.mode === 'daily' && !ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'promoTick'; })) { ScriptApp.newTrigger('promoTick').timeBased().everyDays(1).atHour(PROMO_DAILY_HOUR).inTimezone('Asia/Tokyo').create(); _hbE = _hbE || {}; (_hbE.made = _hbE.made || []).push('promoTick'); } } catch (ePj) {}
+  Logger.log('✅ トリガー設定' + (_hbE ? ' ' + JSON.stringify(_hbE).slice(0, 200) : '')); var _hbW = _hbE ? [(_hbE.made && _hbE.made.length ? '戻した ' + _hbE.made.join(',') : ''), (_hbE.cant && _hbE.cant.length ? '作れない ' + _hbE.cant.join(',') : ''), (_hbE.busy ? '作り直しは鍵待ちで見送り' : ''), (_hbE.ok === false && _hbE.error ? _hbE.error : '')].filter(Boolean).join('・') : ''; return _hbW ? ('ok・' + _hbW) : 'ok';   /* ★11/15 レビュー13：戻せなかった事を隠さない */
 }
 
 // ================= 業界ニュース（ゲーム/アニメ・日本/海外のRSS集約） =================
@@ -14712,9 +14829,10 @@ function tcgCron() { try { var r = tcgTick(false); console.log('tcgCron ' + JSON
 function tcgCronInstall_(p) {
   var removed = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'tcgCron') { ScriptApp.deleteTrigger(t); removed++; } });
-  if (String((p && p.off) || '') === '1') return { ok: true, removed: removed, created: '' };
+  if (String((p && p.off) || '') === '1') { hbBaseEdit_('tcgCron', false); return { ok: true, removed: removed, created: '' }; }   /* ★11/15 止まりの見張りの基準からも外す */
   var m = Math.max(5, Number((p && p.minutes) || 30));
   ScriptApp.newTrigger('tcgCron').timeBased().everyMinutes(m === 5 || m === 10 || m === 15 || m === 30 ? m : 30).create();
+  hbBaseEdit_('tcgCron', true);
   return { ok: true, removed: removed, created: 'everyMinutes(' + m + ')' };
 }
 
