@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0845'
+var SRC_VER = '20261115-0915'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2887,6 +2887,17 @@ function ufDead_() { return !!ufBlockedInfo_(); }
 /* ★2026-09-22 定期処理の入口。両方のアカウントが同じトリガーを持つので、
    ①自分の枠が死んでいたら降りる（相方が拾う）②取り札で二重実行を防ぐ。
    取り札の有効時間はその処理の間隔より短くする（長いと相方がずっと入れない）。 */
+/* 本体が1日の枠に断られているか（子の台から本体の uf_status を読む・10分に1回まで・読めなければ false＝今までどおり待つ） */
+function mainBlockedSeen_() {
+  if (!isChild_()) return false;
+  var c = null, s = null; try { c = CacheService.getScriptCache(); s = c.get('main_blocked_seen'); } catch (e) {}
+  if (s === '1') return true; if (s === '0') return false;
+  var b = false;
+  try { ufBump_(1, '本体の枠の確かめ（取り札の引き継ぎ）'); var t = UrlFetchApp.fetch(brokerUrl_() + (brokerUrl_().indexOf('?') >= 0 ? '&' : '?') + 'action=uf_status&callback=cb', { muteHttpExceptions: true }).getContentText();
+    var j = JSON.parse(String(t).replace(/^\s*[A-Za-z_$][\w$]*\(/, '').replace(/\)\s*;?\s*$/, '')); b = !!(j && j.blocked); } catch (e2) { b = false; }
+  try { if (c) c.put('main_blocked_seen', b ? '1' : '0', 600); } catch (e3) {}
+  return b;
+}
 function syncGate_(name, holdSec, mainTakesOver) {
   if (ufDead_()) { Logger.log(name + '：自分の接続枠が尽きているので、もう一方に任せます'); return false; }
   var k = 'sync_claim_' + name, me = (isChild_() ? 'child' : 'main') + ':' + Utilities.getUuid().slice(0, 8);
@@ -2896,7 +2907,8 @@ function syncGate_(name, holdSec, mainTakesOver) {
        前は「先に手を挙げた方がやる」だけ＝業務（注文・入金・返品）を2台目がかなり取っていて、2台目の枠（＝出品に回す分）が先に減っていた。
        → 【業務は本体】。2台目は、本体の最後の実行が取り札の2.2倍より古い（＝本体が枯れて手を挙げられない）時だけ代わりにやる。
          本体は枯れると手を挙げない（上の ufDead_）ので、取り札が古くなる＝2台目が引き継ぐ。本体が戻れば、次の回から本体に戻る。 */
-    if (isChild_() && cur && cur.at && String(cur.by || '').indexOf('main') === 0 && now_() - cur.at < Math.min((holdSec || 240) * 2.2, (holdSec || 240) + 9000)) {   /* 1.5倍だと syncOrdersAll（毎時・hold 2400秒）で境目。2.2倍だけだと1日1回の処理（hold 72000）は44時間待つ＝本体が朝に枯れた日は誰もやらない（2026-09-22 見直しで発見）→ 取り札＋2.5時間 を上限に */
+    if (isChild_() && cur && cur.at && String(cur.by || '').indexOf('main') === 0 && now_() - cur.at < Math.min((holdSec || 240) * 2.2, (holdSec || 240) + 9000)
+        && !(now_() - cur.at >= Math.min(holdSec || 240, 3600) && mainBlockedSeen_())) {   /* ★2026-11-15 05（00 の見張り 08:29・syncAll が132分・返品が470分 子の台に移らなかった）：本体が Google の1日の枠に断られていると分かれば、2.2倍を待たずに引き継ぐ（取り札の時間＝最長1時間は待つ） */   /* 1.5倍だと syncOrdersAll（毎時・hold 2400秒）で境目。2.2倍だけだと1日1回の処理（hold 72000）は44時間待つ＝本体が朝に枯れた日は誰もやらない（2026-09-22 見直しで発見）→ 取り札＋2.5時間 を上限に */
       Logger.log(name + '：本体が担当中（' + Math.round((now_() - cur.at) / 60) + '分前に実行）なので2台目は見送り'); return false;
     }
     /* ★2026-11-15 05 レビュー（3）：mainTakesOver＝本体は、取り札の主が子機（child*）なら新しくても見送らずに取りに行く（入金の同期だけ）。
@@ -9533,7 +9545,7 @@ function hbWatchRun_(me, heal) {
       var old = !pend && fail && now - fail > 86400000;   /* 押した時だけ動く物の昔の失敗は警告 */
       /* ★2026-11-15 05（00 の見張り 07:29）：本体アカウント（取込GAS と同じ Google アカウント）が1日の枠に断られている間の、取込GAS を呼ぶ口の失敗・時間切れは、止まりと分けて黄色で出す（17:00 に戻る） */
       var qWhy = String(f.why || '');
-      if ((HB_MAIN_BLOCKED_ || /回数が多すぎ|urlfetch/.test(qWhy)) && /^(pa_|follow|omsg|quote|ql|ack|mam|chat_un|health|sup|pb|rec)/i.test(String(f.fn))) {
+      if (HB_MAIN_BLOCKED_ || /回数が多すぎ|urlfetch|too many times/i.test(qWhy)) {   /* ★11/15 09 05（00 の見張り 08:29）：道具の項目は全部が取込GAS（本体アカウント）を呼ぶ＝名前で絞らない（postbox_sync が漏れていた） */
         add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: 'warn', why: '本体アカウントの1日の枠の断りの間（' + ufResetJstStr_() + ' に戻る）の見込み：' + qWhy.slice(0, 80) });
         return;
       }
