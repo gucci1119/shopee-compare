@@ -1833,7 +1833,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261115-0316';
+  const APP_BUILD = '20261115-0406';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -2329,7 +2329,9 @@
   }
   try {
     document.addEventListener('click', (e) => { const t = e.target && e.target.closest && e.target.closest('#ba-brake'); if (!t) return; try { lst.tab = 'auto'; localStorage.setItem('smdListTab', 'auto'); } catch (_) {} showPage('list'); });
-    setTimeout(() => { baBrakeBarTick().catch(() => {}); }, 20000); setInterval(() => { baBrakeBarTick().catch(() => {}); }, 10 * 60000);
+    /* ★2026-11-15 05（通信の効率化）：上の🛑の帯（表示だけ）は裏のタブでは読まない・前に出した時に10分より古ければ読み直す */
+    setTimeout(() => { baBrakeBarTick().catch(() => {}); }, 20000); setInterval(() => { if (document.hidden) return; window.__baBrakeAt = Date.now(); baBrakeBarTick().catch(() => {}); }, 10 * 60000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - (Number(window.__baBrakeAt) || 0) > 10 * 60000) { window.__baBrakeAt = Date.now(); baBrakeBarTick().catch(() => {}); } });
   } catch (_) {}
   function aiCostDraw() {
     const el = document.getElementById('ai-cost'); if (!el) return;
@@ -13613,7 +13615,10 @@
     })(); }
   // 枠の残りは開いた時に出し、あとは5分ごとに静かに更新する（この呼び出しは枠を使わない）
   try { const _e0 = document.getElementById('uf-quota'); if (_e0 && !_e0.textContent) ufPillRestore(_e0); } catch (_) {}   /* ★開いた瞬間に前回の値 */
-  try { setTimeout(() => { ufQuotaDraw(); setInterval(ufQuotaDraw, 300000); }, 800); } catch (_) {}
+  /* ★2026-11-15 05（通信の効率化）：上のピルの接続枠（GAS uf_status＋Supabase uf_ext_*）を、裏のタブでも5分ごとにタブの数だけ取っていた。
+     裏のタブは代表のタブだけ取る（担当PCの裏で回る処理の目安は残す）・前に出した時に5分より古ければすぐ取り直す。前→後：開いているタブ数×1日288回 → 表のタブ＋代表の1枚 */
+  try { setTimeout(() => { ufQuotaDraw(); setInterval(() => { if (document.hidden && !smdLeadTab()) return; ufQuotaDraw(); }, 300000); }, 800); } catch (_) {}
+  try { document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - (Number(window.__ufLastAt) || 0) > 300000) { try { ufQuotaDraw(); } catch (_) {} } }); } catch (_) {}
   try { aiCostDraw(); } catch (_) {}   // 💴 AI検索の使用額（保存済みの記録を起動時に出す）
   try { aiActualLoad().then(() => aiCostDraw()); } catch (_) {}   // 🧾 Console の実績を読んでから上のバーを実績に
   // 📍 見ていた場所を控える（再読み込みで戻すため）。書きすぎないよう300msに1回だけ。
@@ -15798,8 +15803,120 @@
   function sbBootDrop(table) {
     if (!SB_BOOT_TTL[table]) return;
     if (table === 'inventory') { stockHeld.rev++; stockHeld.at = 0; }
+    if (table === 'listings') { try { localStorage.setItem('smdLstdDirtyAt', String(Date.now())); } catch (_) {} }   /* ★2026-11-15 05（通信の効率化）：このPCで出品を書いた＝起動90秒の「控えをそのまま」を使わない（差分の控えは消さない＝次の読みで変わった行を読み直す） */
     idbKv('readwrite', st => { const r = st.openCursor(); r.onsuccess = () => { const c = r.result; if (!c) return; if (String(c.key).indexOf('boot|' + table + '|') === 0) c.delete(); c.continue(); }; return r; }).catch(() => {});
   }
+  /* ★2026-11-15 05（通信の効率化）：出品の表（listings・select=*・約8,100行・明細つき）を、タブを開くたび（ensureListings）・出品ログの毎時の反映（syncListingLog）・
+     自動処理の全店分（lstRawFullForAuto）・バリエ候補（ensureListingsCatalog）でそのつど丸ごと読んでいた（実測 1,000行あたり 1.3〜3.7MB・4か所の平均 2.65MB×約8,100行＝1回 約21MB・gzip 前の見当）。
+     → この端末の控え（IndexedDB・前に読んだ【生の DB の行】）と比べて、変わった行だけ明細つきで読み直す：
+       ① 明細（models）以外の全部の列を全行（row_updated_at 付き・1,000行あたり約0.9MB＝約7.4MB）。消えた行・増えた行・値段・在庫・画像・同期の時刻はここで今の値になる
+       ② 控えと row_updated_at が違う行（DB のトリガーが models・状態・名前・親SKU・店・重さ・明細数の変化で進める）と、控えに無い行だけ select=* で読み直す（ふだん数十〜数百行）
+       ③ ①の並び（create_time 降順→cc→item_id＝丸ごと読みと同じ）で組み、列の並びも丸ごと読みに合わせる。明細だけが控えから来る＝丸ごと読みと同じ中身。
+     丸ごと読みに戻す時：控えが無い・壊れた・最後の丸ごと読みから24時間・①が読めない/0件・②が2,000行超・知らない列が来た・row_updated_at の列が無い。🎭デモでは使わない（伏せた名前を控えない）。
+     控えは読んだ直後の生の行（販売数の補正などで画面用に書き換える前）を await で書き込む。同じ絞り込みの読みが重なったら1本にまとめ、後から来た方には写しを渡す（同じ物を書き換え合わない）。
+     見込み：1回 約21MB → 約7.5MB＋変わった行（数百KB）。1日1回は丸ごと読む。照合は window.__smdLstDeltaCheck()（丸ごと読みと比べて違う行の数を返す・約30MB 読むので手で1回だけ） */
+  function lstdCols() { return 'cc,item_id,name,image,status,parent_sku,price_min,price_max,stock,model_count,create_time,synced_at,shop_id,update_time,weight,has_video,images,video_url,row_updated_at'; }
+  function lstdS() { try { return window.__smdLstd || (window.__smdLstd = { inflight: {}, last: null, cleaned: false }); } catch (_) { return { inflight: {}, last: null, cleaned: true }; } }
+  function lstdClone(rows) { try { if (typeof structuredClone === 'function') return structuredClone(rows); } catch (_) {} return JSON.parse(JSON.stringify(rows)); }
+  function lstdDirtyAt() { try { return Number(localStorage.getItem('smdLstdDirtyAt') || 0); } catch (_) { return 0; } }
+  /* 決めた絞り込み（filt）を自分で付けて読む。sbGetAll は最初の await の前に絞り込みを決めるので、呼ぶ間だけ店の絞り込みを外す */
+  function lstdGet(qs, filt) { const r0 = state.rawRead; state.rawRead = true; try { return sbGetAll('listings', qs + (filt ? '&' + filt : '')); } finally { state.rawRead = r0; } }
+  function lstdFilt(raw) { const r0 = state.rawRead; if (raw) state.rawRead = true; try { return acctQs('listings', ''); } finally { state.rawRead = r0; } }
+  /* opts.raw＝店の絞り込みを外す（全店）／opts.fresh・opts.noFast＝起動90秒の「控えをそのまま」を使わない（書き込みの元に使う時は必ず noFast）／
+     opts.sel＝要る列だけ（'cc,item_id,…,models' の形・既定は select=*）。列ごとに別の控え。軽い読みもその列（＋row_updated_at）だけになる。返す行には row_updated_at の列が1つ増える */
+  function lstdPlan(sel, order) {
+    const ord = (order === '' ? '' : '&order=' + (order || 'create_time.desc.nullslast'));   /* order=''＝並びを指定しない（前の呼び方＝主キー順 cc,item_id） */
+    if (!sel || sel === '*') { const lc = lstdCols(); return { ord, sel: '*', light: lc, refetch: '*', known: new Set(lc.split(',').concat(['models'])) }; }
+    const cs = String(sel).split(',').map(x => x.trim()).filter(Boolean);
+    ['cc', 'item_id', 'models'].forEach(c => { if (cs.indexOf(c) < 0) cs.push(c); });
+    const orig = cs.join(',');   /* 呼んだ側の列（row_updated_at が無い時の読み直しに使う） */
+    if (cs.indexOf('row_updated_at') < 0) cs.push('row_updated_at');
+    return { ord, orig, sel: cs.join(','), light: cs.filter(c => c !== 'models').join(','), refetch: cs.join(','), known: new Set(cs) };
+  }
+  async function lstDeltaRows(opts) {
+    opts = opts || {};
+    const filt = lstdFilt(!!opts.raw);   /* ★最初の await の前に決める（呼んだ時の絞り込み） */
+    const plan = lstdPlan(opts.sel, opts.order);
+    if (demoOn()) return lstdGet('select=' + (plan.orig || plan.refetch) + plan.ord, filt);   /* 🎭デモは前と同じ読み（控えを使わない・作らない） */
+    const key = 'lstd|' + plan.sel + '|' + plan.ord + '|' + filt, S = lstdS();
+    const fly = S.inflight[key];
+    if (fly && (!fly.fast || !(opts.fresh || opts.noFast))) { const rows0 = await fly.p; return lstdClone(rows0); }   /* 読みかけに合流（写しを渡す） */
+    const p = lstdBody(key, filt, opts, plan);
+    S.inflight[key] = { p, fast: !(opts.fresh || opts.noFast) };
+    try { return await p; } finally { if (S.inflight[key] && S.inflight[key].p === p) delete S.inflight[key]; }
+  }
+  async function lstdBody(key, filt, opts, plan) {
+    const S = lstdS();
+    const known = plan.known;
+    let rec = null; try { rec = await idbKv('readonly', st => st.get(key)); } catch (_) { rec = null; }
+    const recOk = !!(rec && rec.v === 1 && Array.isArray(rec.rows) && rec.rows.length && Number(rec.fullAt) > 0 && Array.isArray(rec.cols) && rec.cols.indexOf('models') >= 0 && rec.cols.indexOf('row_updated_at') >= 0 && rec.cols.every(c => known.has(c)));
+    /* 開いてから90秒の間・控えが10分以内・その後このPCで出品を書いていない → 控えをそのまま（11/07 の起動時の控えと同じ扱い・通信0） */
+    if (recOk && !opts.fresh && !opts.noFast && (typeof performance !== 'undefined' ? performance.now() : 1e9) < 90000 && Date.now() - Number(rec.at || 0) < 10 * 60e3 && Number(rec.at || 0) > lstdDirtyAt()) {
+      S.last = { mode: 'boot', at: new Date().toISOString(), rows: rec.rows.length, key };
+      try { window.__smdBootHit = (window.__smdBootHit || 0) + 1; } catch (_) {}
+      return rec.rows;
+    }
+    let rows = null, mode = 'full', nCh = 0, why = recOk ? '' : '控えなし';
+    if (recOk && Date.now() - Number(rec.fullAt) >= 24 * 3600e3) why = '24時間ごとの丸ごと読み';
+    if (recOk && Date.now() - Number(rec.fullAt) < 24 * 3600e3) {
+      try {
+        const light = await lstdGet('select=' + plan.light + plan.ord, filt);
+        if (!Array.isArray(light) || !light.length) throw new Error('軽い列が0件');
+        const by = new Map(); rec.rows.forEach(r => { by.set(r.cc + '|' + r.item_id, r); });
+        const need = [];
+        light.forEach(b => { const c = by.get(b.cc + '|' + b.item_id); if (!c || !b.row_updated_at || String(c.row_updated_at || '') !== String(b.row_updated_at)) need.push(String(b.item_id)); });
+        const ids = [...new Set(need)];
+        if (ids.length > 2000) throw new Error('変わった行が多い（' + ids.length + '行）');
+        if (ids.some(x => !/^\d+$/.test(x))) throw new Error('数字でない item_id');
+        const fresh = new Map();
+        for (let i = 0; i < ids.length; i += 100) {
+          const part = await lstdGet('select=' + plan.refetch + '&item_id=in.(' + ids.slice(i, i + 100).join(',') + ')', filt);
+          (part || []).forEach(r => { const unk = Object.keys(r).filter(c => !known.has(c)); if (unk.length) throw new Error('知らない列 ' + unk.join(',')); fresh.set(r.cc + '|' + r.item_id, r); });
+        }
+        const cols = rec.cols;
+        rows = [];
+        light.forEach(b => {
+          const k = b.cc + '|' + b.item_id, f = fresh.get(k);
+          if (f) { const o = {}; cols.forEach(col => { o[col] = f[col]; }); Object.keys(f).forEach(col => { if (!(col in o)) o[col] = f[col]; }); rows.push(o); return; }
+          const c = by.get(k);
+          if (!c || String(c.row_updated_at || '') !== String(b.row_updated_at || '')) return;   /* 読み直しの間に消えた行 */
+          const o = {}; cols.forEach(col => { o[col] = (col === 'models') ? c.models : b[col]; });
+          rows.push(o);
+        });
+        mode = 'delta'; nCh = fresh.size;
+      } catch (e) { rows = null; why = String((e && e.message) || e).slice(0, 80); }
+    }
+    let cols = recOk ? rec.cols : null, fullAt = recOk ? Number(rec.fullAt) : 0;
+    if (!rows) {
+      try { rows = await lstdGet('select=' + plan.refetch + plan.ord, filt); }   /* 読めなければ今までどおり例外（空として返さない） */
+      catch (eF) { if (!plan.orig) throw eF; rows = await lstdGet('select=' + plan.orig + plan.ord, filt); why = 'row_updated_at を読めない＝前の列で読んだ（控えは作らない）'; }   /* row_updated_at の列が無い（戻した）時も、前と同じ列で必ず読む */
+      mode = 'full'; nCh = rows.length; fullAt = Date.now();
+      cols = rows.length ? Object.keys(rows[0]) : [];
+    }
+    const canKeep = rows.length && cols && cols.indexOf('row_updated_at') >= 0 && cols.indexOf('models') >= 0 && cols.every(c => known.has(c));
+    if (canKeep) { try { await idbKv('readwrite', st => st.put({ v: 1, at: Date.now(), fullAt, cols, rows }, key)); } catch (_) {} }   /* ★呼んだ側が書き換える前に控える（put の時点で写される） */
+    else if (mode === 'full' && rows.length) { try { if (!S.warned) { S.warned = true; console.warn('[出品の差分読み] 控えを作れない（列が想定と違う）＝毎回丸ごと読みます', cols); } } catch (_) {} }
+    if (!S.cleaned) { S.cleaned = true; idbKv('readwrite', st => { const r = st.openCursor(); r.onsuccess = () => { const c = r.result; if (!c) return; if (String(c.key).indexOf('boot|listings|') === 0) c.delete(); c.continue(); }; return r; }).catch(() => {}); }   /* 前の起動時の控え（丸ごと・約21MB）はもう使わない */
+    S.last = { mode, at: new Date().toISOString(), rows: rows.length, changed: nCh, why, key };
+    try { (S.log = S.log || []).push(S.last); if (S.log.length > 30) S.log.shift(); } catch (_) {}
+    return rows;
+  }
+  /* 照合の口（手で1回）：差分で組んだ表と丸ごと読みを比べ、違う行の数を返す。間に GAS が書くと数行ずれることがある（その時はもう一度）。
+     例：await window.__smdLstDeltaCheck()（全店・select=*）／await window.__smdLstDeltaCheck(true, 'cc,item_id,name,image,create_time,models,parent_sku')（出品ログの反映と同じ列） */
+  try {
+    window.__smdLstDeltaCheck = async function (raw, sel, order) {
+      const filt = lstdFilt(raw !== false), plan = lstdPlan(sel, order);
+      const a = await lstDeltaRows({ raw: raw !== false, noFast: true, sel, order }), info = Object.assign({}, lstdS().last);
+      const b = await lstdGet('select=' + plan.refetch + plan.ord, filt);
+      const norm = r => JSON.stringify(Object.keys(r).sort().reduce((o, k) => { o[k] = r[k]; return o; }, {}));
+      const ma = new Map(a.map(r => [r.cc + '|' + r.item_id, r]));
+      let diff = 0, keyOrder = 0; const sample = [];
+      b.forEach(r => { const k = r.cc + '|' + r.item_id, x = ma.get(k); if (!x || norm(x) !== norm(r)) { diff++; if (sample.length < 5) sample.push(k + (x ? '（中身が違う）' : '（差分の表に無い）')); } else if (Object.keys(x).join(',') !== Object.keys(r).join(',')) keyOrder++; ma.delete(k); });
+      const extra = [...ma.keys()];
+      const orderSame = a.length === b.length && a.every((r, i) => r.cc === b[i].cc && String(r.item_id) === String(b[i].item_id));
+      return { delta: a.length, full: b.length, diff, extra: extra.length, extraSample: extra.slice(0, 5), sample, orderSame, keyOrderDiff: keyOrder, info };
+    };
+  } catch (_) {}
   async function sbGetAll(table, qs) {
     qs = sbStableOrder(table, acctQs(table, qs));
     const key = settings.sbKey || settings.sbSecret;
@@ -24609,7 +24726,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         [inv, orders, rs, pss0] = await Promise.all([
           ensureInv(),
           sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
-          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen,stock_restore_state,stock_restore_manual,amz_class,price_adj_digest,cancel_stock_skip,cancel_stock_log,cancel_watch_state,boshu_dup_watch,llog_shift_watch,promo_back_skip,mam_patrol_seen,hb_watch)').catch(e => ({ __kvErr: e })),   /* ★2026-10-24 レビュー #1：失敗を空にしない（印を立てて画面とバッジに出す・キャッシュしない） */   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
+          /* ★2026-11-15 05（通信の効率化）：🤖の状態（boshu_auto_status・約437KB）は、ここでは「足した記録（added）」と「ブレーキ（brake）」しか使わない（下の baStA）。
+             その2つだけを DB で切り出して読む（約310KB）。ほかの鍵は今までどおり。1回の読み 約556KB → 約430KB。どちらかが読めなければ今までどおり全体を「読めなかった」にする */
+          Promise.all([
+            sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_seen,stock_restore_state,stock_restore_manual,amz_class,price_adj_digest,cancel_stock_skip,cancel_stock_log,cancel_watch_state,boshu_dup_watch,llog_shift_watch,promo_back_skip,mam_patrol_seen,hb_watch)'),
+            sbGetAll('app_kv', 'select=k,added:v->added,brake:v->brake&k=eq.boshu_auto_status'),
+          ]).then(([a0, b0]) => (a0 || []).concat((b0 || []).map(x => ({ k: x.k, v: { added: x.added, brake: x.brake } })))).catch(e => ({ __kvErr: e })),   /* ★2026-10-24 レビュー #1：失敗を空にしない（印を立てて画面とバッジに出す・キャッシュしない） */   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
           readPromoSnap(),   /* ★11/13 値下げの控えが残っている品物（上の k=in.(…) とは別の小さい1本） */
         ]);
         const kvErr0 = rs && rs.__kvErr ? rs.__kvErr : null; if (kvErr0) rs = [];
@@ -25386,7 +25508,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   //   ③📈事業計画：週ごとに 注文／出品1,000明細あたりの注文／🤖が足した分からの注文（7・14・28日）／キャンセル率と理由 を並べる
   const normVar = v => String(v || '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9぀-ヿ一-鿿]+/g, ' ').trim();
   async function lstDailySnap() {
-    if (!settings.sbSecret || demoOn() || !pcIsOwner()) return;
+    if (!settings.sbSecret || demoOn() || !pcIsOwner() || !smdLeadTab()) return;   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ（日の印の読みと書きの間に2枚が入ると同じ重い読みが2本） */
     const today = jstDate(Date.now());
     if (localStorage.getItem('smdLstSnapDay') === today) return;
     const cur = await sbGet('app_kv', 'select=v&k=eq.lst_daily').catch(() => null); if (cur === null) return;   /* 読めなければ書かない */
@@ -25470,7 +25592,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     await sbUpsert('app_kv', [{ k: AH_OLD, v: { m }, updated_at: new Date().toISOString() }]);
   }
   async function baAddedHist() {
-    if (!settings.sbSecret || demoOn() || !pcIsOwner()) return;
+    if (!settings.sbSecret || demoOn() || !pcIsOwner() || !smdLeadTab()) return;   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ（日の印の読みと書きの間に2枚が入ると同じ重い読みが2本） */
     const last = Number(localStorage.getItem('smdBaHistAt') || 0); if (Date.now() - last < 60 * 60 * 1000) return;
     localStorage.setItem('smdBaHistAt', String(Date.now()));
     const mr = await sbGet('app_kv', 'select=v&k=eq.' + AH_META).catch(() => null); if (mr === null) return;   /* 読めなければ書かない */
@@ -25512,7 +25634,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (_lstRawDay && _lstRawDay.day === today) { if (_lstRawDay.byCc) return { byCc: _lstRawDay.byCc, src: 'raw' }; if (_lstRawDay.p) return _lstRawDay.p; }
     try { if (localStorage.getItem('smdLstRawReadDay') === today) return { byCc: null, why: '全店分の読みは今日この PC で済み（タブを読み直したので明日まで見送り）' }; localStorage.setItem('smdLstRawReadDay', today); } catch (_) {}
     const p = (async () => {
-      let pR; { const r0 = state.rawRead; state.rawRead = true; try { pR = sbGetAll('listings', 'select=cc,item_id,name,status,stock,models'); } finally { state.rawRead = r0; } }
+      const pR = lstDeltaRows({ raw: true, noFast: true, sel: 'cc,item_id,name,status,stock,models', order: '' });   /* ★2026-11-15 05（通信の効率化）：全店分の差分読み（前と同じ列・中身は丸ごと読みと同じ） */
       try { const rows = await pR; const byCc = {}; (rows || []).forEach(r => { (byCc[r.cc] = byCc[r.cc] || []).push(r); }); _lstRawDay = { day: today, byCc }; return { byCc, src: 'raw' }; }
       catch (eR) { _lstRawDay = null; return { byCc: null, why: '全店分の出品の表を読めませんでした（' + String((eR && eR.message) || eR).slice(0, 60) + '）' }; }
     })();
@@ -25520,7 +25642,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return p;
   }
   async function deboostAutoFix(force) {
-    if (!force && (!pcIsOwner() || demoOn())) return null;
+    if (!force && (!pcIsOwner() || demoOn() || !smdLeadTab())) return null;   /* ★2026-11-15 05（通信の効率化）：自動の回は同じ PC の代表のタブだけ */
     if (!settings.writeToken || !settings.openapiUrl) return null;
     try { if (!force && Date.now() - Number(localStorage.getItem('smdDeboostFixAt') || 0) < 2 * 3600e3) return null; localStorage.setItem('smdDeboostFixAt', String(Date.now())); } catch (_) {}
     try { await ensureListings(); } catch (_) {}
@@ -25714,7 +25836,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   /* 担当PCが1日1回（6時以降）、今月のふりかえりを裏で計算して残す。利益の画面を開いている時は触らない（その画面が描けば残る） */
   async function plReviewDaily() {
     try {
-      if (!settings.sbSecret || demoOn() || !pcIsOwner()) return;
+      if (!settings.sbSecret || demoOn() || !pcIsOwner() || !smdLeadTab()) return;   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ（日の印の読みと書きの間に2枚が入ると同じ重い読みが2本） */
       const now = Date.now(), today = jstDate(now); if (new Date(now + 9 * 3600000).getUTCHours() < 6) return;
       if (localStorage.getItem('smdPlRvDay') === today) return;
       const h = await plReviewHistLoad(true); if (h && h[today]) { localStorage.setItem('smdPlRvDay', today); return; }
@@ -25734,7 +25856,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
      これで「売れ筋が在庫0で買えなかった」かを後から日ごとに見られる。読むだけ・Shopeeには書かない・GASの枠も使わない */
   async function stockSnapDaily() {
     try {
-      if (!settings.sbSecret || demoOn() || !pcIsOwner()) return;
+      if (!settings.sbSecret || demoOn() || !pcIsOwner() || !smdLeadTab()) return;   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ（日の印の読みと書きの間に2枚が入ると同じ重い読みが2本） */
       const now = Date.now(), today = jstDate(now); if (new Date(now + 9 * 3600000).getUTCHours() < 6) return;
       if (localStorage.getItem('smdStockSnapDay') === today) return;
       const k = 'stock_daily_' + today;
@@ -26864,6 +26986,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function inqLogTick(force) {
     if (!force && !pcIsOwner()) return { skipped: true };   // 🖥 担当のPCだけ
+    if (!force && !smdLeadTab()) return { skipped: true };   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ（inquiry_log 約200KB＋chat_interest を30分ごとにタブの数だけ読んでいた） */
     if (!(settings.sbKey || settings.sbSecret)) return { skipped: true };
     // 読めない時は書かない（空で上書きすると溜めた分が消える）
     const r0 = await sbGetAll('app_kv', 'select=v&k=eq.inquiry_log');
@@ -29155,6 +29278,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-15', items: [
+      '📶 <b>ポータルの通信を軽くしました</b>（本人「無駄な通信をしているところがあれば、効率化して軽くしてください」）：①出品の表は、前に読んだ控え（この端末）と比べて【変わった行だけ】明細つきで読み直す（開くたび約21MB→約7.5MB＋変わった行・出品ログの毎時の反映 約16MB→約2.3MB＋変わった行。中身と並びは丸ごと読みと同じ・1日1回は丸ごと読む） ②同じPCでポータルを何枚開いていても、自動の読み書き（出品ログの反映・写真集め・🤖巡回の起動・問い合わせの溜め・日次の記録・自動同期など）は1枚だけで回す（閉じると次のタブが引き継ぐ） ③上の接続枠・🛑の帯は裏のタブでは取りに行かない（前に出した時に取り直す） ④設定の共有は更新時刻だけ先に見て、変わっていなければ中身を読まない ⑤自動検知の🤖の状態は使う2項目だけ読む（約556KB→約430KB）。画面の数字・一覧は変わりません',
       '🛡 <b>全面改修の続き（別の目のレビューの7件）</b>：①見積もりの小窓が本体のタブの「②の割合・揃える」を持ち込んで②の割り振りが変わっていたのを止めた ②お客さんと約束した額（&price・&shopAmt・品物ごとの値段）を 0.5・1 の単位に丸めない＝払う額が合意より増えない（整数しか出せない VN・TW だけ整数に切り捨て・動いた時は返事に「（国の単位に切り捨て）」・Shopee が断ったらその誤りをそのまま返す） ③使い回す窓でも、新しい公開のたびに古い版なら読み直す ④店を絞ったまま・出品同期の後でも、降格の自動直しと在庫の毎日記録が自分で全店分を読んで動く（1日1回・担当のPC） ⑤⑥明細の詰め直しの付け替えは、その回の JAN の台帳と在庫0固定の保存が両方通ったかで決める（別の保存と取り違えない） ⑦失敗して開いたままの窓が読み直されても、失敗の理由を消さずに出す',
       '🛡 <b>壊れる筋道が分かっていた17か所を全面的に直しました</b>（本人「一生このエラーが起きないくらいの勢いで」「全面的に改修して」）：①古い版のまま開いた窓が自分の古さに気づけなかった→ページに版の印を埋め、チャットからの自動の窓は動く前に比べて古ければ1回だけ読み直す ②③決めた金額に端数があると「金額が一致しません」で止まっていた→国の値段の単位に丸めて通し、丸めた時は返事に「（国の単位に丸めた）」と出す・計算と3倍ずれていても約束の額は止めず ⚠ を付けて出す ④自動の窓が本体のタブの目標粗利・重さを持ち込み・書き戻していたのを止めた ⑤値段の指定が無く為替が読めていない時は既定のレートで足さず理由を返す ⑥出品の表が全店分読めていない時は降格の自動直しを見送る（重複の組の守りが空になるのを防ぐ） ⑦通信が切れた時の保存の失敗も赤い印に出す ⑧担当のPCが替わって入金予定の自動転記が止まると「見送り：担当でない」と🔔に出す ⑨DB同期で失敗した国があれば「一部失敗（国：…）」と出し最終同期の時刻を進めない ⑩統計の毎日の取り直しが通らなければ30分後にやり直す（1日5回まで） ⑪⑫明細の詰め直しの付け替えは保存が通ってから「当てた」にし、通らなければ在庫0固定も一緒に元へ戻す（2つずれない） ⑬同じPCの2つのタブが同じ仕事を二重に走らせない ⑭日次の出品の記録を店の絞り込みなしで取り、公開の数を正しく数える ⑮読めなかった時に「無い」と出さず「読めませんでした」と出す（🔔の入庫待ち・出品ログの仕入れ目安と下書き） ⑯自動の読み直しで同じ依頼をもう一度足さない ⑰為替の自動の読み直しで出品の途中に「見積もりの条件が変わりました」で止まらない',
       '⏱ <b>止まっている自動処理を「やること」に赤で出すようにしました</b>（本人「一生このエラーが起きないくらいの勢いで」）：同期・🤖・トレカ・キャンセルの見回り・あいさつ・転記・チャットの取り込み・AI の実績・4つの道具など、全部の自動処理の最後に動いた時刻を GAS の見張りが1時間ごとに見ます。決めた時間を超えた物は赤で出し、台のトリガーが欠けていれば見張りが自分で作り直します。',
@@ -34142,7 +34266,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   const lst = { tab: (function () { try { const t = localStorage.getItem('smdListTab') || 'status'; return t === 'plan' ? 'status' : t; } catch (_) { return 'status'; } })(), grid: (function () { try { return localStorage.getItem('smdListGrid') === '1'; } catch (_) { return false; } })(), started: false, wired: false, syncing: false, byCc: {}, filter: 'all', search: '', open: (function () { try { const a = JSON.parse(localStorage.getItem('smdListOpen') || '[]'); return new Set(Array.isArray(a) ? a : []); } catch (_) { return new Set(); } })(), costOpen: new Set(), covOpen: new Set(), note: '', ccs: (function () { try { const a = JSON.parse(localStorage.getItem('smdLstCcs') || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } })() };
   function listingsFromDb(fresh) {
-    return sbGetAllBoot('listings', 'select=*&order=create_time.desc.nullslast', fresh).then(rows => {
+    /* ★2026-11-15 05（通信の効率化）：丸ごと読み（約21MB）→ 差分読み（lstDeltaRows・約7.5MB＋変わった行）。中身・並びは丸ごと読みと同じ。起動90秒・10分以内の控えはそのまま（前と同じ） */
+    return lstDeltaRows({ fresh: !!fresh }).then(rows => {
       const byCc = {}; (rows || []).forEach(r => (byCc[r.cc] = byCc[r.cc] || []).push(r)); return byCc;
     });
   }
@@ -41093,6 +41218,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   const RV_SKIP = { busy: 0, collecting: 0, buy: 0, bridge: 0 };
   async function rvCollectTick() {
     if (!settings.sbSecret || demoOn() || !pcIsOwner()) return;
+    if (!smdLeadTab()) return;   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ（rvCollect.busy はタブの中だけの印＝2枚で同時にメルカリを叩きえた） */
     let last = 0; try { last = Number(localStorage.getItem('smdRvAt') || 0); } catch (_) {}
     if (Date.now() - last < 10 * 60000) return;
     if (rvCollect.busy) { RV_SKIP.busy++; return; }
@@ -41348,6 +41474,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!lst._statsDailyTimer) lst._statsDailyTimer = setInterval(async () => {
       try {
         if (typeof pcIsOwner === 'function' && !pcIsOwner()) return;
+        if (!smdLeadTab()) return;   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ */
         const jst = new Date(Date.now() + 9 * 3600000), ymd = jst.toISOString().slice(0, 10);
         if (jst.getUTCHours() < 17) return;
         if (localStorage.getItem('smdStatsDailyAt') === ymd) return;
@@ -41510,6 +41637,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     /* ★2026-10-09 レビュー：担当でないPCでも毎分 Supabase 4〜5回＋GAS を読んでから捨てていた。安い判定を先に（約6,000回/日→ほぼ0） */
     if (!force) {
       if (!pcIsOwner()) { try { window.__baCollectWhy = { at: new Date().toISOString(), why: '担当のPCではない' }; localStorage.setItem('smdBaCollectWhy', JSON.stringify(window.__baCollectWhy)); } catch (_) {} return; }
+      if (!smdLeadTab()) return;   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ（間隔の印 lst._baCollectAt はタブの中だけ＝2枚開くと写真集めが2本・Supabase とメルカリが2倍）。理由の印は代表のタブが書く */
       if (Date.now() - (lst._baCollectAt || 0) < BA_COLLECT_EVERY_MS) return;
       if (_buyBusyAny()) { try { localStorage.setItem('smdBaCollectWhy', JSON.stringify({ at: new Date().toISOString(), why: '仕入れ画面を開いているので休み' })); } catch (_) {} return; }
     }
@@ -41745,6 +41873,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   }
   async function baWebTick() {
     if (typeof pcIsOwner !== 'function' || !pcIsOwner()) return;
+    if (!smdLeadTab()) return;   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ（印 smdBaWebTick_* の読みと書きの間に2枚が入ると🤖巡回を2回起こしえた＝GAS が出品表を2回読む） */
     /* ★2026-10-12 ゲームの機種が空（一時停止中）なら🤖巡回を呼ばない。前は止めていても1時間に約20回、GAS が毎回約12MBを読んでから戻っていた＝Supabase が落ちた一因。
        売れた作品の他国在庫0は GAS の時間トリガーの回が軽い経路で続ける */
     try {
@@ -45903,6 +46032,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   const LISTLOG_EVERY_MS = 60 * 60 * 1000;
   const listLogAutoTick = () => { try {
     if (!pcIsOwner() || demoOn()) return;   // ポータルは裏のタブに居ることが多いので、裏でも動かす（Supabase の読み書きだけ）
+    if (!smdLeadTab()) return;   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ（印 smdListLogAutoAt の読みと書きの間に2枚が同時に入ると、丸読みが2本走っていた） */
     const last = Number(localStorage.getItem('smdListLogAutoAt') || 0);
     if (Date.now() - last < LISTLOG_EVERY_MS) return;
     localStorage.setItem('smdListLogAutoAt', String(Date.now()));
@@ -45949,7 +46079,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     const _rr0 = state.rawRead; let _pL, _pK; state.rawRead = true;
     /* ★2026-11-12 egress（事業本部）：仮行（model_id=0）の日付も読む。known は ymd を読んでいないので、仮行の日付の引き継ぎで ymd が undefined になり、
        JSON で ymd の項目だけ抜けて「PGRST102 項目がそろっていない」で書き込みが毎回 400 → 自動の反映が10分ごとに丸読みをやり直していた（11/11 02時〜11/12 16時） */
-    let _pZ; try { _pL = sbGetAll('listings', 'select=cc,item_id,name,image,create_time,models,parent_sku'); _pK = sbGetAll('listing_log', 'select=cc,item_id,model_id'); _pZ = sbGetAll('listing_log', 'select=cc,item_id,ymd&model_id=eq.0').catch(() => []); } finally { state.rawRead = _rr0; }
+    /* ★2026-11-15 05（通信の効率化）：出品の表は差分読み（lstDeltaRows・全店・起動時の控えは使わない＝DB の今と同じ中身）。毎時 約16MB → 約2.3MB＋変わった行（実測 1,000行あたり 明細つき約2.0MB・軽い列 約0.28MB。読む列は前と同じ） */
+    let _pZ; try { _pL = lstDeltaRows({ raw: true, noFast: true, sel: 'cc,item_id,name,image,create_time,models,parent_sku', order: '' }); _pK = sbGetAll('listing_log', 'select=cc,item_id,model_id'); _pZ = sbGetAll('listing_log', 'select=cc,item_id,ymd&model_id=eq.0').catch(() => []); } finally { state.rawRead = _rr0; }
     const [live, known, baKv, _llZero] = await Promise.all([
       _pL,
       _pK,
@@ -49396,7 +49527,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         sbGetAll('costs', 'select=cc,sn,cost,deposit,deposit_init'),
         sbGetAll('inventory', 'select=shopee_sn,price&shopee_sn=not.is.null'),
         /* ★2026-10-29 本人「なんでこんなに表示遅いの？」：出品（7,890行・明細付き 約30MB・推測）はポータルの起動時にも全件読んでいる（lst.byCc）＝🔄 の時だけ読み直し、普段は使い回す */
-        ((!force && lst.loaded && lst.byCc) ? Promise.resolve([].concat(...Object.values(lst.byCc))) : (!force && lst._ensureP && !lst.loaded) ? lst._ensureP.then(() => ((lst.loaded && lst.byCc && Object.keys(lst.byCc).length) ? [].concat(...Object.values(lst.byCc)) : sbGetAll('listings', 'select=cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku')))   /* ★2026-11-04 レビュー 10/31 中-9：口座の切り替えで lst.byCc＝{}・前の済んだ約束のまま＝空の一覧で「赤字0件」。読み終わっていなければ DB から読む */ : sbGetAll('listings', 'select=cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku')),   /* ★2026-10-25 親SKU＝トレカのフロントの見分け（列が1つ増えるだけ） */
+        ((!force && lst.loaded && lst.byCc) ? Promise.resolve([].concat(...Object.values(lst.byCc))) : (!force && lst._ensureP && !lst.loaded) ? lst._ensureP.then(() => ((lst.loaded && lst.byCc && Object.keys(lst.byCc).length) ? [].concat(...Object.values(lst.byCc)) : lstDeltaRows({ fresh: true, sel: 'cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku', order: '' })))   /* ★2026-11-04 レビュー 10/31 中-9：口座の切り替えで lst.byCc＝{}・前の済んだ約束のまま＝空の一覧で「赤字0件」。読み終わっていなければ DB から読む */ : lstDeltaRows({ fresh: true, sel: 'cc,item_id,shop_id,name,status,models,price_min,stock,weight,image,parent_sku', order: '' })),   /* ★2026-11-15 05（通信の効率化）：🔄の読み直しも差分読み（同じ列・DB の今と同じ中身・約17MB → 約2.7MB＋変わった行（軽い列の実測 1,000行あたり約0.33MB）） */   /* ★2026-10-25 親SKU＝トレカのフロントの見分け（列が1つ増えるだけ） */
         sbGetAll('app_kv', 'select=v&k=eq.price_adj_log').catch(() => null),
         sbGetAll('app_kv', 'select=v&k=eq.profit_sheet'),   // 📗利益計算表（仕入の3番目の控え・PayPal分）＝利益明細と同じ材料
         sbGetAll('app_kv', 'select=v&k=eq.front_items').catch(() => null),
@@ -50358,6 +50489,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   async function paDigestDaily() {
     try {
       if (typeof pcIsOwner === 'function' && !pcIsOwner()) return;
+      if (!smdLeadTab()) return;   /* ★2026-11-15 05（通信の効率化）：同じ PC の代表のタブだけ（値付けの数えは出品・注文を丸ごと読む） */
       if (state.acct && state.acct !== 'all') return;   /* ★2026-11-04 レビュー 10/31 中-9：口座を1つに絞った画面の材料で共有の数え（price_adj_digest）を書かない */
       const jst = new Date(Date.now() + 9 * 3600000), ymd = jst.toISOString().slice(0, 10);
       if (jst.getUTCHours() < 19) return;   /* 17時台の統計の取り直しと重ねない（Supabase の負荷） */
@@ -57883,7 +58015,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   let _listingCatalog = null;
   async function ensureListingsCatalog() {
     if (_listingCatalog) return _listingCatalog;
-    _listingCatalog = await sbGetAll('listings', 'select=cc,item_id,name,models');
+    _listingCatalog = await lstDeltaRows({ sel: 'cc,item_id,name,models', order: '' });   /* ★2026-11-15 05（通信の効率化）：明細つきの丸ごと読み → 差分読み（同じ絞り込み・同じ列・中身は同じ） */
     return _listingCatalog;
   }
   const vsNorm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -62023,14 +62155,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (indepCb) { indepCb.checked = !!settings.independentMode;
       indepCb.addEventListener('change', () => { settings.independentMode = indepCb.checked; saveSettings(); applyIndependentMode(); toast(indepCb.checked ? '🔗 独立運用モードON：スプシ連携UIを非表示にしました' : 'スプシ連携UIを再表示（並行稼働）'); }); } }
   applyIndependentMode();
+  /* ★2026-11-15 05（通信の効率化）：syncRunning はタブの中だけの印＝担当PCでポータルを2枚開くと、30分ごとの自動同期（GAS・中継）が2本走っていた。
+     同じ PC の別のタブが25分以内に始めていたら見送る（localStorage の取り札）。代表のタブに絞らないのは、中継のつながったタブで必ず走らせるため */
+  function syncAutoClaim_() { try { const last = Number(localStorage.getItem('smdSyncAutoAt') || 0); if (Date.now() - last < 25 * 60000) return false; localStorage.setItem('smdSyncAutoAt', String(Date.now())); } catch (_) {} return true; }
   setInterval(() => {
-    if (settings.syncAuto && pcIsOwner() && state.mode === 'live' && !syncRunning) {
+    if (settings.syncAuto && pcIsOwner() && state.mode === 'live' && !syncRunning && syncAutoClaim_()) {
       syncAll(t => { const el = document.getElementById('sync-status'); if (el) el.textContent = t; });
     }
   }, 30 * 60 * 1000);
   // 自動同期ONなら起動1分後に1回実行
   setTimeout(() => {
-    if (settings.syncAuto && pcIsOwner() && state.mode === 'live' && !syncRunning) {
+    if (settings.syncAuto && pcIsOwner() && state.mode === 'live' && !syncRunning && syncAutoClaim_()) {
       syncAll(t => { const el = document.getElementById('sync-status'); if (el) el.textContent = t; });
     }
   }, 60 * 1000);
@@ -63118,6 +63253,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     try { PC.id = localStorage.getItem('smdPcId') || ''; if (!PC.id) { PC.id = Math.random().toString(36).slice(2, 8); localStorage.setItem('smdPcId', PC.id); } PC.label = localStorage.getItem('smdPcLabel') || ('PC-' + PC.id.slice(0, 3)); } catch (_) { PC.id = PC.id || 'x' + Date.now().toString(36).slice(-5); PC.label = PC.label || 'PC'; }
   }
   function pcIsOwner() { if (!settings.sbSecret) return false; if (!PC.known) return PC.fails >= 3 && (function () { try { return localStorage.getItem('smdPcWasOwner') === '1'; } catch (_) { return false; } })();   /* ★2026-09-23 読めない時に引き継ぐのは【直前まで担当だったPC】だけ（2台とも担当になると外部サイトを二重に叩く） */ if (PC.last && Date.now() - PC.last > 5 * 60000) return false;   /* 確認し直しは定期の pcBeat に任せる（ここから呼ぶと pcDraw→pcIsOwner→pcBeat で連鎖する・Codex 指摘） */   /* ★2026-09-28 レビュー：担当の確認が5分以上とれていない（裏タブで凍結・通信失敗）なら、担当のつもりで動かない＝2台同時に動かない */ return !!(PC.owner && PC.owner.id === PC.id); }   // 3回続けて読めない＝1台運用とみなして動かす（全部止まるよりまし）
+  /* ★2026-11-15 05（通信の効率化）：同じ PC（同じ Chrome）でポータルを何枚開いていても、勝手に走る読み書き（出品ログの反映・写真集め・問い合わせの溜め・日次の記録など）は1枚だけで回す。
+     navigator.locks の取り札（smd-portal-lead）を最初に取ったタブが代表。閉じると次のタブが自動で引き継ぐ（止まらない）。裏のタブでも代表なら回す（担当PCのポータルは裏にいることが多い）。
+     locks が無いブラウザは今までどおり全部のタブで回す。前→後：開いているタブの数だけ同じ読みが走っていた → 1枚分 */
+  function smdLeadTab() {
+    try {
+      if (!navigator.locks || typeof navigator.locks.request !== 'function') return true;
+      if (!window.__smdLeadReq) {
+        window.__smdLeadReq = 1;
+        navigator.locks.request('smd-portal-lead', { mode: 'exclusive' }, () => { window.__smdLead = true; return new Promise(() => {}); }).catch(() => { window.__smdLeadFail = 1; });   /* 申し込みが失敗したら今までどおり（このタブでも回す）＝自動処理を止めない */
+      }
+      if (window.__smdLeadFail) return true;
+      return !!window.__smdLead;
+    } catch (_) { return true; }
+  }
   function pcPageLabel() { try { const b = document.querySelector('#smd-nav button.on'); return (b ? b.textContent.replace(/\s+/g, ' ').trim() : String(state.page || '')).slice(0, 24); } catch (_) { return ''; } }
   async function pcKvPut(k, v) { const key = settings.sbSecret; if (!key) return false; const r = await fetch(`${SB_URL}/rest/v1/app_kv?on_conflict=k`, { method: 'POST', headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify([{ k: k, v: v, updated_at: new Date().toISOString() }]) }); return r.ok; }
   async function pcKvRead() { const key = settings.sbSecret || settings.sbKey; const r = await fetch(`${SB_URL}/rest/v1/app_kv?select=k,v&k=like.pc_*`, { headers: { apikey: key, Authorization: 'Bearer ' + key } }); if (!r.ok) throw new Error('HTTP ' + r.status); const a = await r.json(); if (!Array.isArray(a)) throw new Error('bad'); return a; }
@@ -63199,6 +63348,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     try {
       if (!setsyncSnap) setsyncStamp();
       const key = settings.sbSecret || settings.sbKey;
+      /* ★2026-11-15 05（通信の効率化）：5分ごとに開いているタブの数だけ共有の設定（約6KB）を丸ごと読んでいた。先に更新時刻だけ読み（数十バイト）、
+         前に取り込んだ時と同じ・このタブで変えた設定も増えていなければ、中身は読まない（app_kv は中身が変わると updated_at が必ず進む＝10/29 のトリガー）。読めなければ今までどおり中身を読む */
+      const _maxKat = () => { let m = ''; try { const ka = settings._keyAt || {}; Object.keys(ka).forEach(k => { if (String(ka[k]) > m) m = String(ka[k]); }); } catch (_) {} return m; };
+      let _remoteAt = null;
+      try { const r0 = await fetch(`${SB_URL}/rest/v1/app_kv?select=updated_at&k=eq.portal_settings_shared`, { headers: { apikey: key, Authorization: 'Bearer ' + key } }); if (r0.ok) { const a0 = await r0.json(); if (Array.isArray(a0)) _remoteAt = String((a0[0] && a0[0].updated_at) || ''); } } catch (_) { _remoteAt = null; }
+      if (_remoteAt != null && window.__setsyncSeen && window.__setsyncSeen.at === _remoteAt && window.__setsyncSeen.kat === _maxKat()) return;
       const r = await fetch(`${SB_URL}/rest/v1/app_kv?select=v&k=eq.portal_settings_shared`, { headers: { apikey: key, Authorization: 'Bearer ' + key } });
       if (!r.ok) return;                                 // 読めない時は何もしない（空で上書きしない）
       const a = await r.json(); if (!Array.isArray(a)) return;
@@ -63227,6 +63382,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         try { toast('🔄 もう1台で変えた設定を取り込みました（' + took.length + '項目）'); } catch (_) {}
       }
       if (give && settings.sbSecret) { out.at = new Date().toISOString(); out.by = PC.id; out.label = PC.label; await pcKvPut('portal_settings_shared', out); }   // 失敗しても _keyAt が残る＝次の巡回でもう一度
+      /* ★2026-11-15 05（通信の効率化）：取り込みが済んだ時刻の印（書いた時は相手から見て updated_at が進むので、次の回は1回だけ中身を読み直して印を合わせる）。
+         書き出すべき物が残っている（書けない PC・書き込み失敗）時は印を付けない＝次も中身を読む */
+      if (_remoteAt != null) window.__setsyncSeen = give ? null : { at: _remoteAt, kat: _maxKat() };
     } finally { setsyncBusy = false; }
   }
 
@@ -63243,6 +63401,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
 
   (async function boot() {
+    try { smdLeadTab(); } catch (_) {}   /* ★2026-11-15 05（通信の効率化）：代表のタブの取り札を先に申し込む（取れたタブだけが自動の読み書きを回す） */
     await ensureAuth();          // ★ログイン突破まで先へ進めない（データ描画前にゲート）
     injectLogout();
     notifWire();                 // 🔔 お知らせ（届いた荷物）
