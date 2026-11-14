@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0730'
+var SRC_VER = '20261115-0750'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -3198,7 +3198,7 @@ function shop3CandidateRead_(p) {
       String(target[0].label || '').trim().toLowerCase() !== expectedLabel || !getToken_(Number(id))) {
     throw new Error('第3店の登録と認可が一致しません');
   }
-  var out = { ok:true, market:market, shop_id:id, shopLabel:String(target[0].label), checkedAt:new Date().toISOString(), canPublish:!isChild_(),
+  var out = { ok:true, market:market, shop_id:id, shopLabel:String(target[0].label), checkedAt:new Date().toISOString(), canPublish:shop3PubHome_().here,
     cap:null, used:null, matches:[], duplicate:'unverified' };
   try {
     var lr = callShop_(Number(id), '/api/v2/product/get_item_limit', {}, 'get');
@@ -6148,8 +6148,8 @@ function baCondFor_(name, given) {
 // 店ごとの8区画に分け、5店合計の値を最大180,000バイトに抑える。
 // 送信前の札だけ10分で失効。送信後の成否が不明なら、期限で再送できるようにしない。
 function shop3PublishReceipt_(claim, phase, itemId) {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) throw new Error('第3店の公開控えが使用中です');
+  var lock = shop3PubLock_();   /* ★2026-11-15 05：🤖・トレカの巡回が ScriptLock を数分持つので、第3の控えは別の錠（UserLock）にした。子の台で 07:12 から『使用中』で断られていた */
+  if (!lock.tryLock(10000)) throw new Error('第3店の公開控えが使用中です');
   try {
     var props = P_(), shards = {}, changes = {};
     var reserved = 'r:' + claim.at + ':' + claim.owner;
@@ -6233,6 +6233,8 @@ function shop3PubHome_() {
   var off = pr.getProperty('SHOP3_PUB_OFF') || '';
   return off ? { here: false, why: '第3店の公開は ' + off + ' へ移しました（本体では公開しません）' } : { here: true };
 }
+/* 第3の公開控え専用の錠。トリガーも /exec も持ち主（同じ人）として動くので、UserLock はこのプロジェクトの中で ScriptLock と別の1本の錠として働く。ほかに UserLock を使う所は無い */
+function shop3PubLock_() { return LockService.getUserLock(); }
 var SHOP3_PUB_VAL_RE = /^(?:[rp]:\d+:[\w-]+|[isa]:[1-9]\d*)$/;
 function shop3PubShards_() {
   var all = P_().getProperties(), out = {};
@@ -6241,7 +6243,7 @@ function shop3PubShards_() {
 }
 /* 今の受け持ちが呼ばれる：自分を止めてから控えを全部返す（何度呼ばれても同じ控えを返す） */
 function shop3PubHandoff_(to) {
-  var lock = LockService.getScriptLock(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（少し待ってもう一度）');
+  var lock = shop3PubLock_(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（少し待ってもう一度）');
   try {
     var pr = P_(), who = String(to || '').replace(/[^\w-]/g, '').slice(0, 20) || 'child';
     if (isChild_()) pr.deleteProperty('SHOP3_PUB_ON'); else pr.setProperty('SHOP3_PUB_OFF', who);
@@ -6257,7 +6259,7 @@ function shop3PubTake_(src, token) {
   var txt = UrlFetchApp.fetch(url + '?action=shop3_pub_handoff&to=' + encodeURIComponent(baRunnerId_()) + '&token=' + encodeURIComponent(token) + '&callback=cb', { muteHttpExceptions: true }).getContentText();
   var j = null; try { j = JSON.parse(String(txt).replace(/^\s*[A-Za-z_$][\w$]*\(/, '').replace(/\)\s*;?\s*$/, '')); } catch (e) { j = null; }
   if (!j || !j.ok || !j.shards || typeof j.shards !== 'object') throw new Error('今の受け持ちから控えを受け取れませんでした（どの台も公開しない状態です・もう一度 take を）：' + String(txt).slice(0, 160));
-  var lock = LockService.getScriptLock(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（もう一度 take を）');
+  var lock = shop3PubLock_(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（もう一度 take を）');
   try {
     var pr = P_(), rank = function (v) { var c = String(v || '').charAt(0); return { r: 1, p: 2, i: 3, s: 4, a: 5 }[c] || 0; }, add = 0, kept = 0, toP = 0;
     Object.keys(j.shards).forEach(function (k) {
