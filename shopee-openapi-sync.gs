@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261114-2234'
+var SRC_VER = '20261115-0205'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -567,6 +567,20 @@ function doGetInner_(e) {
         _io = { ok: true, hasKey: !!P_().getProperty('INGEST_KEY'), req: P_().getProperty('INGEST_REQ') === '1', seen: _seen, src: SRC_VER };
       } catch (err) { _io = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(_icb + '(' + JSON.stringify(_io) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'hb_ensure' || p.action === 'hb_watch_run' || p.action === 'hb_watch_setup') {   /* ★2026-11-15 05 止まりの見張り */
+      var _hcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), _ho;
+      try {
+        var _hwt = P_().getProperty('WRITE_TOKEN'); if (!_hwt || p.token !== _hwt) throw new Error('WRITE_TOKEN不正');
+        if (p.action === 'hb_ensure') _ho = hbEnsureTriggers_(p.snap === '1');
+        else if (p.action === 'hb_watch_setup') {
+          var _hme = baRunnerId_(); if (_hme !== 'child3' && _hme !== 'child2') throw new Error('見張りは4台目・3台目だけ（この台は ' + _hme + '）');
+          var _hhas = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'hbWatchTick'; });
+          if (!_hhas) ScriptApp.newTrigger('hbWatchTick').timeBased().everyHours(1).create();
+          _ho = { ok: true, runner: _hme, had: _hhas, triggers: hbTrigNow_() };
+        } else { var _hr = hbWatchRun_(baRunnerId_()); if (p.write === '1') baKvSet_('hb_watch', _hr); _ho = { ok: true, wrote: p.write === '1', watch: _hr }; }
+      } catch (_he) { _ho = { ok: false, error: String((_he && _he.message) || _he) }; }
+      return ContentService.createTextOutput(_hcb + '(' + JSON.stringify(_ho) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'setup_triggers') {
       var _scb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -9096,6 +9110,144 @@ function dailyAdjustmentsCheckBody_() {
   return { newCount: fresh.length };
 }
 
+/* ═══ ⏱ 止まりの見張り（2026-11-15 05・本人「一生このエラーが起きないくらいの勢いで」・ノート 30_止まりの型と全面改修 の型 A）
+   全部の自動処理の「最後に動いた時刻」を1か所（app_kv hb_watch）に集め、1時間ごとに見る。決めた時間を超えた物は赤。
+   立て直し：止まった台のトリガーが「前に動いていた一覧」（app_kv hb_trig_<台>・hb_ensure&snap=1 で取る）から欠けていたら、その台の /exec hb_ensure で作り直す（1つの台につき3時間に1回まで）。
+   動くのは4台目（child3）。4台目が止まった時（hb_watch が90分より古い）は3台目（child2）が代わりに見る。
+   読む物は小さい：app_kv の更新時刻だけ（中身は読まない・ai_actual と🤖の状態は必要な所だけ）＋4台の /exec を各2回（1時間8回・1日約190回） */
+var HB_EXEC_ = {
+  main: 'https://script.google.com/macros/s/AKfycbwbCbQpW0ZrsnWQ4WMX5FXDinIEd8DkVwikbFSjxbkss2NFl72dhZoiLJt-mqUEBLG7yA/exec',
+  child: 'https://script.google.com/macros/s/AKfycbzmh47e-hl6FvJA6-1CEjvdDSLkON-hQXXA6glvFdXRCQo9k6viM6RcawKLv9XGxlyi/exec',
+  child2: 'https://script.google.com/macros/s/AKfycbx1QS5CTVC2X04GjI80X88KuJNMlH1iEKwGSD2LakQCnbCbEGSbel9HOrRheXZdOpeO/exec',
+  child3: 'https://script.google.com/macros/s/AKfycbxV02tSfDsnAB82XXwZWSALAt2H1g41wZ5uMsn1D-u9TJ4lilLRZeAQWXLOfR-r2Qzasg/exec'
+};
+var HB_NAME_ = { main: '本体', child: '2台目', child2: '3台目', child3: '4台目' };
+/* 控えの鍵 → [名前, 何分より古いと赤, 中身の時刻の場所（無ければ更新時刻）] */
+var HB_KV_ = [
+  ['orders_sync_last', '注文の同期', 90],
+  ['sync_claim_syncAll', '同期（syncAll・在庫の自動復活ほか）', 90],
+  ['sync_claim_syncListingsRoundRobin', '出品の同期', 70],
+  ['sync_claim_boostTick', 'Bump', 70],
+  ['sync_claim_condIndexTick', '状態写真の索引', 40],
+  ['cancel_watch_state', 'キャンセルの見回り', 40],
+  ['boshu_auto_status', '🤖自動出品（2台目）', 60],
+  ['boshu_auto_status_child2', '🤖自動出品（3台目）', 60],
+  ['tcg_auto_status', '🃏トレカ（2台目）', 60],
+  ['tcg_auto_status_child2', '🃏トレカ（3台目）', 60],
+  ['tcg_auto_status_child3', '🃏トレカ（4台目）', 60],
+  ['boshu_revalue', '相場の見直し（4台目）', 180],
+  ['mam_patrol_seen', '購入後あいさつの見回り（メルカリのタブ）', 60],
+  ['rowsync_last', '利益管理表への転記（Seller Center のタブ）', 300],
+  ['chat_sender_hb', 'Shopee チャットの取り込み（webchat のタブ）', 60],
+  ['uf_ext_mercari', '仕入れの取り込み（取込GAS）', 90],
+  ['profit_sheet', '利益管理表の取り込み', 1560],
+  ['ai_actual', 'AI の実績（コスト画面のタブ）', 1800, 'at']
+];
+function hbExec_(who, qs) {
+  var u = HB_EXEC_[who]; if (!u) return { http: 0, err: 'URL なし' };
+  try {
+    ufBump_(1, '見張り(/exec)');
+    var r = UrlFetchApp.fetch(u + (u.indexOf('?') >= 0 ? '&' : '?') + qs + '&callback=cb', { muteHttpExceptions: true, followRedirects: true });
+    var code = r.getResponseCode(), t = String(r.getContentText() || ''), m = t.match(/^\s*cb\(([\s\S]*)\)\s*;?\s*$/);
+    var j = null; try { j = JSON.parse(m ? m[1] : t); } catch (e) { j = null; }
+    return { http: code, j: j, err: j ? '' : ('返事が読めない（HTTP ' + code + '）') };
+  } catch (e) { return { http: 0, err: String((e && e.message) || e).slice(0, 120) }; }
+}
+/* その台の今のトリガー（関数名の一覧）。自分の台は直接読む */
+function hbTrigNow_() { return ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }).sort(); }
+/* 欠けたトリガーを作る（作り方の表。表に無い物は作らない＝知らせだけ） */
+function hbMakeTrigger_(fn) {
+  var T = function (f) { return ScriptApp.newTrigger(f).timeBased(); };
+  switch (fn) {
+    case 'syncAll': case 'syncOrdersAll': T(fn).everyHours(1).create(); return true;
+    case 'syncEscrowAll': case 'syncPayoutsAll': case 'syncReturnsAll': T(fn).everyHours(6).create(); return true;
+    case 'recheckEscrowForReturns': T(fn).everyDays(3).atHour(4).create(); return true;
+    case 'backfillEscrowUnchanged': T(fn).everyDays(1).atHour(5).create(); return true;
+    case 'syncListingStats': case 'boshuAutoRecheck': T(fn).everyDays(1).atHour(4).create(); return true;
+    case 'dailyAdjustmentsCheck': T(fn).everyDays(1).atHour(7).create(); return true;
+    case 'syncListingsRoundRobin': case 'boostTick': case 'tcgCron': T(fn).everyMinutes(30).create(); return true;
+    case 'condIndexTick': T(fn).everyMinutes(10).create(); return true;
+    case 'cancelWatchTick': T(fn).everyMinutes(15).create(); return true;
+    case 'boshuRevalueTick': case 'hbWatchTick': T(fn).everyHours(1).create(); return true;
+    case 'boshuAutoTick': setupBoshuAutoTrigger(); return true;
+    default: return false;
+  }
+}
+/* 前に動いていた一覧（app_kv hb_trig_<台>）と比べて、欠けた物を作る。snap=true の時は今の一覧を「前に動いていた一覧」として控える */
+function hbEnsureTriggers_(snap) {
+  var me = baRunnerId_(), key = 'hb_trig_' + me, now = hbTrigNow_();
+  if (snap) { baKvSet_(key, { at: new Date().toISOString(), fns: now, src: SRC_VER }); return { ok: true, snap: true, runner: me, fns: now }; }
+  var base = baKvFresh_(key);
+  if (!base || !Array.isArray(base.fns)) return { ok: false, runner: me, error: '前に動いていた一覧（' + key + '）がまだ無い＝hb_ensure&snap=1 で先に取る', now: now };
+  var have = {}; now.forEach(function (f) { have[f] = (have[f] || 0) + 1; });
+  var missing = base.fns.filter(function (f) { return !have[f]; }), made = [], cant = [];
+  missing.forEach(function (f) { try { if (hbMakeTrigger_(f)) made.push(f); else cant.push(f); } catch (e) { cant.push(f + '（' + String((e && e.message) || e).slice(0, 60) + '）'); } });
+  return { ok: true, runner: me, missing: missing, made: made, cant: cant, now: hbTrigNow_() };
+}
+function hbWatchTick() {
+  var me = baRunnerId_();
+  if (me !== 'child3' && me !== 'child2') return;
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return;
+  try {
+    if (me === 'child2') {   /* 3台目は予備：4台目の見張りが90分以内に書いていれば何もしない */
+      var cur = null; try { var r0 = sbSelect_('app_kv', 'select=updated_at,by:v->by&k=eq.hb_watch'); cur = r0 && r0[0]; } catch (e0) { cur = null; }
+      if (cur && cur.by === 'child3' && Date.now() - Date.parse(cur.updated_at) < 90 * 60000) return;
+    }
+    var out = hbWatchRun_(me);
+    baKvSet_('hb_watch', out);
+  } finally { lock.releaseLock(); }
+}
+function hbWatchRun_(me) {
+  var now = Date.now(), items = [], P = P_();
+  var add = function (it) { it.ageMin = (it.last ? Math.round((now - Date.parse(it.last)) / 60000) : null); items.push(it); };
+  /* ① 4台の /exec：答えるか・版がそろっているか・枠が止まっていないか・トリガーが欠けていないか */
+  ['main', 'child', 'child2', 'child3'].forEach(function (who) {
+    var nm = HB_NAME_[who], st = hbExec_(who, 'action=uf_status');
+    if (!st.j || st.j.ok === false) { add({ id: 'exec_' + who, name: nm + 'の GAS（/exec）', state: 'red', why: '答えない：' + (st.err || ('HTTP ' + st.http)) + '＝アカウントのログイン・承認の切れの見込み（人の操作が要る）', last: null }); return; }
+    if (st.j.src && st.j.src !== SRC_VER) add({ id: 'src_' + who, name: nm + 'の GAS の版', state: 'warn', why: '版が違う（' + st.j.src + '・見張りの台は ' + SRC_VER + '）', last: null });
+    if (st.j.blocked) add({ id: 'quota_' + who, name: nm + 'の接続枠', state: 'warn', why: 'Google の1日の枠に断られて止まっている（' + String(st.j.blockedAt || '').slice(0, 16) + 'Z〜・翌日17時に戻る）', last: null });
+    var tg = hbExec_(who, 'action=promo_status&token=' + encodeURIComponent(P.getProperty('WRITE_TOKEN') || ''));
+    var fns = (tg.j && Array.isArray(tg.j.triggers)) ? tg.j.triggers : null;
+    var base = null; try { base = baKvFresh_('hb_trig_' + who); } catch (eB) { base = null; }
+    if (fns && base && Array.isArray(base.fns)) {
+      var have = {}; fns.forEach(function (f) { have[f] = 1; });
+      var miss = base.fns.filter(function (f) { return !have[f]; });
+      if (miss.length) {
+        var hk = 'HB_HEAL_' + who, last = Number(P.getProperty(hk) || 0), healed = null;
+        if (now - last > 3 * 3600 * 1000) { P.setProperty(hk, String(now)); var h = hbExec_(who, 'action=hb_ensure&token=' + encodeURIComponent(P.getProperty('WRITE_TOKEN') || '')); healed = h.j || { error: h.err }; }
+        add({ id: 'trig_' + who, name: nm + 'のトリガー', state: healed && healed.made && healed.made.length === miss.length ? 'warn' : 'red', why: '欠けていた：' + miss.join('・') + (healed ? '→ 作り直した：' + ((healed.made || []).join('・') || 'なし') + ((healed.cant || []).length ? '・作れない：' + healed.cant.join('・') : '') + (healed.error ? '・' + healed.error : '') : '（作り直しは3時間に1回まで・次の回）'), last: null });
+      }
+    } else if (!base) add({ id: 'trigbase_' + who, name: nm + 'のトリガーの基準', state: 'warn', why: '前に動いていた一覧がまだ無い（hb_ensure&snap=1 で取る）', last: null });
+  });
+  /* ② 自動処理の控えの時刻（更新時刻だけ読む） */
+  var keys = HB_KV_.map(function (x) { return x[0]; });
+  var rows = null; try { rows = sbSelect_('app_kv', 'select=k,updated_at,at:v->>at,brake:v->brake&k=in.(' + keys.join(',') + ')'); } catch (eR) { rows = null; }
+  if (!rows) add({ id: 'kv_read', name: '控えの読み（Supabase）', state: 'red', why: '読めなかった＝この回は時刻を見ていない（0件ではない）', last: null });
+  else {
+    var byK = {}; rows.forEach(function (r) { byK[r.k] = r; });
+    HB_KV_.forEach(function (x) {
+      var r = byK[x[0]], last = r ? (x[3] === 'at' ? (r.at || r.updated_at) : r.updated_at) : null;
+      var age = last ? (now - Date.parse(last)) / 60000 : null;
+      var it = { id: 'kv_' + x[0], name: x[1], last: last, maxMin: x[2], state: (!last || age > x[2]) ? 'red' : 'ok', why: !last ? '記録が無い' : (age > x[2] ? Math.round(age) + '分動いていない（線 ' + x[2] + '分）' : '') };
+      if (r && r.brake && r.brake.at && /^boshu_auto_status/.test(x[0])) { it.state = 'red'; it.why = '🛑 ブレーキで止まっている（' + String(r.brake.why || '').slice(0, 80) + '）＝ポータルの ▶ 再開が要る'; }
+      add(it);
+    });
+  }
+  /* ③ 道具（SR・WA・Zalo・Viber）の health_<tool>_<pc>（03 の道具が30分ごとに送る） */
+  var hs = null; try { hs = sbSelect_('app_kv', 'select=k,v,updated_at&k=like.health_*&limit=40'); } catch (eH) { hs = null; }
+  (hs || []).forEach(function (r) {
+    var v = r.v || {}, tag = String(v.tool || '').toUpperCase() + '（' + String(v.pc || '') + '）', at = Date.parse(r.updated_at);
+    if (now - at > 90 * 60000) { add({ id: r.k, name: tag + ' の道具', last: r.updated_at, maxMin: 90, state: 'red', why: Math.round((now - at) / 60000) + '分 知らせが来ない＝タブが閉じた・止まった見込み' }); return; }
+    (v.items || []).forEach(function (f) {
+      var mx = Number(f.maxMin) || 60, ok = Number(f.okAt) || 0, fail = Number(f.failAt) || 0, pend = Number(f.pending) || 0;
+      var stale = !ok || (now - ok) / 60000 > mx, bad = stale && (fail > ok || pend > 0);
+      if (bad) add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: 'red', why: (f.why ? String(f.why).slice(0, 120) : (pend ? '待ち ' + pend + '件があるのに' : '失敗の後') + ' ' + mx + '分 成功が無い') });
+    });
+  });
+  var red = items.filter(function (x) { return x.state === 'red'; }).length, warn = items.filter(function (x) { return x.state === 'warn'; }).length;
+  return { at: new Date().toISOString(), by: me, src: SRC_VER, red: red, warn: warn, items: items };
+}
+
 function setupTriggers() {
   // ★ここは【全トリガーを消して作り直す】。作り直す一覧に入れ忘れた同期は、
   //   実行した瞬間に黙って止まる。実際 syncReturnsAll（返品リクエストの取り込み）が
@@ -9132,7 +9284,9 @@ function setupTriggers() {
   // ★SLS+補償が入ったかを毎朝チェックしてメール通知（入るのが数か月遅れるので、毎日見に行かないと気づけない）
   ScriptApp.newTrigger('syncReturnsAll').timeBased().everyHours(6).create();   // ★入れ忘れると返品の取り込みが止まる
   ScriptApp.newTrigger('dailyAdjustmentsCheck').timeBased().everyDays(1).atHour(7).create();
-  Logger.log('✅ トリガー設定'); return 'ok';
+  /* ★2026-11-15 05（型 E）：上で全部消すので、一覧に無いトリガー（cancelWatchTick・tcgCron・boshuRevalueTick・hbWatchTick など）は前に動いていた一覧（hb_trig_<台>）から戻す。一覧がまだ無ければ何もしない */
+  var _hbE = null; try { _hbE = hbEnsureTriggers_(false); } catch (eHb) { _hbE = { ok: false, error: String(eHb).slice(0, 80) }; }
+  Logger.log('✅ トリガー設定' + (_hbE ? ' ' + JSON.stringify(_hbE).slice(0, 200) : '')); return _hbE && _hbE.made && _hbE.made.length ? ('ok・戻した ' + _hbE.made.join(',')) : 'ok';
 }
 
 // ================= 業界ニュース（ゲーム/アニメ・日本/海外のRSS集約） =================

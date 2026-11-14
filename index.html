@@ -24451,7 +24451,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function alertToShip_(orders) { return (orders || []).filter(o => /to ?ship/i.test(o.status || '') && !o.tracking && !alertSelfTransit_(o)); }
   function alertLate_(orders) { return (orders || []).filter(o => o.tab === 300 && o.tracking && /to ?ship|processed/i.test(o.status || '') && !alertSelfTransit_(o) && ordDueBucket({ tab: 300, shipBy: o.ship_by, cc: o.cc }) === 'over'); }
   function alertBadgeSet_(k, ship, late) {
-    const total = k.rest + ship + late, urgentN = ship + late + k.eli + k.rowsync + (k.brake ? 1 : 0);
+    const total = k.rest + ship + late, urgentN = ship + late + k.eli + k.rowsync + (k.brake ? 1 : 0) + (k.hb || 0);
     updateAlertBadge(total, urgentN, (k.kvErr ? '⚠ 一部の記録を読めず未確認（ELI・転記停止・🤖・在庫0・値付け）・' : '') + '急ぎ ' + urgentN + '件（未手配 ' + ship + '／伝票済みで期限超過 ' + late + '／ELI ' + k.eli + '／転記停止 ' + k.rowsync + (k.brake ? '／🤖自動ブレーキ' : '') + '）・そのほかの片付けもの ' + (total - urgentN) + '件', k.kvErr);
   }
   function alertBadgeTick_() {
@@ -24477,7 +24477,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         [inv, orders, rs, pss0] = await Promise.all([
           ensureInv(),
           sbGetAll('orders', 'select=cc,sn,order_id,buyer,status,ship_by,items,tab,tracking,order_date&tab=lt.500&order=ship_by.asc'),
-          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen,stock_restore_state,stock_restore_manual,amz_class,price_adj_digest,cancel_stock_skip,cancel_stock_log,cancel_watch_state,boshu_dup_watch,llog_shift_watch,promo_back_skip,mam_patrol_seen)').catch(e => ({ __kvErr: e })),   /* ★2026-10-24 レビュー #1：失敗を空にしない（印を立てて画面とバッジに出す・キャッシュしない） */   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
+          sbGetAll('app_kv', 'select=k,v&k=in.(rowsync_last,eli_cases,boshu_auto_status,boshu_auto_seen,stock_restore_state,stock_restore_manual,amz_class,price_adj_digest,cancel_stock_skip,cancel_stock_log,cancel_watch_state,boshu_dup_watch,llog_shift_watch,promo_back_skip,mam_patrol_seen,hb_watch)').catch(e => ({ __kvErr: e })),   /* ★2026-10-24 レビュー #1：失敗を空にしない（印を立てて画面とバッジに出す・キャッシュしない） */   // 📄SCタブ側転記の生存記録（GAS rowsync_ping が書く）＋🔋ELI（GAS eliMailScan_ が書く）
           readPromoSnap(),   /* ★11/13 値下げの控えが残っている品物（上の k=in.(…) とは別の小さい1本） */
         ]);
         const kvErr0 = rs && rs.__kvErr ? rs.__kvErr : null; if (kvErr0) rs = [];
@@ -24488,6 +24488,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         renderAlerts._cache.cancelSkip = ((rs || []).find(x => x.k === 'cancel_stock_skip') || {}).v || null;
         renderAlerts._cache.promoBack = ((rs || []).find(x => x.k === 'promo_back_skip') || {}).v || null;
         renderAlerts._cache.mamSeen = ((rs || []).find(x => x.k === 'mam_patrol_seen') || {}).v || null;   /* ★11/13 メルカリのあいさつの見回りが最後に候補を聞きに来た時刻（GAS mamPending_・30分に1回書く） */   /* ★11/13 値下げに戻せなかった明細（GAS priceRelockPromo_） */
+        renderAlerts._cache.hb = ((rs || []).find(x => x.k === 'hb_watch') || {}).v || null;   /* ★2026-11-15 05 止まりの見張り（GAS hbWatchTick・1時間ごと） */
         renderAlerts._cache.promoSnap = pss0;   /* ★11/13 値下げの控えが残っている品物（readPromoSnap・読めない時は { err }） */
         renderAlerts._cache.cancelLog = ((rs || []).find(x => x.k === 'cancel_stock_log') || {}).v || null; renderAlerts._cache.cancelWatch = ((rs || []).find(x => x.k === 'cancel_watch_state') || {}).v || null;
         renderAlerts._cache.dupWatch = ((rs || []).find(x => x.k === 'boshu_dup_watch') || {}).v || null;   /* ★2026-11-05 🤖の重複の見張り（毎朝・GAS boshuDupWatch_） */
@@ -24643,6 +24644,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ['商品（写真・名前・明細名）', '仕入元', '仕入額', '仕入から'],
         dead.slice(0, 100).map(r => `<tr><td style="font-size:11px">${invName(r)}</td><td style="font-size:11px">${esc(r.supplier || '')}</td><td style="font-size:11px">${r.price != null ? fmtJpy(r.price) : ''}</td><td style="font-size:11px;white-space:nowrap"><b>${Math.floor(holdDays(r))}日</b></td></tr>`).join(''),
         `在庫保管中のまま仕入から90日以上＝<b style="color:#c0392b">資金が寝ている</b>状態。滞留している仕入額の合計 <b>${fmtJpy(deadVal)}</b>。値下げ・損切り・再出品を検討 → <button class="al-godead smd-btn" style="font-size:10.5px;padding:1px 8px">🏚 在庫の死に筋一覧で対処</button>`, 'al-dead') +
+      card('⏱', '止まっている自動処理', '#b71c1c', hbRows.length,
+        ['処理', '最後に動いた', '止まっている理由'],
+        hbRows.map(r => `<tr><td style="font-size:12px;font-weight:700">${esc(r.name)}</td><td style="font-size:11px;white-space:nowrap">${r.last ? esc(jstDateTime(r.last)) : '—'}</td><td style="font-size:11.5px;color:#b71c1c">${esc(r.why)}</td></tr>`).join(''),
+        '全部の自動処理（同期・🤖・トレカ・キャンセルの見回り・あいさつ・転記・チャットの取り込み・AI の実績・4つの道具など）の最後に動いた時刻を、GAS の見張りが1時間ごとに見ています（見張りの最後：' + (hbW && hbW.at ? esc(jstDateTime(hbW.at)) : 'まだ無い') + '）。台のトリガーが欠けた時は見張りが自分で作り直します。ここに残る物は、タブ・ログイン・本人の操作が要る物か、作り直しても戻らなかった物です。', 'al-hb') +
       card('🔋', 'ELI（リチウム電池貨物）の情報提出', '#7b52c4', eliRows.length,
         ['期限', '国', 'Product ID', '商品', '電池', 'Case', 'フォーム', '済み'],
         eliRows.map(r => `<tr${r.level === 2 ? ' style="background:#fff5f5"' : ''}><td style="font-size:11px;white-space:nowrap"><b style="color:${r.level === 2 ? '#d93025' : '#e8710a'}">${esc(r.c.deadline || '—')}</b><br>${r.days == null ? '' : (r.days < 0 ? '<b style="color:#d93025">' + (-r.days) + '日 超過</b>' : 'あと ' + r.days + '日')}</td><td style="font-size:11px">${esc(r.c.cc || '')}</td><td style="font-size:11px;white-space:nowrap">${esc(r.c.product || '')}</td><td style="font-size:11px">${r.name ? itemCellHtml([{ name: r.name, image: (r.row && r.row.image) || '' }], { size: 32, maxW: '260px', vrEmpty: '明細：—（提出は商品ごと）' }) : '<span class="smd-dim">（出品データを読むと名前が出ます）</span>'}</td><td style="font-size:10.5px">${r.b && r.b.wh ? `<b>${esc(r.b.batt)}</b> ${r.b.v}V・${r.b.mah}mAh・約${r.b.wh}Wh・${r.b.cells}セル<br>UN3481 / PI967 Section II` : (r.b ? '<span class="smd-dim">🔋 電池内蔵らしいが機種未特定（型番・Whは手で確認）</span>' : '<span class="smd-dim">機種を判定できず（申告書は手で）</span>')}</td><td style="font-size:10.5px;white-space:nowrap">${esc(r.c.case || '')}<br><span class="smd-dim">${esc(String(r.c.mailAt || '').slice(0, 10))} 着</span></td><td style="font-size:11px;white-space:nowrap">${r.c.form ? `<a href="${hrefOk(r.c.form)}" target="_blank" rel="noopener">📝 開く</a>` : ''}</td><td><button class="smd-btn eli-done" data-k="${av(r.c.case || '')}" style="font-size:10.5px;padding:1px 6px">✓ 済み</button></td></tr>`).join(''),
@@ -24678,7 +24683,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // ※伝票を出した注文の status は 'Processed'（'To Ship' ではない）。最初 'To Ship' だけで数えて 0件になった（実データで確認 2026-09-19）
     const lateArranged = lateRows.length;   // ★2026-10-24 レビュー #3：上の🚨のカードと同じ行（表・要対応・🎉・チップにも入れる）
     const totalAll = total + lateArranged;
-    renderAlerts._badge = { rest: totalAll - shipRows.length - lateArranged, eli: eliRows.length, rowsync: rowsyncRows.length, brake: !!baBrake, kvErr: !!kvErr };   // 10分ごとの数え直し（alertBadgeTick_）用
+    /* ⏱ ★2026-11-15 05（本人「一生このエラーが起きないくらいの勢いで」・型 A 黙って止まる）：全部の自動処理の最後に動いた時刻を GAS の見張り（hbWatchTick・1時間ごと）が app_kv hb_watch に集める。
+       赤の物をここに出す。見張りそのものが2時間より古い（4台目も3台目も見張れていない）時も赤。読めなかった時は「読めなかった」と出す（0件にしない） */
+    const hbW = (renderAlerts._cache && renderAlerts._cache.hb) || null;
+    const HB_FN_JA = { outreach_send: '営業の自動送信', order_msg: '注文のメッセージ', postbox_sync: '📮 未返信の取り込み', reply_mark: '返事の印', qlog_sync: '見積もりの記録', follow_sync: '🚩 後で追う人', sup_sync: '仕入れ予定', settings_sync: '設定の写し', translate: '和訳', stock0_pend: '在庫0の頼み', install_watch: '道具の入れ替えの見張り' };
+    const hbName = n => String(n || '').replace(/\b([a-z0-9_]+)\b/g, (m, w) => HB_FN_JA[w] || m);
+    const hbRows = [];
+    if (!kvErr) {
+      if (!hbW || !hbW.at) hbRows.push({ name: '⏱ 止まりの見張りそのもの', last: null, why: 'まだ一度も書かれていない（GAS の見張り hbWatchTick が動いていない）' });
+      else {
+        const hbAge = (Date.now() - Date.parse(hbW.at)) / 60000;
+        if (hbAge > 120) hbRows.push({ name: '⏱ 止まりの見張りそのもの', last: hbW.at, why: Math.round(hbAge) + '分 書かれていない（4台目も3台目も見張れていない）' });
+        (hbW.items || []).filter(x => x && x.state === 'red').forEach(x => hbRows.push({ name: hbName(x.name), last: x.last, why: x.why || '' }));
+      }
+    }
+    renderAlerts._badge = { rest: totalAll - shipRows.length - lateArranged, eli: eliRows.length, rowsync: rowsyncRows.length, brake: !!baBrake, kvErr: !!kvErr, hb: hbRows.length };   // 10分ごとの数え直し（alertBadgeTick_）用
     alertBadgeSet_(renderAlerts._badge, shipRows.length, lateArranged);
     /* ★2026-11-04 全体レビュー 新-C：起動時の先読み・値付けの後の描き直しで、見ていない欄に部品 約1万・画像 約700 を作っていた（11/3 の中身を捨てる直しの効きが半分）。
        バッジの数だけ出して、⚠️自動検知の欄を見ていない時は中身を描かない（開いた時に renderTodo→renderAlerts で描く） */
@@ -24691,6 +24710,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ['📦 相手未発送', stuckShip.length, '#e8710a', 'al-stuck'],
       ['⏳ 入庫待ち長期', stuckArrive.length, '#e8710a', 'al-arrive'],
       ['📸 確証未取得', noProof.length, '#7b52c4', 'al-proof'],
+      ['⏱ 止まった自動処理', hbRows.length, '#b71c1c', 'al-hb'],
       ['🔋 ELI提出', eliRows.length, '#7b52c4', 'al-eli'],
       ['🤖 自動出品の点検', baNewRows.length + (baBrake && !baNewRows.length ? 1 : 0), baBrake ? '#d93025' : '#1565c0', 'al-ba'],
       ['📄 転記停止', rowsyncRows.length, '#b71c1c', 'al-rowsync'],
@@ -28953,6 +28973,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-15', items: [
+      '⏱ <b>止まっている自動処理を「やること」に赤で出すようにしました</b>（本人「一生このエラーが起きないくらいの勢いで」）：同期・🤖・トレカ・キャンセルの見回り・あいさつ・転記・チャットの取り込み・AI の実績・4つの道具など、全部の自動処理の最後に動いた時刻を GAS の見張りが1時間ごとに見ます。決めた時間を超えた物は赤で出し、台のトリガーが欠けていれば見張りが自分で作り直します。',
+    ] },
     { date: '2026-11-14', items: [
       '🔋 <b>たまごっちにも電池の札を付け、1注文に電池入りが2個以上の時は赤い警告を出すようにしました</b>（00・第3の店でトイ・ホビーを出し始めるため）：SLS の決まりは、電池入りの注文は1注文1個まで（箱の外に赤字で ELI・申告書）。注文の一覧の明細の下に「🔋 電池入りが N 個（SLS は1注文1個まで）」と出ます。全店で効きます。',
       '📲 <b>Viber の中のポータルの設定が消えても、本店のポータルが自動で入れ直すようにしました</b>（03 営業部）：本店のポータル（強い鍵のある PC）が、開いた時と10分ごとに、この Mac の Viber Smart Reply へ設定を送ります（書き込みの強い鍵は送りません・中身が同じ時は送りません）。',
