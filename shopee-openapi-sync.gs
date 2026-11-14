@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0830'
+var SRC_VER = '20261115-0845'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9413,7 +9413,9 @@ function hbWatchTick() {
     baKvSet_('hb_watch', out);
   } finally { try { C.remove('hb_running'); } catch (eC) {} try { ufPersist_(); } catch (eP) {} }
 }
+var HB_MAIN_BLOCKED_ = false;
 function hbWatchRun_(me, heal) {
+  HB_MAIN_BLOCKED_ = false;
   var now = Date.now(), items = [], P = P_(), tok = encodeURIComponent(P.getProperty('WRITE_TOKEN') || '');
   var add = function (it) { it.ageMin = (it.last ? Math.round((now - Date.parse(it.last)) / 60000) : null); items.push(it); };
   var fin = function () { var red = items.filter(function (x) { return x.state === 'red'; }).length, warn = items.filter(function (x) { return x.state === 'warn'; }).length, blind = items.filter(function (x) { return x.state === 'blind'; }).length; return { at: new Date().toISOString(), by: me, byName: HB_NAME_[me] || me, src: SRC_VER, red: red, warn: warn, blind: blind, items: items };   /* ★11/15 00：見張り自身が読めなかった物は blind（赤の数に混ぜない・本人の画面に出さない・05 と 00 にだけ知らせる） */ };
@@ -9433,6 +9435,7 @@ function hbWatchRun_(me, heal) {
     else {
       if (!st.j || st.j.ok === false) { add({ id: 'exec_' + who, name: nm + 'の GAS（/exec）', state: 'red', why: '2回続けて答えない：' + (st.err || ('HTTP ' + st.http)) + '＝アカウントのログイン・承認の切れの見込み（推測・人の操作が要るかも）', last: null }); return; }
       if (st.j.src && st.j.src !== SRC_VER) add({ id: 'src_' + who, name: nm + 'の GAS の版', state: 'warn', why: '版が違う（' + st.j.src + '・見張りの台は ' + SRC_VER + '）', last: null });
+      if (st.j.blocked && who === 'main') HB_MAIN_BLOCKED_ = true;   /* ★11/15 05（00）：道具の取込GAS の失敗を「本体の枠の断りの間」と分けるため */
       if (st.j.blocked) add({ id: 'quota_' + who, name: nm + 'の接続枠', state: 'warn', why: 'Google の1日の枠に断られて止まっている（日本時間 ' + (st.j.blockedAt ? Utilities.formatDate(new Date(st.j.blockedAt), 'Asia/Tokyo', 'MM/dd HH:mm') : '?') + '〜・' + ufResetJstStr_() + ' に戻る）', last: null });
       var tg = res[who + ':tg'] || {};
       fns = (tg.j && Array.isArray(tg.j.triggers)) ? tg.j.triggers : null;
@@ -9528,6 +9531,12 @@ function hbWatchRun_(me, heal) {
       var stale = !ok || (now - ok) / 60000 > mx, bad = stale && (fail > ok || pend > 0);
       if (!bad) return;
       var old = !pend && fail && now - fail > 86400000;   /* 押した時だけ動く物の昔の失敗は警告 */
+      /* ★2026-11-15 05（00 の見張り 07:29）：本体アカウント（取込GAS と同じ Google アカウント）が1日の枠に断られている間の、取込GAS を呼ぶ口の失敗・時間切れは、止まりと分けて黄色で出す（17:00 に戻る） */
+      var qWhy = String(f.why || '');
+      if ((HB_MAIN_BLOCKED_ || /回数が多すぎ|urlfetch/.test(qWhy)) && /^(pa_|follow|omsg|quote|ql|ack|mam|chat_un|health|sup|pb|rec)/i.test(String(f.fn))) {
+        add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: 'warn', why: '本体アカウントの1日の枠の断りの間（' + ufResetJstStr_() + ' に戻る）の見込み：' + qWhy.slice(0, 80) });
+        return;
+      }
       add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: old ? 'warn' : 'red', why: (f.why ? String(f.why).slice(0, 120) : (pend ? '待ち ' + pend + '件があるのに' : '失敗の後') + ' ' + mx + '分 成功が無い') });
     });
   });
