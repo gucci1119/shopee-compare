@@ -2,7 +2,7 @@
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @name:ja      【Shopeeチャット】📥 会話ログを取り込む（→ポータル）
 // @namespace    gucci-shopee-chat
-// @version      3.44.8
+// @version      3.44.9
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -396,7 +396,35 @@
   //     message_content: { id, from_user_name, to_user_name, type, content:{text|url}, ... }
   //   会話を開かないので **混線しない・既読にならない・画面が動かない**。
   const WS_SHOP2CC = { br: 'BR', ph: 'PH', vn: 'VN', my: 'MY', sg: 'SG', th: 'TH', tw: 'TW' };
-  const OWN_SHOP_RE = /^(gcsonlinestore|gs_japan_select|maneki_neko_japan)([._-][a-z0-9]{1,12})?$/i;   /* ★3.44.8 うちの全店（店を足したらここにも） */
+  /* ★3.44.8 2026-11-15 05（03 の指示）：うちの店は、ポータルの店の一覧（Supabase accounts の label・cc）から作る。6時間ごとに読み直し、GM に控える。
+     最初の1回や読めない時は、控え（無ければ 11/15 の一覧＝OWN_SEED）で動き、理由を ownErr に残す（取り込み全体は止めない＝お客さんの発言を落とさないため）。
+     どちらの一覧にも無いが、うちの店らしい名前（OWN_LIKE）の発言は、取り込まずに理由を残す（新しい店を足した直後の取り違えを防ぐ）。 */
+  const OWN_SEED = { 'gs_japan_select.br': 'BR', 'gs_japan_select': 'TW', 'gs_japan_select.th': 'TH', 'gs_japan_select.my': 'MY', 'gs_japan_select.sg': 'SG', 'gs_japan_select.ph': 'PH',
+    'gcsonlinestore.ph': 'PH', 'gcsonlinestore.sg': 'SG', 'gcsonlinestore.my': 'MY', 'gcsonlinestore.br': 'BR', 'gcsonlinestore.vn': 'VN', 'gcsonlinestore.th': 'TH', 'gcsonlinestore.tw': 'TW',
+    'manekineko_japan': 'TW', 'maneki_neko_japan.sg': 'SG', 'maneki_neko_japan.my': 'MY', 'maneki_neko_japan.ph': 'PH', 'maneki_neko_japan.th': 'TH' };
+  const OWN_LIKE = /^(gcsonlinestore|gs_japan_select|maneki_?neko_japan)(\.(ph|sg|my|br|vn|th|tw))?$/i;   /* ★3.44.9 レビュー高1：前方一致だと manekineko88 のようなお客さんに当たる＝完全一致に */
+  const OWN_CCS = { BR: 1, PH: 1, VN: 1, MY: 1, SG: 1, TH: 1, TW: 1 };
+  const BAD_BUYER_RE = /^(Unread( [Mm]essages?)?|Read|New|Online|Offline|Active( now)?|Typing|Closed|Overdue|Pinned|Muted|Auto-?[Rr]eply)$/;   /* ★3.44.9 画面の札の言葉は相手の名前にしない。大文字小文字を区別＝ユーザー名 new・read 等（小文字）は飛ばさない（レビュー 11/4 と同じ考え） */
+  let ownSkip = { notInList: 0, noCc: 0, noShop: 0 };
+  const K_OWN = 'own_shops_v2';   /* ★3.44.9 v1（空の国が混ざりうる控え）は使わない */
+  let OWN = null, ownErr = '';
+  try { const o0 = JSON.parse(GM_getValue(K_OWN, '') || 'null'); if (o0 && o0.map) { const m0 = {}; Object.keys(o0.map).forEach(k => { const c = String(o0.map[k] || '').toUpperCase(); if (OWN_CCS[c]) m0[k] = c; }); if (Object.keys(m0).length) OWN = { at: o0.at || 0, map: m0 }; } } catch (_) {}
+  const ownMap = () => (OWN && OWN.map) ? Object.assign({}, OWN_SEED, OWN.map) : OWN_SEED;   /* ★3.44.9 レビュー高〜中2：読めた一覧は控え（OWN_SEED）に重ねる＝一覧の抜けで落とさない */
+  const ownCc = (n) => ownMap()[String(n || '').trim().toLowerCase()] || '';
+  const isOwn = (n) => !!ownCc(n);
+  let _ownBusy = false, _ownForceAt = 0;
+  function ownLoad(force) {
+    const key = getSbKey(); if (!key) { if (!OWN) ownErr = '店の一覧を読む鍵が無い（11/15 の一覧で判定中）'; return; }
+    if (_ownBusy) return;
+    if (force) { if (Date.now() - _ownForceAt < 10 * 60e3) return; _ownForceAt = Date.now(); }   /* 一覧に無い店らしい名前が続いても、読み直しは10分に1回まで */
+    else if (OWN && Date.now() - (OWN.at || 0) < 6 * 3600e3) return;
+    _ownBusy = true;
+    try { GM_xmlhttpRequest({ method: 'GET', url: getSbUrl() + '/rest/v1/accounts?select=label,cc', headers: { apikey: key, Authorization: 'Bearer ' + key }, timeout: 20000,
+      onload: (r) => { _ownBusy = false; try { const a = JSON.parse(r.responseText); if (!Array.isArray(a) || !a.length) throw new Error('空'); const map = {}; a.forEach(x => { const l = String(x.label || '').trim().toLowerCase(), c = String(x.cc || '').toUpperCase(); if (l && OWN_CCS[c]) map[l] = c; }); if (!Object.keys(map).length) throw new Error('空'); OWN = { at: Date.now(), map: map }; GM_setValue(K_OWN, JSON.stringify(OWN)); ownErr = ''; } catch (e) { ownErr = '店の一覧を読めない（HTTP ' + r.status + '・前の一覧で判定中）'; } },
+      onerror: () => { _ownBusy = false; ownErr = '店の一覧を読めない（通信エラー・前の一覧で判定中）'; }, ontimeout: () => { _ownBusy = false; ownErr = '店の一覧を読めない（時間切れ・前の一覧で判定中）'; }, onabort: () => { _ownBusy = false; ownErr = '店の一覧の読みが中断された（前の一覧で判定中）'; } }); } catch (eOl) { _ownBusy = false; ownErr = '店の一覧を読めない（' + String(eOl).slice(0, 60) + '）'; }
+  }
+  try { ownLoad(false); } catch (_) {}
+  setInterval(() => { try { ownLoad(false); } catch (_) {} }, 30 * 60 * 1000);   /* 6時間より古い時だけ読む（18行・小さい） */
   let wsGot = 0;
   function wsIngest(str) {
     // 取り込まなかった理由を数える＋**実物を1つずつ残す**（推測で実装して壊さないため）
@@ -417,13 +445,15 @@
        2店舗目・3店舗目の発言をお客さんの発言（in・buyer＝店の名前）として入れていた。うちの全店（OWN_SHOP_RE）を自分と見る。
        国は店の名前の後ろ（.th など）から取る。本店以外で国が分からない時は、タブの国を当てずに取り込まない（TH のお客さんが BR になった）。 */
     const fromName = String(mc.from_user_name || '').trim(), toName = String(mc.to_user_name || '').trim();
-    const fromMe = OWN_SHOP_RE.test(fromName);
+    const fromMe = isOwn(fromName);
+    if (!fromMe && !isOwn(toName) && OWN_LIKE.test(fromName)) { ownSkip.notInList++; why('うちの店らしいが一覧に無い送り手:' + fromName, JSON.stringify(mc)); ownLoad(true); return; }   /* 相手が一覧の店なら、送り手はお客さん（OWN_LIKE を見ない） */
     const shopName = fromMe ? fromName : toName;
     const buyer = fromMe ? toName : fromName;
-    if (!buyer || OWN_SHOP_RE.test(buyer)) { why('相手が特定できない（相手もうちの店）'); return; }
+    if (!buyer || isOwn(buyer) || (fromMe && OWN_LIKE.test(buyer))) { why('相手が特定できない（相手もうちの店）'); return; }
     const sfx = (shopName.indexOf('.') >= 0 ? shopName.split('.').pop() : '').toLowerCase();
-    let cc = WS_SHOP2CC[sfx] || '';
-    if (!cc) { if (/^gcsonlinestore$/i.test(shopName) || !shopName) cc = CC; else { why('店の名前から国が分からない:' + shopName); return; } }
+    let cc = ownCc(shopName) || WS_SHOP2CC[sfx] || '';
+    if (!cc && !fromMe && OWN_LIKE.test(shopName)) { cc = CC; ownSkip.noCc++; ownLoad(true); }   /* ★3.44.9 レビュー中1：うちの店宛てなのは確かで国だけ分からない時は、お客さんの発言を落とさずタブの国で入れて数える */
+    if (!cc) { if (!shopName) { ownSkip.noShop++; why('店の名前が空（国を決められない）', JSON.stringify(mc)); } else { ownSkip.noCc++; why('店の名前から国が分からない:' + shopName, JSON.stringify(mc)); } return; }   /* ★3.44.9 レビュー中4・5：タブの国を当てない（BR のタブに TH の発言が来て BR になった） */
     const ty = String(mc.type || '');
     let text = '', msgType = 'text';
     const c = mc.content || {};
@@ -452,7 +482,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.44.8';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.44.9';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -727,6 +757,7 @@
         if (selIdx >= 0) { const ri = rowInfo(rows[selIdx]); if (ri.buyer) { buyer = ri.buyer; cc = ri.cc || cc; } }
       }
     } catch (_) {}
+    if (buyer && (BAD_BUYER_RE.test(buyer) || isOwn(buyer))) buyer = '';   /* ★3.44.9 2026-11-15 05：画面の言葉（Unread 等）やうちの店を相手にしない（BR のお客さんの質問が buyer=Unread で入っていた） */
     if (buyer) return { thread, tr, buyer, cc };
     [].slice.call(document.querySelectorAll('div,span,a')).forEach(el => {
       const t = (el.textContent || '').trim(); if (!t || t.length > 44 || el.children.length > 1) return;
@@ -741,6 +772,7 @@
         && r.top < best) { best = r.top; buyer = t; }
     });
     buyer = buyer.replace(/[^\w.].*$/, '').trim(); // 末尾のゴミ（": ??"等）を除去＝ユーザー名は[\w.]のみ。別会話に割れるのを防ぐ
+    if (buyer && (BAD_BUYER_RE.test(buyer) || isOwn(buyer))) buyer = '';   /* ★3.44.9 削った後に見る（Unread Messages → Unread） */
     return { thread, tr, buyer, cc };
   }
   let captureAs = null; // 巡回で「ヘッダ先頭＝狙い名」を確認済みの時だけ {buyer,cc} を入れる＝その時のみ行由来のクリーン名で確定
@@ -789,6 +821,7 @@
     //   その時は一覧行由来のクリーンな名前/国で確定する（ヘッダは住所連結で抽出が不安定なため）。検証を通った時
     //   だけなので混線しない（表示中スレッド＝その会話）。手動閲覧時は captureAs=null＝ヘッダ検出（domHeaderInfo）。
     if (captureAs && captureAs.buyer) { h.buyer = captureAs.buyer; if (captureAs.cc) h.cc = captureAs.cc; }
+    if (h.buyer && (BAD_BUYER_RE.test(h.buyer) || isOwn(h.buyer))) return [];   /* ★3.44.9 最後の守り：札の言葉・うちの店の名前では取り込まない */
     if (!h.buyer) return [];
     // ★混線ガード：会話を切り替えた直後は「本文は新しい相手・ヘッダはまだ前の相手」という数百msのズレが起きる。
     //   captureAs（巡回で検証済み）でない時は、**同じ相手が続けて表示されている**ことを確認してから取り込む。
@@ -922,7 +955,7 @@
             if (!mm) return false;
             const nm = mm[1];
             if (nm === me) return false;
-            if (/^(gcsonlinestore|gs_japan_select|maneki_neko_japan)/i.test(nm)) return false;   // 自分の店（AIアシスタント側）★3.44.8 全店
+            if (isOwn(nm) || OWN_LIKE.test(nm)) return false;   // 自分の店（AIアシスタント側）★3.44.8 全店（店の一覧）
             return true;
           });
           if (bad) return;
@@ -1203,6 +1236,12 @@
   /* ★2026-11-03 03-12・事業本部：一覧の行の1行目をそのまま名前にしていた＝行の頭に「Unread」「Pinned」などの札が出ていると、それが相手の名前になり
      chat_messages に「Unread」さんの行が入っていた（📮 の相手が Unread）。札を飛ばし、名前の形（英数字と . _）をした最初の行を名前にする。
      （SKIP_CHIP は後ろで作るので、ここでは使わない＝作る前に呼ばれて止まらないように） */
+  /* ★3.44.9 行探し用：札（Unread 等）だけ飛ばし、最初の名前の行をそのまま返す（「…」で切られていても返す） */
+  function rowFirstName_(lines) {
+    const ls = (lines || []).map(x => String(x || '').trim()).filter(Boolean);
+    for (const x of ls) { if (BAD_BUYER_RE.test(x)) continue; return x; }
+    return '';
+  }
   function rowBuyerOf(lines) {
     const chip = /^(Closed|Overdue|Pinned|Unread|Auto-?Reply|Auto-?reply|Muted)$/;   /* ★大文字小文字を区別＝ユーザー名 new・read 等を飛ばさない（レビュー 11/4） */
     const ls = (lines || []).map(s => String(s || '').trim()).filter(Boolean);
@@ -1379,6 +1418,7 @@
       for (let w = 0; w < 12; w++) { if (threadConvId() === want.id) { okId = true; break; } await sleep(200); }
       if (!okId) return false;
     }
+    if (!name || BAD_BUYER_RE.test(name) || isOwn(name)) { captureAs = null; return false; }   /* ★3.44.9 札の言葉・うちの店を相手にしない（BR:Unread の元） */
     captureAs = { buyer: name, cc: cc, convId: (want && want.id) || threadConvId() };
     try { if (!noCapture) await quickCapture(deep); } finally { captureAs = null; }
     try { await saveInterest(name); } catch (_) {}   // この人が見ている商品も一緒に取る
@@ -1469,7 +1509,7 @@
         if ((count % 8) === 0) {   // full/new どちらの巡回中でも、新着は必ず先に取り込む
           const sc = sideScroller(); if (sc) { rvScroll(sc, 0); await sleep(600); side = sideList() || side; }
           for (const row of [].slice.call(side.children)) {
-            const nm = (row.innerText || '').trim().split('\n')[0].trim();
+            const nm = rowBuyerOf((row.innerText || '').split('\n'));   /* ★3.44.9 札（Unread 等）を飛ばして名前を取る */
             if (!nm || !/^[\w.]+$/.test(nm)) continue;
             // 表示が変わった＝新着。★未知の会話(lastSig無し)も対象にする。
             //   「既知のみ」に絞っていたため、新しく上がってきた会話が優先されず取りこぼしていた。
@@ -1489,7 +1529,7 @@
         //   （実測：一覧で今日やり取りのあった32会話のうち31会話がDBに入っていなかった）。
         upToDate = 0;
         for (const row of [].slice.call(side.children)) {
-          const nm = (row.innerText || '').trim().split('\n')[0].trim();
+          const nm = rowBuyerOf((row.innerText || '').split('\n'));   /* ★3.44.9 札（Unread 等）を飛ばして名前を取る */
           if (!nm || !/^[\w.]+$/.test(nm)) continue;
           if (mode === 'new') {
             // ★一覧は新しい順に並んでいる。取り込み済みの会話が続いたら、それより下は
@@ -1522,7 +1562,7 @@
       if (mode === 'full') GM_setValue('didFullCycle', true);
       if (manual) toast('✅ 巡回完了（' + count + '会話を取込）');
       // 元の会話へ戻す（その後ユーザーが触っていなければ）
-      if (startConv && !userBusy()) { const side = sideList(); if (side) { for (const row of [].slice.call(side.children)) { if (norm((row.innerText || '').split('\n')[0]) === norm(startConv)) { reactOpen(row); break; } } } }
+      if (startConv && !userBusy()) { const side = sideList(); if (side) { for (const row of [].slice.call(side.children)) { if (norm(rowBuyerOf((row.innerText || '').split('\n'))) === norm(startConv)) { reactOpen(row); break; } } } }
     } catch (_) {} finally { cycling = false; cycleInfo = ''; _crawlRepAt = 0; reportCrawl(mode, false, ''); updateChip(); }
   }
   GM_registerMenuCommand('🐢 全会話をゆっくり巡回して取り込む', () => { slowCrawl('full', true); });
@@ -1588,7 +1628,7 @@
       const side = sideList(); if (!side) return;
       let changed = false;
       for (const row of [].slice.call(side.children)) {
-        const nm = (row.innerText || '').trim().split('\n')[0].trim();
+        const nm = rowBuyerOf((row.innerText || '').split('\n'));   /* ★3.44.9 札（Unread 等）を飛ばして名前を取る */
         if (!nm || !/^[\w.]+$/.test(nm)) continue;
         if (lastSig[nm] !== rowSigT(row)) { changed = true; break; }
       }
@@ -1613,7 +1653,7 @@
       if (!buyer || !/^[\w.]{2,}$/.test(buyer)) return; // 名前らしくない行（見出し等）は無視
       const cc = (raw.match(/\(([A-Z]{2})\)/) || [])[1] || CC;
       const when = t.find(s => /^\d{1,2}:\d{2}$/.test(s) || /^\d{1,2}\/\d{1,2}$/.test(s) || /^(Yesterday|Today)$/i.test(s)) || '';
-      const prev = t.slice(1).find(s => s !== when && !SKIP_CHIP.test(s) && !/^\([A-Z]{2}\)/.test(s) && !/gcsonlinestore|gs_japan|maneki_neko/i.test(s)) || '';
+      const prev = t.slice(1).find(s => s !== when && !SKIP_CHIP.test(s) && !/^\([A-Z]{2}\)/.test(s) && !/^(gcsonlinestore|gs_japan_select|maneki_?neko_japan)\S*$/i.test(s)) || '';
       const key = cc + ':' + buyer;
       if (!acc[key]) n++;
       acc[key] = { buyer: buyer, cc: cc, when: when, prev: prev.slice(0, 140), overdue: /Overdue/i.test(raw) };
@@ -1766,7 +1806,7 @@
   }
   async function openConversation(buyer) {
     await clearSearch();   // 前回の検索が残っていると一覧が絞られていて見つからない
-    const side = sideList(); if (side) { const rows = [].slice.call(side.children); for (const row of rows) { const nm = (row.innerText || '').trim().split('\n')[0].trim(); if (nm === buyer) { row.click(); await sleep(1300); return true; } } }
+    const side = sideList(); if (side) { const rows = [].slice.call(side.children); for (const row of rows) { const nm = rowBuyerOf((row.innerText || '').split('\n'));   /* ★3.44.9 札（Unread 等）を飛ばして名前を取る */ if (nm === buyer) { row.click(); await sleep(1300); return true; } } }
     // 検索フォールバック（使ったら必ず空に戻す）
     const s = searchBox();
     if (s) {
@@ -1884,7 +1924,7 @@
       //   完全一致だけで探すと、名前が長い相手に永久に辿り着けない。切られている場合は前方一致で照合する。
       const target = norm(buyer);
       const row = [].slice.call(side.children).find(r => {
-        const nm = norm((r.innerText || '').split('\n')[0]);
+        const nm = norm(rowFirstName_((r.innerText || '').split('\n')));   /* ★3.44.9 札だけ飛ばす（名前の形は問わない＝「…」で切られた長い名前も当たる・レビュー高） */
         if (!nm) return false;
         if (nm === target) return true;
         const cut = nm.replace(/[…\.]+$/, '');
@@ -2253,7 +2293,7 @@
     sbReq('POST', 'app_kv?on_conflict=k',
       // ver＝実際に動いているスクリプトの版。これが無いと「入れ替えたのに古いまま動いている」に気づけない
       //   （Tampermonkeyは差し替えても、開いたままのタブは古いコードで動き続ける）。
-      [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname, ver: VER, noDate: skipNoDate, dated: keptDated, ws: wsGot,
+      [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname, ver: VER, noDate: skipNoDate, dated: keptDated, ws: wsGot, own: { n: Object.keys(ownMap()).length, at: (OWN && OWN.at) || 0, err: ownErr || '', skip: ownSkip },   /* ★3.44.9 レビュー中3：店の一覧の状態と、うちの店の判定で取り込まなかった件数を外から見る */
              vis: _realVis(), spoof: true, hid: document.hidden,
              side: (function(){ try { const l = sideList(); return l ? l.children.length : -1; } catch (_) { return -2; } })(),
              thr: (function(){ try { const h = domHeaderInfo(); return h ? h.thread.children.length : -1; } catch (_) { return -2; } })(),
@@ -2445,7 +2485,7 @@
         if (!sideList()) return;
         const want = norm(String(v.buyer || ''));
         const here = [].slice.call(sideList().children).some(r => {
-          const nm = norm((r.innerText || '').split('\n')[0]);
+          const nm = norm(rowBuyerOf((r.innerText || '').split('\n')));   /* ★3.44.9 札を飛ばす */
           return nm && (nm === want || want.indexOf(nm.replace(/[…\.]+$/, '')) === 0);
         });
         if (!here) { /* 画面に出ていなくてもスクロールで探せるので、開ける見込みがあるなら続行 */ }
