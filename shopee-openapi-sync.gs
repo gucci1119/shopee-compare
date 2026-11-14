@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0330'
+var SRC_VER = '20261115-0500'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -528,8 +528,8 @@ function doGetInner_(e) {
       try {
         var _bwt = P_().getProperty('WRITE_TOKEN'); if (!_bwt || p.token !== _bwt) throw new Error('WRITE_TOKEN不正');
         if (p.on === '1' || p.on === '0') { P_().setProperty('BKC_ON', p.on); BKC_ON_V = null; }
-        if (p.reset === '1') P_().deleteProperty('BKC_IDX');
-        var _bi = {}; try { _bi = JSON.parse(P_().getProperty('BKC_IDX') || '{}'); } catch (eB) {}
+        if (p.reset === '1') { try { var _ap = P_().getProperties() || {}; Object.keys(_ap).forEach(function (pk) { if (pk === 'BKC_IDX' || pk.indexOf('BKC_IDX_') === 0) P_().deleteProperty(pk); }); } catch (eRs) {} }   /* ★2026-11-15 05：索引は鍵ごとの BKC_IDX_<鍵> */
+        var _bi = bkcIdxLoad_();
         var _bl = {}; Object.keys(_bi).forEach(function (k) { _bl[k] = { len: _bi[k].len, n: _bi[k].n, u: _bi[k].u, ageMin: Math.round((Date.now() - Number(_bi[k].at || 0)) / 60000) }; });
         _bo = { ok: true, on: bkcOn_(), runner: baRunnerId_(), keys: _bl, src: SRC_VER };
       } catch (err) { _bo = { ok: false, error: String((err && err.message) || err) }; }
@@ -2876,7 +2876,7 @@ function ufDead_() { return !!ufBlockedInfo_(); }
 /* ★2026-09-22 定期処理の入口。両方のアカウントが同じトリガーを持つので、
    ①自分の枠が死んでいたら降りる（相方が拾う）②取り札で二重実行を防ぐ。
    取り札の有効時間はその処理の間隔より短くする（長いと相方がずっと入れない）。 */
-function syncGate_(name, holdSec) {
+function syncGate_(name, holdSec, mainTakesOver) {
   if (ufDead_()) { Logger.log(name + '：自分の接続枠が尽きているので、もう一方に任せます'); return false; }
   var k = 'sync_claim_' + name, me = (isChild_() ? 'child' : 'main') + ':' + Utilities.getUuid().slice(0, 8);
   try {
@@ -2887,6 +2887,14 @@ function syncGate_(name, holdSec) {
          本体は枯れると手を挙げない（上の ufDead_）ので、取り札が古くなる＝2台目が引き継ぐ。本体が戻れば、次の回から本体に戻る。 */
     if (isChild_() && cur && cur.at && String(cur.by || '').indexOf('main') === 0 && now_() - cur.at < Math.min((holdSec || 240) * 2.2, (holdSec || 240) + 9000)) {   /* 1.5倍だと syncOrdersAll（毎時・hold 2400秒）で境目。2.2倍だけだと1日1回の処理（hold 72000）は44時間待つ＝本体が朝に枯れた日は誰もやらない（2026-09-22 見直しで発見）→ 取り札＋2.5時間 を上限に */
       Logger.log(name + '：本体が担当中（' + Math.round((now_() - cur.at) / 60) + '分前に実行）なので2台目は見送り'); return false;
+    }
+    /* ★2026-11-15 05 レビュー（3）：mainTakesOver＝本体は、取り札の主が子機（child*）なら新しくても見送らずに取りに行く（入金の同期だけ）。
+       本体が戻った後も2台目が札を持ち続けて担当が移ったままになるのを防ぐ。2台目の「本体に譲る」守り（上）はそのまま */
+    if (mainTakesOver && !isChild_() && cur && cur.at && String(cur.by || '').indexOf('child') === 0) {
+      var meT = 'main:' + Utilities.getUuid().slice(0, 8);
+      sbUpsert_('app_kv', [{ k: k, v: { at: now_(), by: meT }, updated_at: new Date().toISOString() }], 'k');
+      var chkT = baKvFresh_(k); if (chkT && chkT.by === meT) { Logger.log(name + '：子機の取り札を本体が引き取った'); return true; }
+      Logger.log(name + '：取り札の引き取りを確かめられなかったので見送り'); return false;
     }
     if (cur && cur.at && now_() - cur.at < (holdSec || 240)) { Logger.log(name + '：もう一方が実行中なので見送り'); return false; }
     var got = baClaimAtomic_(k, holdSec || 240, me);   /* ★2026-09-23 DBの一意制約で1人だけ通す（Codex指摘P1） */
@@ -7638,26 +7646,60 @@ function fillIncomeInitial_() {
 //   7月など古い月の確定額が永久に入らなかった（2026-08-09 実測：完了559件中492件が暫定のまま）。
 //   income表から amount==amount_initial の完了行を拾って get_escrow_detail を直接叩く。
 //   1回で最大300件。実行時間6分に当たらないよう区切って、何度か実行すれば全部埋まる。
+/* ★2026-11-15 05 レビュー（8）：入金の取り直しで書く行。Shopee の返事に無い項目（null・NaN）は行に入れない＝buyer_paid・fee_total・fees を空や0で上書きしない。
+   upsert は1回の束の行が同じ列でないと揃わないので、列の組ごとに分けて書く */
+function escIncPart_(inc, row) {
+  var num = function (x) { var v = parseFloat(x); return isNaN(v) ? null : v; };
+  var fc = num(inc.commission_fee), fs = num(inc.service_fee), ft = num(inc.seller_transaction_fee), bp = num(inc.buyer_total_amount);
+  if (bp !== null) row.buyer_paid = bp;
+  if (fc !== null || fs !== null || ft !== null) { row.fee_total = (fc || 0) + (fs || 0) + (ft || 0); row.fees = escrowFees_(inc, fc || 0, fs || 0, ft || 0, bp); }
+  return row;
+}
+function escIncUpsert_(rows) {
+  var by = {};
+  (rows || []).forEach(function (r) { var sig = Object.keys(r).sort().join(','); (by[sig] = by[sig] || []).push(r); });
+  Object.keys(by).forEach(function (sig) { var g = by[sig]; for (var k = 0; k < g.length; k += 200) sbUpsert_('income', g.slice(k, k + 200), 'cc,sn'); });
+}
+/* ★2026-11-15 05 レビュー（2）：続きの位置は全部の台で共有（app_kv の小さい1行）。読めない時は null＝進めない（止める） */
+function escCursorGet_(k) { var v = baKvFresh_(k); if (BA_KV_FAIL[k]) return null; return String((v && v.sn) || ''); }
+function escCursorPut_(k, sn) { try { baKvSet_(k, { sn: String(sn), at: new Date().toISOString(), by: baRunnerId_() }); } catch (e) {} }
 function backfillEscrowUnchanged(limitN) {
   if (!bgAllowed_()) { Logger.log('backfillEscrowUnchanged skip: urlfetch予約枠(手動用)を確保'); return { skipped: 'uf_budget' }; }
   if (!syncGate_('backfillEscrowUnchanged', 3600)) return { skipped: 'gate' };   /* ★2026-09-23 札は動ける時だけ */
-  var lim = limitN || 300, done = 0, moved = 0, errs = 0;
+  /* ★2026-11-15 05（止まりの見張りの発見）：時間トリガーから呼ばれると limitN が「トリガーの知らせ（オブジェクト）」になり、slice(0, オブジェクト)＝0件で
+     「対象なし」と終わっていた（入金の表を丸ごと読むだけで何もしない）。数の時だけ使う。
+     ★あわせて対象を「注文日が15〜90日前」に絞り、続きの位置から古い順に回す：
+       前の並び（sn の古い順・先頭300件）のまま直すと、暫定＝確定のまま本当に動かない古い行を毎日同じ300件だけ聞き直す＝Shopee の接続を毎日最大300回むだに使う。
+       直近15日の注文は syncEscrowAll（syncEscrowForShop_・更新が15日以内の注文）が聞き直している＝ここで聞くと重複。
+       実測（11/15 05 時・列を絞った読み）：直近90日の入金 1,129行のうち暫定＝確定 428行＝直近15日 53行・15〜90日 375行。1日300件ずつ回せば約1.3日で一巡（推測）。
+       注文番号の頭6桁＝注文日（YYMMDD）。動く入金は倉庫スキャンの数日後なので90日あれば足りる（推測）。
+     ★05 レビュー（2）：続きの位置は app_kv bf_esc_cursor（全部の台で共有・小さい1行）。読めない時は進めない（同じ300件を繰り返さない・勝手に頭から始めない）。
+     ★05 レビュー（6）（7）（8）：ufPersist_ を返す前に・ループの頭で予約枠を見る・返事に無い項目は書かない。
+     前→後の見込み：今は1日0回（何もしていない）→ 1日最大300回（170秒で切る・bgAllowed_ の枠の中）。暫定のまま固まった15〜90日の入金を拾う */
+  var lim = (typeof limitN === 'number' && limitN > 0) ? limitN : 300, done = 0, moved = 0, errs = 0;
+  var _cut90 = Utilities.formatDate(new Date(Date.now() - 90 * 86400000), 'Asia/Tokyo', 'yyMMdd'), _cut15 = Utilities.formatDate(new Date(Date.now() - 15 * 86400000), 'Asia/Tokyo', 'yyMMdd');
+  var _cur = escCursorGet_('bf_esc_cursor'), _lastSn = '';
+  if (_cur === null) { Logger.log('backfillEscrow: 続きの位置（bf_esc_cursor）を読めないので今回は止めます'); try { ufPersist_(); } catch (eUf0) {} return { skipped: 'cursor_unreadable' }; }
   var toks = listTokens_(), byShop = {};
   toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
   // ★入金額が確定するのは「Shopee倉庫でスキャンされた数日後」。注文の完了(COMPLETED)を待つ必要はない。
   //   以前は pending=false（完了済み）だけを対象にしていたため、**配送中(pending=true)の注文が
   //   永久に取り直されず暫定額のまま固まっていた**（2026-08-09 実測：同額のまま未確定 113件）。
   //   完了・未完了どちらも、暫定額のまま動いていない注文を対象にする。
-  var rows = sbSelectAll_('income', 'select=cc,sn,amount,amount_initial,shop_id&order=sn.asc');
+  var rows = sbSelectAll_('income', 'select=cc,sn,amount,amount_initial,shop_id&sn=gte.' + _cut90 + '&sn=lt.' + _cut15 + '&order=sn.asc');   /* ★2026-11-15 05：15〜90日の行だけ読む（Supabase の読みも減る） */
   var targets = (rows || []).filter(function (r) {
-    return r.amount_initial != null && parseFloat(r.amount) === parseFloat(r.amount_initial) && r.shop_id;
-  }).slice(0, lim);
-  if (!targets.length) { Logger.log('backfillEscrow: 対象なし（すべて確定済み）'); return { done: 0, moved: 0 }; }
+    return r.amount_initial != null && parseFloat(r.amount) === parseFloat(r.amount_initial) && r.shop_id && /^\d{6}/.test(String(r.sn || '')) && String(r.sn).slice(0, 6) >= _cut90 && String(r.sn).slice(0, 6) < _cut15;
+  });
+  /* ★2026-11-15 05：続きの位置から古い順に回す（終わりまで行ったら頭へ） */
+  targets = targets.filter(function (r) { return String(r.sn) > _cur; }).concat(targets.filter(function (r) { return String(r.sn) <= _cur; })).slice(0, lim);
+  if (!targets.length) { Logger.log('backfillEscrow: 対象なし（すべて確定済み）'); try { ufPersist_(); } catch (eUf1) {} return { done: 0, moved: 0 }; }
   var deadline = now_() + 170;   // 約3分で切り上げ（1日の実行時間枠90分を守る。毎日回るので数日で消化される）
   var out = [], now2 = new Date().toISOString();
   for (var i = 0; i < targets.length; i++) {
+    if (!bgAllowed_()) { Logger.log('backfillEscrow: 予約枠の線に来たので中断（' + i + '件処理）'); break; }   /* ★05 レビュー（7） */
     if (now_() > deadline) { Logger.log('backfillEscrow: 時間切れで中断（' + i + '件処理）'); break; }
     var t = targets[i], shopId = parseInt(t.shop_id, 10);
+    _lastSn = String(t.sn);   /* 次の回はこの次から（ループの後で1回だけ控える） */
     if (!byShop[String(shopId)]) continue;
     var e;
     try { e = callShop_(shopId, '/api/v2/payment/get_escrow_detail', { order_sn: t.sn }, 'get'); }
@@ -7667,16 +7709,12 @@ function backfillEscrowUnchanged(limitN) {
     done++;
     if (amt === parseFloat(t.amount)) continue;      // 本当に動いていない＝そのまま
     moved++;
-    var f_comm = parseFloat(inc.commission_fee) || 0, f_serv = parseFloat(inc.service_fee) || 0, f_txn = parseFloat(inc.seller_transaction_fee) || 0;
-    var buyerPaid = parseFloat(inc.buyer_total_amount); if (isNaN(buyerPaid)) buyerPaid = null;
-    out.push({ cc: t.cc, sn: t.sn, amount: amt, amount_at: now2,
-      amount_initial: parseFloat(t.amount_initial), buyer_paid: buyerPaid,
-      fee_total: f_comm + f_serv + f_txn,
-      fees: escrowFees_(inc, f_comm, f_serv, f_txn, buyerPaid), bundle: escrowBundle_(inc), adj: escrowAdj_(inc),
-      synced_at: now2 });
+    out.push(escIncPart_(inc, { cc: t.cc, sn: t.sn, amount: amt, amount_at: now2, amount_initial: parseFloat(t.amount_initial), bundle: escrowBundle_(inc), adj: escrowAdj_(inc), synced_at: now2 }));   /* ★05 レビュー（8）：返事に無い項目は入れない */
   }
-  if (out.length) { for (var k = 0; k < out.length; k += 200) sbUpsert_('income', out.slice(k, k + 200), 'cc,sn'); }
+  if (out.length) escIncUpsert_(out);
+  if (_lastSn) escCursorPut_('bf_esc_cursor', _lastSn);   /* 書けた後に続きの位置を控える（書く前に落ちたら次の回も同じ所から） */
   Logger.log('backfillEscrow: 照会' + done + '件 / 金額が動いた ' + moved + '件 / エラー ' + errs + '件（残り対象 ' + Math.max(0, targets.length - done) + '件）');
+  try { ufPersist_(); } catch (eUf2) {}   /* ★05 レビュー（6） */
   return { done: done, moved: moved, errs: errs };
 }
 /* ★2026-11-07 02 の調べ・事業本部（案イ）：返品・キャンセルになった注文の入金を取り直す。syncEscrowForShop_ は CANCELLED を飛ばし、
@@ -7748,12 +7786,21 @@ function syncEscrowAll(force) {
      手動実行（⚡今すぐ取得）は素通し。 */
   /* ★Codex指摘（2026-09-21・P2）：`run_income`（⚡今すぐ取得）もこの関数を呼ぶので、
      force を渡さないと**手動の取得が黙って飛ばされる**（しかも ok:true が返る）。「手動は今まで通り」が嘘になる。 */
-  var ESC_EVERY_MS = 11.5 * 60 * 60 * 1000;
+  var ESC_EVERY_MS = 11 * 60 * 60 * 1000;   /* ★2026-11-15 05 レビュー（3）：11.5→11時間（6時間トリガーで約12時間おき） */
+  /* ★2026-11-15 05（止まりの見張りの発見・通信の効率化）：時間トリガーは1つ目の引数に「トリガーの知らせ（オブジェクト）」を渡す＝前は force が真になり、
+     6時間ごとに12時間の間引きと取り札（syncGate_）を飛ばして、本体・2台目・3台目の3台が毎回それぞれ全部を同期していた（取り札 sync_claim_syncEscrowAll が 9/23 から更新なし）。
+     手動の印は「true そのもの」の時だけ（⚡今すぐ取得 run_income は syncEscrowAll(true)）。
+     前→後の見込み（11/14 の10.5時間で 3台とも約555回＝1台1回約280回の推測）：1日 3台×4回×約280≈3,300回 → 約2回×約280≈560回（担当は本体・本体が枯れた時だけ2台目） */
+  force = (force === true);
   if (!force) {
     var _escLast = parseInt(P_().getProperty('escrowAll_at') || '0', 10) || 0;
     if (Date.now() - _escLast < ESC_EVERY_MS) { Logger.log('syncEscrowAll skip: 前回から12時間たっていない（入金の確定は数日後なので6時間ごとに見る意味がない）'); return [{ skipped: 'too_soon' }]; }
   }
-  if (!force && !syncGate_('syncEscrowAll', 14400)) return [{ skipped: 'gate' }];   /* ★2026-09-23 札は動ける時だけ・手動は札を通さない（Codex指摘） */
+  /* ★2026-11-15 05：取り札の長さ 4時間→11時間。syncGate_ は「本体の札が min(長さ×2.2, 長さ＋2.5時間) より新しい間は2台目が譲る」＝4時間だと6.5時間で、
+     本体の間隔（12時間の間引き＝実際は約12時間おき）より短く、6.5〜12時間の間に2台目・3台目の6時間トリガーが通って走る（1日 約4回の見込み・9/23 から一度も動いていなかった所）。
+     11時間なら譲る窓が13.5時間＝本体が動いている間は2台目は走らない（1日 約2回）。本体が枯れた時は札が13.5時間古くなってから2台目が代わる（前の設計より遅いが、入金の確定は倉庫スキャンの数日後なので足りる・推測）。
+     本体自身は12時間後に札が11時間より古いので通る */
+  if (!force && !syncGate_('syncEscrowAll', 39600, true)) return [{ skipped: 'gate' }];   /* ★05 レビュー（3）：本体は取り札の主が子機でも見送らずに取る（2台目に居座らせない） */   /* ★2026-09-23 札は動ける時だけ・手動は札を通さない（Codex指摘） */
   P_().setProperty('escrowAll_at', String(Date.now()));
   var toks = listTokens_(), log = [], deadline = now_() + 270, finByCc = {};
   toks.forEach(function (tok) { var cc = tok.cc; if (!cc || finByCc[cc]) return; try { finByCc[cc] = finalizedSns_(cc); } catch (e) { finByCc[cc] = {}; } });
@@ -8870,9 +8917,35 @@ function sbClientInfo_() {
    前提：app_kv の行を書き換えたら updated_at も必ず新しくなること（データベースのトリガーで保証してから BKC_ON にする） */
 var BKC_MAX_MS = 60 * 60 * 1000, BKC_MIN_LEN = 100000, BKC_CHUNK = 90000, BKC_MAX_CHUNKS = 120, BKC_ON_V = null;
 function bkcOn_() { if (BKC_ON_V === null) { try { BKC_ON_V = P_().getProperty('BKC_ON') === '1'; } catch (e) { BKC_ON_V = false; } } return BKC_ON_V; }
+/* ★2026-11-15 05（通信の効率化）：控えの置き場の名前に「版（updated_at）の短いハッシュ」を入れる。
+   前は同じ台で2本同時に動くと、別の版の切れ端が混ざり得た（レビュー 10/31 低-10）。長さの比べで大半は外れになるが、同じ長さの書き換えだと古い中身を「今の版」として返し得た。
+   版ごとに名前が違えば混ざらない。古い名前で置いた控えは1回だけ外れて読み直す（中身は変わらない）。置く期間は使える長さ（BKC_MAX_MS）＋5分にした（前は6時間＝使えない古い版が CacheService に残っていた） */
+function bkcChunkKey_(k, e, i) { return 'bkc_' + k + '_' + baKeyHash_(String((e && e.u) || '')) + '_' + i; }
+/* ★2026-11-15 05 レビュー（4）：写しの索引を鍵ごとのスクリプト プロパティ BKC_IDX_<鍵> に分けた（前は1つの BKC_IDX に全部）。
+   ①1つの値の上限（約9KB・記憶・推測）で押し出す必要が無い＝4台目の判定の候補（21機種×機種ごとの鍵）でも当たりが消えない
+   ②同じ台で2本同時に動いても、触った鍵の行だけ書く＝他の実行が置いた鍵を消さない（前は丸ごと上書き＝最後に書いた方だけ残った）
+   ③使える長さ（60分）を過ぎた行は、読んだ時に消す。古い1本の BKC_IDX は見つけたら消す（中身は1回外れて置き直すだけ） */
+var BKC_IDX_P = 'BKC_IDX_';
+var BKC_TOUCHED = {};   /* この実行で置いた／外した鍵（保存の時に、その鍵の行だけ書く・消す） */
+function bkcIdxLoad_() {
+  var idx = {};
+  try {
+    var all = P_().getProperties() || {}, now = Date.now(), stale = [];
+    Object.keys(all).forEach(function (pk) { if (pk.indexOf(BKC_IDX_P) !== 0) return; var k = pk.slice(BKC_IDX_P.length); try { var e = JSON.parse(all[pk]); if (e && now - Number(e.at || 0) < BKC_MAX_MS) idx[k] = e; else stale.push(pk); } catch (eJ) { stale.push(pk); } });
+    if (all.hasOwnProperty('BKC_IDX')) stale.push('BKC_IDX');
+    stale.slice(0, 20).forEach(function (pk) { try { P_().deleteProperty(pk); } catch (eD) {} });   /* 1回に消すのは20行まで（時間をかけない） */
+  } catch (e) {}
+  return idx;
+}
+function bkcIdxSave_(idx) {
+  try {
+    Object.keys(BKC_TOUCHED).forEach(function (k) { var pk = BKC_IDX_P + k; try { if (idx[k]) P_().setProperty(pk, JSON.stringify(idx[k])); else P_().deleteProperty(pk); } catch (eS) {} });
+    BKC_TOUCHED = {};
+  } catch (e) {}
+}
 function bkcGet_(C, k, e) {
   try {
-    var ks = []; for (var i = 0; i < e.n; i++) ks.push('bkc_' + k + '_' + i);
+    var ks = []; for (var i = 0; i < e.n; i++) ks.push(bkcChunkKey_(k, e, i));
     var got = C.getAll(ks); var parts = [];
     for (var j = 0; j < ks.length; j++) { var x = got[ks[j]]; if (x == null) return undefined; parts.push(x); }
     var str = Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(parts.join('')), 'application/x-gzip')).getDataAsString('UTF-8');
@@ -8881,21 +8954,23 @@ function bkcGet_(C, k, e) {
   } catch (err) { return undefined; }
 }
 function bkcPut_(C, idx, k, u, v, now) {
+  BKC_TOUCHED[k] = 1;
   if (!u) { delete idx[k]; return; }
   if (/^(boshu_auto_status|tcg_auto_status)/.test(String(k))) { delete idx[k]; return; }   /* ★2026-10-29 事業本部：状態の鍵は毎回変わる＝控えても当たらない。控えの対象から外す（案2を入にする時に一緒に） */
   var str = JSON.stringify(v); if (str.length < BKC_MIN_LEN) { delete idx[k]; return; }
   var b64 = Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(str, 'application/json')).getBytes());
   var n = Math.ceil(b64.length / BKC_CHUNK); if (n > BKC_MAX_CHUNKS) { delete idx[k]; return; }
-  var o = {}; for (var i = 0; i < n; i++) o['bkc_' + k + '_' + i] = b64.slice(i * BKC_CHUNK, (i + 1) * BKC_CHUNK);
-  C.putAll(o, 21600);
-  idx[k] = { u: String(u), at: now, n: n, len: str.length };
+  var e = { u: String(u), at: now, n: n, len: str.length };
+  var o = {}; for (var i = 0; i < n; i++) o[bkcChunkKey_(k, e, i)] = b64.slice(i * BKC_CHUNK, (i + 1) * BKC_CHUNK);
+  C.putAll(o, Math.round(BKC_MAX_MS / 1000) + 300);   /* ★2026-11-15 05：使える長さ＋5分だけ置く（前は6時間） */
+  idx[k] = e;
 }
-function bkcSelect_(q) {
+/* ★2026-11-15 05（通信の効率化）：tag＝記録の名前の区別（'' は先読み＝今までの __bkcHit 等。1本読み・写真の控えは別の名前に数え、先読みの数を上書きしない） */
+function bkcSelect_(q, tag) {
   var inq = 'k=in.(' + q.map(encodeURIComponent).join(',') + ')';
   if (!bkcOn_()) return sbSelect_('app_kv', 'select=k,v&' + inq);
   var meta; try { meta = sbSelect_('app_kv', 'select=k,updated_at&' + inq); } catch (eM) { SB_LAST_LEN = 0; return sbSelect_('app_kv', 'select=k,v&' + inq); }   /* ① */
-  var C = CacheService.getScriptCache(), now = Date.now(), idx = {};
-  try { idx = JSON.parse(P_().getProperty('BKC_IDX') || '{}') || {}; } catch (eI) { idx = {}; }
+  var C = CacheService.getScriptCache(), now = Date.now(), idx = bkcIdxLoad_();
   var out = [], miss = [], hit = 0, hitLen = 0, mu = {};
   (meta || []).forEach(function (m) { mu[m.k] = m.updated_at; });
   q.forEach(function (k) {
@@ -8908,11 +8983,29 @@ function bkcSelect_(q) {
   if (miss.length) {
     SB_LAST_LEN = 0;
     var r = sbSelect_('app_kv', 'select=k,v,updated_at&k=in.(' + miss.map(encodeURIComponent).join(',') + ')'); missLen = SB_LAST_LEN;
-    (r || []).forEach(function (x) { out.push({ k: x.k, v: x.v }); try { bkcPut_(C, idx, x.k, x.updated_at, x.v, now); } catch (eP) { delete idx[x.k]; } });
+    (r || []).forEach(function (x) { out.push({ k: x.k, v: x.v }); try { bkcPut_(C, idx, x.k, x.updated_at, x.v, now); } catch (eP) { delete idx[x.k]; BKC_TOUCHED[x.k] = 1; } });
   }
-  try { P_().setProperty('BKC_IDX', JSON.stringify(idx)); } catch (eS) {}
-  SB_LAST_LEN = missLen; try { BA_KV_SZ.__bkcHit = hit; BA_KV_SZ.__bkcHitLen = hitLen; BA_KV_SZ.__bkcMiss = miss.length; } catch (eZ) {}
+  bkcIdxSave_(idx);   /* ★2026-11-15 05：この実行で触った鍵の行だけ書く（鍵ごとのプロパティ・前は1つの値を丸ごと上書き・失敗は黙って捨てていた） */
+  SB_LAST_LEN = missLen;
+  try { var _tg = tag || ''; if (!_tg) { BA_KV_SZ.__bkcHit = hit; BA_KV_SZ.__bkcHitLen = hitLen; BA_KV_SZ.__bkcMiss = miss.length; } else { BA_KV_SZ['__bkc' + _tg + 'Hit'] = (BA_KV_SZ['__bkc' + _tg + 'Hit'] || 0) + hit; BA_KV_SZ['__bkc' + _tg + 'HitLen'] = (BA_KV_SZ['__bkc' + _tg + 'HitLen'] || 0) + hitLen; BA_KV_SZ['__bkc' + _tg + 'Miss'] = (BA_KV_SZ['__bkc' + _tg + 'Miss'] || 0) + miss.length; } } catch (eZ) {}
   return out;
+}
+/* ★2026-11-15 05（通信の効率化）：1本読みの大物を、更新時刻（updated_at）で確かめてから手元の写しで返す。
+   測った数（11/14 18:29 の巡回1回・kvSz）：手動判定の NG の控え boshu_auto_judged_manual_ng 約262万字は、ゲームの巡回・トレカの巡回（3台）・下見のどれも【毎回1本で丸ごと】読んでいた（先読みに入っておらず BKC が効かない）。
+   駿河屋の控え sg_<機種>（pokeca 約89万字）・題名 titles_<機種>・JAN の控え jan_master_<機種>・カード名 tcg_names_<機種> も同じ（GAS が読んだ写しを書き戻しの元にしない鍵：grep で確かめた。titles_ は作品マスタの作り直し 8374 行で丸ごと書くが、元は外の一覧で読んだ写しではない）。
+   名指しの鍵だけ（BKC_ONE_RE）。足した印（boshu_auto_done_*）・状態・取り札・枠の控えなど「古いまま使うと二重出品・取り違えになる物」は入れない。
+   索引に無い（まだ大きいと分かっていない）鍵は今までどおり1回で読み、ついでに updated_at も受け取って大きければ置く＝接続の回数は増えない。
+   索引にある鍵だけ「更新時刻だけ読む（数十バイト）→ 同じなら手元・違えば読む」＝当たれば丸ごと読みが0、外れれば今より1回多い（数十バイト）。
+   読み直し（baKvFresh_）は BA_CFG_NOCACHE で必ず素通し（呼び手の baKv_ が判定する） */
+var BKC_ONE_RE = /^(boshu_auto_judged_manual_ng|sg_[a-z0-9_]+|titles_[a-z0-9_]+|jan_master_[a-z0-9_]+|tcg_names_(?!ai$)[a-z0-9_]+)$/;
+function bkcOne_(k) {
+  var _pe = null; try { _pe = P_().getProperty(BKC_IDX_P + k); } catch (eG) {}
+  if (_pe) return bkcSelect_([k], '1');
+  SB_LAST_LEN = 0;
+  var r = sbSelect_('app_kv', 'select=k,v,updated_at&k=eq.' + encodeURIComponent(k)); var len = SB_LAST_LEN;
+  if (r && r[0] && r[0].updated_at) { try { var idx = {}; bkcPut_(CacheService.getScriptCache(), idx, k, r[0].updated_at, r[0].v, Date.now()); bkcIdxSave_(idx); } catch (eP) {} }
+  SB_LAST_LEN = len;
+  return (r || []).map(function (x) { return { k: x.k, v: x.v }; });
 }
 var SB_GZIP_ON = null;
 function sbGzipOn_() { if (SB_GZIP_ON === null) { try { SB_GZIP_ON = P_().getProperty('SB_GZIP') === '1'; } catch (e) { SB_GZIP_ON = false; } } return SB_GZIP_ON; }
@@ -9142,7 +9235,7 @@ var HB_KV_ = [
   ['sync_claim_syncListingsRoundRobin', '出品の同期', 70, 'upd'],
   ['sync_claim_boostTick', 'Bump', 70, 'upd'],
   ['sync_claim_condIndexTick', '状態写真の索引', 40, 'upd'],
-  ['sync_claim_syncEscrowAll', '入金の同期', 420, 'upd'],
+  ['sync_claim_syncEscrowAll', '入金の同期', 1080, 'upd'],   /* ★2026-11-15 05 レビュー（1）：入金の同期は本体が約12時間おきになった（取り札を通るようになった）＝7時間では誤って赤。18時間 */
   ['sync_claim_syncReturnsAll', '返品の同期', 420, 'upd'],
   ['sync_claim_syncPayoutsAll', '振込の同期', 420, 'upd'],
   ['cancel_watch_state', 'キャンセルの見回り（引き戻せた時刻）', 50, 'lastAt'],
@@ -9764,34 +9857,50 @@ function testImportOne() {
 function recheckEscrowForReturns(limitN) {
   if (!bgAllowed_()) { Logger.log('recheckEscrowForReturns skip: urlfetch予約枠(手動用)を確保'); return { skipped: 'uf_budget' }; }
   if (!syncGate_('recheckEscrowForReturns', 3600)) return { skipped: 'gate' };   /* ★2026-09-23 札は動ける時だけ */
-  var lim = limitN || 300, done = 0, moved = 0;
+  /* ★2026-11-15 05（止まりの見張りの発見）：トリガーから呼ばれると limitN がオブジェクト＝「out.length < オブジェクト」が偽で1件も聞かずに終わっていた（返品と入金の表を丸ごと読むだけ）。数の時だけ使う。
+     上限は「金額が動いた件数」ではなく「Shopee に聞いた回数」で数える（前の形のまま直すと、動かない古い返品を2分半ずっと聞き続ける）。
+     ★05 レビュー（5）：対象は直近180日の注文（SLS+ の補償は数か月後に反映する）。続きの位置 app_kv recheck_esc_cursor（全部の台で共有）から古い順に回す。読めない時は進めない。
+     ★05 レビュー（6）（7）（8）：ufPersist_・ループの頭で予約枠・返事に無い項目は書かない。
+     （返品・キャンセル後の取り直しは 11/7 から syncEscrowAll の refreshIncomeAfterReturn_ が毎回15件ずつやっている＝こちらは取りこぼしの拾い直し）
+     前→後の見込み：今は0回 → 3日に1回・最大300回（2分半で切る）＝1日あたり最大約100回 */
+  var lim = (typeof limitN === 'number' && limitN > 0) ? limitN : 300, done = 0, moved = 0, asked = 0;
+  var _cutR = Utilities.formatDate(new Date(Date.now() - 180 * 86400000), 'Asia/Tokyo', 'yyMMdd');
+  var _cur = escCursorGet_('recheck_esc_cursor'), _lastSn = '';
+  if (_cur === null) { Logger.log('recheckEscrowForReturns: 続きの位置（recheck_esc_cursor）を読めないので今回は止めます'); try { ufPersist_(); } catch (eUf0) {} return { skipped: 'cursor_unreadable' }; }
   var toks = listTokens_(), byShop = {};
   toks.forEach(function (t) { byShop[String(t.shop_id)] = t; });
-  var rets = sbSelectAll_('returns', 'select=cc,order_sn&order=order_sn.asc') || [];
+  var rets = sbSelectAll_('returns', 'select=cc,order_sn&order_sn=gte.' + _cutR + '&order=order_sn.asc') || [];
   var seen = {}, targets = [];
   rets.forEach(function (r) {
     var k = (r.cc || '') + ':' + (r.order_sn || '');
     if (!r.order_sn || seen[k]) return; seen[k] = 1; targets.push(r);
   });
-  var incs = sbSelectAll_('income', 'select=cc,sn,amount,shop_id&order=sn.asc') || [];
+  targets = targets.filter(function (r) { return String(r.order_sn) > _cur; }).concat(targets.filter(function (r) { return String(r.order_sn) <= _cur; }));   /* 続きの位置から（終わりまで行ったら頭へ） */
+  var incs = sbSelectAll_('income', 'select=cc,sn,amount,shop_id&sn=gte.' + _cutR + '&order=sn.asc') || [];   /* ★2026-11-15 05：対象（180日）の分だけ読む */
   var im = {};
   incs.forEach(function (x) { im[x.cc + ':' + x.sn] = x; });
   var deadline = now_() + 150, out = [], now2 = new Date().toISOString();   // 2分半で切り上げ（日次の実行時間枠を守る）
-  for (var i = 0; i < targets.length && out.length < lim; i++) {
+  for (var i = 0; i < targets.length && asked < lim; i++) {
+    if (!bgAllowed_()) { Logger.log('予約枠の線に来たので中断（' + i + '件処理）'); break; }   /* ★05 レビュー（7） */
     if (now_() > deadline) { Logger.log('時間切れで中断（' + i + '件処理）'); break; }
     var t = targets[i], cur = im[t.cc + ':' + t.order_sn];
+    _lastSn = String(t.order_sn);
     if (!cur || !cur.shop_id || !byShop[String(cur.shop_id)]) continue;
-    var e;
+    var e; asked++;
     try { e = callShop_(parseInt(cur.shop_id, 10), '/api/v2/payment/get_escrow_detail', { order_sn: t.order_sn }, 'get'); } catch (ex) { continue; }
     var inc = ((e.response || {}).order_income) || {};
     var amt = parseFloat(inc.escrow_amount); if (isNaN(amt)) continue;
     done++;
     if (amt === parseFloat(cur.amount)) continue;
     moved++;
-    out.push({ cc: t.cc, sn: t.order_sn, amount: amt, amount_at: now2, adj: escrowAdj_(inc), synced_at: now2 });
+    /* ★2026-11-15 05：書く項目を refreshIncomeAfterReturn_（11/7）とそろえる（手数料 fees・fee_total・bundle も）。前は amount と adj だけ＝adj.at が新しくなるので、
+       11/7 の取り直しが「済み」と見て対象から外し、手数料が返品前のまま残る筋道があった。返事に無い項目は入れない（05 レビュー（8）） */
+    out.push(escIncPart_(inc, { cc: t.cc, sn: t.order_sn, amount: amt, amount_at: now2, bundle: escrowBundle_(inc), adj: escrowAdj_(inc), synced_at: now2 }));
   }
-  if (out.length) { for (var k = 0; k < out.length; k += 200) sbUpsert_('income', out.slice(k, k + 200), 'cc,sn'); }
+  if (out.length) escIncUpsert_(out);
+  if (_lastSn) escCursorPut_('recheck_esc_cursor', _lastSn);
   Logger.log('返品ありの注文を再確認: 照会' + done + '件 / 金額が変わった ' + moved + '件（SLS+補償などが反映された分）');
+  try { ufPersist_(); } catch (eUf2) {}   /* ★05 レビュー（6） */
   return { done: done, moved: moved };
 }
 
@@ -9982,7 +10091,7 @@ var BA_KV_ERR = false;
    GAS は【8つ全部そろっていれば】それを合わせて読み、そろっていなければ今までの1本（boshu_auto_pre）を読む（移行の途中でも壊れない） */
 var BA_PRE_SHARDS = 8;
 var BA_CTX_ROWS = null, BA_CTX_SOLD = null;
-var BA_SNAP_USE = false, BA_SNAP_HIT = 0, BA_TICK_REUSE_HIT = 0;   /* ★2026-11-05 見るだけの口（game_judge_cands・boshu_auto_preview）だけ、出品の表の控えを使い回す */
+var BA_SNAP_USE = false, BA_SNAP_HIT = 0, BA_TICK_REUSE_HIT = 0, BA_SNAP_DELTA_HIT = 0;   /* ★2026-11-15 05：BA_SNAP_DELTA_HIT＝見るだけの口が巡回の差分読みの控えを使った回数 */   /* ★2026-11-05 見るだけの口（game_judge_cands・boshu_auto_preview）だけ、出品の表の控えを使い回す */
 function baSnapName_(key) { return 'ba_ctx_rows_' + String(key).replace(/[^A-Za-z0-9]/g, '_') + '.b64gz'; }
 function baSnapFolder_() { var fs = DriveApp.getFoldersByName('Shopee 自動出品の控え（消してよい）'); return fs.hasNext() ? fs.next() : DriveApp.createFolder('Shopee 自動出品の控え（消してよい）'); }
 function baSnapGet_(key, maxAgeMs) {
@@ -10019,10 +10128,14 @@ function baListingsDelta_(rowsKey, ccs, extra) {
   var COLS = 'cc,item_id,name,parent_sku,models,status,shop_id,weight,model_count,row_updated_at';
   var inCc = 'cc=in.(' + ccs.join(',') + ')' + (extra ? '&' + extra : ''), key = 'delta|' + rowsKey, prev = null;   /* extra＝トレカの絞り込み（差分・一覧・丸ごとの3つ全部に同じ物を付ける） */
   var tOf = function (r) { var x = Date.parse(String((r && r.row_updated_at) || '')); return isNaN(x) ? 0 : x; };
-  try { var it = baSnapFolder_().getFilesByName(baSnapName_(key)); if (it.hasNext()) { var f = it.next(); if (Date.now() - f.getLastUpdated().getTime() < 60 * 60000) prev = JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(f.getBlob().getDataAsString()), 'application/x-gzip')).getDataAsString()); } } catch (eP) { prev = null; }
+  /* ★2026-11-15 05（通信の効率化）：丸ごと読みの間隔（今までの60分）をスクリプト プロパティ BA_DELTA_FULL_MIN で台ごとに変えられるように（既定60＝今までどおり・30〜180）。
+     測った数：差分読みは効いている（11/14 18:41 本体 delta・変わった行 64／トレカ 612行・変わった行 0〜2）。残っている出品の表の読みは、ほぼこの1時間ごとの丸ごと読み（1回 約1,280万字）。
+     見込み（推測）：180 にすると巡回の出品の表の読みが約3分の1。変えるかは事業本部が決める（レビュー高1 の守り＝丸ごと読みの間隔なので黙って変えない） */
+  var _fullMs = 60 * 60000; try { var _fm = Number(P_().getProperty('BA_DELTA_FULL_MIN') || 0); if (_fm >= 30) _fullMs = Math.min(_fm, 180) * 60000;   /* ★05 レビュー（9）：上限180分（大きい値は180に丸める） */ } catch (eFm) {}
+  try { var it = baSnapFolder_().getFilesByName(baSnapName_(key)); if (it.hasNext()) { var f = it.next(); if (Date.now() - f.getLastUpdated().getTime() < Math.max(60 * 60000, _fullMs)) prev = JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(f.getBlob().getDataAsString()), 'application/x-gzip')).getDataAsString()); } } catch (eP) { prev = null; }
   var rows = null, t = 0, mode = 'full', nCh = 0, readAt = Date.now();   /* ★11/8 13時：起点は「前の回に読み始めた時刻 − 2分」（列を足した時に全行が同じ時刻になり、行の時刻の最大を起点にすると毎回全行を読んでいた＝12:15・12:35 の delta で 7,090行） */
   /* レビュー高1：丸ごと読みは「最後に丸ごと読んだ時刻」（fullAt）から60分で必ず（控えは毎回書き直すのでファイルの更新時刻では判定しない） */
-  if (prev && Array.isArray(prev.rows) && prev.rows.length && Number(prev.t) > 0 && Number(prev.fullAt) > 0 && Date.now() - Number(prev.fullAt) < 60 * 60000) {
+  if (prev && Array.isArray(prev.rows) && prev.rows.length && Number(prev.t) > 0 && Number(prev.fullAt) > 0 && Date.now() - Number(prev.fullAt) < _fullMs) {
     try {
       var since = new Date((Number(prev.readAt) > 0 ? Number(prev.readAt) : Number(prev.t)) - 120000).toISOString();
       var ch = sbSelectAll_('listings', 'select=' + COLS + '&' + inCc + '&row_updated_at=gt.' + encodeURIComponent(since));
@@ -10117,7 +10230,9 @@ function baPreHLoad_(hws) {
   if (typeof BA_PRE_H_FAILN !== 'undefined' && BA_PRE_H_FAILN > 0) return BA_PRE_H_OBJ;
   var _errBefore = BA_KV_ERR;
   try {
-    SB_LAST_LEN = 0; var rows = sbSelect_('app_kv', 'select=k,v&k=in.(' + want.map(function (h) { return encodeURIComponent(baPreHKey_(h)); }).join(',') + ')');
+    /* ★2026-11-15 05（通信の効率化）：機種ごとの写真の控え（boshu_auto_pre_h_<機種>・GAS が書くのは手動の移し baPreHMigrate_ だけ＝ふだん書くのはポータル）を、更新時刻で確かめた手元の写しから（BKC_ON の台＝2台目・3台目）。
+       前は巡回・下見のたびに直接丸ごと（11/14 18:29 の巡回1回で fc 約228万字・md 約193万字）。写真が増えた機種の鍵だけ読み直す。前→後の見込み（推測）：1回 約2MB → 当たれば 0.1MB 未満 */
+    SB_LAST_LEN = 0; var rows = bkcSelect_(want.map(function (h) { return baPreHKey_(h); }), 'Pre');
     BA_KV_SZ['boshu_auto_pre(機種)'] = (BA_KV_SZ['boshu_auto_pre(機種)'] || 0) + SB_LAST_LEN;
     var pre = BA_PRE_H_OBJ;
     (rows || []).forEach(function (x) { var v = x.v || {}; Object.keys(v).forEach(function (k) { var e = v[k], cur = pre[k]; if (!cur || !(cur.at && e && e.at && Date.parse(cur.at) > Date.parse(e.at))) pre[k] = e; }); });
@@ -10255,6 +10370,13 @@ function baKv_(k) {
      同じ台の中で5分だけ覚える（CacheService）。書いた時は覚えた値も書き換える。書く直前の読み直し（baKvFresh_）は覚えた値を使わない。
      ポータルや別の台で設定を変えた時は、この台に効くまで最大5分遅れる。100KB を超える大きさの時は覚えない */
   if (k === BA_CFG && !BA_CFG_NOCACHE) { try { var _cc = CacheService.getScriptCache().get('bacfg5'); if (_cc) { var _cv = JSON.parse(_cc); if (BA_KV_CACHE) BA_KV_CACHE[k] = _cv; delete BA_KV_FAIL[k]; return _cv; } } catch (eCc) {} }
+  /* ★2026-11-15 05（通信の効率化）：名指しの大物（GAS は読むだけの鍵）は、更新時刻で確かめた手元の写しから（bkcOne_ の説明）。
+     前→後の見込み（推測・BKC_ON の台＝2〜4台目。GAS は judged_manual_ng を書かない＝書くのは Claude の判定ループ）：judged_manual_ng 約2.6MB が巡回ごと（ゲーム2台・トレカ3台・下見）→ 判定ループ（30分ごと）が書いた後の1回だけ。
+     1台の巡回1回あたり 約3〜3.5MB → 0〜0.1MB（当たった時）。読み直し（baKvFresh_）は素通し */
+  if (!BA_CFG_NOCACHE && BKC_ONE_RE.test(k) && bkcOn_()) {
+    try { SB_LAST_LEN = 0; var _ob = bkcOne_(k); BA_KV_SZ[k] = SB_LAST_LEN; var _vb = (_ob && _ob[0] && _ob[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = _vb; delete BA_KV_FAIL[k]; return _vb; }
+    catch (eB1) { BA_KV_SZ[k] = -SB_LAST_LEN; BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
+  }
   try { SB_LAST_LEN = 0; var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); BA_KV_SZ[k] = SB_LAST_LEN; var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; delete BA_KV_FAIL[k]; if (k === BA_CFG && v) baCfgCachePut_(v); return v; } catch (e) { BA_KV_SZ[k] = -SB_LAST_LEN; BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
 }
 /* ★2026-10-20 全体レビュー 高-A：読めなかった鍵（522・時間切れ）は、この実行では書かない。読めない時に `|| {}` で始めた中身（その回の数件だけ）で、
@@ -11724,9 +11846,14 @@ function boshuAutoTick(manual) {
        🔜の一覧には判定の結果が出るので、カタログ画像は出す前に一覧から消える。控えは本番と同じ鍵なので、出す時に二重に判定しない（費用は増えず前倒しになるだけ）。1回 最大8枚 */
     try { var pjR = baPrejudgePass_(cand, pre, judged, sameCache, st, hw, hwWord, maxCost, judgeCap, 20, t0, DEADLINE * 0.68); if (pjR.n) baLog_(st, '🔍 先回りの写真判定 ' + pjR.n + '枚（OK ' + pjR.ok + '・NG ' + pjR.ng + '）'); } catch (ePJ) {}
     /* ★2026-09-23 2台目・3台目で共有する控えは【新しい値に自分の分を重ねて】書く（丸ごと上書きで相方の追記を消さない） */
-    var _fr = baKvFreshMany_([BA_JUDGED, BA_EN, BA_SAME, 'boshu_auto_prerej', BA_IMGS]);
-    try { if (baSig_(judged) !== _tkSig0.J) baKvSetMerged_(BA_JUDGED, judged, _fr, BA_JUDGED_CAP); } catch (eJ) {}
-    try { if (baSig_(enCache) !== _tkSig0.E) baKvSetMerged_(BA_EN, enCache, _fr, 0); if (baSig_(sameCache) !== _tkSig0.S) baKvSetMerged_(BA_SAME, sameCache, _fr, 12000); } catch (eC) {}   // ★v182（控えの上限 4,500→12,000・2026-09-24）
+    /* ★2026-11-15 05（通信の効率化）：書く前の読み直しは【この回に書く鍵だけ】。前は5本（判定・英題・同一作品・写真NG・使った写真）を、変わったかを比べる前に毎回まとめて読んでいた
+       （書かない鍵の分も丸ごと＝1回 数MB）。読み直しは今までどおり DB から直接（手元の写しは使わない）。使った写真（BA_IMGS）はこの後に明細を足す処理で変わることがあるので、
+       ここで変わっていなければ、書く直前（下の baKvSetMerged_(BA_IMGS…)）に1本だけ読み直す。前→後の見込み（推測）：変わらない鍵の分だけ毎回減る（1回 0〜数MB） */
+    var _sigJ = baSig_(judged) !== _tkSig0.J, _sigE = baSig_(enCache) !== _tkSig0.E, _sigS = baSig_(sameCache) !== _tkSig0.S, _sigI0 = baSig_(used) !== _tkSig0.I;
+    var _frK = []; if (_sigJ) _frK.push(BA_JUDGED); if (_sigE) _frK.push(BA_EN); if (_sigS) _frK.push(BA_SAME); if (preRejChanged) _frK.push('boshu_auto_prerej'); if (_sigI0) _frK.push(BA_IMGS);
+    var _fr = _frK.length ? baKvFreshMany_(_frK) : {};   /* 読めなければ null＝下の混ぜ書きは全部書かない（今までどおり） */
+    try { if (_sigJ) baKvSetMerged_(BA_JUDGED, judged, _fr, BA_JUDGED_CAP); } catch (eJ) {}
+    try { if (_sigE) baKvSetMerged_(BA_EN, enCache, _fr, 0); if (_sigS) baKvSetMerged_(BA_SAME, sameCache, _fr, 12000); } catch (eC) {}   // ★v182（控えの上限 4,500→12,000・2026-09-24）
     if (preRejChanged) { try { var _prm = baKvMerge_('boshu_auto_prerej', preRej, _fr, 0); if (!_prm) throw new Error('読み直せないので書きません'); preRej = _prm; var _prk = Object.keys(preRej); if (_prk.length > 3000) { _prk.sort(function (a, b) { return String((preRej[a] || {}).at || '').localeCompare(String((preRej[b] || {}).at || '')); }).slice(0, _prk.length - 3000).forEach(function (k) { delete preRej[k]; }); } baKvSet_('boshu_auto_prerej', preRej); } catch (ePr) { baLog_(st, '写真NGの記録に失敗: ' + String(ePr).slice(0, 160)); } }
     if (!picks.length) { try { baKvSet_('boshu_auto_done_' + hw, ledger); } catch (eL) {} return finish_(st.lastMsg = hw + '：今回は出せる候補がなかった（写真なし/名前なし ' + out.skipped + '件）'); }
     // 国ごとに、家族カタログの空きへ
@@ -11756,7 +11883,7 @@ function boshuAutoTick(manual) {
     try { var _ll = baListLogWrite_(st, t0); if (_ll) baLog_(st, '出品ログに ' + _ll + '件 記録'); } catch (eLl) { baLog_(st, '出品ログへの記録に失敗（ポータルの取り込みで後から入ります）: ' + String(eLl).slice(0, 160)); }
     // 済み台帳・使った写真・当日カウント
     if (baSig_(ledger) !== _tkSig0.L) baKvSet_('boshu_auto_done_' + hw, ledger);
-    if (baSig_(used) !== _tkSig0.I) baKvSetMerged_(BA_IMGS, used, _fr, 0);   /* ★使った写真の一覧は相方の分も残す（消えると同じ写真が別の作品に付く） */
+    if (baSig_(used) !== _tkSig0.I) baKvSetMerged_(BA_IMGS, used, _sigI0 ? _fr : baKvFreshMany_([BA_IMGS]), 0);   /* ★使った写真の一覧は相方の分も残す（消えると同じ写真が別の作品に付く）。★2026-11-15 05：上で読み直していない時だけ、ここで1本読み直す（混ぜる元は必ずその鍵を読んだ物） */
     st.today.n += picks.length; st.today.added += out.added;
     /* ★v184 失敗の数え方：候補があったのに1件も入らなかった回を「失敗」に数える（baAddBatch_ は例外を握って note で返すので外の catch に来ない・Codex指摘）。1件でも入れば0に戻す */
     /* ★2026-09-25 本人「出品巻き返して」＝2台とも「候補が1件も入らなかった」が3回続いてブレーキ（実測：全部「対象なし」＝その作品はどの国にも
@@ -11884,7 +12011,7 @@ function gameJudgeCands_(p) {
     }
     out.skipped[hw] = sk; out.done.push(hw);
   }
-  out.ms = Date.now() - t0; out.n = out.list.length; out.snapHit = BA_SNAP_HIT; BA_SNAP_USE = false;
+  out.ms = Date.now() - t0; out.n = out.list.length; out.snapHit = BA_SNAP_HIT; out.snapDeltaHit = BA_SNAP_DELTA_HIT; BA_SNAP_USE = false;
   return out;
 }
 /* 🔍 まとめて先に判定する（ポータルのボタン／手動）。出品はしない。1回 最大 maxN 枚・4分まで */
@@ -12137,6 +12264,10 @@ function baLoadCtx_(cfg, hw, ccs, opts) {
      本番の巡回（出品する方）は今までどおり毎回 DB から読む。控えが読めない・古い時は DB から読む */
   if (!BA_CTX_ROWS[_rowsKey]) {
     var _snap = (BA_SNAP_USE && !_tcg) ? baSnapGet_(_rowsKey, 60 * 60000) : null;   /* 見るだけの口なので60分（game_judge_cands は1時間に数回＝15分では効かない・レビュー9） */
+    /* ★2026-11-15 05（通信の効率化）：見るだけの口（下見・判定の候補）は、自分の控えが無い時、同じ台の巡回が差分読みで保っている出品の表の控え（'delta|'・同じ国の組み合わせ・同じ列）を使う。
+       60分以内に DB から読み始めた物だけ（読み始めた時刻 readAt で見る）。前はここで丸ごと読み直していた（11/14 2台目の下見｜listings 約107MB／10.5時間・3台目 67MB）。
+       出品する巡回（BA_SNAP_USE が偽）は今までどおり（ここは通らない）。控えが無い・古い・壊れている時は今までどおり丸ごと読む */
+    if (!_snap && BA_SNAP_USE && !_tcg) { { try { var _dIt = baSnapFolder_().getFilesByName(baSnapName_('delta|' + _rowsKey)); if (_dIt.hasNext()) { var _dF = _dIt.next(); if (Date.now() - _dF.getLastUpdated().getTime() < 60 * 60000) { var _dO = JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(_dF.getBlob().getDataAsString()), 'application/x-gzip')).getDataAsString()); if (_dO && Array.isArray(_dO.rows) && _dO.rows.length && Number(_dO.readAt) > 0 && Date.now() - Number(_dO.readAt) < 60 * 60000) { _snap = _dO.rows; BA_SNAP_DELTA_HIT = (BA_SNAP_DELTA_HIT || 0) + 1; } } } } catch (eDs) {} } }
     /* ★2026-11-08 egress（事業本部の②）：本番の巡回も、同じ台で5分以内に読んだ出品の表を使い回す（時刻の巡回 boshuAutoTick とポータルから呼ぶ tick_bg が重なる・1回 12.78MB）。
        控えはその台の Drive（台ごとの Google アカウント）＝他の台が足した物は見えない＝今までどおり、足す直前に Shopee の明細の一覧を読み直して同じ名前を飛ばす守り（addVariationsBulk0_ の skipped）と足した印（boshu_auto_done）で止める。
        止める時はスクリプト プロパティ BA_TICK_REUSE='0' */
@@ -12364,7 +12495,10 @@ function boshuAutoPreviewBody_(hw, limit, noYahoo, needPhoto) {
   st.today = (st.today && st.today.d === todayJ) ? Object.assign({}, st.today, { aiText: stP.today.aiText || 0, capT: stP.today.capT }) : stP.today;
   var _pvStDirty = !needPhoto || ((stP.today && stP.today.aiText) || 0) !== _pvSig0.ai;   /* 🔜の表示を更新する時・AIを使った時だけ */
   if (_pvStDirty && !BA_KV_ERR) { try { baKvSet_(BA_ST, st); } catch (e) {} }   /* ★2026-09-28 読めなかった回は書かない */
-  try { var _frV = baKvFreshMany_([BA_EN, BA_SAME]); if (baSig_(enCache) !== _pvSig0.en) baKvSetMerged_(BA_EN, enCache, _frV, 0); if (baSig_(sameCache) !== _pvSig0.same) baKvSetMerged_(BA_SAME, sameCache, _frV, 12000); } catch (eC) {}   // ★v182／★2026-09-28 混ぜて書く
+  /* ★2026-11-15 05（通信の効率化）：下見は呼ばれるたびに英題と同一作品の控えを2本とも読み直していた（書かない回も）。変わった鍵だけ読み直して混ぜて書く（読み直しは今までどおり DB から直接）。
+     前→後の見込み（推測）：AI を使わなかった下見（大半）は 1回 約1MB超 → 0 */
+  try { var _pvE = baSig_(enCache) !== _pvSig0.en, _pvS = baSig_(sameCache) !== _pvSig0.same, _pvK = []; if (_pvE) _pvK.push(BA_EN); if (_pvS) _pvK.push(BA_SAME);
+    if (_pvK.length) { var _frV = baKvFreshMany_(_pvK); if (_pvE) baKvSetMerged_(BA_EN, enCache, _frV, 0); if (_pvS) baKvSetMerged_(BA_SAME, sameCache, _frV, 12000); } } catch (eC) {}   // ★v182／★2026-09-28 混ぜて書く
   ufPersist_();
   return { ok: true, hw: hw, total: ctx.cand.length, rows: rows, held: held, blocked: blocked, aiKey: !!stP.aiKey };
 }
