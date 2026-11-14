@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261114-0630'
+var SRC_VER = '20261114-1310'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -7820,12 +7820,15 @@ function relinkInventoryFromProfitSheet() {
   var items = (kv && kv[0] && kv[0].v && kv[0].v.items) || null;
   if (!items) { Logger.log('profit_sheet が未取込。何もしない'); return 0; }
   // 在庫台帳（item_id → 今の売却SN）
-  var inv = sbSelectAll_('inventory', 'select=item_id,shopee_sn') || [];
-  var cur = {};
-  inv.forEach(function (r) { cur[String(r.item_id)] = String(r.shopee_sn || '').trim(); });
+  var inv = sbSelectAll_('inventory', 'select=item_id,shopee_sn,status') || [];
+  var cur = {}, curSt = {};
+  inv.forEach(function (r) { cur[String(r.item_id)] = String(r.shopee_sn || '').trim(); curSt[String(r.item_id)] = String(r.status || ''); });
   // 実在する注文だけを対象にする（消えた注文に紐付けない）
-  var ords = sbSelectAll_('orders', 'select=sn') || [];
-  var live = {}; ords.forEach(function (o) { live[o.sn] = 1; });
+  var ords = sbSelectAll_('orders', 'select=sn,status') || [];
+  var live = {}, ended = {}; ords.forEach(function (o) { live[o.sn] = 1; if (/cancel|return/i.test(String(o.status || ''))) ended[o.sn] = 1; });
+  /* ★2026-11-14 05（本人「直して」・00）：注文番号だけ書いて状態を書かなかったので、売れた品が「在庫保管中／入庫待ち」のまま 959行たまった。
+     付ける時に、注文がキャンセル・返品中でなく、今の状態が在庫保管中か入庫待ちの行だけ、状態も「販売済み」にする（ポータルの紐付けと同じ・edited_at も） */
+  var rowsSold = [], nowIso = new Date().toISOString();
   var rows = [], seen = {}, conflict = 0, same = 0;
   Object.keys(items).forEach(function (k) {
     var sn = k.indexOf(':') >= 0 ? k.split(':')[1] : k;
@@ -7836,15 +7839,19 @@ function relinkInventoryFromProfitSheet() {
       if (!(id in cur) || seen[id]) return;
       if (cur[id] === sn) { same++; return; }
       if (cur[id]) { conflict++; return; }        // ★既に別注文に紐付いている＝触らない
-      seen[id] = 1; rows.push({ item_id: id, shopee_sn: sn });
+      seen[id] = 1;
+      if (!ended[sn] && /^(在庫保管中|入庫待ち)$/.test(curSt[id] || '')) rowsSold.push({ item_id: id, shopee_sn: sn, status: '販売済み', edited_at: nowIso });
+      else rows.push({ item_id: id, shopee_sn: sn });
     });
   });
-  for (var i = 0; i < rows.length; i += 200) {
-    try { sbUpsert_('inventory', rows.slice(i, i + 200), 'item_id'); }
-    catch (e) { Logger.log('⚠ 在庫の紐付け書込失敗: ' + String(e).slice(0, 120)); }
-  }
-  Logger.log('✅ 在庫の売却SNを復元 ' + rows.length + '件（既に一致 ' + same + ' / 別注文に紐付済みで据え置き ' + conflict + '）');
-  return rows.length;
+  [rows, rowsSold].forEach(function (L) {   /* 列の組が違う2束は分けて書く（PostgREST の一括は同じ列の組だけ） */
+    for (var i = 0; i < L.length; i += 200) {
+      try { sbUpsert_('inventory', L.slice(i, i + 200), 'item_id'); }
+      catch (e) { Logger.log('⚠ 在庫の紐付け書込失敗: ' + String(e).slice(0, 120)); }
+    }
+  });
+  Logger.log('✅ 在庫の売却SNを復元 ' + (rows.length + rowsSold.length) + '件（うち販売済みにした ' + rowsSold.length + '・既に一致 ' + same + ' / 別注文に紐付済みで据え置き ' + conflict + '）');
+  return rows.length + rowsSold.length;
 }
 
 function finalizedSns_(cc) {
