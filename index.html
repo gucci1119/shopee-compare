@@ -1831,6 +1831,9 @@
 <script>
 (function () {
   'use strict';
+  /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
+     前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
+  const APP_BUILD = '20261115-0243';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -3057,6 +3060,9 @@
   /* ★2026-11-04 全体レビュー 新-1：ポータルは300秒で打ち切るが GAS は最大360秒動いて最後まで済ませる＝返事（moves）が届かず JAN・在庫0固定が古い番号に残っていた。
      GAS が残す結果（app_kv shift_result_<shop>_<item>）を、時間切れの後に4回（30秒・90秒・3分・5分）読みに行き、呼んだ時より後の物なら1回だけ当てる */
   /* ★2026-11-04 全体レビュー 2回目 新2-2：同じカタログの別の詰め直し削除の結果を当てないよう、呼ぶたびの番号（rid）が合う物だけ当てる。当てた rid はこの端末に控える */
+  /* ★2026-11-15 05（全面改修・型F）：担当のPCの判定はPC単位＝同じPCの2つのタブが両方「担当」になる。当て中の札にはタブごとの番号（sessionStorage）も入れる */
+  const SMD_TAB_ID = (() => { try { let t = sessionStorage.getItem('smdTabId'); if (!t) { t = Math.random().toString(36).slice(2, 8); sessionStorage.setItem('smdTabId', t); } return t; } catch (_) { return Math.random().toString(36).slice(2, 8); } })();
+  const _shiftPollBusy = new Set();   /* ★2026-11-15 05（全面改修・型G）：同じ rid の後からの当てを重ねない（30秒・90秒…の読みが重なる） */
   function shiftApplied(rid) { try { const m = JSON.parse(localStorage.getItem('smdShiftAppliedRid') || '{}'); return !!m[rid]; } catch (_) { return false; } }
   function shiftMarkApplied(rid) { try { const m = JSON.parse(localStorage.getItem('smdShiftAppliedRid') || '{}'); m[rid] = Date.now(); const ks = Object.keys(m).sort((a, b) => m[b] - m[a]); ks.slice(50).forEach(k => { delete m[k]; }); localStorage.setItem('smdShiftAppliedRid', JSON.stringify(m)); } catch (_) {} }
   /* ★2026-11-04 全体レビュー 3回目 新3-3・新3-4：当てた印は結果の控え（shift_result_*・GAS が丸ごと書く）に書かない＝別の鍵 shift_applied_<shop>_<item>（{ ats: { <hist の at>: { at, by } }, lock: { by, at } }）。
@@ -3074,8 +3080,24 @@
         /* ★2026-11-04 新3-7：一番上の値だけでなく、履歴（hist）の中から自分の rid の direct を探す（間に別の削除・後から効いた分が書かれても拾う） */
         const v = !v0 ? null : (String(v0.rid || '') === rid && v0.src !== 'pending') ? v0 : (Array.isArray(v0.hist) ? v0.hist.slice().reverse().find(e => e && String(e.rid || '') === rid && e.src !== 'pending') : null);
         if (!v || v.appliedAt || !(Array.isArray(v.moves) && v.moves.length)) return;   /* 後から効いた分（pending）は担当の PC がまとめて当てる（2台で2回当てない） */
-        shiftMarkApplied(rid);
-        const n = pidRekeyAfterShift(params.item_id, { moves: v.moves || [], gone: v.gone || [], llog: v.llog || null });
+        /* ★2026-11-15 05（全面改修・型G）：成功を確かめる前に「当てた」の印を付けていた＝JAN の台帳の保存が通らなくても二度と当たらなかった。
+           台帳・在庫0固定を読み終えてから当て、保存が通った後（付け替えの側が「保存が通った」と決めた時）に印を付ける。通らなければ手元も元に戻り（revertOnFail）、次の読みでやり直す */
+        if (_shiftPollBusy.has(rid)) return; _shiftPollBusy.add(rid);
+        let n = 0;
+        try {
+          try { await ensureProductIds(); } catch (_) {}
+          if (!productIds || !kvOk.product_ids || _pidsLoading) return;
+          if (lstMeta === null || window._lstMetaLoading) { try { await Promise.race([lstLoadMeta(), new Promise(r0 => setTimeout(r0, 90000))]); } catch (_) {} }
+          if (!kvOk.listing_meta || lstMeta === null) return;
+          if (shiftApplied(rid)) return;
+          const rr = { moves: v.moves || [], gone: v.gone || [], llog: v.llog || null, revertOnFail: true };
+          const tS = Date.now(); n = pidRekeyAfterShift(params.item_id, rr);
+          const saved = n ? await (rr.savedP || pidSaveWait(tS, 70000)) : true;
+          if (!saved) { try { logAct('出品', '詰め直しの付け替え（後から）の保存が通らず', String(params.item_id), '当てた印は付けない＝次の読みでやり直す'); } catch (_) {} return; }
+          shiftMarkApplied(rid);
+        } finally { _shiftPollBusy.delete(rid);
+          if (sec === 300 && !shiftApplied(rid)) { try { toast('⚠ 明細の削除（中身を前へ詰めて、末尾だけ消す）の結果を後から読みましたが、JAN・在庫0固定を付け替えられませんでした（古い番号のまま）。出品一覧を開き直して確かめてください', 10000); } catch (_) {} try { logAct('出品', '詰め直しの付け替え（後から）ができなかった', String(params.item_id), '台帳を読めない・保存が通らない（5分の間に4回）'); } catch (_) {} } }
+        if (!shiftApplied(rid)) return;
         try { toast('🔁 返事が来なかった明細の削除（中身を前へ詰めて、末尾だけ消す）の結果を後から読み、JAN・在庫0固定を付け替えました（' + (v.moves || []).length + '件の移動）', 8000); } catch (_) {}
         try { logAct('出品', '詰め直しの付け替え（後から）', String(params.item_id), '移動 ' + (v.moves || []).length + '・消えた ' + (v.gone || []).length + '・JAN ' + n); } catch (_) {}
       } catch (e) { console.warn('[詰め直しの結果] 読めませんでした', e && e.message); }
@@ -3083,7 +3105,12 @@
   }
   /* ★2026-11-04 全体レビュー 2回目 新2-1：並べ替えが後から効いた時は、GAS（🤖の回の shiftPendCheck_）が結果を src:'pending' で残す。
      担当の PC（pcIsOwner）が起動の後と10分ごとに読み（直近2日・小さい鍵）、appliedAt の無い物を1回だけ当てて appliedAt を書く（2台で2回当てない） */
+  /* ★2026-11-15 05（全面改修・型F）：同じPCの2つのタブが両方走らないよう、navigator.locks で1つのタブだけにする（営業集計 outFunnelAutoTick と同じ形）。無いブラウザは今までどおり */
   async function shiftPendingApplyTick() {
+    if (navigator.locks && navigator.locks.request) { try { return await navigator.locks.request('smdShiftPendingApply', { ifAvailable: true }, async lk => { if (!lk) return; return shiftPendingApplyTick0(); }); } catch (_) { return; } }
+    return shiftPendingApplyTick0();
+  }
+  async function shiftPendingApplyTick0() {
     try {
       if (!settings.sbSecret || demoOn() || (typeof pcIsOwner === 'function' && !pcIsOwner())) return;
       const since = new Date(Date.now() - 2 * 86400000).toISOString();
@@ -3101,15 +3128,16 @@
         const av = amap[shiftAppliedKey(row.k)] || { ats: {} }, aats = av.ats || {};
         const todo = v.hist.filter(e => e && !e.appliedAt && !aats[String(e.at)] && Array.isArray(e.moves) && (e.src === 'pending' || (!e.rid && e.via !== 'portal'))).sort((a, b) => Number(a.at) - Number(b.at));
         if (!todo.length) continue;
-        if (av.lock && av.lock.by !== PC.id && Date.now() - Number(av.lock.at || 0) < 10 * 60000) continue;   /* 別の PC が当て中 */
+        const myLock = PC.id + ':' + SMD_TAB_ID;   /* ★2026-11-15 05（全面改修・型F）：PC＋タブの番号 */
+        if (av.lock && av.lock.by !== myLock && Date.now() - Number(av.lock.at || 0) < 10 * 60000) continue;   /* 別の PC・別のタブが当て中 */
         /* 新3-3：先に置くのは「当て中」だけ。台帳を読めていなければ当てない（次の10分でやり直す） */
         try { await ensureProductIds(); } catch (_) {}
         if (!productIds || kvOk.product_ids === false || _pidsLoading) continue;
         if (lstMeta === null || window._lstMetaLoading) { try { await Promise.race([lstLoadMeta(), new Promise(r0 => setTimeout(r0, 90000))]); } catch (_) {} }
         if (!kvOk.listing_meta || lstMeta === null) continue;
-        await shiftAppliedPut(row.k, x => { x.lock = { by: PC.id, at: Date.now() }; });
-        const tS = Date.now(); let nAll = 0; let sq = 0; for (const e of todo) { nAll += pidRekeyAfterShift(m[1], { moves: e.moves, gone: e.gone || [], revertOnFail: true, revertSeq: sq++ }) || 0; }
-        const saved = nAll ? await pidSaveWait(tS, 30000) : true;   /* JAN の台帳を書いた時は、保存が通るまで待つ */
+        await shiftAppliedPut(row.k, x => { x.lock = { by: myLock, at: Date.now() }; });
+        let nAll = 0; let sq = 0; const rrs = []; for (const e of todo) { const rr = { moves: e.moves, gone: e.gone || [], revertOnFail: true, revertSeq: sq++ }; rrs.push(rr); nAll += pidRekeyAfterShift(m[1], rr) || 0; }
+        const saved = nAll ? (await Promise.all(rrs.map(x => x.savedP || Promise.resolve(true)))).every(Boolean) : true;   /* ★2026-11-15 05（全面改修・型F/G）：付け替えの側が「保存が通った／元に戻した」を決めるまで待つ（前は30秒で見切り、後から保存が通ると印なしで2回当たった） */   /* JAN の台帳を書いた時は、保存が通るまで待つ */
         if (!saved) { try { logAct('出品', '詰め直しの付け替え（後から）の保存が通らず', m[1], '当てた印は付けない＝10分後にやり直す'); } catch (_) {} continue; }
         await shiftAppliedPut(row.k, x => { const nowA = Date.now(); todo.forEach(e => { x.ats[String(e.at)] = { at: nowA, by: PC.id }; }); delete x.lock; });
         todo.forEach(e => { if (e.rid) shiftMarkApplied(e.rid); });
@@ -9369,6 +9397,28 @@
     "このPCは書き込みキーが未設定です（⚙️設定で登録してください）": "This PC has no write key set (add it in ⚙️ Settings)",
     "このPCは書き込みキー未設定です（⚙️設定でキーを入れてください）": "This PC has no write key set (add the key in ⚙️ Settings)",
     "このPCは書き込みキー未設定です（⚙️設定）": "This PC has no write key set (⚙️ Settings)",
+    "入庫待ちの荷物を読めませんでした": "Could not load parcels waiting to arrive",   /* ★2026-11-15 05（全面改修） */
+    "仕入れ目安 読めませんでした": "Cost estimate: could not load",   /* ★2026-11-15 05（全面改修） */
+    "入金予定の自動転記が止まっています": "Automatic payout-schedule transfer is stopped",   /* ★2026-11-15 05（全面改修） */
+    "自動の転記は担当のPCだけで動きます。担当のPCで「利益管理表へ転記」の「自動実行する」を ON にしてください": "Automatic transfers run only on the assigned PC. On that PC, turn on “Run automatically” under “Transfer to profit sheet”.",   /* ★2026-11-15 05（全面改修） */
+    "出品の表が全部読めていないので見送り": "Skipped: the full listings table is not loaded",   /* ★2026-11-15 05（全面改修） */
+    "重複の組を数えられないので見送り": "Skipped: duplicate pairs could not be counted",   /* ★2026-11-15 05（全面改修） */
+    "今日の為替を読めず、既定のレートで計算した値段になるので足していません（値段の指定もありません）。為替を読み直してから、もう一度押してください": "Not added: today's exchange rate could not be loaded, so the price would use the default rate (no price was specified). Reload the rate and press again.",   /* ★2026-11-15 05（全面改修） */
+    "この依頼はこの窓で一度処理しました。画面が読み直されたので、二重に足さないよう自動では進めません": "This request was already processed in this window. The page was reloaded, so it will not run automatically again (to avoid adding twice).",   /* ★2026-11-15 05（全面改修） */
+    "この依頼は処理の途中で画面が読み直されました。二重に足さないよう自動では進めません。Request page を確かめてから、チャットからもう一度押してください": "The page was reloaded while this request was being processed. It will not run automatically again (to avoid adding twice). Check the Request page, then press again from the chat.",   /* ★2026-11-15 05（全面改修） */
+    "（国の単位に丸めた）": "(rounded to the country's price unit)",   /* ★2026-11-15 05（全面改修） */
+    "在庫の毎日記録を見送り": "Skipped the daily stock record",   /* ★2026-11-15 05（全面改修） */
+    "詰め直しの付け替え（後から）ができなかった": "Could not apply the delayed re-mapping after compacting",   /* ★2026-11-15 05（全面改修） */
+    "同期は一部失敗": "Sync partly failed",   /* ★2026-11-15 05（全面改修） */
+    "最終同期の時刻は進めていません": "The last-sync time was not updated",   /* ★2026-11-15 05（全面改修） */
+    "読めなかった国": "Countries that could not be loaded",   /* ★2026-11-15 05（全面改修） */
+    "見送り: 担当でない": "Skipped: not the assigned PC",   /* ★2026-11-15 05（全面改修） */
+    "約束した額なのでそのまま出しました。打ち間違いでないか確かめてください": "Listed as agreed. Please check it is not a typo.",   /* ★2026-11-15 05（全面改修） */
+    "下書き・目標・🤖の控えを読めませんでした": "Could not load drafts, goal and 🤖 records",   /* ★2026-11-15 05（全面改修） */
+    "下書きから公開した分を除けていないので、件数が多めに出ている恐れがあります。開き直すと読み直します": "Items published from drafts are not excluded, so counts may be too high. Reopen to reload.",   /* ★2026-11-15 05（全面改修） */
+    "統計の毎日の取り直しが通らず": "Daily stats refresh did not go through",   /* ★2026-11-15 05（全面改修） */
+    "降格（カテゴリ違い）の自動直しを見送り": "Skipped automatic fix for demoted listings (wrong category)",   /* ★2026-11-15 05（全面改修） */
+    "詰め直しの付け替え（後から）の保存が通らず": "Saving the delayed re-mapping after compacting did not go through",   /* ★2026-11-15 05（全面改修） */
     "Zalo・Viber からはまだ書けません（書く道を作るまでは WA か Smart Reply で出してください）": "You can't write from Zalo/Viber yet (use WA or Smart Reply until the write route is ready)",
     "Zalo・Viber からはまだ書けません（⚙️設定の WRITE_TOKEN がありません）。WA か Smart Reply で出してください": "You can't write from Zalo/Viber (no WRITE_TOKEN in ⚙️ Settings). Use WA or Smart Reply",
     "このまま書き込みますか？": "Write it as it is?",
@@ -10563,6 +10613,7 @@
       /* ★2026-10-14 本人「ポータルのタブは一定期間で再読み込みされる仕様になってるじゃん。対策してください」：Claude が外から注入して回す長い処理（明細名の書き換え・SKU直し・写真の差し替え）が
          読み直しで2回消えた。処理側が window.__smdHold(ms) で「あと ms ミリ秒は作業中」と宣言すれば、その間は自動で読み直さない（最長30分・宣言を更新し続ける） */
       try { if (Number(window.__smdExtBusyUntil || 0) > Date.now()) return true; } catch (_) {}
+      try { if (Number(window._pcAutoBusyUntil || 0) > Date.now() || (typeof pcQuote !== 'undefined' && pcQuote && pcQuote.addBusy)) return true; } catch (_) {}   /* ★2026-11-15 05（全面改修・型F）：&auto=1 の Request page への追加の途中で自動の読み直しをしない */
       const ae = document.activeElement;
       if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return true;          // 入力中
       const m = document.getElementById('smd-modal');
@@ -10579,6 +10630,7 @@
   function appReloadFresh() {
     try {
       const u = location.pathname + '?v=' + Date.now() + (location.hash || '');
+      try { sessionStorage.setItem('smdFreshReloadAt', String(Date.now())); } catch (_) {}   /* ★2026-11-15 05（全面改修・型F）：自動の読み直しだった印（同じ #…&auto=1 を2回走らせない） */
       location.replace(u);
     } catch (_) { location.reload(); }
   }
@@ -10609,15 +10661,51 @@
     clearTimeout(_appTimer);
     _appTimer = setTimeout(appUpdateApply, 15000);
   }
+  /* ★2026-11-15 05（全面改修・型B）：古い index.html で開かれた窓が、自分が古いと気づけなかった（最初の HEAD の ETag を「この窓の版」と覚えていた＝キャッシュの古い版で開くと、新しい ETag を自分の版と思い込む）。
+     → ページに埋めた版の印（APP_BUILD）と、公開中の index.html の中の印を比べる。本体（約3.5MB）を読むのは ETag が変わった時だけ（ETag ごとに読んだ印を覚える）＝3分ごとに本体を読まない。
+     05 が印の書き換えを忘れた時のために、ETag の変化も予備として今までどおり見る */
+  function appBuildRe() { return new RegExp('const APP_' + "BUILD = '([0-9A-Za-z_.-]{4,40})'"); }
+  function appBuildNewer(remote, mine) { remote = String(remote || ''); mine = String(mine || ''); if (!remote || remote === mine) return false; const f = /^\d{8}-\d{4}$/; return (f.test(remote) && f.test(mine)) ? remote > mine : true; }
+  async function appRemoteBuild(maxMs) {
+    const lim = (p) => maxMs ? Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), maxMs))]) : p;
+    let etag = null;
+    try { const r = await lim(fetch(location.pathname, { method: 'HEAD', cache: 'no-store' })); etag = r.headers.get('etag') || r.headers.get('last-modified') || null; } catch (_) {}
+    if (etag) { try { const m = JSON.parse(localStorage.getItem('smdAppBuildByEtag') || 'null'); if (m && m.etag === etag && m.build) return { build: m.build, etag }; } catch (_) {} }
+    /* ETag が取れない時は、本体を読むのを30分に1回までにする（見積もりの窓の確かめ＝maxMs あり は別） */
+    if (!etag && !maxMs) { try { if (Date.now() - Number(localStorage.getItem('smdAppBuildGetAt') || 0) < 30 * 60000) return { build: '', etag }; localStorage.setItem('smdAppBuildGetAt', String(Date.now())); } catch (_) {} }
+    try {
+      const r = await lim(fetch(location.pathname + '?bv=' + Date.now(), { cache: 'no-store' }));
+      if (!r.ok) return { build: '', etag };
+      const tx = await lim(r.text()); const mm = appBuildRe().exec(tx);
+      const k = etag || r.headers.get('etag') || r.headers.get('last-modified') || '';
+      if (mm && k) { try { localStorage.setItem('smdAppBuildByEtag', JSON.stringify({ etag: k, build: mm[1] })); } catch (_) {} }
+      return { build: mm ? mm[1] : '', etag: etag || k || null };
+    } catch (_) { return { build: '', etag }; }
+  }
   async function appUpdateCheck() {
-    const t = await appTag();
-    if (!t) return;
-    if (!_appTag) { _appTag = t; return; }
-    if (t === _appTag || _appNew) return;
+    if (_appNew) return;
+    const rb = await appRemoteBuild(0);
+    let isNew = !!(rb && rb.build && appBuildNewer(rb.build, APP_BUILD));
+    const t = rb && rb.etag;
+    if (!isNew && t) { if (!_appTag) _appTag = t; else if (t !== _appTag) isNew = true; }   /* 予備：印の書き換え忘れでも、ETag が変われば新しい版 */
+    if (!isNew || _appNew) return;
     _appNew = true;
     appUpdateBanner();
     appUpdateApply();
   }
+  /* ★2026-11-15 05（全面改修・型B）：&auto=1・mode=quote で開かれた窓は、動き出す前に版を比べる。古ければ ?v= を付けて1回だけ読み直す（sessionStorage の印で2回目はしない）。
+     読めない・5秒で返らない時は待たずに進める（返事の無い止まり方をしない） */
+  async function appBuildGate() {
+    try {
+      const rb = await Promise.race([appRemoteBuild(5000), new Promise(z => setTimeout(() => z(null), 5000))]);   /* 全体で5秒まで */
+      if (!rb || !rb.build || !appBuildNewer(rb.build, APP_BUILD)) return true;
+      let done = ''; try { done = sessionStorage.getItem('smdBuildGateReload') || ''; } catch (_) { return true; }
+      if (done) { try { console.warn('[版] 読み直しても古い版のまま', APP_BUILD, '→', rb.build); } catch (_) {} return true; }
+      try { sessionStorage.setItem('smdBuildGateReload', rb.build); } catch (_) { return true; }
+      appReloadFresh(); return false;
+    } catch (_) { return true; }
+  }
+  try { window.__appBuildGate = appBuildGate; } catch (_) {}
   appUpdateCheck();
   setInterval(appUpdateCheck, 180000);                                   // 3分ごと
   document.addEventListener('visibilitychange', () => { if (!document.hidden) appUpdateCheck(); });  // タブに戻った時
@@ -11241,20 +11329,25 @@
   // 入力を憶えておく：ページを開き直すたびに打ち直すのが面倒なので、前回の値を復元する
   const PC_IDS = ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-gross', 'pc-margin', 'pc-ratio', 'pc-ppfee', 'pc-ppfix'];
   let pcOv = {};   // ★2026-10-15 国ごとの売値の上書き（カードの値段を打ち替えた物）。本人「各国の値段の上に打ち込めるようにした方がいい」
+  /* ★2026-11-15 05（全面改修・型B/E）：&auto=1 の窓も見積もりの小窓と同じく、本体のタブの目標粗利・ROI・利益率・重さ・寸法を持ち込まず、書き戻さない。
+     印は開いた URL から最初に立てる（priceCalcRestore は fromChat より先に走ることがある）。PayPal の手数料の欄などは今までどおり戻す */
+  try { const h0 = String(location.hash || ''); if (h0.indexOf('pricecalc') >= 0 && /[?&](auto=1|mode=quote)(&|$)/.test(h0)) window._pcChatWin = true; } catch (_) {}
+  const PC_TGT_IDS = ['pc-cost', 'pc-weight', 'pc-w', 'pc-h', 'pc-d', 'pc-roi', 'pc-gross', 'pc-margin'];
   function priceCalcSave() {
-    if (window._pcQuoteWin) return;   /* ★2026-10-24 見積もりの小窓（mode=quote）の値（目標粗利・重さ等）を本体のタブへ持ち込まない */
+    if (window._pcQuoteWin || window._pcChatWin) return;   /* ★2026-10-24 見積もりの小窓（mode=quote）の値（目標粗利・重さ等）を本体のタブへ持ち込まない */
     const o = {}; PC_IDS.forEach(id => { const el = document.getElementById(id); if (el) o[id] = el.value; });
     const al = document.getElementById('pc-align'); if (al) o['pc-align'] = al.checked ? '1' : '0';
     try { localStorage.setItem('smdPriceCalc', JSON.stringify(o));  } catch (_) {}
   }
   function priceCalcRestore() {
-    if (window._pcQuoteWin) return;   /* ★2026-10-24 小窓には本体のタブで打った目標粗利・重さ等を戻さない（カードが指定した値か既定の式で計算する） */
+    if (window._pcQuoteWin && !window._pcChatWin) return;   /* ★2026-10-24 小窓には本体のタブで打った目標粗利・重さ等を戻さない（カードが指定した値か既定の式で計算する） */
+    const chatWin = !!(window._pcQuoteWin || window._pcChatWin);   /* ★2026-11-15 05（全面改修・型B/E）：チャットから開いた窓は目標・重さ・仕入額を戻さない（手数料の欄だけ戻す） */
     let o = null; try { o = JSON.parse(localStorage.getItem('smdPriceCalc') || 'null'); } catch (_) {}
     /* ★2026-10-24 本人「直ってないね」「429」：打ち替え（売値）がこの端末に保存され、読み直すたびに前の商品の R$429 が戻っていた＝打ち替えはその場だけ（読み直したら消す） */
-    if (!window._pcLoadedOnce) { window._pcLoadedOnce = true; try { localStorage.removeItem('smdPriceCalcOv'); } catch (_) {} pcOv = {}; }   /* ★2026-10-24 レビュー：描き直しのたびに消していた＝作業中の打ち替えが消えた。消すのはページを読んだ最初だけ */
+    if (!window._pcLoadedOnce) { window._pcLoadedOnce = true; if (!chatWin) { try { localStorage.removeItem('smdPriceCalcOv'); } catch (_) {} pcOv = {}; } }   /* ★2026-11-15 05（全面改修・型B/E）：チャットの窓では打ち替え（&price で入れた約束の額）を消さない（ログイン待ちで fromChat が先に動いた時に消えていた） */   /* ★2026-10-24 レビュー：描き直しのたびに消していた＝作業中の打ち替えが消えた。消すのはページを読んだ最初だけ */
     if (!o) return;
     try { const al = document.getElementById('pc-align'); if (al && o['pc-align'] != null) al.checked = o['pc-align'] === '1'; } catch (_) {}
-    PC_IDS.forEach(id => { const el = document.getElementById(id); if (el && o[id] != null && (el.value === '' || el.value === el.defaultValue)) el.value = o[id];   /* ★2026-09-26 点検：初期値(50/4.1/40)が入っている欄にも保存値を戻す */ });
+    PC_IDS.forEach(id => { if (chatWin && PC_TGT_IDS.indexOf(id) >= 0) return; const el = document.getElementById(id); if (el && o[id] != null && (el.value === '' || el.value === el.defaultValue)) el.value = o[id];   /* ★2026-09-26 点検：初期値(50/4.1/40)が入っている欄にも保存値を戻す */ });
   }
   /* ★2026-10-23 粗利（円）をちょうど超える最も安い売値を探す（売値↑で粗利↑なので二分探索） */
   /* ★2026-10-23 本人「shopeeだけで買った時よりどれくらい安くなるか」「粗利差とかも見れると」：②③で打った粗利は②③だけに効かせる（①の売値は動かさず PayPal 請求だけ変える）＝①比と「①より○安い」が見える */
@@ -11485,6 +11578,12 @@
   /* ★2026-11-05 03 営業部：為替が読めず既定のレートで計算した値段は、お客さんへの文面（入力欄へ）・Request page（🛒）に出さない。
      既定かどうかは見積もりの答えの rateSrc と同じ決め方（FXD.days が読めているか） */
   function pcRateIsDefault() { return !(FXD.days && Object.keys(FXD.days).length); }
+  /* ★2026-11-15 05（全面改修・型D）：約束した額（&price・&shopAmt）を国の値段の単位に丸める（roundLocal と同じ・0 にはしない）。額の一致の許容は2か所で同じ物を使う */
+  function pcRoundAgreed(cc, v) { const u = ((regionByCc(cc) || {}).priceUnit) || 1; v = Number(v) || 0; if (!(v > 0)) return 0; let r = Math.round(v / u) * u; if (!(r > 0)) r = u; return u < 1 ? Math.round(r * 100) / 100 : Math.round(r); }
+  function pcAmtTol(cc) { const u = ((regionByCc(cc) || {}).priceUnit) || 1; return u < 1 ? 0.005 : 0.5; }
+  /* ★2026-11-15 05（全面改修・型D/H）：「見積もりの条件が変わりました」は物そのものでなく中身で比べる（為替の自動の読み直しで計算が描き直されると物が作り直され、出品の途中で止まっていた）。
+     比べる＝値段・仕入額・国・払い方・相手・照合番号・品名（違う相手・違う品・違う額だけ止める） */
+  function pcQuoteSig(q, c) { q = q || {}; c = c || {}; return JSON.stringify([q.cc || '', String(q.plan || ''), Number(q.shopL) || 0, String(q.buyer || '').trim(), String(q.ref || ''), String(q.title || '').trim(), Math.round(Number(c.cost) || 0)]); }
   function pcRateGate() {
     const d = pcRateIsDefault();
     ['pc-q-tochat', 'pc-q-addreq'].forEach(id => { const b = document.getElementById(id); if (!b) return; if (b.dataset.t0 == null) b.dataset.t0 = b.title || ''; if (!pcQuote.addBusy || id !== 'pc-q-addreq') b.disabled = d; b.title = d ? '為替を読めず既定のレートで計算しています。為替を読み直してから押してください' : b.dataset.t0; });
@@ -12087,7 +12186,7 @@
       return fail('inputs', tr('仕入額・重量・為替・送料・販売額を確認してください。', 'Check the cost, weight, exchange rate, shipping, and sale amount.'));
     }
     const agreedPrice = agreed?.ref === ref && agreed.plan === plan ? agreed.price : null;
-    if (agreedPrice > 0 && Math.abs(price - agreedPrice) > 0.005) {
+    if (agreedPrice > 0 && Math.abs(price - agreedPrice) > pcAmtTol(cc)) {   /* ★2026-11-15 05（全面改修・型D）：許容を自動の入口と同じにそろえた */
       return fail('agreed_price', tr(`Shopeeの掲載額 ${price} ${quote.ISO} が、お客さんと決めた金額 ${agreedPrice} と一致しません。`, `The Shopee listing amount of ${price} ${quote.ISO} differs from the agreed amount of ${agreedPrice}.`));
     }
     const split = plan !== '1';
@@ -12191,7 +12290,7 @@
           ? 'Listing was stopped. A current exchange rate is unavailable for this country.'
           : '出品していません。この国の現在の為替を確認できません。為替を取得してからお試しください。' });
       }
-      if (pcQuote.last !== L || window._pcCtx !== profitContext) return reportProfitBlock({
+      if (pcQuoteSig(pcQuote.last, window._pcCtx) !== pcQuoteSig(L, profitContext)) return reportProfitBlock({   /* ★2026-11-15 05（全面改修・型D/H）：中身で比べる */
         code: 'quote_changed',
         msg: i18nOn() ? 'Listing was stopped. The quote changed. Check the current quote and try again.' : '出品していません。見積もりの条件が変わりました。現在の条件を確認してください。'
       });
@@ -13335,7 +13434,7 @@
            画面の「目標粗利」「重量」の欄に入れて今の計算に通す＝①は pcSolvePrice でその粗利になる掲載額、②③は①と同じ粗利になるよう PayPal を決める。
            見積もりの小窓では、指定の無い欄（目標粗利・重さ・目標ROI・寸法）を空にする＝本体のタブで打った値を持ち込まない */
         window._pcFront = p.get('front') === '1'; window._pcNeedCIB = false;   /* ★2026-10-25 フロント商品の見積もり＝基準の線は粗利 ¥250 */
-        { const isQ = p.get('mode') === 'quote'; if (isQ) window._pcQuoteWin = true;
+        { const isQ = p.get('mode') === 'quote'; if (isQ) window._pcQuoteWin = true; const isA = !isQ && p.get('auto') === '1'; if (isQ || isA) window._pcChatWin = true;   /* ★2026-11-15 05（全面改修・型B/E）：&auto=1 も本体のタブの値を持ち込まない・書き戻さない */
           const n0 = (k) => Math.round(Number(String(p.get(k) || '').replace(/[^0-9.]/g, '')) || 0), prof0 = n0('profit'), w0 = n0('w');
           window._pcChatTarget = { profit: prof0 > 0 && prof0 <= 10000000 ? prof0 : 0, w: w0 > 0 && w0 <= 30000 ? w0 : 0 };
           /* ★2026-10-29 03 営業部（quote-card-spec 16）本人「Shopee で 350 で売ってるらしいので、売値を変えられたりもする？」：&sale=現地通貨の額。
@@ -13356,9 +13455,9 @@
             window._pcSplitSale = (isQ && sp > 0 && sp <= 1e9) ? { cc: String(p.get('cc') || 'BR').toUpperCase(), v: sp } : null;
             if (window._pcSplitSale) window._pcChatTarget.profit = 0; }
           const setV = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
-          if (window._pcChatTarget.profit) setV('pc-gross', String(window._pcChatTarget.profit)); else if (isQ) setV('pc-gross', '');
-          if (window._pcChatTarget.w) setV('pc-weight', String(window._pcChatTarget.w)); else if (isQ) setV('pc-weight', '');
-          if (isQ) ['pc-roi', 'pc-margin', 'pc-w', 'pc-h', 'pc-d'].forEach(id => setV(id, ''));
+          if (window._pcChatTarget.profit) setV('pc-gross', String(window._pcChatTarget.profit)); else if (isQ || isA) setV('pc-gross', '');
+          if (window._pcChatTarget.w) setV('pc-weight', String(window._pcChatTarget.w)); else if (isQ || isA) setV('pc-weight', '');
+          if (isQ || isA) ['pc-roi', 'pc-margin', 'pc-w', 'pc-h', 'pc-d'].forEach(id => setV(id, ''));
           /* ★2026-11-06 事業本部・本人「利益率とROIも指定できるように」：&margin=目標の利益率 %（÷売り値）・&roi=目標の ROI %（÷仕入・税込）。
              &sale・&profit が来た時はそちらが勝つ（margin と roi が両方来たら margin）。見積もりの小窓の時だけ */
           if (isQ && !window._pcSale && !window._pcChatTarget.profit) {
@@ -13377,14 +13476,22 @@
             if (pl) { pl.value = p.get('plan') || '1'; if (p.get('plan')) pl.dataset.user = '1'; }   /* ★2026-11-04 保存の復元（smdPriceCalcTab）で払い方が上書きされないように先に固定 */
             window._pcKeepDeal = true; pcNewItem(true); pcQuote.deal = { price: cost0, eff: cost0, site: site0, url: url0, img: img0, name: tChat || q }; pcQuote.q = q;
             const ce0 = document.getElementById('pc-cost'); if (ce0) { ce0.value = String(Math.round(cost0)); ce0.dispatchEvent(new Event('input', { bubbles: true })); ce0.dispatchEvent(new Event('change', { bubbles: true })); }
-            const price0 = Number(String(p.get('price') || '').replace(/[^0-9.]/g, '')) || 0; if (price0 > 0) { pcOv[cc] = price0; try { priceCalcSave(); } catch (_) {} }
+            /* ★2026-11-15 05（全面改修・型D）：決めた金額に端数があると、出品の額（国の単位に丸めた額）と合わず「金額が一致しません」で止まっていた。受けた時点で国の単位に丸めた額を決めた金額にする（動いた時は返事の文に出す） */
+            window._pcAutoNotes = [];
+            /* ★2026-11-15 05（全面改修・型D）：3倍の守りを外したので、読み違い（「1.273,50」を 1.27 と読む＝違う額）だけは形で止める。道具（SR・WA）は数だけ（例 199.9）を送る */
+            const amtBad = ['price', 'shopAmt'].filter(k => { const v0 = p.get(k); return v0 != null && String(v0).trim() !== '' && !/^\d+(\.\d+)?$/.test(String(v0).trim()); });
+            const price0raw = Number(String(p.get('price') || '').replace(/[^0-9.]/g, '')) || 0, price0 = pcRoundAgreed(cc, price0raw);
+            if (price0raw > 0 && Math.abs(price0 - price0raw) > 1e-9) window._pcAutoNotes.push('決めた金額 ' + price0raw + ' → ' + price0 + '（国の単位に丸めた）');
+            if (price0 > 0) { pcOv[cc] = price0; try { priceCalcSave(); } catch (_) {} }
             /* ★2026-11-04 事業本部・本人「このパターンの場合の操作は？」「もっとわかりやすくね」（WA の見積もりカードの ⑤＝②③の最後の手順）：
                &stage=paid（PayPal の入金を確かめた）と &shopAmt=②③の Shopee の額（現地通貨・打ち替えた案 k1/k2・①と同じ合計の案 s2/s3 の Shopee の額）を受ける。
                ②③は Request page の明細をちょうどその額で足し、paid の文の Amount もその額。前は段階がいつも deal＝②の［Transaction Guidelines］が入り、額も計算の額だった */
             const stageP = p.get('stage') === 'paid' ? 'paid' : 'deal', planP = p.get('plan') || '1';
             /* ★2026-11-14 03（spec 23.24 I・同じ品を N 個）：&qty（新しい名前）＝足す明細の在庫の数（値段は1個の値段）。1〜99・無ければ今どおり1 */
             { const q0 = parseInt(String(p.get('qty') || ''), 10); window._pcReqQty = (q0 >= 1 && q0 <= 99) ? q0 : 1; }
-            const shopAmt0 = ((planP === '2' || planP === '3') && p.get('mode') !== 'quote') ? (Number(String(p.get('shopAmt') || '').replace(/[^0-9.]/g, '')) || 0) : 0;
+            const shopAmtRaw = ((planP === '2' || planP === '3') && p.get('mode') !== 'quote') ? (Number(String(p.get('shopAmt') || '').replace(/[^0-9.]/g, '')) || 0) : 0;
+            const shopAmt0 = pcRoundAgreed(cc, shopAmtRaw);   /* ★2026-11-15 05（全面改修・型D）：②③の約束の額も同じく国の単位に丸める */
+            if (shopAmtRaw > 0 && Math.abs(shopAmt0 - shopAmtRaw) > 1e-9) window._pcAutoNotes.push('Shopee の額 ' + shopAmtRaw + ' → ' + shopAmt0 + '（国の単位に丸めた）');
             let shopCalc0 = 0;   /* 打ち替える前の、その払い方の計算の Shopee の額（3倍ずれの守りの相手） */
             if (shopAmt0 > 0) { try { delete pcOvShop[planP][cc]; priceCalcRun(); const L0 = pcQuote.last || {}; if (L0.plan === planP) shopCalc0 = Number(L0.shopL) || 0; } catch (_) {} pcOvShop[planP][cc] = shopAmt0; }
             const st0 = document.getElementById('pc-q-stage'); if (st0) { st0.value = stageP; st0.dispatchEvent(new Event('change', { bubbles: true })); }
@@ -13420,24 +13527,36 @@
                 return; } }
             if (p.get('mode') === 'quote') { pcQuoteApiReply(p); return; }   /* ★2026-10-24 チャットで完結 */
             if (p.get('auto') === '1') {
-              const tell = (ok, m) => { const upN = (ok && pcQuote.userProfitNote) ? String(pcQuote.userProfitNote) : ''; if (upN && String(m || '').indexOf(upN) < 0) m = upN + '。' + String(m || ''); try { const op = window.opener; const to = pcChatOrigin(pcQuote.o); if (to && op && !op.closed) op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 400), userProfit: upN, userProfitSet: upN ? 1 : 0, buyer: p.get('buyer') || '', price: Number((pcQuote.last || {}).shopL) || null, iso: (pcQuote.last || {}).ISO || '', plan: (pcQuote.last || {}).plan || planP, stage: ((document.getElementById('pc-q-stage') || {}).value) || stageP, ref: pcQuote.ref || '', text: String((document.getElementById('pc-q-text') || {}).value || '').slice(0, 4000), link: pcQuote.link || '', option: pcQuote.optName || '', ...pcReqFields(), ...(pcQuote.reqProfitBlock ? { profitCheck: Object.assign({ code: pcBlockerCode(pcQuote.reqProfitBlock.msg) }, pcQuote.reqProfitBlock) } : {}), ...(pcQuote.dryRes ? { dry: pcDryWithCodes(pcQuote.dryRes) } : {}), addedCount: (ok && pcQuote.req && pcQuote.link && !pcQuote.req.already && !pcQuote.req.updated && !pcQuote.dryOnly) ? (Number(pcQuote.addedN) || 1) : 0,   /* ★11/13 03：数は addedCount（added は前からの true/false＝pcReqFields のまま） */ rid: p.get('rid') || pcQuote.ref || '' }, to); } catch (_) {} };   /* ★2026-11-04 WA が出した額と合っているか確かめるため price・stage を返す／★2026-11-05 03-22・03：英文（text）・リンク（link）・quote-card-spec 19.6 の項目と照合番号（rid）を毎回返す */
+              /* ★2026-11-15 05（全面改修・型F）：自動の読み直し（appReloadFresh・location.reload）で同じ #…&auto=1 がもう一度走って二重に足さないよう、この窓で始めた依頼（rid＋開いた URL）を控える */
+              const ridKey = 'smdAutoRid|' + String(p.get('rid') || '') + '|' + h;
+              const tell = (ok, m) => { { const an = (window._pcAutoNotes || []).filter(x => x && String(m || '').indexOf(x) < 0); if (an.length) m = String(m || '') + '（' + an.join('／') + '）'; } try { sessionStorage.setItem(ridKey, 'done'); } catch (_) {} try { window._pcAutoBusyUntil = Date.now() + 3000; } catch (_) {} const upN = (ok && pcQuote.userProfitNote) ? String(pcQuote.userProfitNote) : ''; if (upN && String(m || '').indexOf(upN) < 0) m = upN + '。' + String(m || ''); try { const op = window.opener; const to = pcChatOrigin(pcQuote.o); if (to && op && !op.closed) op.postMessage({ smdReqStatus: ok ? 'ok' : 'err', msg: String(m || '').slice(0, 400), userProfit: upN, userProfitSet: upN ? 1 : 0, buyer: p.get('buyer') || '', price: Number((pcQuote.last || {}).shopL) || null, iso: (pcQuote.last || {}).ISO || '', plan: (pcQuote.last || {}).plan || planP, stage: ((document.getElementById('pc-q-stage') || {}).value) || stageP, ref: pcQuote.ref || '', text: String((document.getElementById('pc-q-text') || {}).value || '').slice(0, 4000), link: pcQuote.link || '', option: pcQuote.optName || '', ...pcReqFields(), ...(pcQuote.reqProfitBlock ? { profitCheck: Object.assign({ code: pcBlockerCode(pcQuote.reqProfitBlock.msg) }, pcQuote.reqProfitBlock) } : {}), ...(pcQuote.dryRes ? { dry: pcDryWithCodes(pcQuote.dryRes) } : {}), addedCount: (ok && pcQuote.req && pcQuote.link && !pcQuote.req.already && !pcQuote.req.updated && !pcQuote.dryOnly) ? (Number(pcQuote.addedN) || 1) : 0,   /* ★11/13 03：数は addedCount（added は前からの true/false＝pcReqFields のまま） */ rid: p.get('rid') || pcQuote.ref || '' }, to); } catch (_) {} };   /* ★2026-11-04 WA が出した額と合っているか確かめるため price・stage を返す／★2026-11-05 03-22・03：英文（text）・リンク（link）・quote-card-spec 19.6 の項目と照合番号（rid）を毎回返す */
               pcQuote.tell = tell;
               const mm = document.getElementById('pc-q-msg') || document.createElement('div');   /* 一瞬（長く回さない） */
+              { let ridSt = ''; try { ridSt = sessionStorage.getItem(ridKey) || ''; } catch (_) {}
+                const autoLoad = (() => { try { const nv = (performance.getEntriesByType('navigation') || [])[0]; const fr = Number(sessionStorage.getItem('smdFreshReloadAt') || 0); sessionStorage.removeItem('smdFreshReloadAt'); return (nv && nv.type === 'reload') || (Date.now() - fr < 120000); } catch (_) { return false; } })();   /* 自動の読み直しの印は1回で使い切る（後から道具が同じ URL で開き直した時は止めない） */
+                if (ridSt && autoLoad) { const tR = ridSt === 'done' ? 'この依頼はこの窓で一度処理しました。画面が読み直されたので、二重に足さないよう自動では進めません' : 'この依頼は処理の途中で画面が読み直されました。二重に足さないよう自動では進めません。Request page を確かめてから、チャットからもう一度押してください';
+                  if (mm) mm.textContent = '⚠ ' + tR; if (ridSt !== 'done') tell(false, tR); return; }
+                try { sessionStorage.setItem(ridKey, 'run'); } catch (_) {} try { window._pcAutoBusyUntil = Date.now() + 5 * 60000; } catch (_) {} }
               /* ★2026-10-24 本人「目的は、リクエスト商品にかける時間を少なく効率化すること」：値段が来ていない時は止めずに、計算の値段（選んだ払い方の Shopee の額）で進める */
               const priceAuto = !(price0 > 0);
               /* ★2026-10-24 レビュー：国が分からない時に黙って BR に足していた・メモの「R$ 1.273,50」を 1.27 と読んで出品しかけた＝自動の時は止める */
+              if (amtBad.length) { const tB = '値段（' + amtBad.map(k => k + '=' + String(p.get(k)).slice(0, 20)).join('・') + '）の形が読めないので足していません（読み違いで違う額にしないため）。数だけ（例 199.9・区切りのカンマは付けない）で渡してください'; if (mm) mm.textContent = '⚠ ' + tB; tell(false, tB); return; }   /* ★2026-11-15 05（全面改修・型D） */
               if (!p.get('cc')) { const t7 = '国が分からないので自動では進めません（この画面で国を確かめて 🛒 を押してください）'; if (mm) mm.textContent = '⚠ ' + t7; tell(false, t7); return; }
               { let calc0 = 0; try { const sv = pcOv[cc]; delete pcOv[cc]; priceCalcRun(); calc0 = Number((pcQuote.last || {}).shopL) || 0; pcOv[cc] = sv; priceCalcRun(); } catch (_) {}
-                if (!priceAuto && calc0 > 0 && (price0 > calc0 * 3 || price0 < calc0 / 3)) { const t8 = '値段 ' + price0 + ' が計算の値段（' + calc0 + '）と3倍以上ずれています（打ち間違い・読み違いの恐れ）。この画面で確かめて 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t8; tell(false, t8); return; } }
-              if (shopAmt0 > 0 && shopCalc0 > 0 && (shopAmt0 > shopCalc0 * 3 || shopAmt0 < shopCalc0 / 3)) { const t8b = 'Shopee の額 ' + shopAmt0 + ' が、この払い方（' + planP + '）の計算の Shopee の額（' + shopCalc0 + '）と3倍以上ずれています（打ち間違い・読み違いの恐れ）。この画面で確かめて 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t8b; tell(false, t8b); return; }
+                /* ★2026-11-15 05（全面改修・型D）：約束した額（&price）は3倍ずれていても止めない＝⚠ を返事の文に足して通す（11/14 本人「赤字だろうがなんだろうが、もう出品まで」） */
+                if (!priceAuto && calc0 > 0 && (price0 > calc0 * 3 || price0 < calc0 / 3)) { const t8 = '⚠ 値段 ' + price0 + ' が計算の値段（' + calc0 + '）と3倍以上ずれています（約束した額なのでそのまま出しました。打ち間違いでないか確かめてください）'; window._pcAutoNotes.push(t8); if (mm) mm.textContent = t8; } }
+              if (shopAmt0 > 0 && shopCalc0 > 0 && (shopAmt0 > shopCalc0 * 3 || shopAmt0 < shopCalc0 / 3)) { const t8b = '⚠ Shopee の額 ' + shopAmt0 + ' が、この払い方（' + planP + '）の計算の Shopee の額（' + shopCalc0 + '）と3倍以上ずれています（約束した額なのでそのまま出しました。打ち間違いでないか確かめてください）'; window._pcAutoNotes.push(t8b); if (mm) mm.textContent = t8b; }   /* ★2026-11-15 05（全面改修・型D）：約束した額は止めない */
               if ((planP === '2' || planP === '3') && stageP === 'paid' && !(shopAmt0 > 0)) { const t8c = '②③の支払い案内なのに Shopee の額（shopAmt）が来ていません。この画面で額を確かめて 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t8c; tell(false, t8c); return; }
               setTimeout(async () => {
                 try {
                   try { await window._pcEnP; } catch (_) {}   /* ★2026-10-24 英語名の自動づけを待つ */
                   { const tw = Date.now(); while (!FXD._doneAt && Date.now() - tw < 15000) await new Promise(z => setTimeout(z, 300)); if ((window._pcRunAt || 0) < (FXD._doneAt || 0)) { try { priceCalcRun(); } catch (_) {} } }   /* ★2026-10-24 為替を読み終えてから（既定レートの値段で出品しない） */
+                  /* ★2026-11-15 05（全面改修・型G）：値段の指定（&price・&shopAmt）が無く、為替が既定のレートのままなら、足さずに止めて理由を返す（既定のレートの値段で黙って出さない）。決めた金額がある時は今のまま通す */
+                  if (priceAuto && !(shopAmt0 > 0) && pcRateIsDefault()) { try { await applyFxRates(); } catch (_) {} try { priceCalcRun(); } catch (_) {}
+                    if (pcRateIsDefault()) { const tF = '今日の為替を読めず、既定のレートで計算した値段になるので足していません（値段の指定もありません）。為替を読み直してから、もう一度押してください' + (FXD.err ? '（理由：' + String(FXD.err).slice(0, 80) + '）' : ''); if (mm) mm.textContent = '⚠ ' + tF; tell(false, tF); return; } }
                   const ttl = String((document.getElementById('pc-q-title') || {}).value || '');
                   if (!ttl.trim() || /[\u3040-\u30ff\u4e00-\u9fff]/.test(ttl) || (!pcBundleLive() && pcLooksLikeSentence(ttl))) { const t2 = '英語の商品名がありません（日本語のまま・またはお客さんの文に見える）。この画面で直して 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t2; tell(false, t2); return; }
-                  if (shopAmt0 > 0) { const L9 = pcQuote.last || {}, u9 = ((regionByCc(cc) || {}).priceUnit || 1); if (L9.plan !== planP || Math.abs((Number(L9.shopL) || 0) - shopAmt0) > (u9 < 1 ? 0.005 : 0.5)) { const t9b = 'Shopee の額が ' + shopAmt0 + ' になりません（計算は ' + (L9.shopL || '') + '・払い方 ' + (L9.plan || '') + '）。この画面で確かめて 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t9b; tell(false, t9b); return; } }
+                  if (shopAmt0 > 0) { const L9 = pcQuote.last || {}, u9 = ((regionByCc(cc) || {}).priceUnit || 1); if (L9.plan !== planP || Math.abs((Number(L9.shopL) || 0) - shopAmt0) > pcAmtTol(cc)) { const t9b = 'Shopee の額が ' + shopAmt0 + ' になりません（計算は ' + (L9.shopL || '') + '・払い方 ' + (L9.plan || '') + '）。この画面で確かめて 🛒 を押してください'; if (mm) mm.textContent = '⚠ ' + t9b; tell(false, t9b); return; } }
                   { const cIn = Math.round(Number(String(p.get('cost') || '').replace(/[^0-9.]/g, '')) || 0), cU = Math.round(Number((window._pcCtx || {}).cost) || 0);   /* ★2026-11-13 全体レビュー中5：23.12 の守りを &auto=1 にも（&price が無い時も素通りしない） */
                     if (cIn > 0 && Math.abs(cU - cIn) > 1) { const tC = '仕入れ額が渡した額と違うので止めました（渡した ¥' + cIn.toLocaleString() + '・計算に使った ¥' + cU.toLocaleString() + '）。もう一度押してください'; if (mm) mm.textContent = '⚠ ' + tC; tell(false, tC); return; } }
                   const updM = p.get('update') === '1';
@@ -13477,7 +13596,9 @@
         if (p.get('mode') === 'quote') { const why1 = pcChatOpenerWhy(p); if (why1) { const t10 = '⚠ 見積もりの窓として開かれましたが、' + why1 + '。自動では探しません（探す時は「探す」を押してください）'; const sm1 = document.getElementById('pc-src-msg'); if (sm1) sm1.textContent = t10; try { toast(t10, 8000); } catch (_) {} return; } }   /* ★2026-10-24 価格計算レビュー1 */
         window._pcAutoPick = true; run(); if (p.get('mode') === 'quote') pcQuoteApiReply(p); };
       /* ★2026-10-24 Smart Reply の 💴 でポータルを新しく開くと『Cannot access JP_DICT before initialization』で検索が止まった＝ここはスクリプトの途中で走る（JP_DICT はもっと下で作る）。最初の1回は読み込みが終わってから */
-      setTimeout(fromChat, 0); window.addEventListener('hashchange', fromChat);
+      /* ★2026-11-15 05（全面改修・型B）：&auto=1・mode=quote の窓は、動き出す前に版を比べる（古ければ1回だけ読み直す） */
+      const fromChatGated = () => { const h = String(location.hash || ''); if (h.indexOf('pricecalc') < 0 || !/[?&](auto=1|mode=quote)(&|$)/.test(h) || typeof window.__appBuildGate !== 'function') return fromChat(); window.__appBuildGate().then(ok => { if (ok) fromChat(); }, () => fromChat()); };
+      setTimeout(fromChatGated, 0); window.addEventListener('hashchange', fromChatGated);
     })(); }
   // 枠の残りは開いた時に出し、あとは5分ごとに静かに更新する（この呼び出しは枠を使わない）
   try { const _e0 = document.getElementById('uf-quota'); if (_e0 && !_e0.textContent) ufPillRestore(_e0); } catch (_) {}   /* ★開いた瞬間に前回の値 */
@@ -15388,12 +15509,12 @@
     if (!key) throw new Error('このPCは書き込みキー未設定です（⚙️設定でservice_roleキーを入力）');
     const qs = onConflict ? ('?on_conflict=' + encodeURIComponent(onConflict)) : '';
     for (let i = 0; i < rows.length; i += 500) {
-      const r = await fetch(`${SB_URL}/rest/v1/${table}${qs}`, {
+      let r; try { r = await fetch(`${SB_URL}/rest/v1/${table}${qs}`, {
         method: 'POST',
         headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json',
           Prefer: 'resolution=merge-duplicates,return=minimal' },
         body: JSON.stringify(rows.slice(i, i + 500)),
-      });
+      }); } catch (eF) { sbWriteFail('upsert', table, eF); throw eF; }   /* ★2026-11-15 05（全面改修・型A）：通信が切れた時の失敗も記録と赤い印に出す（前はどこにも出なかった） */
       if (!r.ok) { const e = new Error(`${table}保存 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`); sbWriteFail('upsert', table, e); throw e; }
     }
     return rows.length;
@@ -15451,10 +15572,10 @@
     demoWriteGuard('delete', table, qs);
     const key = settings.sbSecret;
     if (!key) throw new Error('書き込みキー未設定');
-    const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
+    let r; try { r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
       method: 'DELETE',
       headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'return=minimal' },
-    });
+    }); } catch (eF) { sbWriteFail('delete', table, eF); throw eF; }   /* ★2026-11-15 05（全面改修・型A）：通信の失敗も出す */
     if (!r.ok) { const e = new Error(`${table}削除 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`); sbWriteFail('delete', table, e); throw e; }
   }
   async function sbPatch(table, qs, patch) {
@@ -15462,11 +15583,11 @@
     demoWriteGuard('patch', table, patch);
     const key = settings.sbSecret;
     if (!key) throw new Error('書き込みキー未設定');
-    const r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
+    let r; try { r = await fetch(`${SB_URL}/rest/v1/${table}?${qs}`, {
       method: 'PATCH',
       headers: { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
       body: JSON.stringify(patch),
-    });
+    }); } catch (eF) { sbWriteFail('patch', table, eF); throw eF; }   /* ★2026-11-15 05（全面改修・型A）：通信の失敗も出す */
     if (!r.ok) { const e = new Error(`${table}更新 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`); sbWriteFail('patch', table, e); throw e; }
   }
   const snToDate = sn => {
@@ -25260,9 +25381,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const cur = await sbGet('app_kv', 'select=v&k=eq.lst_daily').catch(() => null); if (cur === null) return;   /* 読めなければ書かない */
     const v = ((cur || [])[0] || {}).v || {}; const d = v.d || {};
     if (d[today]) { localStorage.setItem('smdLstSnapDay', today); return; }
-    const rows = await sbGetAll('listings', 'select=cc,item_id,model_count,status');
+    /* ★2026-11-15 05（全面改修・型F/G）：店の絞り込みが効いたまま全体の日次記録を書いていた＝自動の読みは絞り込みを外す（rawRead）。
+       listings.status は数（1＝公開・8）なので数で見る（前は文字の normal を探していて、公開の数が毎日0だった） */
+    let pR; { const r0 = state.rawRead; state.rawRead = true; try { pR = sbGetAll('listings', 'select=cc,item_id,model_count,status'); } finally { state.rawRead = r0; } }
+    const rows = await pR;
     const snap = { items: 0, models: 0, live: 0, cc: {} };
-    rows.forEach(r => { const mc = Math.max(1, Number(r.model_count) || 1); snap.items++; snap.models += mc; if (/normal/i.test(String(r.status || ''))) snap.live += mc; const c = snap.cc[r.cc] = snap.cc[r.cc] || { items: 0, models: 0 }; c.items++; c.models += mc; });
+    rows.forEach(r => { const mc = Math.max(1, Number(r.model_count) || 1); snap.items++; snap.models += mc; if (Number(r.status) === 1 || /^normal$/i.test(String(r.status || ''))) snap.live += mc; const c = snap.cc[r.cc] = snap.cc[r.cc] || { items: 0, models: 0 }; c.items++; c.models += mc; });
     d[today] = snap;
     Object.keys(d).sort().slice(0, -400).forEach(k => { delete d[k]; });
     await sbUpsert('app_kv', [{ k: 'lst_daily', v: { d }, updated_at: new Date().toISOString() }]);
@@ -25373,7 +25497,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!settings.writeToken || !settings.openapiUrl) return null;
     try { if (!force && Date.now() - Number(localStorage.getItem('smdDeboostFixAt') || 0) < 2 * 3600e3) return null; localStorage.setItem('smdDeboostFixAt', String(Date.now())); } catch (_) {}
     try { await ensureListings(); } catch (_) {}
-    let dupIds = new Map(); try { dupIds = cqDupGroups().byId; } catch (_) {}
+    /* ★2026-11-15 05（全面改修・型A/C）：重複の組（🟰）の守りが、出品の表が読めていない・店の絞り込み中に読んだ表・数え損ね（catch で空）の時に黙って空になり、組の片方を編集しうる（2026-09-26 VN で相方が消された）。
+       出品の表が全店分読めている時でなければ自動直しをしない＝見送りの理由を記録に出す。見送った時は2時間の印を外す（次の回でやり直す） */
+    let dupIds = null, dupWhy = '';
+    if (!lst.loaded || lst._loadedScope !== 'all') dupWhy = '出品の表が全部読めていないので見送り' + (!lst.loaded ? '（出品の表を読めていない）' : '（店の絞り込み中に読んだ表）');
+    else { try { const g0 = cqDupGroups(); dupIds = (g0 && g0.byId && typeof g0.byId.has === 'function') ? g0.byId : null; if (!dupIds) dupWhy = '重複の組を数えられないので見送り'; } catch (eD) { dupIds = null; dupWhy = '重複の組を数えられないので見送り（' + String((eD && eD.message) || eD).slice(0, 60) + '）'; } }
+    if (!dupIds) {
+      try { localStorage.removeItem('smdDeboostFixAt'); } catch (_) {}
+      const r0 = { at: new Date().toISOString(), skipped: dupWhy };
+      try { if (settings.sbSecret) await sbUpsert('app_kv', [{ k: 'deboost_fix_log', v: r0, updated_at: r0.at }]); } catch (_) {}
+      try { const lk = localStorage.getItem('smdDeboostSkipLog') || ''; if (lk.split('|')[0] !== dupWhy || Date.now() - Number(lk.split('|')[1] || 0) > 24 * 3600e3) { logAct('出品', '降格（カテゴリ違い）の自動直しを見送り', '', dupWhy); localStorage.setItem('smdDeboostSkipLog', dupWhy + '|' + Date.now()); } } catch (_) {}
+      return r0;
+    }
     /* ★2026-10-05 必須の欄（型番・TIS No. など＝事実が要るので埋めない）や「このカテゴリは出せない」で断られた物は7日は試さない（2時間ごとに同じ10件を失敗し続けて枠の無駄だった） */
     let skipMap = {}; try { skipMap = JSON.parse(localStorage.getItem('smdDeboostSkip') || '{}') || {}; } catch (_) {}
     Object.keys(skipMap).forEach(k => { if (Date.now() - skipMap[k] > 7 * 864e5) delete skipMap[k]; });
@@ -25577,9 +25712,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const k = 'stock_daily_' + today;
       const ex = await sbGet('app_kv', 'select=k&k=eq.' + encodeURIComponent(k)).catch(() => null); if (ex === null) return;   /* 読めなければ書かない */
       if (ex.length) { localStorage.setItem('smdStockSnapDay', today); return; }
-      await ensureListings(); if (!lst.loaded) return;
+      /* ★2026-11-15 05（全面改修・型F/G）：店の絞り込み中に読んだ出品の表では書かない（日の印も付けない＝30分後にやり直す）。注文は絞り込みを外して読む。status は数で見る */
+      await ensureListings(); if (!lst.loaded || lst._loadedScope !== 'all') { try { if (localStorage.getItem('smdStockSnapSkipDay') !== today) { localStorage.setItem('smdStockSnapSkipDay', today); logAct('出品', '在庫の毎日記録を見送り', today, '出品の表が全店分読めていない（' + (!lst.loaded ? '読めていない' : lst._loadedScope === 'sync' ? '出品同期で今の店の分だけ入れ替えた表' : '店の絞り込み中に読んだ表') + '）＝30分後にやり直す'); } } catch (_) {} return; }
       const since = jstDate(now - 60 * 86400000);
-      const od = await sbGetAll('orders', `select=cc,sn,status,items&order_date=gte.${since}&order=cc,sn`).catch(() => null); if (!od) return;
+      let pO; { const r0 = state.rawRead; state.rawRead = true; try { pO = sbGetAll('orders', `select=cc,sn,status,items&order_date=gte.${since}&order=cc,sn`); } finally { state.rawRead = r0; } }
+      const od = await pO.catch(() => null); if (!od) return;
       const byId = new Map(); Object.entries(lst.byCc || {}).forEach(([cc, rows]) => (rows || []).forEach(l => byId.set(cc + '|' + l.item_id, l)));
       const s = {}, st = {}; let miss = 0;
       od.forEach(o => { if (/cancel/i.test(String(o.status || ''))) return; (o.items || []).forEach(it => {
@@ -25587,7 +25724,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const l = byId.get(o.cc + '|' + it.item_id); if (!l) { miss++; return; }
         const vn = String(it.variation || '').trim(); const m = vn ? (l.models || []).find(x => x && String(x.n || '').trim() === vn) : null;
         s[kk] = m ? (Number(m.stock) || 0) : (vn ? null : (Number(l.stock) || 0));
-        if (l.status && l.status !== 'NORMAL') st[o.cc + '|' + it.item_id] = l.status;
+        if (l.status != null && !(Number(l.status) === 1 || l.status === 'NORMAL')) st[o.cc + '|' + it.item_id] = l.status;
       }); });
       const n = Object.keys(s).length, z = Object.values(s).filter(v => v === 0).length;
       await sbUpsert('app_kv', [{ k, v: { at: new Date().toISOString(), n, zero: z, miss, s, st }, updated_at: new Date().toISOString() }], 'k');
@@ -28491,7 +28628,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try {
       rows = await sbGetAll('inventory',
         'select=item_id,name,name_supplier,image,supplier,supplier_order,purchase_ts,purchase_date,delivery_status,delivery_info,delivery_eta,delivery_history,delivery_place,delivery_synced_at,tracking_no&status=eq.' + encodeURIComponent('入庫待ち'));
-    } catch (_) { rows = []; }
+    } catch (eInv) { rows = [];   /* ★2026-11-15 05（全面改修・型G）：読めなかった時に「入庫待ちの荷物は無い」に化けさせない */
+      try { const nowMs = Date.now(); out.push({ id: 'inverr:' + jstDate(nowMs) + ':' + new Date(nowMs).getHours(), ic: '⚠️', cat: 'parcel', kind: 'readerr', at: notifSortKey(jstDateTime(nowMs), jstDate(nowMs)),
+        ti: '入庫待ちの荷物を読めませんでした', sb: '読めないので、届いた荷物・配達中の荷物が無いとは限りません。10分ほどで読み直します（' + String((eInv && eInv.message) || eInv).slice(0, 60) + '）' }); } catch (_) {} }
     // ★配送業者が「配達完了」を出すと、GAS(shopee-tracking.gs の AUTO_ARRIVE)が
     //   自動で status を『在庫保管中』に移す。その瞬間に入庫待ちから外れるので、
     //   **見る前にお知らせから消えていた**（2026-08-23 本人「あれ？何個か消えた？今日表示されてたのに？」）。
@@ -28707,6 +28846,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const S = await slsClaimLoad(); const c = S.cnt;
       [['expired', '🚨', 'SLS+ の補償の申請：期限切れ ' + c.expired + '件（申請できるか Shopee に確かめる）'], ['le7', '🚨', 'SLS+ の補償の申請：期限まで7日以内 ' + c.le7 + '件'], ['le14', '⏰', 'SLS+ の補償の申請：期限まで14日以内 ' + c.le14 + '件'], ['le30', '⏰', 'SLS+ の補償の申請：期限まで30日以内 ' + c.le30 + '件']]
         .forEach(([k, ic, ti], i) => { if (c[k] > 0) out.push({ id: 'slsclaim:' + k + ':' + jstDate(Date.now()) + ':' + c[k], ic, cat: 'todo', kind: 'slsclaim', at: '9999-' + (9 - i), ti, sb: '返品・キャンセルの画面の一番上「🛡 SLS+ の補償の申請」で、申請したら「申請した」を押す（未申請 ' + c.todo + '件）' }); });
+    } catch (_) {}
+    /* ★2026-11-15 05（全面改修・型E/A）：担当のPCが替わると入金予定の自動転記が黙って止まっていた（「自動実行する」はPCごと・動くのは担当のPCだけ）。担当のPCで OFF のままなら知らせる */
+    try {
+      if (settings.depUrl && settings.depToken && !settings.independentMode && PC.owner && PC.owner.id) {
+        const op = (PC.pres || []).find(x => x && x.id === PC.owner.id);
+        const off = PC.owner.id === PC.id ? !depAutoOn() : !!(op && op.depAuto === false);
+        if (off) out.push({ id: 'depauto-off:' + PC.owner.id + ':' + jstDate(Date.now()), ic: '⚠️', cat: 'todo', kind: 'depauto', at: '9999-0',
+          ti: '入金予定の自動転記が止まっています（担当のPC「' + (PC.owner.label || PC.owner.id) + '」で「自動実行する」が OFF）',
+          sb: '自動の転記は担当のPCだけで動きます。担当のPCで「利益管理表へ転記」の「自動実行する」を ON にしてください' });
+      }
     } catch (_) {}
     // 全部そろってから、新しい順に並べる（荷物＝到着時刻／発送＝期限／お金＝入金日）
     out.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')) || String(a.ti).localeCompare(String(b.ti)));
@@ -28976,6 +29125,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-15', items: [
+      '🛡 <b>壊れる筋道が分かっていた17か所を全面的に直しました</b>（本人「一生このエラーが起きないくらいの勢いで」「全面的に改修して」）：①古い版のまま開いた窓が自分の古さに気づけなかった→ページに版の印を埋め、チャットからの自動の窓は動く前に比べて古ければ1回だけ読み直す ②③決めた金額に端数があると「金額が一致しません」で止まっていた→国の値段の単位に丸めて通し、丸めた時は返事に「（国の単位に丸めた）」と出す・計算と3倍ずれていても約束の額は止めず ⚠ を付けて出す ④自動の窓が本体のタブの目標粗利・重さを持ち込み・書き戻していたのを止めた ⑤値段の指定が無く為替が読めていない時は既定のレートで足さず理由を返す ⑥出品の表が全店分読めていない時は降格の自動直しを見送る（重複の組の守りが空になるのを防ぐ） ⑦通信が切れた時の保存の失敗も赤い印に出す ⑧担当のPCが替わって入金予定の自動転記が止まると「見送り：担当でない」と🔔に出す ⑨DB同期で失敗した国があれば「一部失敗（国：…）」と出し最終同期の時刻を進めない ⑩統計の毎日の取り直しが通らなければ30分後にやり直す（1日5回まで） ⑪⑫明細の詰め直しの付け替えは保存が通ってから「当てた」にし、通らなければ在庫0固定も一緒に元へ戻す（2つずれない） ⑬同じPCの2つのタブが同じ仕事を二重に走らせない ⑭日次の出品の記録を店の絞り込みなしで取り、公開の数を正しく数える ⑮読めなかった時に「無い」と出さず「読めませんでした」と出す（🔔の入庫待ち・出品ログの仕入れ目安と下書き） ⑯自動の読み直しで同じ依頼をもう一度足さない ⑰為替の自動の読み直しで出品の途中に「見積もりの条件が変わりました」で止まらない',
       '⏱ <b>止まっている自動処理を「やること」に赤で出すようにしました</b>（本人「一生このエラーが起きないくらいの勢いで」）：同期・🤖・トレカ・キャンセルの見回り・あいさつ・転記・チャットの取り込み・AI の実績・4つの道具など、全部の自動処理の最後に動いた時刻を GAS の見張りが1時間ごとに見ます。決めた時間を超えた物は赤で出し、台のトリガーが欠けていれば見張りが自分で作り直します。',
     ] },
     { date: '2026-11-14', items: [
@@ -34109,7 +34259,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     Object.values(lst.byCc).forEach(rows => (rows || []).forEach(l => { const names = (l.models || []).map(m => m.n).join(' '); l._fr = classifyFranchise((l.name || '') + ' ' + names); }));
     lst.covCatData = {}; if (lst.bulkSel) lst.bulkSel.clear();
     try { localStorage.setItem('smdListSync', String(Date.now())); } catch (_) {}
-    lst.syncing = false; lst.loaded = true; lst.loadedAt = Date.now(); lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP') + (skippedEmpty.length ? `（${skippedEmpty.join('/')}は0件のため既存保持）` : ''); drawListingStatus();
+    lst.syncing = false; lst.loaded = true; lst.loadedAt = Date.now(); lst._loadedScope = 'sync'; /* ★2026-11-15 05（全面改修・型A/C）：今の店の分だけを入れ替えた表＝全店分とは扱わない（DB から読み直すまで降格の自動直し・在庫の日次記録は見送る） */ lst.note = '更新完了 ' + new Date().toLocaleTimeString('ja-JP') + (skippedEmpty.length ? `（${skippedEmpty.join('/')}は0件のため既存保持）` : ''); drawListingStatus();
   }
   // 出品データの最終同期時刻（ポータル表示は前回同期時点。編集はShopeeへ即時反映）
   function listSyncStr() {
@@ -41170,10 +41320,27 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         const jst = new Date(Date.now() + 9 * 3600000), ymd = jst.toISOString().slice(0, 10);
         if (jst.getUTCHours() < 17) return;
         if (localStorage.getItem('smdStatsDailyAt') === ymd) return;
-        localStorage.setItem('smdStatsDailyAt', ymd); localStorage.setItem('smdStatsDailyTs', String(Date.now()));   /* 先に印を付ける＝失敗しても1日1回だけ */
-        const r = await openapiRunFetch('run_stats');
-        console.log('[統計] 毎日の取り直し', ymd, r && r.ok, (r && r.log && r.log.length) || 0, '店');
-      } catch (e) { console.warn('[統計] 毎日の取り直しに失敗', e.message); }
+        if (!settings.openapiUrl || !settings.writeToken) return;
+        /* ★2026-11-15 05（全面改修・型A）：失敗しても「今日済み」の印が残り1日1回きりだった。返りの中身（ok・書けた店の数）を確かめ、だめなら印を外して次の回でやり直す。
+           1回で約180回の枠を使うので、やり直しは30分あけて1日5回まで。GAS が「20時間以内に取り直し済み（too_soon）」と返した時は済みにする */
+        let tr = {}; try { tr = JSON.parse(localStorage.getItem('smdStatsDailyTry') || '{}') || {}; } catch (_) { tr = {}; }
+        if (tr.d !== ymd) tr = { d: ymd, n: 0, at: 0 };
+        if (tr.n >= 5 || Date.now() - (Number(tr.at) || 0) < 30 * 60000) return;
+        tr.n++; tr.at = Date.now(); localStorage.setItem('smdStatsDailyTry', JSON.stringify(tr));
+        localStorage.setItem('smdStatsDailyAt', ymd); localStorage.setItem('smdStatsDailyTs', String(Date.now()));   /* 走っている間に2回目を起こさない（通らなければ下で外す） */
+        let r = null, err = '';
+        try { r = await openapiRunFetch('run_stats'); } catch (e1) { err = String((e1 && e1.message) || e1); }
+        const lg = (r && Array.isArray(r.log)) ? r.log : [];
+        const wrote = lg.filter(x => x && Number(x.stats) > 0).length, soon = lg.some(x => x && x.skipped === 'too_soon'), errs = lg.filter(x => x && x.error).length;
+        if (!(r && r.ok !== false && (wrote > 0 || soon))) {
+          localStorage.removeItem('smdStatsDailyAt');
+          const why = err || (!r ? '返事がありません' : r.ok === false ? String(r.error || 'ok:false') : lg.length ? ('書けた店 0・' + lg.map(x => (x && (x.skipped || x.error)) ? String(x.skipped || x.error).slice(0, 40) : '').filter(Boolean).join('／')) : '店の結果がありません');
+          console.warn('[統計] 毎日の取り直しが通らず、次の回でやり直します', ymd, why);
+          try { logAct('出品', '統計の毎日の取り直しが通らず', ymd, String(why).slice(0, 200) + '（' + tr.n + '回目・' + (tr.n < 5 ? '30分後にやり直す' : '今日はここまで') + '）'); } catch (_) {}
+          return;
+        }
+        console.log('[統計] 毎日の取り直し', ymd, '書けた店', wrote, '／', lg.length, soon ? '（GAS が20時間以内に取り直し済み）' : '', errs ? '失敗 ' + errs + '店' : '');
+      } catch (e) { try { localStorage.removeItem('smdStatsDailyAt'); } catch (_) {} console.warn('[統計] 毎日の取り直しに失敗', e.message); }
     }, 10 * 60000);
     if (!lst._paDigestTimer) lst._paDigestTimer = setInterval(() => { paDigestDaily().catch(() => {}); }, 10 * 60000);   /* 🏷 値付けの提案を毎日19時以降に1回数える（担当PC） */
     setTimeout(() => { baAutoCollectTick().catch(() => {}); }, 8000);
@@ -44841,19 +45008,26 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   }
   // 開き直した時に、止まったままの「まとめて編集」を拾って続きから走らせる。
   // 他のタブがまだ回している可能性があるので、2分以上更新が無いものだけを対象にする。
+  /* ★2026-11-15 05（全面改修・型F）：担当のPCの判定はタブ単位でない＝同じPCの2つのタブが同じ「まとめて編集」を二重に流しうる。navigator.locks で1つのタブだけにし、続きを流し終えるまで札を持つ。
+     札の中で「拾った印」（localStorage・7分）も付ける。navigator.locks が無いブラウザは今までどおり */
   async function bkResumeStalled() {
+    if (navigator.locks && navigator.locks.request) { try { return await navigator.locks.request('smdBkResume', { ifAvailable: true }, async lk => { if (!lk) return; return bkResumeStalled0(); }); } catch (_) { return; } }
+    return bkResumeStalled0();
+  }
+  async function bkResumeStalled0() {
     if (!settings.writeToken || !settings.sbSecret) return;
     if (!pcIsOwner()) return;   /* ★2026-09-28 レビュー：もう1台のPCが同じ「まとめて編集」を二重に流さない */
-    let rows = [];
+    let rows = []; const bkRuns = [];
     try { rows = await sbGetAll('app_kv', 'select=k,v,updated_at&k=like.job_*'); } catch (_) { return; }
     const now = Date.now();
     for (const r of (rows || [])) {
       const v = r.v || {};
       if (v.kind !== 'bulkedit' || v.status !== 'run' || !v.resume || !v.resume.kv) continue;
       if (now - Math.max(new Date(r.updated_at).getTime() || 0, Date.parse(v.updated_at || '') || 0) < 7 * 60000) continue;   // ★2026-09-28 レビュー：1回は最大270秒かかる＝2分では動いている最中を拾っていた。GAS の上限6分＋余裕の7分／中身の updated_at も見る
+      try { const ck = 'smdBkResumeClaim_' + r.k; if (Date.now() - Number(localStorage.getItem(ck) || 0) < 7 * 60000) continue; localStorage.setItem(ck, String(Date.now())); } catch (_) {}
       const rz = v.resume;
       jobPollStart();
-      bkRunChunks(rz.kv, r.k, null, rz.from || 0, rz.done || 0, rz.failed || 0, rz.errors || []);
+      bkRuns.push(Promise.resolve(bkRunChunks(rz.kv, r.k, null, rz.from || 0, rz.done || 0, rz.failed || 0, rz.errors || [])).catch(() => {}));
     }
     // 再開情報を持たない古い実行中は拾えない。「実行中」のまま残ると動いていると誤解するので中断にする
     for (const r of (rows || [])) {
@@ -44862,6 +45036,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       if (now - new Date(r.updated_at).getTime() < 600000) continue;   // 10分は様子を見る
       jobRemoteFail(r.k, '中断されました（画面を閉じたため。もう一度選び直して保存してください）');
     }
+    if (bkRuns.length) await Promise.all(bkRuns);   /* 流し終えるまで札を持つ */
   }
   /* ★2026-10-24 全体レビュー（出品管理 #38）：断られたカタログを「保存済み」にしない（Shopee は旧タイトルのまま・画面は新タイトルになっていた／💾で出し直せなかった） */
   function bkFailAdd(set, res) { (res.failed_ids || []).forEach(k => set.add(String(k))); (res.errors || []).forEach(t => { const m = /^(\S*) (\d+):/.exec(String(t)); if (m) set.add(m[1] + '|' + m[2]); }); return set; }
@@ -45902,7 +46077,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     if (force) logState.costMap = null;
     if (logState._costMapBusy || logState.costMap) return;
     logState._costMapBusyAt = Date.now();
-    logState._costMapBusy = true; llogFetchAll(!!force && Date.now() - (_llogAll.at || 0) > 60 * 1000).then(ks => { const cm = {}; (ks || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(key => { const v = m[key]; cm[key] = (v && typeof v === 'object') ? { c: Number(v.c) || 0, src: String(v.src || ''), from: String(v.from || ''), ja: String(v.ja || ''), en: String(v.en || ''), jan: String(v.jan || ''), mpn: String(v.mpn || ''), jc: v.jc ? 1 : 0 } : { c: Number(v) || 0, src: '', from: '', ja: '', en: '', jan: '', mpn: '', jc: 0 };   /* ★2026-10-17 jc（駿河屋まで確かめた印）も写す。写していなかったので「JAN なし」が「未取得」のまま出ていた */   /* ★2026-10-16 JAN・型番も控えから出す（🤖/🃏が足した時に分かっていた値） */ }); }); logState.costMap = cm; logState._costMapAt = Date.now(); { const byN = {}; Object.keys(cm).forEach(k0 => { const e0 = cm[k0], p0 = k0.split('|'); if (e0 && e0.en) byN[p0[0] + '|' + p0[1] + '|' + llNmN(e0.en)] = e0; }); logState.costByName = byN; } try { renderListingLog(); } catch (_) {} /* ★2026-10-24 操作ログの renderLog を呼んでいた（10/19 レビュー高-新3）＝出品ログが「読み込み中」のまま・操作ログを裏で500行読んでいた */ }).catch(() => { logState.costMap = {}; logState._costMapAt = Date.now(); }).finally(() => { logState._costMapBusy = false; }); 
+    logState._costMapBusy = true; llogFetchAll(!!force && Date.now() - (_llogAll.at || 0) > 60 * 1000).then(ks => { const cm = {}; (ks || []).forEach(x => { const m = (x && x.v && x.v.m) || {}; Object.keys(m).forEach(key => { const v = m[key]; cm[key] = (v && typeof v === 'object') ? { c: Number(v.c) || 0, src: String(v.src || ''), from: String(v.from || ''), ja: String(v.ja || ''), en: String(v.en || ''), jan: String(v.jan || ''), mpn: String(v.mpn || ''), jc: v.jc ? 1 : 0 } : { c: Number(v) || 0, src: '', from: '', ja: '', en: '', jan: '', mpn: '', jc: 0 };   /* ★2026-10-17 jc（駿河屋まで確かめた印）も写す。写していなかったので「JAN なし」が「未取得」のまま出ていた */   /* ★2026-10-16 JAN・型番も控えから出す（🤖/🃏が足した時に分かっていた値） */ }); }); logState.costMap = cm; logState._costMapAt = Date.now(); logState.costMapErr = ''; { const byN = {}; Object.keys(cm).forEach(k0 => { const e0 = cm[k0], p0 = k0.split('|'); if (e0 && e0.en) byN[p0[0] + '|' + p0[1] + '|' + llNmN(e0.en)] = e0; }); logState.costByName = byN; } try { renderListingLog(); } catch (_) {} /* ★2026-10-24 操作ログの renderLog を呼んでいた（10/19 レビュー高-新3）＝出品ログが「読み込み中」のまま・操作ログを裏で500行読んでいた */ }).catch((eC) => { logState.costMap = {}; logState.costMapErr = String((eC && eC.message) || eC || '読めませんでした').slice(0, 80); logState._costMapAt = Date.now() - 4 * 60 * 1000; try { renderListingLog(); } catch (_) {} }).finally(() => { logState._costMapBusy = false; });   /* ★2026-11-15 05（全面改修・型G）：読めなかった時は空（＝「—」）にせず「読めませんでした」の印を持ち、1分後に読み直す */ 
   }
   async function loadListingLog() {
     /* ★2026-09-21 本人「なんかずっと読み込み中だけど、重くなってますかね？」→ 実測でその通りだった。
@@ -45927,12 +46102,12 @@ create policy "listing_log all" on listing_log for all using (true) with check (
            ⚠️ 7日ぶんの機種別（baRecentByHw）は別のクエリで name を取っているので影響しない。 */
         /* ★2026-10-14 控え（IndexedDB）があれば差分だけ読む（本人「毎回読み込まんでよくね？」）。初回だけ全件＋進み具合のバー */
         llogRowsCached(),
-        sbGetAll('app_kv', 'select=k,v&k=in.(listlog_goal,listlog_auto,listlog_drafts)').catch(() => []),
+        sbGetAll('app_kv', 'select=k,v&k=in.(listlog_goal,listlog_auto,listlog_drafts)').catch((eK) => { logState.kvErr = String((eK && eK.message) || eK || '読めませんでした').slice(0, 80); return null; }),   /* ★2026-11-15 05（全面改修・型G）：読めなかった時に「下書きは無い」に化けさせない */
       ]);
-      { const dr = (kv || []).find(x => x.k === 'listlog_drafts'); logState.drafts = new Set(Object.keys((dr && dr.v && dr.v.keys) || {})); }
+      if (kv === null) { if (!logState.drafts) logState.drafts = new Set(); } else { logState.kvErr = ''; const dr = (kv || []).find(x => x.k === 'listlog_drafts'); logState.drafts = new Set(Object.keys((dr && dr.v && dr.v.keys) || {})); }
       logState.rows = (rows || []).filter(r => !logState.drafts.has(r.cc + '|' + r.item_id));   /* ★2026-10-04 下書きから公開した分は出品に数えない */
       logState.loadErr = ''; logState.loadErrAt = 0; logState.loadErrN = 0;
-      { const au = (kv || []).find(x => x.k === 'listlog_auto'); logState.autoMap = (au && au.v && au.v.map) || {}; }
+      if (kv !== null || !logState.autoMap) { const au = (kv || []).find(x => x.k === 'listlog_auto'); logState.autoMap = (au && au.v && au.v.map) || {}; }
       /* ★2026-09-29 本人「なんで当日しか紫じゃないのか」＝🤖の控えは【明細名】が鍵なのに、9/21 から一覧は明細名を読まなくなった（重いので選んだ日だけ）。
          → 選んでいない日は照合できず全部「手動」になっていた。🤖が入れたカタログの行だけ明細名を読み、明細IDの集合（cc|model_id）に置き換えて照合する */
       try {
@@ -46751,6 +46926,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       <div style="font-size:10.5px;color:#8a8f98">${label}</div><div style="font-size:21px;font-weight:800;color:${color || '#333'};line-height:1.25">${val}</div>
       <div style="font-size:10px;color:#8a8f98">${sub || ''}</div></div>`;
     host.innerHTML = `
+      ${logState.kvErr ? `<div style="margin-bottom:8px;padding:5px 10px;border:1px solid #f5c6c0;background:#fdecea;border-radius:8px;font-size:12px;color:#b3261e">⚠ 下書き・目標・🤖の控えを読めませんでした（${esc(logState.kvErr)}）。下書きから公開した分を除けていないので、件数が多めに出ている恐れがあります。開き直すと読み直します</div>` : ''}
       ${_llAS ? `<div style="margin-bottom:8px;padding:5px 10px;border:1px solid #c7d7ee;background:#eef4ff;border-radius:8px;font-size:12px;color:#1d3f73" data-guide-name="出品ログ：対象アカウント" data-guide="画面のいちばん上の「対象アカウント」で選んだ店の分だけを数えています。全部に戻すには「全アカウント（すべて合算）」を選びます">🏪 <b>${esc(_llAName)}</b> の分だけを出しています（棒グラフ・数字・その日の商品・🤖の表と収支）。${_llAWait ? '<span style="color:#b26a00">⏳ 店の情報を読み込み中…</span>' : ''}</div>` : ''}<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
         <div style="flex:1;min-width:250px;border:1px solid #ececec;border-radius:10px;padding:11px 14px;background:linear-gradient(180deg,#fff,#fafbff)">
           <div style="font-size:11px;color:#8a8f98">今日の出品（${today}）</div>
@@ -46894,6 +47070,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 const cm = logState.costMap; if (!cm) return '<span style="display:block;font-size:9.5px;color:#c0392b">仕入れ目安 読み込み中…</span>';
                 const ce = llCostFor(r); const c = ce && !ce.other ? ce.c : 0;   /* ★2026-10-25 控えの作品名でカードの明細と照らす（上の llCostFor） */
                 if (ce && ce.other) return `<span style="display:block;font-size:9.5px;color:#b06000" title="この番号の記録は「${av(ce.en || ce.ja || '')}」（¥${Number(ce.c || 0).toLocaleString('ja-JP')}）の物で、このカードの明細「${av(r.model_name || '')}」とは別の作品です。誤った目安で値付けしないよう出しません">仕入れ目安 分からない（控えが別の作品）</span>`;
+                if (!(c > 0) && logState.costMapErr) return `<span style="display:block;font-size:9.5px;color:#c0392b" title="仕入れ目安の控えを読めませんでした（${esc(logState.costMapErr)}）。無いとは限りません。1分ほどで読み直します">仕入れ目安 読めませんでした</span>`;   /* ★2026-11-15 05（全面改修・型G） */
                 if (!(c > 0)) return '<span style="display:block;font-size:9.5px;color:#bbb" title="🤖/🃏が足した明細だけに付きます（手で出した明細・古い明細は無し）">仕入れ目安 —</span>';
                 let diff = ''; try { const pv2 = Number(r.price); const rt2 = fxRate(r.cc, r.ymd); if (isFinite(pv2) && pv2 > 0 && rt2 > 0) { const d = Math.round(pv2 * rt2) - c; diff = `<span class="llc-diff" style="font-weight:400;color:${d >= 0 ? '#1a7f37' : '#b3261e'}"> 差 ${d >= 0 ? '+' : '−'}¥${Math.abs(d).toLocaleString('ja-JP')}</span>`; } } catch (_) {}
                 /* ★2026-10-11 本人「これ本当に仕入れ値850円か？どこの仕入れ元リンクから取ってきたかも欲しい」「化粧箱ついてたから気になった」
@@ -48131,6 +48308,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   async function ensureListingsBody_(fresh) {
     const seq = (lst._seq = (lst._seq || 0) + 1);   // アカウント切替で読込が重なった時、古い(未フィルタ)結果が上書きしないように。★最初の await より前に振る＝_ensureP と同じ順番になり、自分自身を待たない
     if (!state.accounts) await loadAccounts().catch(() => {}); // 系統(fam:)フィルタのshop_id解決に登録簿が要る→先に確保
+    const scope0 = (!state.acct || state.acct === 'all') ? 'all' : String(state.acct);   /* ★2026-11-15 05（全面改修・型A/C）：どの絞り込みで読んだ表かを覚える（全店分か） */
     const data = await listingsFromDb(fresh);
     if (seq !== lst._seq) { const np = lst._ensureP; if (np) await np.catch(() => {}); return; }   // より新しい読込に追い越された→この結果は破棄し、新しい方が済むまで待つ
     lst.byCc = data;
@@ -48155,7 +48333,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     Object.values(lst.byCc).forEach(rows => (rows || []).forEach(l => {
       if (l._fr === undefined) { const names = (l.models || []).map(m => m.n).join(' '); l._fr = classifyFranchise((l.name || '') + ' ' + names); }
     }));
-    lst.loaded = true; lst.loadedAt = Date.now();   /* ★2026-11-04 レビュー 10/31 低-3：値付けの見直しに出品データの古さを出す */
+    lst.loaded = true; lst.loadedAt = Date.now(); lst._loadedScope = scope0;   /* ★2026-11-04 レビュー 10/31 低-3：値付けの見直しに出品データの古さを出す */
   }
   // シリーズ(フランチャイズ)分類。タイトルが国ごとに微妙に違うため完全一致では束ねられない→シリーズで粗く束ねる。[表示名, 判定regex, 出品状況検索用kw(英語substr)]
   const FRANCHISES = [
@@ -51178,16 +51356,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       try { _pidDupCache = null; } catch (_) {}
       const tS = Date.now(); saveProductIds();
       /* ★11/7 全体レビュー 中1：保存が通らなければ手元の台帳を元に戻す（前は付け替え済みのまま＝10分後に同じ付け替えをもう一度当てて2つずれ、次の保存で Supabase に載っていた） */
-      const chk = (k9) => { if ((window.__pidSavedAt || 0) > tS) return; if ((window.__pidSaveErrAt || 0) > tS || k9 >= 12) { Object.keys(undo).forEach(k => { if (undo[k] === undefined) delete productIds[k]; else productIds[k] = undo[k]; }); r.__rekeyed = false; try { _pidDupCache = null; } catch (_) {} try { toast('⚠ JAN の台帳の付け替えを保存できなかったので、手元も元に戻しました（次に読み直した時にもう一度付け替えます）', 8000); } catch (_) {} return; } setTimeout(() => chk(k9 + 1), 5000); };
+      let _svRes = null; if (r.revertOnFail) r.savedP = new Promise(z => { _svRes = z; });   /* ★2026-11-15 05（全面改修・型G）：「保存が通った／元に戻した」を呼んだ側へ返す（印を付けるかはこれで決める） */
+      /* ★2026-11-15 05（全面改修・型F）：JAN の台帳の保存が通らない時、台帳だけ戻して在庫0固定（keep0m）は付け替えたまま＝やり直しでもう一度動いて2つずれた。keep0m も一緒に元へ戻す */
+      const chk = (k9) => { if ((window.__pidSavedAt || 0) > tS) { if (_svRes) _svRes(true); return; } if ((window.__pidSaveErrAt || 0) > tS || k9 >= 12) { r.__k0Cancel = true; if (r.__k0Undo) { try { r.__k0Undo.mt.keep0m = r.__k0Undo.k0; saveListingMeta(); } catch (_) {} } if (_svRes) _svRes(false); Object.keys(undo).forEach(k => { if (undo[k] === undefined) delete productIds[k]; else productIds[k] = undo[k]; }); r.__rekeyed = false; try { _pidDupCache = null; } catch (_) {} try { toast('⚠ JAN の台帳の付け替えを保存できなかったので、手元も元に戻しました（次に読み直した時にもう一度付け替えます）', 8000); } catch (_) {} return; } setTimeout(() => chk(k9 + 1), 5000); };
       if (r.revertOnFail) setTimeout(() => chk(0), 3000 + (60 - Math.min(60, Number(r.revertSeq) || 0)) * 20);   /* 同じ回に何件も当てた時は、後の物から戻す（順番を逆に） */   /* 後から当てる道（10分ごと）だけ＝当てた印を付けずにやり直す道。すぐ当てる道は印が先に付くので戻さない（戻すと二度と当たらない） */
     }
     /* ★2026-11-04 全体レビュー 新-2：在庫0固定（listing_meta）がまだ読めていない・読み込み中なら、読み終わるまで待ってから付け替える（最大2分） */
     if ((lstMeta === null || window._lstMetaLoading) && !r.__metaWait) { r.__metaWait = true; let tries = 0;
       const again = () => { tries++; if ((lstMeta === null || window._lstMetaLoading) && tries < 24) { if (lstMeta === null && typeof lstLoadMeta === 'function' && tries === 1) { try { lstLoadMeta(); } catch (_) {} } setTimeout(again, 5000); return; }
-        const mt2 = lstMeta && lstMeta[id]; if (mt2 && mt2.keep0m && kvOk.listing_meta) { const k0 = Object.assign({}, mt2.keep0m), nk0 = Object.assign({}, mt2.keep0m); r.moves.forEach(mv => { if (k0[mv[0]]) nk0[mv[1]] = true; else delete nk0[mv[1]]; }); (r.gone || []).forEach(t => { delete nk0[t]; }); mt2.keep0m = nk0; saveListingMeta(); } };
+        if (r.__k0Cancel) return; const mt2 = lstMeta && lstMeta[id]; if (mt2 && mt2.keep0m && kvOk.listing_meta) { r.__k0Undo = { mt: mt2, k0: Object.assign({}, mt2.keep0m) }; const k0 = Object.assign({}, mt2.keep0m), nk0 = Object.assign({}, mt2.keep0m); r.moves.forEach(mv => { if (k0[mv[0]]) nk0[mv[1]] = true; else delete nk0[mv[1]]; }); (r.gone || []).forEach(t => { delete nk0[t]; }); mt2.keep0m = nk0; saveListingMeta(); } };
       setTimeout(again, 3000); }
     const mt = (lstMeta && !window._lstMetaLoading) ? lstMeta[id] : null;
-    if (mt && mt.keep0m) { const k0 = Object.assign({}, mt.keep0m), nk0 = Object.assign({}, mt.keep0m); r.moves.forEach(mv => { if (k0[mv[0]]) nk0[mv[1]] = true; else delete nk0[mv[1]]; }); (r.gone || []).forEach(t => { delete nk0[t]; }); mt.keep0m = nk0; saveListingMeta(); }
+    if (mt && mt.keep0m) { r.__k0Undo = { mt, k0: Object.assign({}, mt.keep0m) }; const k0 = Object.assign({}, mt.keep0m), nk0 = Object.assign({}, mt.keep0m); r.moves.forEach(mv => { if (k0[mv[0]]) nk0[mv[1]] = true; else delete nk0[mv[1]]; }); (r.gone || []).forEach(t => { delete nk0[t]; }); mt.keep0m = nk0; saveListingMeta(); }
     try { if (r.llog && r.llog.n && typeof logState !== 'undefined') logState.costMap = null; } catch (_) {}   /* ★2026-10-25 GAS が仕入れ目安の控えも付け替えた＝次に出品ログを開いた時に読み直す */
     if (n && !kvOk.product_ids) { try { toast('⚠ 明細の番号が入れ替わりましたが、JAN の台帳を読めていないので付け替えを保存できませんでした（出品一覧を開き直してください）', true); } catch (_) {} }
     return n;
@@ -61333,7 +61513,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function depAutoCheck() {
     if (!depAutoOn() || depAutoRunning || !depAutoNextAt) return;
     if (Date.now() < depAutoNextAt) return;
-    if (!pcIsOwner()) { depAutoArm(DEP_AUTO_MS); return; }   // 🖥 担当のPCだけ（2台で同じ転記を走らせない）
+    if (!pcIsOwner()) {   // 🖥 担当のPCだけ（2台で同じ転記を走らせない）
+      /* ★2026-11-15 05（全面改修・型E/A）：担当のPCが替わると黙って止まっていた＝「見送り：担当でない」を記録する（同じ見送りが続く間は1行だけ＝記録の枠を埋めない） */
+      try { const a0 = JSON.parse(localStorage.getItem('smdDepRuns') || '[]'); const top = Array.isArray(a0) ? a0[0] : null; if (!(top && /^見送り: 担当でない/.test(String(top.note || '')))) depRunsSave(depRecordRow('自動', null, '見送り: 担当でない（自動の転記は担当のPC「' + ((PC.owner && PC.owner.label) || 'もう1台') + '」だけで動きます。担当のPCでも「自動実行する」を ON にしてください）')); } catch (_) {}
+      try { renderDepRuns(); } catch (_) {}
+      depAutoArm(DEP_AUTO_MS); return; }
     if (!depAutoClaim_()) { depAutoArm(DEP_AUTO_MS); return; }   // 別タブが直前に走らせた＝こちらは次回へ
     depAutoRunning = true;
     if (depAutoT) { clearInterval(depAutoT); depAutoT = null; }
@@ -61436,7 +61620,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!settings.sbSecret) { st('❌ ⚙️設定でSupabase secretキーを入力してください'); return; }
     syncRunning = true; toolBusy = 'sync';
     const log = [];
-    const say = m => { log.push(m); st(log.join('\n')); };
+    /* ★2026-11-15 05（全面改修・型G）：失敗した国があっても「保存 ✅」「同期完了」と出ていた＝⚠ を数え、1つでもあれば「一部失敗（国：…）」と出し、最終同期の時刻は進めない */
+    const syncFail = [];
+    const say = m => { log.push(m); if (/⚠/.test(String(m))) { const mc = /^[\s　]*([A-Z]{2})\s/.exec(String(m)); syncFail.push(mc ? mc[1] : String(m).replace(/^[\s　]+/, '').split(/[:：]/)[0].slice(0, 16)); } st(log.join('\n')); };
     st('⏳ 店を確かめています…（最長12秒）');   /* ★2026-10-24 レビュー#8：押した瞬間に反応させる */
     if (!state.accounts) await loadAccounts().catch(() => {});
     // 手動同期は対象アカウントが持つ国だけ（gs_japan_select選択時はVN等を除外）。自動同期は有効な全国（今アクティブな垢を丸ごと最新化）。
@@ -61458,7 +61644,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (oc && oc.status === 'ok') (oc.liveRows || oc.rows).forEach(o => orderRows.push(orderRowToDb(o)));   /* ★11/8 書き戻すのはライブの行だけ（画面の行には DB の行を重ねている） */
       });
       await upsertOrdersPreservingShop(orderRows, targets); // 判定できた国だけshop_idを刻む＋pre_order列フォールバック（未判別国は既存shop_id保持）
-      log[log.length - 1] = `📦 注文 ${orderRows.length}件 保存 ✅`; st(log.join('\n'));
+      const ordNg = targets.filter(region => { const oc = state.orders.perCountry.get(region.cc); return !(oc && oc.status === 'ok'); }).map(region => region.cc);   /* ★2026-11-15 05（全面改修・型G）：読めなかった国を黙って飛ばさない */
+      ordNg.forEach(c => syncFail.push(c));
+      log[log.length - 1] = '📦 注文 ' + orderRows.length + '件 保存 ' + (ordNg.length ? '⚠（読めなかった国：' + ordNg.join('・') + '）' : '✅'); st(log.join('\n'));
 
       // 2) 入金予定額（初回値=暫定を保持し、更新されたら最新値=確定）
       say('💵 入金予定額を取得中...');
@@ -61738,8 +61926,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       } catch (e) { say(`　在庫: ⚠ ${String(e.message).slice(0, 40)}`); }
       }
 
-      say(`✅ 同期完了 ${new Date().toLocaleString('ja-JP')}`);
-      localStorage.setItem('smdLastSync', String(Date.now()));
+      const fz = [...new Set(syncFail)];
+      if (fz.length) { say('⚠ 同期は一部失敗（国：' + fz.join('・') + '）。最終同期の時刻は進めていません'); try { logAct('同期', 'DB同期 一部失敗', fz.join('・'), log.filter(x => /⚠/.test(String(x))).join(' / ').slice(0, 300)); } catch (_) {} }
+      else { say(`✅ 同期完了 ${new Date().toLocaleString('ja-JP')}`); localStorage.setItem('smdLastSync', String(Date.now())); }
       renderSyncLast();
     } catch (e) {
       say(`❌ ${e.message}`);
@@ -62879,7 +63068,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!settings.sbKey || (typeof demoOn === 'function' && demoOn())) return;
     try {
       const now = Date.now();
-      if (settings.sbSecret) await pcKvPut('pc_presence_' + PC.id, { id: PC.id, label: PC.label, at: new Date(now).toISOString(), page: pcPageLabel(), pageKey: String(state.page || ''), hidden: !!document.hidden, ver: (typeof APP_VERSION !== 'undefined' ? APP_VERSION : '') });
+      if (settings.sbSecret) await pcKvPut('pc_presence_' + PC.id, { id: PC.id, label: PC.label, at: new Date(now).toISOString(), page: pcPageLabel(), pageKey: String(state.page || ''), hidden: !!document.hidden, depAuto: (() => { try { return depAutoOn(); } catch (_) { return null; } })() /* ★2026-11-15 05（全面改修・型E/A）：担当のPCで自動転記が OFF かを🔔で出すため */, ver: APP_BUILD /* ★2026-11-15 05（全面改修・型B）：APP_VERSION は無く空だった */ });
       let rows = await pcKvRead();
       const pres = rows.filter(r => /^pc_presence_/.test(r.k)).map(r => r.v).filter(v => v && v.id);
       let owner = (rows.find(r => r.k === 'pc_owner') || {}).v || null;
@@ -62890,7 +63079,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         rows = await pcKvRead(); owner = (rows.find(r => r.k === 'pc_owner') || {}).v || owner;
       }
       PC.owner = owner; PC.known = true; PC.fails = 0; PC.last = now; try { localStorage.setItem('smdPcWasOwner', (owner && owner.id === PC.id) ? '1' : '0'); } catch (_) {}
-      PC.others = pres.filter(x => x.id !== PC.id && now - Date.parse(x.at) < 10 * 60000);
+      PC.others = pres.filter(x => x.id !== PC.id && now - Date.parse(x.at) < 10 * 60000); PC.pres = pres;
     } catch (e) { PC.fails++; }
     pcDraw();
   }
