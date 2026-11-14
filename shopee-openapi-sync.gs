@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0915'
+var SRC_VER = '20261115-0945'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2037,12 +2037,13 @@ function doGetInner_(e) {
       } catch (err) { ssout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(sscb + '(' + JSON.stringify(ssout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
-    if (p.action === 'shop3_pub_handoff' || p.action === 'shop3_pub_take' || p.action === 'shop3_pub_status') {   /* ★2026-11-15 05：第3の公開の受け持ちを1台ずつ移す */
+    if (p.action === 'shop3_pub_handoff' || p.action === 'shop3_pub_take' || p.action === 'shop3_pub_status' || p.action === 'shop3_pub_clear') {   /* ★2026-11-15 05：第3の公開の受け持ちを1台ずつ移す */
       var s3cb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), s3o;
       try {
         var s3wt = P_().getProperty('WRITE_TOKEN'); if (!s3wt || p.token !== s3wt) throw new Error('WRITE_TOKEN不正');
         if (p.action === 'shop3_pub_handoff') s3o = shop3PubHandoff_(p.to);
         else if (p.action === 'shop3_pub_take') s3o = shop3PubTake_(p.src, s3wt);
+        else if (p.action === 'shop3_pub_clear') s3o = shop3PubClear_(p.shop_id, p.asins, String(p.dry || '') !== '0');
         else { var s3h = shop3PubHome_(), s3s = shop3PubShards_(), s3n = 0; Object.keys(s3s).forEach(function (k) { try { s3n += Object.keys(JSON.parse(s3s[k] || '{}')).length; } catch (e) {} }); s3o = { ok: true, runner: baRunnerId_(), here: s3h.here, why: s3h.why || '', asins: s3n }; }
         s3o.src = SRC_VER;
       } catch (err) { s3o = { ok: false, error: String((err && err.message) || err) }; }
@@ -6249,6 +6250,39 @@ function shop3PubHome_() {
 /* 第3の公開控え専用の錠。トリガーも /exec も持ち主（同じ人）として動くので、UserLock はこのプロジェクトの中で ScriptLock と別の1本の錠として働く。ほかに UserLock を使う所は無い */
 function shop3PubLock_() { return LockService.getUserLock(); }
 var SHOP3_PUB_VAL_RE = /^(?:[rp]:\d+:[\w-]+|[isa]:[1-9]\d*)$/;
+/* ★2026-11-15 05（01：通信の失敗で Shopee に出来なかった物の控えが残り、出し直しが『公開控えがあります』で断られる）：
+   受け持ちの台だけ。途中の印（r: 予約・p: 送信中）の ASIN だけを外す。i/s/a（商品ができている）は外さない。
+   外す前に、その店で SKU（AMZ_<ASIN>）を Shopee の search_item で探し、見つかったら外さない。dry=1（既定）は数えるだけ */
+function shop3PubClear_(shopId, asinsCsv, dry) {
+  var h = shop3PubHome_(); if (!h.here) throw new Error(h.why);
+  var sid = String(shopId || '').replace(/\D/g, ''); if (!sid) throw new Error('shop_id が要ります');
+  var asins = String(asinsCsv || '').split(',').map(function (x) { return x.trim().toUpperCase(); }).filter(function (x) { return /^[A-Z0-9]{10}$/.test(x); });
+  if (!asins.length || asins.length > 20) throw new Error('asins（カンマ区切り・1〜20件）が要ります');
+  var out = { ok: true, dry: dry, shop_id: sid, cleared: [], kept: [] };
+  var found = {};
+  asins.forEach(function (a) {
+    try { var r = callShop_(Number(sid), '/api/v2/product/search_item', { item_sku: 'AMZ_' + a, page_size: 10, offset: 0 }, 'get');
+      if (r && r.error) found[a] = 'Shopee で探せない（' + String(r.error).slice(0, 40) + '）＝外さない';
+      else { var ids = ((r && r.response) || {}).item_id_list || []; if (ids.length) found[a] = 'Shopee にある（' + ids.slice(0, 3).join(',') + '）＝外さない'; } }
+    catch (e) { found[a] = 'Shopee で探せない（' + String((e && e.message) || e).slice(0, 40) + '）＝外さない'; }
+  });
+  var lock = shop3PubLock_(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です');
+  try {
+    var pr = P_();
+    asins.forEach(function (a) {
+      var hash = 0; for (var i = 0; i < a.length; i++) hash = Math.imul(hash, 31) + a.charCodeAt(i);
+      var key = 'shop3_pub_' + sid + '_' + ((hash >>> 0) % 8), v = {}; try { v = JSON.parse(pr.getProperty(key) || '{}'); } catch (e) { v = null; }
+      if (!v) { out.kept.push({ asin: a, why: '控えが読めない' }); return; }
+      var st = String(v[a] || '');
+      if (!st) { out.kept.push({ asin: a, why: '控えに無い' }); return; }
+      if (!/^[rp]:/.test(st)) { out.kept.push({ asin: a, why: '商品ができている印（' + st + '）' }); return; }
+      if (found[a]) { out.kept.push({ asin: a, why: found[a] }); return; }
+      out.cleared.push({ asin: a, was: st.slice(0, 2) });
+      if (!dry) { delete v[a]; pr.setProperty(key, JSON.stringify(v)); }
+    });
+  } finally { lock.releaseLock(); }
+  return out;
+}
 function shop3PubShards_() {
   var all = P_().getProperties(), out = {};
   Object.keys(all).forEach(function (k) { if (/^shop3_pub_\d+_[0-7]$/.test(k)) out[k] = all[k]; });
