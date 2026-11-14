@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0500'
+var SRC_VER = '20261115-0730'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2036,6 +2036,17 @@ function doGetInner_(e) {
         if (ssout && ssout.ok && ssout.item_id) { try { baCatalogMadeRec_(String(p.hw || ''), baCcOfShop_(p.dst_shop_id), ssout.item_id, ssout.name, p.dst_shop_id, String(p.sku || ''), null, p.price); } catch (eRs) {} }   /* ★2026-09-25 手動の種も控える */
       } catch (err) { ssout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(sscb + '(' + JSON.stringify(ssout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'shop3_pub_handoff' || p.action === 'shop3_pub_take' || p.action === 'shop3_pub_status') {   /* ★2026-11-15 05：第3の公開の受け持ちを1台ずつ移す */
+      var s3cb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), s3o;
+      try {
+        var s3wt = P_().getProperty('WRITE_TOKEN'); if (!s3wt || p.token !== s3wt) throw new Error('WRITE_TOKEN不正');
+        if (p.action === 'shop3_pub_handoff') s3o = shop3PubHandoff_(p.to);
+        else if (p.action === 'shop3_pub_take') s3o = shop3PubTake_(p.src, s3wt);
+        else { var s3h = shop3PubHome_(), s3s = shop3PubShards_(), s3n = 0; Object.keys(s3s).forEach(function (k) { try { s3n += Object.keys(JSON.parse(s3s[k] || '{}')).length; } catch (e) {} }); s3o = { ok: true, runner: baRunnerId_(), here: s3h.here, why: s3h.why || '', asins: s3n }; }
+        s3o.src = SRC_VER;
+      } catch (err) { s3o = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(s3cb + '(' + JSON.stringify(s3o) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'shop_tokens') {
       var stcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -6209,10 +6220,66 @@ function shop3LlogCostSave_(cc, itemId, vars, rows) {
   baKvSet_(kk, cur);
   return n;
 }
+/* ★2026-11-15 05（00 の至急・本体の接続枠が毎朝6時ごろに切れ、第3の公開（本体で1日約1,200回）が止まる）：
+   第3の公開は、二重公開を止める「公開控え」（Script Properties の shop3_pub_<店>_<0〜7>）を持つ【1台だけ】が受け持つ。
+   既定＝本体（SHOP3_PUB_OFF が無い時）。子の台は SHOP3_PUB_ON='1' の時だけ。
+   移し方：移す先の台で action=shop3_pub_take（WRITE_TOKEN）→ 先の台が、今の受け持ち（既定は本体＝BROKER_URL）の action=shop3_pub_handoff を呼ぶ
+   → 今の受け持ちは錠の中で自分を止め（本体は SHOP3_PUB_OFF・子は SHOP3_PUB_ON を消す）、控えを全部渡す → 先の台が自分の控えに重ね、SHOP3_PUB_ON='1'。
+   途中で失敗すると、どの台も公開しない側に倒れる（もう一度 take を呼べば同じ控えでやり直せる）。
+   引き継いだ控えのうち、途中の印（r: 予約・p: 送信中）は p: にして期限で消えないようにする＝その ASIN は公開されず、照合を待つ（二重を作らない側） */
+function shop3PubHome_() {
+  var pr = P_();
+  if (isChild_()) return pr.getProperty('SHOP3_PUB_ON') === '1' ? { here: true } : { here: false, why: '第3店の公開はこの台の受け持ちではありません（受け持ちの台へ。移すのは action=shop3_pub_take）' };
+  var off = pr.getProperty('SHOP3_PUB_OFF') || '';
+  return off ? { here: false, why: '第3店の公開は ' + off + ' へ移しました（本体では公開しません）' } : { here: true };
+}
+var SHOP3_PUB_VAL_RE = /^(?:[rp]:\d+:[\w-]+|[isa]:[1-9]\d*)$/;
+function shop3PubShards_() {
+  var all = P_().getProperties(), out = {};
+  Object.keys(all).forEach(function (k) { if (/^shop3_pub_\d+_[0-7]$/.test(k)) out[k] = all[k]; });
+  return out;
+}
+/* 今の受け持ちが呼ばれる：自分を止めてから控えを全部返す（何度呼ばれても同じ控えを返す） */
+function shop3PubHandoff_(to) {
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（少し待ってもう一度）');
+  try {
+    var pr = P_(), who = String(to || '').replace(/[^\w-]/g, '').slice(0, 20) || 'child';
+    if (isChild_()) pr.deleteProperty('SHOP3_PUB_ON'); else pr.setProperty('SHOP3_PUB_OFF', who);
+    var sh = shop3PubShards_(), n = 0; Object.keys(sh).forEach(function (k) { try { n += Object.keys(JSON.parse(sh[k] || '{}')).length; } catch (e) {} });
+    return { ok: true, from: baRunnerId_(), stopped: true, shards: sh, asins: n };
+  } finally { lock.releaseLock(); }
+}
+/* 移す先で呼ぶ：今の受け持ち（src・既定は本体）から控えをもらい、自分の控えに重ねて受け持ちになる */
+function shop3PubTake_(src, token) {
+  var url = String(src || '') || brokerUrl_();
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) throw new Error('今の受け持ちの /exec が分かりません');
+  ufBump_(1, '第3店の公開控えの引き継ぎ');
+  var txt = UrlFetchApp.fetch(url + '?action=shop3_pub_handoff&to=' + encodeURIComponent(baRunnerId_()) + '&token=' + encodeURIComponent(token) + '&callback=cb', { muteHttpExceptions: true }).getContentText();
+  var j = null; try { j = JSON.parse(String(txt).replace(/^\s*[A-Za-z_$][\w$]*\(/, '').replace(/\)\s*;?\s*$/, '')); } catch (e) { j = null; }
+  if (!j || !j.ok || !j.shards || typeof j.shards !== 'object') throw new Error('今の受け持ちから控えを受け取れませんでした（どの台も公開しない状態です・もう一度 take を）：' + String(txt).slice(0, 160));
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（もう一度 take を）');
+  try {
+    var pr = P_(), rank = function (v) { var c = String(v || '').charAt(0); return { r: 1, p: 2, i: 3, s: 4, a: 5 }[c] || 0; }, add = 0, kept = 0, toP = 0;
+    Object.keys(j.shards).forEach(function (k) {
+      if (!/^shop3_pub_\d+_[0-7]$/.test(k)) return;
+      var inc = {}; try { inc = JSON.parse(j.shards[k] || '{}'); } catch (e) { throw new Error('受け取った控えが読めません: ' + k); }
+      var loc = {}; try { loc = JSON.parse(pr.getProperty(k) || '{}'); } catch (e2) { throw new Error('この台の控えが読めません: ' + k); }
+      Object.keys(inc).forEach(function (asin) {
+        var v = String(inc[asin] || ''); if (!/^[A-Z0-9]{10}$/.test(asin) || !SHOP3_PUB_VAL_RE.test(v)) return;
+        if (v.charAt(0) === 'r') { v = 'p' + v.slice(1); toP++; }
+        if (loc[asin] && rank(loc[asin]) >= rank(v)) { kept++; return; }
+        loc[asin] = v; add++;
+      });
+      pr.setProperty(k, JSON.stringify(loc));
+    });
+    if (isChild_()) pr.setProperty('SHOP3_PUB_ON', '1'); else pr.deleteProperty('SHOP3_PUB_OFF');
+    return { ok: true, here: baRunnerId_(), from: j.from || '', added: add, kept: kept, reservedToPending: toP, asins: j.asins || 0 };
+  } finally { lock.releaseLock(); }
+}
 function shop3CandidatePublish_(body) {
   var attempt = { claim:null, submitted:false };
   try {
-    if (isChild_()) throw new Error('第3店の直接公開は本体GASを使ってください');
+    var _s3h = shop3PubHome_(); if (!_s3h.here) throw new Error(_s3h.why);   /* ★2026-11-15 05（00 の至急）：受け持ちの台（公開控えを持つ1台）だけが公開する。前は子の台を一律に断っていた */
     return addItem_(body, attempt);
   }
   catch (err) {
