@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261114-1310'
+var SRC_VER = '20261114-2154'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -6266,7 +6266,7 @@ function addItem_(body, attempt) {
         !body.dimension || !Number.isSafeInteger(body.category_id) || body.category_id < 1 ||
         !Number.isSafeInteger(body.brand_id) || body.brand_id < 0 || !Array.isArray(body.attribute_list) ||   /* ★2026-11-13 本人「ブランドなければノーブランドで出しちゃえばいいから」＝0（No Brand）も通す（読み直しの照らしも 0 同士で合う） */
         !/^\[New\] .+/.test(String(body.item_name || '')) || baCondFor_(body.item_name, body.condition) !== 'NEW' ||
-        !/^(Color|Pack size|Packaging)$/.test(body.tier_name) ||
+        !/^(Color|Pack size|Packaging|Character|Type|Design)$/.test(body.tier_name) ||   /* ★2026-11-14 01（本人「トイホビ系とか」）：amiibo・ぬいぐるみ・トミカ・ガンプラのキャラ違い・車種違いを1つの出品に＝Character・Type・Design を足す（明細2〜10・別写真・値段の差の守りは今のまま） */
         !Array.isArray(vars) || vars.length < 2 || vars.length > 10 || vars.some(function (v) {
           if (!v || !/^AMZ_[A-Z0-9]{10}$/.test(v.sku) || skus.has(v.sku) ||
               typeof v.name !== 'string' || !v.name || v.name.trim() !== v.name || v.name.length > 30 ||
