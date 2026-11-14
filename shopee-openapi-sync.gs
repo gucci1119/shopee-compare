@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0750'
+var SRC_VER = '20261115-0830'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -6151,6 +6151,7 @@ function shop3PublishReceipt_(claim, phase, itemId) {
   var lock = shop3PubLock_();   /* ★2026-11-15 05：🤖・トレカの巡回が ScriptLock を数分持つので、第3の控えは別の錠（UserLock）にした。子の台で 07:12 から『使用中』で断られていた */
   if (!lock.tryLock(10000)) throw new Error('第3店の公開控えが使用中です');
   try {
+    if (phase === 'reserve') { var _h3 = shop3PubHome_(); if (!_h3.here) throw new Error(_h3.why); }   /* ★2026-11-15 05（レビュー M1）：受け持ちの確かめと予約の間に引き継ぎが入っても、錠の中でもう一度見る */
     var props = P_(), shards = {}, changes = {};
     var reserved = 'r:' + claim.at + ':' + claim.owner;
     var pending = 'p:' + claim.at + ':' + claim.owner;
@@ -6223,7 +6224,7 @@ function shop3LlogCostSave_(cc, itemId, vars, rows) {
 /* ★2026-11-15 05（00 の至急・本体の接続枠が毎朝6時ごろに切れ、第3の公開（本体で1日約1,200回）が止まる）：
    第3の公開は、二重公開を止める「公開控え」（Script Properties の shop3_pub_<店>_<0〜7>）を持つ【1台だけ】が受け持つ。
    既定＝本体（SHOP3_PUB_OFF が無い時）。子の台は SHOP3_PUB_ON='1' の時だけ。
-   移し方：移す先の台で action=shop3_pub_take（WRITE_TOKEN）→ 先の台が、今の受け持ち（既定は本体＝BROKER_URL）の action=shop3_pub_handoff を呼ぶ
+   移し方：移す先の台で action=shop3_pub_take（WRITE_TOKEN・src＝今の受け持ちの /exec は必須）→ 先の台が、今の受け持ち（既定は本体＝BROKER_URL）の action=shop3_pub_handoff を呼ぶ
    → 今の受け持ちは錠の中で自分を止め（本体は SHOP3_PUB_OFF・子は SHOP3_PUB_ON を消す）、控えを全部渡す → 先の台が自分の控えに重ね、SHOP3_PUB_ON='1'。
    途中で失敗すると、どの台も公開しない側に倒れる（もう一度 take を呼べば同じ控えでやり直せる）。
    引き継いだ控えのうち、途中の印（r: 予約・p: 送信中）は p: にして期限で消えないようにする＝その ASIN は公開されず、照合を待つ（二重を作らない側） */
@@ -6245,7 +6246,12 @@ function shop3PubShards_() {
 function shop3PubHandoff_(to) {
   var lock = shop3PubLock_(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（少し待ってもう一度）');
   try {
-    var pr = P_(), who = String(to || '').replace(/[^\w-]/g, '').slice(0, 20) || 'child';
+    var pr = P_(), who = String(to || '').replace(/[^\w-]/g, '').slice(0, 20);
+    /* ★2026-11-15 05（レビュー H1）：渡せるのは今の受け持ちだけ。止めた後のやり直しは、前に渡したのと同じ先（SHOP3_PUB_GAVE）の時だけ（古い控えで2台目の受け持ちを作らない） */
+    if (!who || who === 'child') throw new Error('渡す先（to＝RUNNER_ID）が分かりません');
+    var gave = pr.getProperty('SHOP3_PUB_GAVE') || '';
+    if (!shop3PubHome_().here && gave !== who) throw new Error('この台は第3の受け持ちではありません（前に ' + (gave || '？') + ' へ渡した）');
+    pr.setProperty('SHOP3_PUB_GAVE', who);
     if (isChild_()) pr.deleteProperty('SHOP3_PUB_ON'); else pr.setProperty('SHOP3_PUB_OFF', who);
     var sh = shop3PubShards_(), n = 0; Object.keys(sh).forEach(function (k) { try { n += Object.keys(JSON.parse(sh[k] || '{}')).length; } catch (e) {} });
     return { ok: true, from: baRunnerId_(), stopped: true, shards: sh, asins: n };
@@ -6253,7 +6259,8 @@ function shop3PubHandoff_(to) {
 }
 /* 移す先で呼ぶ：今の受け持ち（src・既定は本体）から控えをもらい、自分の控えに重ねて受け持ちになる */
 function shop3PubTake_(src, token) {
-  var url = String(src || '') || brokerUrl_();
+  var url = String(src || '');   /* ★2026-11-15 05（レビュー H1）：src は必須（今の受け持ちの /exec）。既定の本体をやめた */
+  if (isChild_() && (!P_().getProperty('RUNNER_ID'))) throw new Error('この台の RUNNER_ID がありません（受け持ちを見分けられない）');
   if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) throw new Error('今の受け持ちの /exec が分かりません');
   ufBump_(1, '第3店の公開控えの引き継ぎ');
   var txt = UrlFetchApp.fetch(url + '?action=shop3_pub_handoff&to=' + encodeURIComponent(baRunnerId_()) + '&token=' + encodeURIComponent(token) + '&callback=cb', { muteHttpExceptions: true }).getContentText();
@@ -6275,6 +6282,7 @@ function shop3PubTake_(src, token) {
       pr.setProperty(k, JSON.stringify(loc));
     });
     if (isChild_()) pr.setProperty('SHOP3_PUB_ON', '1'); else pr.deleteProperty('SHOP3_PUB_OFF');
+    pr.deleteProperty('SHOP3_PUB_GAVE');
     return { ok: true, here: baRunnerId_(), from: j.from || '', added: add, kept: kept, reservedToPending: toP, asins: j.asins || 0 };
   } finally { lock.releaseLock(); }
 }
