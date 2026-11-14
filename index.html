@@ -24614,6 +24614,22 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       (count > 100 ? `<div style="font-size:11px;color:#c0392b;margin-top:6px;font-weight:600">⚠ 上位100件のみ表示（残り ${count - 100} 件は非表示）。古い順から片付けるか、各ページで絞り込んでください。</div>` : '') +
       `</details>`;
 
+    /* ⏱ ★2026-11-15 05（本人「一生このエラーが起きないくらいの勢いで」・型 A 黙って止まる）：全部の自動処理の最後に動いた時刻を GAS の見張り（hbWatchTick・1時間ごと）が app_kv hb_watch に集める。
+       赤の物をここに出す。★11/15 レビュー：html を組む前に置く（後ろで const だと宣言前の参照で renderAlerts が毎回止まった）。見張りそのものが2時間より古い（4台目も3台目も見張れていない）時も赤。読めなかった時は「読めなかった」と出す（0件にしない） */
+    const hbW = (renderAlerts._cache && renderAlerts._cache.hb) || null;
+    const HB_FN_JA = { outreach_send: '営業の自動送信', order_msg: '注文のメッセージ', postbox_sync: '📮 未返信の取り込み', reply_mark: '返事の印', qlog_sync: '見積もりの記録', follow_sync: '🚩 後で追う人', sup_sync: '仕入れ予定', settings_sync: '設定の写し', translate: '和訳', stock0_pend: '在庫0の頼み', install_watch: '道具の入れ替えの見張り' };
+    const hbName = n => String(n || '').replace(/\b([a-z0-9_]+)\b/g, (m, w) => HB_FN_JA[w] || m);
+    const hbRows = [];
+    /* ★2026-11-15 05 レビュー：記録が読めなかった時は0件にしない（読めなかったの1行） */
+    if (kvErr) hbRows.push({ name: '⏱ 止まりの見張り', last: null, why: '記録を読めなかったので数えていません（' + String(kvErr).slice(0, 60) + '）' });
+    else {
+      if (!hbW || !hbW.at) hbRows.push({ name: '⏱ 止まりの見張りそのもの', last: null, why: 'まだ一度も書かれていない（GAS の見張り hbWatchTick が動いていない）' });
+      else {
+        const hbAge = (Date.now() - Date.parse(hbW.at)) / 60000;
+        if (hbAge > 120) hbRows.push({ name: '⏱ 止まりの見張りそのもの', last: hbW.at, why: Math.round(hbAge) + '分 書かれていない（4台目も3台目も見張れていない）' });
+        (hbW.items || []).filter(x => x && x.state === 'red').forEach(x => hbRows.push({ name: hbName(x.name), last: x.last, why: x.why || '' }));
+      }
+    }
     const deadVal = dead.reduce((s, r) => s + (r.price || 0), 0); // 滞留在庫に寝ている仕入額
     const html =
       card('📥', '到着済なのに入庫待ち（✓入荷し忘れ）', '#1a7f37', arrivedNotRecv.length,
@@ -24683,20 +24699,6 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     // ※伝票を出した注文の status は 'Processed'（'To Ship' ではない）。最初 'To Ship' だけで数えて 0件になった（実データで確認 2026-09-19）
     const lateArranged = lateRows.length;   // ★2026-10-24 レビュー #3：上の🚨のカードと同じ行（表・要対応・🎉・チップにも入れる）
     const totalAll = total + lateArranged;
-    /* ⏱ ★2026-11-15 05（本人「一生このエラーが起きないくらいの勢いで」・型 A 黙って止まる）：全部の自動処理の最後に動いた時刻を GAS の見張り（hbWatchTick・1時間ごと）が app_kv hb_watch に集める。
-       赤の物をここに出す。見張りそのものが2時間より古い（4台目も3台目も見張れていない）時も赤。読めなかった時は「読めなかった」と出す（0件にしない） */
-    const hbW = (renderAlerts._cache && renderAlerts._cache.hb) || null;
-    const HB_FN_JA = { outreach_send: '営業の自動送信', order_msg: '注文のメッセージ', postbox_sync: '📮 未返信の取り込み', reply_mark: '返事の印', qlog_sync: '見積もりの記録', follow_sync: '🚩 後で追う人', sup_sync: '仕入れ予定', settings_sync: '設定の写し', translate: '和訳', stock0_pend: '在庫0の頼み', install_watch: '道具の入れ替えの見張り' };
-    const hbName = n => String(n || '').replace(/\b([a-z0-9_]+)\b/g, (m, w) => HB_FN_JA[w] || m);
-    const hbRows = [];
-    if (!kvErr) {
-      if (!hbW || !hbW.at) hbRows.push({ name: '⏱ 止まりの見張りそのもの', last: null, why: 'まだ一度も書かれていない（GAS の見張り hbWatchTick が動いていない）' });
-      else {
-        const hbAge = (Date.now() - Date.parse(hbW.at)) / 60000;
-        if (hbAge > 120) hbRows.push({ name: '⏱ 止まりの見張りそのもの', last: hbW.at, why: Math.round(hbAge) + '分 書かれていない（4台目も3台目も見張れていない）' });
-        (hbW.items || []).filter(x => x && x.state === 'red').forEach(x => hbRows.push({ name: hbName(x.name), last: x.last, why: x.why || '' }));
-      }
-    }
     renderAlerts._badge = { rest: totalAll - shipRows.length - lateArranged, eli: eliRows.length, rowsync: rowsyncRows.length, brake: !!baBrake, kvErr: !!kvErr, hb: hbRows.length };   // 10分ごとの数え直し（alertBadgeTick_）用
     alertBadgeSet_(renderAlerts._badge, shipRows.length, lateArranged);
     /* ★2026-11-04 全体レビュー 新-C：起動時の先読み・値付けの後の描き直しで、見ていない欄に部品 約1万・画像 約700 を作っていた（11/3 の中身を捨てる直しの効きが半分）。
@@ -24778,7 +24780,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     /* ★2026-11-13 事業本部「見回りのタブが閉じられて止まった時に、黙って止まらないように」：最後の見回りから30分を過ぎたら出す（記録がまだ無い時は出さない＝作る前の誤報を避ける） */
     const mamSeen = (renderAlerts._cache || {}).mamSeen, mamSeenAt = mamSeen && mamSeen.at ? Date.parse(mamSeen.at) : 0;
     const mamBox = (mamSeenAt && Date.now() - mamSeenAt > 30 * 60000) ? `<div data-guide="メルカリ・メルカリShops・Yahoo!フリマの購入後のあいさつは、Chrome で裏にある「購入した商品」のタブが見回りをして送っています。そのタブが無い・前に出ている時は止まります。最後に見回りが動いた時刻から30分を過ぎると出ます。" style="margin:0 4px 10px;padding:8px 12px;border:1px solid #d93025;background:#fff5f5;border-radius:8px;font-size:12.5px"><b style="color:#b71c1c">✉️ メルカリのあいさつの見回りが止まっています</b>（最後 ${esc(new Date(mamSeenAt + 9 * 3600000).toISOString().slice(5, 16).replace('T', ' '))}）<br><span style="font-size:12px">「購入した商品」のタブが裏に1つあれば自動で動きます（前に出しているタブ・触っているタブでは動きません）</span></div>` : '';
-    body.innerHTML = kvBanner + pitmBox + mamBox + dupBox + llogBox + chipBar + `<div id="al-cards">${((totalAll + dead.length + paRecN) === 0 && !kvErr && !dupBox && !llogBox && !pitmBox && !mamBox) ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>' : html}${alCancelCard}</div>`;
+    body.innerHTML = kvBanner + pitmBox + mamBox + dupBox + llogBox + chipBar + `<div id="al-cards">${((totalAll + dead.length + paRecN + hbRows.length) === 0 && !kvErr && !dupBox && !llogBox && !pitmBox && !mamBox) ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>' : html}${alCancelCard}</div>`;
     const alShow = (sel) => { const box = body.querySelector('#al-cards'); if (!box) return; [...box.children].forEach(el => { if (!el.id) { el.style.display = sel === 'all' ? '' : 'none'; return; } el.style.display = (sel === 'all' || el.id === sel) ? '' : 'none'; if (el.id === sel && el.tagName === 'DETAILS') el.open = true; }); };
     alShow(alTab);
     { const rt = body.querySelector('.al-retry'); if (rt) rt.addEventListener('click', () => { rt.disabled = true; rt.textContent = '⏳ 読み直し中'; renderAlerts(true).catch(e => { body.innerHTML = errBox(e); }); }); }
