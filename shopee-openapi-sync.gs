@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261114-2154'
+var SRC_VER = '20261114-2218'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9979,17 +9979,23 @@ function baKv_(k) {
       { var _hv2 = {}; (rp || []).forEach(function (x) { _hv2[x.k] = 1; }); if (baPreShardKeys_().some(function (kk) { return !_hv2[kk]; })) { SB_LAST_LEN = 0; rp = (rp || []).concat(sbSelect_('app_kv', 'select=k,v&k=eq.boshu_auto_pre') || []); BA_KV_SZ['boshu_auto_pre(古い1本)'] = SB_LAST_LEN; } }
       var bk = {}; (rp || []).forEach(function (x) { bk[x.k] = x.v; }); var vp = baPreMerge_(bk); if (BA_KV_CACHE) BA_KV_CACHE[k] = vp; delete BA_KV_FAIL[k]; return vp; } catch (eP) { BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
   }
-  try { SB_LAST_LEN = 0; var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); BA_KV_SZ[k] = SB_LAST_LEN; var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; delete BA_KV_FAIL[k]; return v; } catch (e) { BA_KV_SZ[k] = -SB_LAST_LEN; BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
+  /* ★2026-11-14 05（00 の決め・Supabase の通信量）：🤖の設定 boshu_auto_cfg（約79KB）は GAS から1日約5,900回1本ずつ読まれていた（約0.47GB/日）。
+     同じ台の中で5分だけ覚える（CacheService）。書いた時は覚えた値も書き換える。書く直前の読み直し（baKvFresh_）は覚えた値を使わない。
+     ポータルや別の台で設定を変えた時は、この台に効くまで最大5分遅れる。100KB を超える大きさの時は覚えない */
+  if (k === BA_CFG && !BA_CFG_NOCACHE) { try { var _cc = CacheService.getScriptCache().get('bacfg5'); if (_cc) { var _cv = JSON.parse(_cc); if (BA_KV_CACHE) BA_KV_CACHE[k] = _cv; delete BA_KV_FAIL[k]; return _cv; } } catch (eCc) {} }
+  try { SB_LAST_LEN = 0; var r = sbSelect_('app_kv', 'select=v&k=eq.' + encodeURIComponent(k)); BA_KV_SZ[k] = SB_LAST_LEN; var v = (r && r[0] && r[0].v) || null; if (BA_KV_CACHE) BA_KV_CACHE[k] = v; delete BA_KV_FAIL[k]; if (k === BA_CFG && v) baCfgCachePut_(v); return v; } catch (e) { BA_KV_SZ[k] = -SB_LAST_LEN; BA_KV_ERR = true; BA_KV_FAIL[k] = 1; return null; }
 }
 /* ★2026-10-20 全体レビュー 高-A：読めなかった鍵（522・時間切れ）は、この実行では書かない。読めない時に `|| {}` で始めた中身（その回の数件だけ）で、
    台帳 boshu_auto_done_<hw>・状態・仕入れ目安の控えなどを丸ごと上書きして、手で付けた見送り印や出品済みの印を消す筋道があった（10/19 高-新2 と同じ型）。
    書き込みの入口1か所で止める＝全部の書き手に効く。読み直して読めれば印は消える */
 var BA_KV_FAIL = {};
-function baKvSet_(k, v) { if (BA_KV_FAIL[k]) { try { Logger.log('⚠ ' + k + ' はこの実行で読めなかったので書きません（空の中身で上書きしないため）'); } catch (eLg) {} return; } sbUpsert_('app_kv', [{ k: k, v: v, updated_at: new Date().toISOString() }], 'k'); if (BA_KV_CACHE) BA_KV_CACHE[k] = v; }
+var BA_CFG_NOCACHE = false;
+function baCfgCachePut_(v) { try { var js = JSON.stringify(v); if (Utilities.newBlob(js).getBytes().length < 95000) CacheService.getScriptCache().put('bacfg5', js, 300); else CacheService.getScriptCache().remove('bacfg5'); } catch (e) {} }
+function baKvSet_(k, v) { if (k === BA_CFG && !BA_KV_FAIL[k]) baCfgCachePut_(v); if (BA_KV_FAIL[k]) { try { Logger.log('⚠ ' + k + ' はこの実行で読めなかったので書きません（空の中身で上書きしないため）'); } catch (eLg) {} return; } sbUpsert_('app_kv', [{ k: k, v: v, updated_at: new Date().toISOString() }], 'k'); if (BA_KV_CACHE) BA_KV_CACHE[k] = v; }
 /* ★2026-09-23 レビューで見つけた穴。🤖の実行中は app_kv を先読みした控え（BA_KV_CACHE）で答えるので、
    【取り札】の「書いた直後に読み直して自分の札か確かめる」が控えに当たり、必ず「取れた」になっていた（2台目と3台目が同時に
    同じ店のトークンを更新すると refresh_token の取り合いで全店の認証が壊れる）。取り札は必ず控えを飛ばして読む。 */
-function baKvFresh_(k) { if (BA_KV_CACHE) { try { delete BA_KV_CACHE[k]; } catch (e) {} } return baKv_(k); }
+function baKvFresh_(k) { if (BA_KV_CACHE) { try { delete BA_KV_CACHE[k]; } catch (e) {} } BA_CFG_NOCACHE = true; try { return baKv_(k); } finally { BA_CFG_NOCACHE = false; } }
 /* 何本かの鍵を【1回の通信で】新しく読む（控えは使わない）。読めなければ null＝「分からない」（空の {} にしない） */
 function baKvFreshMany_(keys) {
   try { var r = sbSelect_('app_kv', 'select=k,v&k=in.(' + keys.map(encodeURIComponent).join(',') + ')'); var o = {}; (r || []).forEach(function (x) { o[x.k] = x.v; }); return o; } catch (e) { return null; }
