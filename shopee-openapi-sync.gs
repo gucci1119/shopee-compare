@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-2320'
+var SRC_VER = '20261116-0000'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9661,6 +9661,34 @@ function hbWatchRun_(me, heal) {
       omMiss.push(o.cc + ' ' + o.sn + '（' + Utilities.formatDate(new Date(Number(o.order_ts) * 1000), 'Asia/Tokyo', 'MM/dd HH:mm') + ' の注文・' + (s0 ? (omJa[s0] || s0) : '台帳に無い＝道具が拾っていない') + (st && st.note ? '：' + String(st.note).slice(0, 40) : '') + '）');
     });
     add({ id: 'omsg_unsent', name: '注文メッセージ（支払い済みで30分たっても送れていない注文）', state: omMiss.length ? 'red' : 'ok', why: omMiss.length ? omMiss.length + '件：' + omMiss.slice(0, 5).join('／') + (omMiss.length > 5 ? ' ほか ' + (omMiss.length - 5) + '件' : '') : '直近48時間の ' + om.orders.length + '件は送付済み（または送らない決め）', last: null });
+  }
+  /* ⑥-2 発送のお知らせの送り漏れ（★2026-11-15 05・00 の頼み：11/13 に窓口を本体へ移した時に発送のお知らせの作りが抜け、11/13〜15 に1通も出ていなかったのを見張りで拾えなかった）。
+     倉庫へ送った印（costs.self_transit_at・直近3日）から3時間たち、まだスキャン前（orders.tab 300）なのに、台帳 order_msg_state.sh が sent でも skip（同じお客さんに24時間以内・自動 OFF の国など）でもない注文が1件でもあれば赤。
+     読みは小さく：costs 3列・orders 3列・台帳はその注文の鍵だけ（40件ずつ） */
+  var sm = null, smErr = '';
+  try {
+    var cutH = now - 3 * 3600000;
+    var cs = sbSelect_('costs', 'select=cc,sn,self_transit_at&self_transit_at=gte.' + encodeURIComponent(new Date(now - 3 * 86400000).toISOString()) + '&order=self_transit_at.asc&limit=400') || [];
+    cs = cs.filter(function (c) { return /^\d{6}[A-Z0-9]{8}$/.test(String(c.sn || '')) && (Date.parse(c.self_transit_at) || 0) <= cutH; });
+    sm = { list: [], led: {}, n: cs.length };
+    for (var si = 0; si < cs.length; si += 40) {
+      var sp = cs.slice(si, si + 40), ob = {};
+      (sbSelect_('orders', 'select=sn,tab,status&sn=in.(' + sp.map(function (c) { return c.sn; }).join(',') + ')') || []).forEach(function (o) { ob[String(o.sn)] = o; });
+      var tw = sp.filter(function (c) { var o = ob[String(c.sn)]; return o && Number(o.tab) === 300; });
+      if (!tw.length) continue;
+      var lr2 = hbSel_('select=' + tw.map(function (c, j2) { return 's' + j2 + ':v->sh->' + c.sn; }).join(',') + '&k=eq.order_msg_state'), l2 = (lr2 && lr2[0]) || {};
+      tw.forEach(function (c, j2) { sm.list.push(c); sm.led[c.sn] = l2['s' + j2] || null; });
+    }
+  } catch (eS) { sm = null; smErr = String((eS && eS.message) || eS).slice(0, 120); }
+  if (!sm) add({ id: 'shmsg_read', name: '発送のお知らせの突き合わせの読み', state: 'blind', why: '読めなかった＝この回は発送のお知らせの送り漏れを見ていない（0件ではない）' + (smErr ? '（' + smErr + '）' : ''), last: null });
+  else {
+    var shJa = { failed: '失敗', claimed: '送っている途中のまま', unknown: '送れたか分からない', retry: 'やり直し待ち' }, shMiss = [];
+    sm.list.forEach(function (c) {
+      var st = sm.led[c.sn], s0 = st && st.s;
+      if (s0 === 'sent' || s0 === 'skip') return;
+      shMiss.push(c.cc + ' ' + c.sn + '（倉庫へ ' + Utilities.formatDate(new Date(Date.parse(c.self_transit_at)), 'Asia/Tokyo', 'MM/dd') + '・' + (s0 ? (shJa[s0] || s0) : '台帳に無い＝SR が拾っていない') + (st && st.note ? '：' + String(st.note).slice(0, 40) : '') + '）');
+    });
+    add({ id: 'shmsg_unsent', name: '発送のお知らせ（倉庫へ送って3時間たってもスキャン前で送れていない注文）', state: shMiss.length ? 'red' : 'ok', why: shMiss.length ? shMiss.length + '件：' + shMiss.slice(0, 5).join('／') + (shMiss.length > 5 ? ' ほか ' + (shMiss.length - 5) + '件' : '') : '直近3日に倉庫へ送った ' + sm.n + '件のうちスキャン前 ' + sm.list.length + '件は送付済み（または送らない決め）', last: null });
   }
   return fin();
 }
