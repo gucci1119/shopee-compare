@@ -9566,8 +9566,9 @@ function hbWatchRun_(me, heal) {
         if (now - lastR > 3 * 3600 * 1000) {
           P.setProperty(hkR, String(now));
           var whoR = HB_MAIN_BLOCKED_ ? 'child' : 'main', hr = hbExec_(whoR, 'action=run_returns&days=45&token=' + tok), jr = hr && hr.j;
-          it.state = (jr && jr.ok) ? 'warn' : 'red';
-          it.why += (jr && jr.ok) ? '→ 見張りが' + (HB_NAME_[whoR] || whoR) + 'で1回回した（' + (jr.rows || 0) + '件）' : '→ 立て直しに失敗（' + String((jr && jr.error) || (hr && hr.err) || '答えなし').slice(0, 60) + '）';
+          var toR = !jr && /timed? ?out|タイムアウト|時間/i.test(String((hr && hr.err) || ''));   /* 13店で約90秒＝答えを待ちきれないことがある（向こうでは走り続け、成功すれば取り札に時刻が入る） */
+          it.state = (jr && jr.ok) || toR ? 'warn' : 'red';
+          it.why += (jr && jr.ok) ? '→ 見張りが' + (HB_NAME_[whoR] || whoR) + 'で1回回した（' + (jr.rows || 0) + '件）' : toR ? '→ ' + (HB_NAME_[whoR] || whoR) + 'に1回回すよう頼んだ（答えは時間切れ・次の回に取り札で確かめる）' : '→ 立て直しに失敗（' + String((jr && jr.error) || (hr && hr.err) || '答えなし').slice(0, 60) + '）';
         }
       }
       add(it);
