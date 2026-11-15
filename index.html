@@ -6566,6 +6566,14 @@
     "列＝店（国の中の店まで）、行＝作品で並べます。同じ作品はどの店に出したかが横一列で見えます": "Columns = shops (down to each shop in a country), rows = titles. You can see in one row which shops each title went to.",
     "画面のいちばん上の「対象アカウント」で選んだ店の分だけを数えています。全部に戻すには「全アカウント（すべて合算）」を選びます": "Counting only the shop chosen in the account selector at the very top. Choose \"All accounts (combined)\" to go back to everything.",
     "🤖自動出品": "🤖 Auto-listed",
+    "🤖自動（第3・Amazon）": "🤖 Auto (Shop 3 · Amazon)",
+    "🤖第3・Amazon": "🤖 Shop 3 · Amazon",
+    "（第3の分を読み込み中）": "(loading Shop 3 items)",
+    "🤖自動出品（第3の店・Amazon の道具が出した明細＝SKU が AMZ_ で始まる）": "🤖 Auto-listed (Shop 3: variation listed by the Amazon tool = SKU starts with AMZ_)",
+    "🤖 第3の店の Amazon の道具が出した明細（SKU が AMZ_ で始まる）": "🤖 Variation listed by the Shop 3 Amazon tool (SKU starts with AMZ_)",
+    "🤖自動のうち、第3の店（maneki_neko_japan）の Amazon の道具が出した明細（SKU が AMZ_ で始まる）。残りは母数・トレカの🤖": "Of the 🤖 auto count, variations listed by the Amazon tool on Shop 3 (maneki_neko_japan; SKU starts with AMZ_). The rest are the game / trading-card bots",
+    "第3の店（maneki_neko_japan）の Amazon の道具（Mac の publish_product.py）が出した明細。SKU が AMZ_ で始まる物を数えています。決まった間隔では動いていないので、次回の時刻は出していません": "Variations listed by the Shop 3 Amazon tool (publish_product.py on the Mac), counted by SKU starting with AMZ_. It does not run on a fixed interval, so no next-run time is shown",
+    "第3の店で、SKU が AMZ_ で始まる（Amazon の道具が出した）明細の、いま出ている数です（消した分は入りません）": "Live variations on Shop 3 whose SKU starts with AMZ_ (listed by the Amazon tool); deleted ones are not counted",
     "🤖 自動出品": "🤖 Auto-listed",
     "自動出品だけ": "auto-listed only",
     "写真の四隅＋シュリンク": "Photo corners + shrink check",
@@ -9826,6 +9834,8 @@
     "次にやること": "Next steps", "ふだんの道具": "Everyday tools", "🔴 赤字の行だけを出す": "🔴 Show loss items only", "🔀 移すが要る行": "🔀 Items that need moving", "☑ 表示中の提案をすべて選ぶ": "☑ Select all shown suggestions", "提案の値段（直せる）": "Suggested price (editable)", "その時の利益": "Profit at that price", "今の値段で売れたら": "Profit at current price", "直近30日": "Last 30 days", "今の値段": "Current price", "🗑 売れた記録があるので消せません": "🗑 Has sales — cannot delete", "☑ して上の「書き込む」で、この値段を書きます": "Check and press Write above to apply this price", "▼ 大きい順": "▼ Descending", "▲ 小さい順": "▲ Ascending",
   });
   const I18N_PAT = [
+    /* ★2026-11-15 第3・Amazon を🤖自動に数える */
+    [/^（うち第3・Amazon (\d+)）$/, '(incl. Shop 3 · Amazon $1)'], [/^🤖 第3・Amazon：今日 (\d+)件$/, '🤖 Shop 3 · Amazon: $1 today'], [/^（最後 (\d\d:\d\d)）$/, '(last $1)'],
     /* ★2026-11-13 値付けの見直しのカード */
     [/^✅ ☑した (\d+)件の値段を書き込む$/, '✅ Write the prices of $1 checked items'], [/^赤字 (\d+)・基準より下 (\d+)(.*)。上から順に、カードのボタンで決めてください。$/, 'Loss $1 · below the profit line $2$3. Decide from the top with the buttons on each card.'],
     [/^🔀 移し先を探す（(.+)）$/, '🔀 Find a catalog to move to ($1)'], [/^このカタログでは断られる値段（値段の差が上限 (\d+)倍を超える）$/, 'Price rejected in this catalog (price gap over the $1x limit)'], [/^🗑 (この明細を消す|カタログごと消す)（(.+) の上限超え）$/, '🗑 Delete ($2 price cap)'], [/^理由：(.+)$/, 'Reason: $1'],
@@ -14135,6 +14145,34 @@
     const tip = 'まとめ買い割引（Bundle Deal）が効いた注文です。割引前 ' + cur + Number(b.base || 0).toLocaleString('en-US', { maximumFractionDigits: 2 }) + ' から ' + cur + amt + ' 引き（Shopee の入金明細の品ごとの割引の合計）。率が2つある時は品ごとに違う率が付いています';
     return `<div class="ord-itemsub ord-bundle" style="color:#b45309;font-weight:700;margin-top:2px" title="${esc(tip)}">${esc(txt)}</div>`;
   }
+  /* ★2026-11-15 05（00・本人「今依頼してるAmazonから出すのも自動出品の認識だけど」）：第3の店（maneki_neko_japan）の Amazon の道具
+     （Mac の publish_product.py → GAS shop3_candidate_publish）が出した明細も🤖自動に数える。見分けは名前でなく SKU の頭 AMZ_
+     （カタログの parent_sku か明細の sku）。第3の店の出品だけを読む（約250件・約170KB）。10分は読み直さない */
+  const S3_AMZ_SHOPS = (() => { try { return Object.values(SHOP3_CANDIDATE_SHOPS).filter(Boolean); } catch (_) { return ['1938012303', '1938012197', '1938012258', '1938012329', '1938012095']; } })();
+  let _s3Amz = null, _s3AmzAt = 0, _s3AmzP = null;
+  function s3AmzLoad(force) {
+    if (_s3AmzP) return _s3AmzP;
+    if (!force && _s3Amz && Date.now() - _s3AmzAt < 10 * 60000) return Promise.resolve(_s3Amz);
+    _s3AmzP = sbGetAll('listings', 'select=cc,item_id,name,parent_sku,models&shop_id=in.(' + S3_AMZ_SHOPS.join(',') + ')').then(rows => {
+      const items = new Set(), mnames = new Set(), inames = new Set(), byCc = {};
+      (rows || []).forEach(r => {
+        let ms = r.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (_) { ms = []; } } if (!Array.isArray(ms)) ms = [];
+        const amzM = ms.filter(m => m && /^AMZ_/.test(String(m.sku || '')));
+        if (!(/^AMZ_/.test(String(r.parent_sku || '')) || amzM.length)) return;
+        items.add(r.cc + '|' + r.item_id); byCc[r.cc] = (byCc[r.cc] || 0) + (ms.length ? amzM.length : 1);
+        amzM.forEach(m => { if (m.n) mnames.add(r.cc + '|' + String(m.n).toLowerCase().trim()); });
+        if (!ms.length && r.name) inames.add(r.cc + '|' + String(r.name).toLowerCase().trim());
+      });
+      _s3Amz = { items, mnames, inames, byCc }; _s3AmzAt = Date.now(); return _s3Amz;
+    }).catch(() => _s3Amz).finally(() => { _s3AmzP = null; });
+    return _s3AmzP;
+  }
+  /* 注文の明細が第3の Amazon の道具の物か（明細名＝バリエの時・商品名＝単品の時） */
+  function s3AmzOrderHit(cc, variation, name) {
+    if (!_s3Amz) return false;
+    if (variation) return _s3Amz.mnames.has(String(cc || '') + '|' + String(variation).toLowerCase().trim());
+    return !!name && _s3Amz.inames.has(String(cc || '') + '|' + String(name).toLowerCase().trim());
+  }
   let _ordAuto = null, _ordAutoAt = 0, _ordAutoItems = null;   /* _ordAutoItems＝🤖が明細を足したカタログ item_id → { cc, hw, ids:Set(model_id) }（収支の厳密な突き合わせ用） */
   function ordAutoLoad() {
     if (_ordAutoAt && Date.now() - _ordAutoAt < 30 * 60000) return Promise.resolve(null);   /* 読み込み済み＝描き直さない（描画の中から再描画を予約しない [[portal-no-render-loop]]） */
@@ -14168,7 +14206,8 @@
       });
     }).catch(() => { _ordAutoAt = 0; return _ordAuto; });
   }
-  function ordAutoBadge(cc, variation) {
+  function ordAutoBadge(cc, variation, name) {
+    if (s3AmzOrderHit(cc, variation, name)) return ` <span title="🤖自動出品（第3の店・Amazon の道具が出した明細＝SKU が AMZ_ で始まる）" style="display:inline-block;background:#ede7f6;color:#5e35b1;border:1px solid #b39ddb;border-radius:8px;padding:0 6px;font-size:10.5px;font-weight:700;white-space:nowrap">🤖自動（第3・Amazon）</span>`;
     if (!_ordAuto || !variation) return '';
     const hw = _ordAuto.get(String(cc || '') + '|' + String(variation).toLowerCase().trim());
     return hw ? ` <span title="🤖自動出品で入れた明細です（機種: ${esc(String(hw).toUpperCase())}）" style="display:inline-block;background:#ede7f6;color:#5e35b1;border:1px solid #b39ddb;border-radius:8px;padding:0 6px;font-size:10.5px;font-weight:700;white-space:nowrap">🤖自動出品</span>` : '';
@@ -14176,6 +14215,7 @@
   // withLive=false: DBのみ即表示（開いた瞬間は速い）。withLive=true（更新ボタン/同期時）: ライブで上書き
   function loadOrders(withLive) {
     ordAutoLoad().then(set => { if (set && set.size) renderOrders(); });
+    { const _s3Had = !!_s3Amz; s3AmzLoad().then(s3 => { if (!_s3Had && s3 && s3.items.size) renderOrders(); }); }
     ordBundleLoad().then(m => { if (m && m.size) renderOrders(); });
     state.orders.started = true;
     if (!state.accounts) loadAccounts().then(() => renderOrders()).catch(() => {}); // 🏪ショップ名表示のため登録簿を確保→ロード後に再描画
@@ -14979,7 +15019,7 @@
     /* ★2026-09-28 本人「注文管理のところに、自動出品で出したやつがフィルターで見れるような機能も」。印（ordAutoBadge）と同じ判定で絞る。台帳が読めていない間は絞らず、ボタンに「読み込み中」と出す */
     { const ab = document.getElementById('ord-autoonly');
       if (ab) { ab.classList.toggle('on', !!state.orders.autoOnly); ab.textContent = '🤖 自動出品だけ表示' + (state.orders.autoOnly ? (_ordAuto ? '' : '（読み込み中）') : ''); } }
-    if (state.orders.autoOnly && _ordAuto) rows = rows.filter(r => (r.items || []).some(it => !!ordAutoBadge(r.cc, it.variation)));
+    if (state.orders.autoOnly && (_ordAuto || _s3Amz)) rows = rows.filter(r => (r.items || []).some(it => !!ordAutoBadge(r.cc, it.variation, it.name)));
     if (state.orders.search) {
       const q = state.orders.search.toLowerCase();
       rows = rows.filter(r => r.buyer.toLowerCase().includes(q) || r.sn.toLowerCase().includes(q) ||
@@ -15012,7 +15052,7 @@
       const itemThumb = (im) => `<img class="zimg" loading="lazy" src="${IMG_CDN}${im || ''}" onerror="this.style.opacity=.15" title="クリックで最大表示（ホバーで拡大プレビュー）" style="width:44px;height:44px;border-radius:6px;object-fit:cover;background:#eee;flex:none;cursor:zoom-in">`;
       const itemsHtml = (r.items.length ? r.items : [first]).map(it =>
         `<div style="display:flex;align-items:center;gap:8px;min-width:0">${itemThumb(it.image)}<div style="min-width:0;flex:1">` +
-        `<div class="ord-itemname" title="${esc(it.name || '')}">${esc(it.name || '')}${it.qty > 1 ? ` <b style="color:#d93025">×${it.qty}</b>` : ''} ${battBadge(batteryOf((it.name || '') + ' ' + (it.variation || '')))}${ordAutoBadge(r.cc, it.variation)}</div>` +
+        `<div class="ord-itemname" title="${esc(it.name || '')}">${esc(it.name || '')}${it.qty > 1 ? ` <b style="color:#d93025">×${it.qty}</b>` : ''} ${battBadge(batteryOf((it.name || '') + ' ' + (it.variation || '')))}${ordAutoBadge(r.cc, it.variation, it.name)}</div>` +
         (it.variation ? `<div class="ord-itemsub">${esc(it.variation)}</div>` : '') +
         `</div></div>`
       ).join('<div style="border-top:1px dashed #e8e8e8;margin:4px 0"></div>') +
@@ -29278,6 +29318,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-15', items: [
+      '🤖 <b>第3の店の Amazon からの出品も「🤖自動」に数えるようにしました</b>（本人「今依頼してるAmazonから出すのも自動出品の認識だけど」）：前は🤖の台帳（母数・トレカ）に載った明細だけを自動に数えていたので、第3の店（maneki_neko_japan）で Amazon の道具が出した明細が全部「手動」に入っていました（11/15 の出品ログ 859件のうち第3の 489件）。見分けは名前でなく <b>SKU の頭 AMZ_</b>（カタログか明細の SKU）。出品ログの今日の数（「🤖自動 N（うち第3・Amazon N）」）・日ごとの棒の紫・明細の「🤖第3・Amazon」の印・🤖自動出品の帯（今日の件数と最後の時刻）・「🤖の収支・これまでに出した明細」の下の国ごとの数・注文管理の「🤖 自動出品だけ表示」と注文の「🤖自動（第3・Amazon）」の印に入れました。出品の同期（30分ごと）より前に出たばかりの新しいカタログは、同期されるまで手動に数えます。',
       '📶 <b>ポータルの通信を軽くしました</b>（本人「無駄な通信をしているところがあれば、効率化して軽くしてください」）：①出品の表は、前に読んだ控え（この端末）と比べて【変わった行だけ】明細つきで読み直す（開くたび約21MB→約7.5MB＋変わった行・出品ログの毎時の反映 約16MB→約2.3MB＋変わった行。中身と並びは丸ごと読みと同じ・1日1回は丸ごと読む） ②同じPCでポータルを何枚開いていても、自動の読み書き（出品ログの反映・写真集め・🤖巡回の起動・問い合わせの溜め・日次の記録・自動同期など）は1枚だけで回す（閉じると次のタブが引き継ぐ） ③上の接続枠・🛑の帯は裏のタブでは取りに行かない（前に出した時に取り直す） ④設定の共有は更新時刻だけ先に見て、変わっていなければ中身を読まない ⑤自動検知の🤖の状態は使う2項目だけ読む（約556KB→約430KB）。画面の数字・一覧は変わりません',
       '🛡 <b>全面改修の続き（別の目のレビューの7件）</b>：①見積もりの小窓が本体のタブの「②の割合・揃える」を持ち込んで②の割り振りが変わっていたのを止めた ②お客さんと約束した額（&price・&shopAmt・品物ごとの値段）を 0.5・1 の単位に丸めない＝払う額が合意より増えない（整数しか出せない VN・TW だけ整数に切り捨て・動いた時は返事に「（国の単位に切り捨て）」・Shopee が断ったらその誤りをそのまま返す） ③使い回す窓でも、新しい公開のたびに古い版なら読み直す ④店を絞ったまま・出品同期の後でも、降格の自動直しと在庫の毎日記録が自分で全店分を読んで動く（1日1回・担当のPC） ⑤⑥明細の詰め直しの付け替えは、その回の JAN の台帳と在庫0固定の保存が両方通ったかで決める（別の保存と取り違えない） ⑦失敗して開いたままの窓が読み直されても、失敗の理由を消さずに出す',
       '🛡 <b>壊れる筋道が分かっていた17か所を全面的に直しました</b>（本人「一生このエラーが起きないくらいの勢いで」「全面的に改修して」）：①古い版のまま開いた窓が自分の古さに気づけなかった→ページに版の印を埋め、チャットからの自動の窓は動く前に比べて古ければ1回だけ読み直す ②③決めた金額に端数があると「金額が一致しません」で止まっていた→国の値段の単位に丸めて通し、丸めた時は返事に「（国の単位に丸めた）」と出す・計算と3倍ずれていても約束の額は止めず ⚠ を付けて出す ④自動の窓が本体のタブの目標粗利・重さを持ち込み・書き戻していたのを止めた ⑤値段の指定が無く為替が読めていない時は既定のレートで足さず理由を返す ⑥出品の表が全店分読めていない時は降格の自動直しを見送る（重複の組の守りが空になるのを防ぐ） ⑦通信が切れた時の保存の失敗も赤い印に出す ⑧担当のPCが替わって入金予定の自動転記が止まると「見送り：担当でない」と🔔に出す ⑨DB同期で失敗した国があれば「一部失敗（国：…）」と出し最終同期の時刻を進めない ⑩統計の毎日の取り直しが通らなければ30分後にやり直す（1日5回まで） ⑪⑫明細の詰め直しの付け替えは保存が通ってから「当てた」にし、通らなければ在庫0固定も一緒に元へ戻す（2つずれない） ⑬同じPCの2つのタブが同じ仕事を二重に走らせない ⑭日次の出品の記録を店の絞り込みなしで取り、公開の数を正しく数える ⑮読めなかった時に「無い」と出さず「読めませんでした」と出す（🔔の入庫待ち・出品ログの仕入れ目安と下書き） ⑯自動の読み直しで同じ依頼をもう一度足さない ⑰為替の自動の読み直しで出品の途中に「見積もりの条件が変わりました」で止まらない',
@@ -46675,7 +46716,12 @@ create policy "listing_log all" on listing_log for all using (true) with check (
     // ★2026-09-20 本人「自動出品した商品と見分けがつくように。数字も」：🤖が出した明細は控え（listlog_auto）と突き合わせて印を付け、件数も 🤖自動／手動 に分けて出す
     const autoMap = logState.autoMap || {};
     const autoMid = logState.autoMid || new Set();
-    const isAuto = (r) => autoMid.has(r.cc + '|' + r.model_id) || !!autoMap[r.cc + '|' + r.item_id + '|' + String(r.model_name || '').toLowerCase().trim()];
+    const isBot = (r) => autoMid.has(r.cc + '|' + r.model_id) || !!autoMap[r.cc + '|' + r.item_id + '|' + String(r.model_name || '').toLowerCase().trim()];
+    /* ★2026-11-15 05（本人「今依頼してるAmazonから出すのも自動出品の認識だけど」）：第3の店の Amazon の道具が出した明細（SKU の頭 AMZ_）も🤖自動に数える */
+    if (!_s3Amz && !logState._s3Req) { logState._s3Req = 1; s3AmzLoad().then(x => { if (x && x.items.size) renderListingLog(); }); }
+    else if (_s3Amz && Date.now() - _s3AmzAt > 10 * 60000 && !_s3AmzP) s3AmzLoad(true).then(() => {});   /* 10分たったら裏で読み直す（次の描き直しで効く） */
+    const isS3 = (r) => !!(_s3Amz && _s3Amz.items.has(r.cc + '|' + r.item_id));
+    const isAuto = (r) => isS3(r) || isBot(r);
     const isLive = (r) => isAuto(r) || jstDate(r.created_at) === String(r.ymd || '').slice(0, 10);   // 🤖の分は実際に出した日に直して記録するので「後から取り込んだ分」に数えない
     const backfillN = allRows.filter(r => !isLive(r)).length;
     const rows = logState.liveOnly ? allRows.filter(isLive) : allRows;
@@ -47078,7 +47124,8 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       const tick = tickSet.has(d) ? (dd.getMonth() + 1) + '/' + dd.getDate() : '';
       // ★2026-09-20 本人「ここでも自動出品でいくつ、手動でいくつかは見れるようにしたい」→ 棒を 🤖自動（紫）と手動（緑/橙）の積み上げに。数字は「合計（🤖N）」
       const nA = (byDay.get(d) || []).filter(isAuto).length; const hA = n ? Math.round(Math.max(2, h) * nA / n) : 0;
-      return `<div class="llog-bar" data-d="${d}" title="${d}　${n}件（🤖自動 ${nA}・手動 ${n - nA}）${over ? '（目盛りを振り切っています）' : ''}" style="flex:1;min-width:5px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;cursor:pointer;height:86px">
+      const nS3 = nA ? (byDay.get(d) || []).filter(isS3).length : 0;
+      return `<div class="llog-bar" data-d="${d}" title="${d}　${n}件（🤖自動 ${nA}${nS3 ? '〔うち第3・Amazon ' + nS3 + '〕' : ''}・手動 ${n - nA}）${over ? '（目盛りを振り切っています）' : ''}" style="flex:1;min-width:5px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;cursor:pointer;height:86px">
         ${n ? `<span style="font-size:8px;color:${over ? '#7b52c4' : '#8a8f98'};line-height:1;font-weight:${over ? '700' : '400'}">${over ? '▲' : ''}${n}${nA ? `<span style="color:#5e35b1;font-weight:700">(🤖${nA})</span>` : ''}</span>` : ''}
         <span style="display:block;width:100%;height:${Math.max(2, h)}px;background:${nA ? `linear-gradient(to top, ${col} 0 ${Math.max(2, h) - hA}px, #7e57c2 ${Math.max(2, h) - hA}px 100%)` : col};border-radius:4px 2px 0 0;${isSel ? 'outline:2px solid #3b5bdb;outline-offset:1px' : ''}${isToday ? ';box-shadow:0 0 0 1px #ee4d2d inset' : ''}"></span>
         <span style="display:block;height:11px;font-size:8px;line-height:11px;color:${isToday ? '#ee4d2d' : '#b0b4bb'};font-weight:${isToday ? '700' : '400'};white-space:nowrap">${tick}</span>
@@ -47093,7 +47140,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         <div style="flex:1;min-width:250px;border:1px solid #ececec;border-radius:10px;padding:11px 14px;background:linear-gradient(180deg,#fff,#fafbff)">
           <div style="font-size:11px;color:#8a8f98">今日の出品（${today}）</div>
           <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span style="font-size:38px;font-weight:800;color:#1a7f37;line-height:1.1">${todayN}</span><span style="font-size:13px;color:#8a8f98">件</span>
-            ${(() => { const tA = (byDay.get(today) || []).filter(isAuto).length; const yd = jstDate(Date.now() - 86400000), yN = cnt(yd), df = todayN - yN; return `<span style="font-size:12px"><b style="color:#5e35b1">🤖自動 ${tA}</b>・手動 ${todayN - tA}</span><span class="smd-dim" style="font-size:11.5px">昨日 ${yN}件（${df >= 0 ? '+' : '▲'}${Math.abs(df)}）</span>`; })()}</div>
+            ${(() => { const tA = (byDay.get(today) || []).filter(isAuto).length, tS3 = (byDay.get(today) || []).filter(isS3).length; const yd = jstDate(Date.now() - 86400000), yN = cnt(yd), df = todayN - yN; return `<span style="font-size:12px"><b style="color:#5e35b1">🤖自動 ${tA}</b>${tS3 ? `<span style="color:#5e35b1" title="🤖自動のうち、第3の店（maneki_neko_japan）の Amazon の道具が出した明細（SKU が AMZ_ で始まる）。残りは母数・トレカの🤖">（うち第3・Amazon ${tS3}）</span>` : ''}・手動 ${todayN - tA}${_s3Amz ? '' : '<span class="smd-dim" style="font-size:10.5px">（第3の分を読み込み中）</span>'}</span><span class="smd-dim" style="font-size:11.5px">昨日 ${yN}件（${df >= 0 ? '+' : '▲'}${Math.abs(df)}）</span>`; })()}</div>
         </div>
         ${kpi('連続出品', streak + '日', streak >= 3 ? '🔥 続いてます' : '毎日1件でも積む', streak > 0 ? '#e8710a' : '#8a8f98')}
         ${kpi('今月', monthN + '件', monthPrefix, '#3b5bdb')}
@@ -47139,10 +47186,13 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           <b style="color:#5e35b1">🤖 自動出品</b>
           <span title="トリガーの間隔と、1回あたりに扱う作品の数（枠の減り方で自動的に絞ります）">サイクル <b>${every}分ごと</b>・1回あたり最大 <b>${per}作品</b>×担当${nexts.length || 1}台</span>
           ${nexts.length ? `<span>次回 ${nexts.map(x => `<b>${hhmm(x.next)}</b>ごろ<span class="smd-dim">（${esc(NAME[x.id] || x.id)}${x.late ? '<b style="color:#d93025">・⚠️止まっているかも</b>' : ''}）</span>`).join('　')}</span>` : '<span class="smd-dim">次回の時刻が分かりません（稼働記録がありません）</span>'}
+          ${(() => { const s3T = (byDay.get(today) || []).filter(isS3); if (!s3T.length) return ''; const lastS3 = s3T.reduce((m, r) => Math.max(m, Date.parse(r.created_at || '') || 0), 0);
+            return `<span title="第3の店（maneki_neko_japan）の Amazon の道具（Mac の publish_product.py）が出した明細。SKU が AMZ_ で始まる物を数えています。決まった間隔では動いていないので、次回の時刻は出していません">🤖 第3・Amazon：今日 <b>${s3T.length}件</b>${lastS3 ? '<span class="smd-dim">（最後 ' + hhmm(lastS3) + '）</span>' : ''}</span>`; })()}
           <span title="${av(lastH ? ('直近1時間の実績 ' + lastH + '件から、今日の残り ' + restH.toFixed(1) + '時間ぶんを見積もった数です（予定表ではありません）') : '直近1時間に出た明細がないため、見込みは出していません')}">今日このあと <b>${lastH ? '約' + eta.toLocaleString() + '件' : '—'}</b> <span class="smd-dim">（直近1時間 ${lastH}件から）</span></span>
         </div>`;
       })()}
-      <details class="llog-autodet" data-fold="llAutoDet" ${foldOpen('llAutoDet')}><summary style="cursor:pointer;padding:6px 11px;font-size:12px;color:#5e35b1;font-weight:700" title="AI の料金と売れた分の収支・これまでに🤖が出した明細の表（機種×国）。時々見る物なので畳んでいます">▸ 🤖 の収支・これまでに出した明細（機種×国）</summary>${llogTotMatrix()}</details></div>
+      <details class="llog-autodet" data-fold="llAutoDet" ${foldOpen('llAutoDet')}><summary style="cursor:pointer;padding:6px 11px;font-size:12px;color:#5e35b1;font-weight:700" title="AI の料金と売れた分の収支・これまでに🤖が出した明細の表（機種×国）。時々見る物なので畳んでいます">▸ 🤖 の収支・これまでに出した明細（機種×国）</summary>${llogTotMatrix()}${(() => { const b = _s3Amz && _s3Amz.byCc; if (!b || !Object.keys(b).length) return ''; const ks = Object.keys(b).sort(); const tot = ks.reduce((a, k) => a + b[k], 0);
+          return `<div style="padding:6px 11px;font-size:12px;color:#5e35b1" title="第3の店で、SKU が AMZ_ で始まる（Amazon の道具が出した）明細の、いま出ている数です（消した分は入りません）">🤖 第3・Amazon（いま出ている明細）：${ks.map(k => esc(k) + ' <b>' + b[k] + '</b>').join('・')}　計 <b>${tot}</b></div>`; })()}</details></div>
       <div style="margin-top:12px">
         <div style="font-weight:700;color:#333;font-size:13px">${_llLatest ? '🆕 最新の明細（日をまたいで新しい順・' + _llN.toLocaleString() + '件まで）' : esc(sel) + ' に出した商品'}<span style="color:#ee4d2d">${selRows.length}件</span>${(_lt.big || _lt.nw) ? `<span class="smd-dim" style="font-weight:400;font-size:11px">（${esc(hwTierLabel(_lt))}でしぼり込み／全${selAll.length}件）</span>` : ''}${selRows.some(isAuto) ? `　<span style="font-size:12px;font-weight:700;color:#5e35b1;background:#ede7f6;border-radius:10px;padding:1px 9px">🤖自動 ${selRows.filter(isAuto).length}</span> <span style="font-size:12px;font-weight:400;color:#555">手動 ${selRows.length - selRows.filter(isAuto).length}</span>` : ''}
           <span class="smd-dim" style="font-weight:400;font-size:10.5px;margin-left:6px">バリエの明細1件＝1商品</span></div>
@@ -47202,7 +47252,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
               ${(() => { // ★2026-09-20 本人「ここから商品ページに飛べる？」→ 明細名＝お客さんが見る商品ページ／✏️＝セラーセンターの編集ページ。名前は「…」で切らず2行まで出す
                 const rgB = REGIONS.find(x => x.cc === r.cc) || {}; const sidB = (logState.shopMap || {})[r.cc + '|' + r.item_id];
                 const bu = (typeof buyerUrlFor === 'function' ? buyerUrlFor(r.cc, r.item_id) : '') || ((rgB.buyer && sidB) ? `https://${rgB.buyer}/product/${sidB}/${r.item_id}` : ''); const eu = (typeof editUrlForCc === 'function' ? editUrlForCc(r.cc, r.item_id) : '') || '';
-                const nmTxt = esc(r.model_name || r.name || ''); const bot = isAuto(r) ? '<span title="🤖 母数の自動出品が足した明細" style="color:#5e35b1">🤖 </span>' : '';
+                const nmTxt = esc(r.model_name || r.name || ''); const bot = isS3(r) ? '<span title="🤖 第3の店の Amazon の道具が出した明細（SKU が AMZ_ で始まる）" style="color:#5e35b1">🤖第3・Amazon </span>' : isAuto(r) ? '<span title="🤖 母数の自動出品が足した明細" style="color:#5e35b1">🤖 </span>' : '';
                 const nmHtml = bu ? `<a href="${hrefOk(bu)}" target="_blank" rel="noopener" style="color:#1a3d7c;text-decoration:none" title="${av((r.name || '') + '｜押すとShopeeの商品ページを開きます')}">${nmTxt}</a>` : nmTxt;
                 return `<span style="display:flex;gap:4px;align-items:flex-start"><span class="llc-nm" style="flex:1;min-width:0;font-size:11px;font-weight:600;color:#333;line-height:1.35;word-break:break-word">${bot}${nmHtml}</span>${bu ? `<a href="${hrefOk(bu)}" target="_blank" rel="noopener" title="Shopee の商品ページ（お客さんが見る画面）を開く" style="flex:none;font-size:11px;text-decoration:none">🛒</a>` : ''}${eu ? `<a href="${esc(eu)}" target="_blank" rel="noopener" title="セラーセンターの編集ページを開く" style="flex:none;font-size:11px;text-decoration:none">✏️</a>` : ''}</span>`; })()}
               <span class="llc-cats" style="display:block">${llogCatsHtml(r, selRows)}</span>
