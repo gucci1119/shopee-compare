@@ -1964,7 +1964,7 @@ function doGetInner_(e) {
         } catch (eS) {}
         var IMGD = { PH: 'cf.shopee.ph', SG: 'cf.shopee.sg', MY: 'cf.shopee.com.my', BR: 'cf.shopee.com.br', VN: 'cf.shopee.vn', TH: 'cf.shopee.co.th', TW: 'cf.shopee.tw' };
         boout = { ok: true, buyer: bu, cc: bcc, orders: borows.map(function (o) {
-          return { cc: o.cc, sn: o.sn, date: o.order_date || String(o.order_ts || '').slice(0, 10), total: o.total, tab: o.tab, status: o.status || '', issue: issues[o.cc + ':' + o.sn] || '', tracking: o.tracking || '', shop_id: String(o.shop_id || ''),
+          return { cc: o.cc, sn: o.sn, date: o.order_date || String(o.order_ts || '').slice(0, 10), total: o.total, tab: o.tab, status: o.status || '', issue: issues[o.cc + ':' + o.sn] || '', tracking: o.tracking || '', shop_id: String(o.shop_id || ''), shop_label: shopLabelOf_(o.shop_id),   /* ★11/16 03-12：店名で照らせるように */
             items: (o.items || []).slice(0, 10).map(function (it) { var im = String(it.image || ''); return { name: String(it.name || '').slice(0, 120), variation: String(it.variation || '').slice(0, 80), qty: it.qty || 1, item_id: it.item_id != null ? String(it.item_id) : '', model_id: it.model_id != null ? String(it.model_id) : '', sku: String(it.sku || '') || (it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) || '', skuSrc: it.sku ? 'order' : ((it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) ? 'listing' : ''),   /* ★2026-11-06 03 営業部：注文した時の SKU を先に（詰め直し削除の後は model_id が別の REQ_番号を指す）。注文に SKU が無い古い注文だけ今の出品の表から（skuSrc で分かる） */ img: im ? (/^https?:/.test(im) ? im : 'https://' + (IMGD[o.cc] || 'cf.shopee.sg') + '/file/' + im + '_tn') : '' }; }) }; }) };
       } catch (err) { boout = { ok: false, error: String((err && err.message) || err) }; }
       ufPersist_();
@@ -3092,6 +3092,14 @@ function callShop_(shopId, path, query, method, body, beforeFetch) {
 /* ★2026-11-16 05（01 が見つけた・00 の決め 1）：値段・在庫・明細だけの変更では Shopee の update_time が進まない＝出品の写し（listings）の明細が古いまま（MY 51906638079・BR で消えた明細が写しに残る 等・本店210出品の突き合わせで7件）。
    書く口が成功したら印 app_kv ldirty_<店>_<出品> を書き（接続1回・印は重ねても1行）、2時間ごとの増分の同期（syncListingsChangedAll）が印の出品を必ず取り直して印を消す */
 var LIST_DIRTY_PATHS_ = /^\/api\/v2\/product\/(update_price|update_stock|add_model|delete_model|update_model|update_tier_variation|init_tier_variation)$/;
+/* ★11/16 05（03-12）：店の番号→登録簿の名前（accounts.label）。6時間に1回だけ読む（CacheService） */
+var _SHOP_LBL = null;
+function shopLabelOf_(sid) {
+  sid = String(sid || ''); if (!sid) return '';
+  if (!_SHOP_LBL) { var C = CacheService.getScriptCache(), raw = C.get('shop_labels'); if (raw) { try { _SHOP_LBL = JSON.parse(raw); } catch (e) { _SHOP_LBL = null; } }
+    if (!_SHOP_LBL) { _SHOP_LBL = {}; try { (sbSelect_('accounts', 'select=shop_id,label') || []).forEach(function (a) { if (a && a.shop_id) _SHOP_LBL[String(a.shop_id)] = String(a.label || ''); }); C.put('shop_labels', JSON.stringify(_SHOP_LBL), 21600); } catch (e2) {} } }
+  return _SHOP_LBL[sid] || '';
+}
 var _LDIRTY_DONE = {};
 function listDirtyMark_(shopId, itemId) {
   try { if (!shopId || !itemId) return; var dk = shopId + '_' + itemId; if (_LDIRTY_DONE[dk]) return; _LDIRTY_DONE[dk] = 1; sbUpsert_('app_kv', [{ k: 'ldirty_' + shopId + '_' + itemId, v: { at: new Date().toISOString() } }], 'k'); } catch (e) { try { Logger.log('listDirtyMark_ ' + e); } catch (e2) {} }
