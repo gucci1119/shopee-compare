@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261116-0500'
+var SRC_VER = '20261116-0600'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -8513,7 +8513,7 @@ function backfillReturns() { return syncReturnsRange_(730); }    // 初回バッ
 //   ・**非公開(UNLIST)で作る**。中身が空のまま公開されるのを防ぐ（明細を入れてから自分で公開する）
 //   ・明細（バリエ）は作らない。作成後にポータルの「まとめて追加」で入れる＝いつもの手順に合わせる
 //   ・タイトルは呼び出し側が決めて渡す（①→②の付け替えはポータル側で計算）
-function cloneItem_(shopId, itemId, newName, publish) {
+function cloneItem_(shopId, itemId, newName, publish, hw) {
   shopId = parseInt(shopId, 10); itemId = parseInt(itemId, 10);
   var full = getItemFull_(shopId, itemId);
   var base = full.base || {};
@@ -8532,7 +8532,7 @@ function cloneItem_(shopId, itemId, newName, publish) {
     stock: 1,
     weight: base.weight || 0.5,
     image_ids: imgIds,
-    category_id: (function () { var bc = base.category_id, c = baCatByName_(newName || base.item_name); return (c && (bc === 101091 || bc === 100698)) ? c : bc; })(),   /* ★2026-10-05 元が「その他」なら機種のカテゴリへ */
+    category_id: baFixCat_(base.category_id, newName || base.item_name, hw) || base.category_id,   /* ★11/16 05（01）：元が「その他」の時だけでなく、ゲームのカテゴリなら題名・区分から決め直す（トレカは 101400）。★2026-10-05 元が「その他」なら機種のカテゴリへ */
     condition: base.condition || 'USED',
     brand_id: ((base.brand || {}).brand_id) || 0,
     publish: publish ? 1 : 0        // 既定は非公開
@@ -13296,7 +13296,7 @@ function baEnsureFam_(cfg, hw, cc, allRowsCc, famName, st, allRowsAll) {
   }
   var _nmLim = 120; try { var _mx = shopNameLimit_(src.shop_id); if (_mx > 0) _nmLim = Math.min(_mx, 120); } catch (eNl) {}
   var _fitName = baFitName_(srcName, _nmLim);
-  try { cl = cloneItem_(src.shop_id, src.item_id, _fitName, false); }
+  try { cl = cloneItem_(src.shop_id, src.item_id, _fitName, false, hw); }
   catch (e) { baLog_(st, cc + '：' + hw + ' の汎用カタログ作成に失敗: ' + String((e && e.message) || e).slice(0, 160)); return null; }
   if (!cl || !cl.item_id) return null;
   baTcgPreorder_(src.shop_id, cl.item_id, hw, st, cc);   /* ★2026-10-11 トレカの新カタログは予約出品（DTS 7日） */
@@ -13710,7 +13710,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (!tgt && BA_FAM_TICK >= 1) { res.note = '複製はこの回はもう作りません（1回1件）'; break; }
       for (var tryNo = 0; tryNo < 5 && !cl && !tgt; tryNo++) {
         if (tryNo) { var _low = []; for (var _lq = 1; _lq <= nextNo; _lq++) _low.push(baWithNo_(base.name, _lq)); var _nx = baFreeNo_(cc, base.name, _low.concat(_triedNames));   /* nextNo 以下は使った扱い＋実際に試した名前＝下の空きへ戻らず、同じ名前を繰り返さない */ var m2 = CIRC[_nx - 1] || ('(' + _nx + ')'); newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, m2) : (nm0.trim() + ' ' + m2); }   /* review-yaku 低4：送る時も国の中の空きを取り直す */
-        try { cl = cloneItem_(base.shop_id, base.item_id, newName, false); if (cl && cl.item_id) { BA_FAM_TICK++; if (_bn) st.brNewMade.n++; else st.cloneMade.n++; } }
+        try { cl = cloneItem_(base.shop_id, base.item_id, newName, false, hw); if (cl && cl.item_id) { BA_FAM_TICK++; if (_bn) st.brNewMade.n++; else st.cloneMade.n++; } }
         catch (e) { dupErr = String((e && e.message) || e); if (!/duplicate/i.test(dupErr)) break; _triedNames.push(newName); baLog_(st, cc + ' 同じ名前のカタログが既にある→番号を送る: ' + newName); }
       }
       if (!tgt) {
@@ -14245,6 +14245,20 @@ function baCatByName_(name) {
   var cats = {}; baHwsOf_(t).forEach(function (h) { var c = baCatForCc_(h, ''); if (c) cats[c] = 1; });
   var k = Object.keys(cats); return k.length === 1 ? parseInt(k[0], 10) : 0;
 }
+/* ★2026-11-16 05（01：🤖・家族・複製で作ったカタログ 347件のカテゴリ違い＝トレカの単品が Switch/Gameboy/Playstation に・GameCube が DS に など）：
+   複製と2店舗目への写しは、元のカタログのカテゴリをそのまま引き継いでいた（直すのは元が「その他」の時だけ）。
+   → 新しい名前（と分かれば区分 hw）から決め直す：トレカ（区分がトレカ・題名が単品カード/TCG）＝101400／題名から機種が1つに決まる＝その機種のカテゴリ。
+     決め直すのは、元がゲームのカテゴリ（101082〜101091・100698・101409）の時だけ（第3の新品などほかの分野のカテゴリは触らない）。決まらなければ元のまま */
+var BA_CARD_HW_ = /^(pokeca|onepiece|weiss|digimon|unionarena|wixoss|shadowverse|yugioh|yugioh_rush|duema|vanguard|battlespirits|dbh|zx|mtg|dbs|gundam|fftcg|fecipher|smt)$/;   /* トレカ（カード）の区分＝101400 にする物 */
+var BA_GAME_CATS_ = { 101082: 1, 101083: 1, 101084: 1, 101085: 1, 101086: 1, 101087: 1, 101088: 1, 101089: 1, 101091: 1, 100698: 1, 101409: 1 };
+function baFixCat_(cat, name, hw) {
+  var c0 = Number(cat) || 0; if (c0 && !BA_GAME_CATS_[c0]) return c0;
+  var h = String(hw || '').toLowerCase(), nm = String(name || '');
+  if (h && TCG_HW_JA[h] && !BA_CARD_HW_.test(h)) return c0;   /* amiibo・一番くじ・アーケードの区分は今のまま（カードの区分だけ 101400） */
+  if ((h && BA_CARD_HW_.test(h)) || (/\b(single\s*cards?|tcg|ccg)\b|trading\s*cards?(?!\s*game)/i.test(nm) && !/memory\s*card|sd\s*card|amiibo/i.test(nm))) return 101400;
+  var c = h ? baCatForCc_(h, '') : 0; if (!c) c = baCatByName_(nm);
+  return c || c0;
+}
 function seedShopCatalog_(p) {
   var src = parseInt(p.src_shop_id, 10), dst = parseInt(p.dst_shop_id, 10), itemId = parseInt(p.item_id, 10);
   if (!src || !dst || !itemId) return { ok: false, error: 'src_shop_id / dst_shop_id / item_id 必須' };
@@ -14313,8 +14327,7 @@ function seedShopCatalog_(p) {
   /* ★2026-10-06 本人「なんかカテゴリーおかしくない？」：TH 2店舗目の Switch ⑪ が「Toys & Games > Dice, Board & Card Games」に入っていた。
      ここでカテゴリを渡さず addItem_ が「Games」の語で探していたため（10/5 に題名から機種を当てる直しは入ったが、機種が複数のシリーズのカタログは当たらない）。
      → 元のカタログのカテゴリ（番号は7か国共通）をそのまま使う。「その他」(101091/100698)の時だけ題名で機種を当て直す */
-  if (base.category_id && [101091, 100698].indexOf(Number(base.category_id)) < 0) body.category_id = Number(base.category_id);
-  else { var _bc = baCatByName_(body.item_name); if (_bc) body.category_id = _bc; else if (base.category_id) body.category_id = Number(base.category_id); }
+  body.category_id = baFixCat_(base.category_id, body.item_name, p.hw) || Number(base.category_id) || undefined;   /* ★11/16 05：元のカテゴリを引き継がず、題名・区分から決め直す（baFixCat_） */
   if (p.category_id && !isNaN(parseInt(p.category_id, 10))) body.category_id = parseInt(p.category_id, 10);
   var r = null;
   try { r = addItem_(body); } catch (e3) { return { ok: false, error: '作れませんでした: ' + String((e3 && e3.message) || e3).slice(0, 160) }; }
