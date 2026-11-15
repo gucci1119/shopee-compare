@@ -1760,6 +1760,8 @@
     <textarea id="set-listspecs" rows="3" placeholder="Brand=No Brand&#10;Region of Origin=Japan"></textarea>
     <label>説明テンプレ（{title}{name} が使える）</label>
     <textarea id="set-listdesc" rows="3" placeholder="{title}&#10;&#10;- Ships from Japan..."></textarea>
+    <label data-guide-name="第3（新品）用の説明の型" data-guide="出品先の店が第3（maneki_neko_japan・新品だけの店）の時に使う説明の型です。本店・2店舗目は上の説明テンプレを使います。{title}{name} が使えます。空にすると最初の型に戻ります。">第3（新品）用の説明の型（{title}{name} が使える）</label>
+    <textarea id="set-listdesc3" rows="3" placeholder="{title}&#10;&#10;- Brand new (unused)..."></textarea>
     <label>価格式: 係数 / 手数料% / 送料(円) / 丸め</label>
     <div class="row" style="gap:6px">
       <input type="number" id="set-pcoef" step="0.01" style="width:80px" title="係数（仕入×係数）">
@@ -1876,6 +1878,8 @@
     listSpecs: 'Brand=No Brand\nRegion of Origin=Japan\nCondition=Used',
     listSpecsByCc: {}, // 各国別 item specifics テンプレ（未設定の国は listSpecs にフォールバック）
     listDescTpl: '{title}\n\n- Ships from Japan with tracking\n- Pre-owned, inspected before shipping\n- Fast & secure packaging',
+    /* ★2026-11-16 05（00・本人「第３店舗は全部新品ってことは留意で」・文は 03 の決め）：第3（maneki_neko_japan）を出品先に選んだ時の説明の型（新品）。本店・2店舗目は上の listDescTpl のまま */
+    listDescTplShop3: '{title}\n\n- Brand new (unused)\n- Ships from Japan with tracking\n- Fast & secure packaging',
     // 価格式パラメータ（フェーズ2で使用・設定でカスタム可）
     priceCoef: 1.8, priceFeePct: 12, priceShipJpy: 1200, priceRound: 10,
     // 国別の出品数上限（Shopeeの出品可能数。各自入力。未設定=空）
@@ -4637,6 +4641,29 @@
     curSys: (function () { try { const c = JSON.parse(localStorage.getItem('smdCurSys') || 'null'); return (c && Array.isArray(c.perCc)) ? c.perCc : null; } catch (_) { return null; } })(),
     curSysTs: (function () { try { const c = JSON.parse(localStorage.getItem('smdCurSys') || 'null'); return (c && c.ts) || 0; } catch (_) { return 0; } })(),
   };
+  /* ★2026-11-16 05 情報システム部（本人「ポータルのもろもろの機能さ、第3アカウントのやつが抜けてるんだよね」「ここ第3アカウントのやつないけど？」・00 の決め）：
+     店の系統（1＝本店・2＝2店舗目・3＝第3）の【一か所の表】。店を並べる・店で絞る・店の色や名前は、ここと登録簿（Supabase accounts）から引く＝店が増えても抜けない。
+     系統は登録簿の label（末尾の .ph 等を外した名前）で決める。status（2店舗目＝sub・第3＝new）は意味が別にあるので書き換えない・判定にも使わない。
+     shops＝第3の店IDの直書きの置き場（登録簿を読む前から要る所＝出品の候補・Amazon の道具の数え）。分からない店は系統 0（本店にも2店舗目にも倒さない） */
+  const SHOP_FAMS = Object.freeze([
+    Object.freeze({ no: 1, key: 'gcsonlinestore', names: ['gcsonlinestore'], name: '本店', color: '#2b6cb0' }),
+    Object.freeze({ no: 2, key: 'gs_japan_select', names: ['gs_japan_select'], name: '2店舗目', color: '#7b52c4' }),
+    Object.freeze({ no: 3, key: 'maneki_neko_japan', names: ['maneki_neko_japan', 'manekineko_japan'], name: '第3', color: '#0f766e',   /* TW だけ登録簿の名前が manekineko_japan（11/12 の決め・書き換えない） */
+      shops: Object.freeze({ PH: '1938012303', SG: '1938012197', MY: '1938012258', BR: null, VN: null, TH: '1938012329', TW: '1938012095' }) }),
+  ]);
+  const famInfo = (no) => SHOP_FAMS.find(F => F.no === Number(no)) || null;
+  const famNoOfLabel = (lbl) => { const f = String(lbl || '').toLowerCase().replace(/\.(ph|sg|my|br|vn|th|tw)$/i, ''); const F = SHOP_FAMS.find(x => x.names.indexOf(f) >= 0); return F ? F.no : 0; };
+  const famNoOfAcct = (a) => !a ? 0 : (a._fno != null ? a._fno : famNoOfLabel(a.label));   /* _fno＝デモ表示で label を隠す前に決めた系統（loadAccounts） */
+  const famAcctOf = (sid) => sid == null || sid === '' ? null : ((state.accounts || []).find(x => x && String(x.shop_id) === String(sid)) || null);
+  const famNoOfShop = (sid) => famNoOfAcct(famAcctOf(sid));
+  const famNameOfShop = (sid) => ((famInfo(famNoOfShop(sid)) || {}).name) || '';
+  const famShortOfAcct = (a) => ((famInfo(famNoOfAcct(a)) || {}).name) || '';
+  const famColorOfAcct = (a) => ((famInfo(famNoOfAcct(a)) || {}).color) || '#6b7280';
+  const famColorOfShop = (sid) => famColorOfAcct(famAcctOf(sid));
+  const famCcOfShop = (sid) => { const a = famAcctOf(sid); return a ? String(a.cc || '').toUpperCase() : ''; };
+  /* 登録簿にある、ポータルの7か国の店（国の順→系統の順）。登録簿が読めていない時は [] */
+  const famRegShops = () => (state.accounts || []).filter(a => a && a.shop_id && REGIONS.some(r => r.cc === String(a.cc || '').toUpperCase()))
+    .slice().sort((x, y) => (REGIONS.findIndex(r => r.cc === String(x.cc || '').toUpperCase()) - REGIONS.findIndex(r => r.cc === String(y.cc || '').toUpperCase())) || ((famNoOfAcct(x) || 9) - (famNoOfAcct(y) || 9)));
   // 同期時にアクティブなショップ(shop_id)をcc別に保持→行ビルダーが自動で shop_id を刻む
   let activeShopByCc = {};
   const mv = (it, kind) => {
@@ -9784,6 +9811,13 @@
     '国・店': 'Country · shop', '±期間': '± period', '見た人': 'Visitors', '🛒 入れた人': '🛒 Buyers', '🛒 個数': '🛒 Units', 'カート→注文': 'Cart → order',
     '販売（期間）': 'Sold (period)', '閲覧→販売': 'Views → sold', '🛒 カートに入っているのに売れていない（期間）': '🛒 In carts but not sold (period)',
     '本店': 'Main shop', '2店舗目': '2nd shop', '本店（注文のみ）': 'Main shop (orders only)', '2店舗目（注文のみ）': '2nd shop (orders only)',
+    /* ★2026-11-16 05 第3の店（maneki_neko_japan）の抜けの直し */
+    '第3': 'Shop 3', '全部の店': 'All shops', '記録なし（取り込まれていません）': 'No data (not imported)', '一度も届いていない': 'Never received',
+    '登録簿にある店ですが、商品・カート・訪問者のどれも一度も届いていません。その店でログインした Seller Center のタブが無いと届きません（0 ではなく、数えられていない状態です）': 'This shop is in the registry, but no products, carts or visitors have ever arrived. Nothing arrives without a Seller Center tab logged in to that shop (this is "not counted", not 0).',
+    '登録簿にある店のうち、アクセス（訪問者・商品・カート）がまだ一度も取り込まれていない店です。止まったのではありません（0 ではなく、数えられていない状態）。その店でログインした Seller Center のタブがあると、毎日 11:05（現地）に取り込まれます。読むだけです。': 'Shops in the registry whose traffic (visitors, products, carts) has never been imported. They have not stopped (this is "not counted", not 0). With a Seller Center tab logged in to that shop, it is imported every day at 11:05 (local). Read only.',
+    '🤖は第3（maneki_neko_japan）には出しません（第3は Amazon の道具が出します）。': 'The bot does not list to Shop 3 (maneki_neko_japan) (Shop 3 is listed by the Amazon tool).',
+    '第3（新品）用の説明の型（{title}{name} が使える）': 'Description template for Shop 3 (new items) ({title}{name} available)',
+    '出品先の店が第3（maneki_neko_japan・新品だけの店）の時に使う説明の型です。本店・2店舗目は上の説明テンプレを使います。{title}{name} が使えます。空にすると最初の型に戻ります。': 'Description template used when the listing shop is Shop 3 (maneki_neko_japan, new items only). The main and 2nd shops use the description template above. {title}{name} are available. Leave empty to go back to the default.',
     '—（カタログだけ）': '— (catalog only)', '注文（BI）': 'Orders (BI)', 'sold（注文表）': 'Sold (orders)', '閲覧・見た人・いいね': 'Views · visitors · likes',
     '⏳ 明細を読み込み中…': '⏳ Loading variations…', '⏳ 期間の数を読み込み中…': '⏳ Loading the period numbers…', '商品ごとの数字を読み込み中…': 'Loading per-product numbers…',
     '🧹 で下げた品': 'Items unlisted by 🧹', '公開に戻す': 'Relist', '⏳ 戻し中…': '⏳ Relisting…', '✅ 公開に戻しました': '✅ Relisted', '🧹 で下げた品を読み込み中…': 'Loading items unlisted by 🧹…',
@@ -9887,6 +9921,15 @@
     "送れたかどうかを確かめられなかった注文です。二重に送らないため、ここからはもう頼めません。webchat のこのお客さんの会話で確かめてください": "Could not confirm whether it was sent. To avoid sending twice, it cannot be requested here. Check this customer’s chat in webchat.",
   });
   const I18N_PAT = [
+    /* ★2026-11-16 05 第3の店（maneki_neko_japan）の抜けの直し */
+    [/^(本店|2店舗目|第3)：(.+?)( 記録なし（取り込まれていません）|（注文のみ）)?$/, (m, f, n, x) => ({ '本店': 'Main shop', '2店舗目': '2nd shop', '第3': 'Shop 3' })[f] + ': ' + n + (x ? (x.indexOf('記録なし') >= 0 ? ' no data (not imported)' : ' (orders only)') : '')],
+    [/^(.+) 記録なし（取り込まれていません）$/, '$1 no data (not imported)'], [/^(.+)（記録なし）$/, '$1 (no data)'], [/^全部（(.+)）$/, 'All ($1)'],
+    [/^(本店|2店舗目|第3)（(.+)）だけ$/, (m, f, n) => ({ '本店': 'Main shop', '2店舗目': '2nd shop', '第3': 'Shop 3' })[f] + ' (' + n + ') only'],
+    [/^・記録なし (\d+)店：(.+)（一度も取り込まれていません）$/, ' · No data at $1 shops: $2 (never imported)'],
+    [/^本店以外の店（(.+)）でログイン中なので止めました。本店に切り替えてからもう一度押してください$/, 'Stopped: logged in to a non-main shop ($1). Switch to the main shop and press again'],
+    [/^止めました: 本店以外の店（(.+)）でログイン中$/, 'Stopped: logged in to a non-main shop ($1)'],
+    [/^([A-Z]{2}) 第3$/, '$1 Shop 3'],
+    [/^記録なし（この店のアクセスはまだ取り込まれていません：(.+)）$/, 'No data (traffic for these shops has not been imported yet: $1)'], [/^記録なし：(.+)（一度も取り込まれていません）$/, 'No data: $1 (never imported)'],
     /* ★2026-11-15 💹損益・入出金：月を1つに・純利益 */
     [/^(\d{4})年(\d{1,2})月（今月）$/, (m, y, mo) => ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][+mo] + ' ' + y + ' (this month)'],
     [/^💹利益明細は「過去(30|7)日」を表示中（月ではないので、ここは選んだ月のまま）$/, '💹 Profit details is showing “last $1 days” (not a month, so this page keeps the chosen month)'],
@@ -14144,7 +14187,7 @@
     if (!sid) return '';
     const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid));
     if (!a) return '';
-    const color = famOfLabel(a.label) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4';
+    const color = famColorOfAcct(a);   /* ★2026-11-16 05：系統の色は SHOP_FAMS の1か所（本店 青・2店舗目 紫・第3 緑青） */
     // 1行に収める（折り返して「…t / w」のように切れるのを防ぐ。全文はホバーで）
     return `<div class="ord-acct" title="${esc(a.label)}" style="color:${color};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%">🏪${esc(a.label)}</div>`;
   }
@@ -14211,7 +14254,7 @@
   /* ★2026-11-15 05（00・本人「今依頼してるAmazonから出すのも自動出品の認識だけど」）：第3の店（maneki_neko_japan）の Amazon の道具
      （Mac の publish_product.py → GAS shop3_candidate_publish）が出した明細も🤖自動に数える。見分けは名前でなく SKU の頭 AMZ_
      （カタログの parent_sku か明細の sku）。第3の店の出品だけを読む（約250件・約170KB）。10分は読み直さない */
-  const S3_AMZ_SHOPS = (() => { try { return Object.values(SHOP3_CANDIDATE_SHOPS).filter(Boolean); } catch (_) { return ['1938012303', '1938012197', '1938012258', '1938012329', '1938012095']; } })();
+  const S3_AMZ_SHOPS = Object.values(famInfo(3).shops).filter(Boolean);   /* ★2026-11-16 05：SHOP_FAMS の1か所から（前は下の SHOP3_CANDIDATE_SHOPS を読む前に評価され、毎回 catch の直書きに落ちていた＝同じ5店） */
   let _s3Amz = null, _s3AmzAt = 0, _s3AmzP = null;
   function s3AmzLoad(force) {
     if (_s3AmzP) return _s3AmzP;
@@ -15843,11 +15886,11 @@
 
   // ---------------- DB読み取り（閲覧はブリッジ不要） ----------------
   // アカウント絞り込みの注入：state.acctが特定shopなら account系テーブルの読取に shop_id フィルタを足す（'all'時や同期内部読取(rawRead)は無加工）
-  const ACCT_TABLES = new Set(['listings', 'orders', 'income']);
+  const ACCT_TABLES = new Set(['listings', 'orders', 'income', 'returns']);   /* ★2026-11-16 05（00 の決め）：返品の表（returns・GAS の返品同期が shop_id を書く）も絞る */
   // ラベルから末尾の.国コードを除いた「系統名」。gcsonlinestore.ph → gcsonlinestore
   /* ★2026-11-12 事業本部の決め：TW の3店舗目は🔑登録簿の名前が manekineko_japan（他の国は maneki_neko_japan）。登録簿は書き換えず（Shopee の本当のユーザー名かもしれない）、
      系統の読み替えはここ1か所だけ＝上の「対象アカウント」で第3（maneki_neko_japan）を選ぶと TW の店も入る。注文・アクセス・損益・出品ログも同じ */
-  const FAM_ALIAS = { manekineko_japan: 'maneki_neko_japan' };
+  const FAM_ALIAS = (() => { const o = {}; SHOP_FAMS.forEach(F => F.names.forEach(n => { if (n !== F.key) o[n] = F.key; })); return o; })();   /* ★2026-11-16 05：SHOP_FAMS の1か所から（中身は前と同じ { manekineko_japan: 'maneki_neko_japan' }） */
   const famOfLabel = (lbl) => { const f = String(lbl || '').replace(/\.(ph|sg|my|br|vn|th|tw)$/i, ''); return FAM_ALIAS[f] || f; };
   // ある系統(gcsonlinestore等)に属する全ショップのshop_id一覧（全国分）
   const shopIdsOfFamily = (fam) => (state.accounts || []).filter(a => a.shop_id && famOfLabel(a.label) === fam).map(a => String(a.shop_id));
@@ -21171,17 +21214,27 @@
     const ccCol = (cc) => (regionByCc(cc) || {}).color || '#888';
     if (!TA.ccs || !TA.ccs.length) TA.ccs = allCc.slice();
     /* ★2026-09-26 本人「アカウントごとに見れるようにもしておいて」。アカウント＝店（shop_id）。アクセスは取り込みが店を送るようになった日から（shopee-insights v1.1.0） */
+    if (!TA._d) { box.innerHTML = '<div class="smd-dim" style="padding:8px">分析のデータを読み込み中…</div>'; try { await taLoad(kv); } catch (e) { box.innerHTML = '<div style="color:#d93025;padding:8px">⚠ 分析のデータを読めませんでした（' + esc(e.message) + '）</div>'; return; } }   /* ★2026-11-16 05：店の一覧（注文のある店）と保存した選択の移行が最初の描画から効くよう、店の一覧より前で読む */
     const byShop = (kv && kv.byShop) || {};
-    /* 店の一覧は【アクセスが届いている店】＋【注文がある店】（第二アカウント gs_japan_select はこの Chrome でログインしていないのでアクセスは無いが、注文・売上は出せる） */
+    /* 店の一覧は【アクセスが届いている店】＋【注文がある店】（第二アカウント gs_japan_select はこの Chrome でログインしていないのでアクセスは無いが、注文・売上は出せる）
+       ★2026-11-16 05（本人「ここ第3アカウントのやつないけど？」）：＋【登録簿のアクセスの国の全店】。データが1つも無い店は「記録なし（取り込まれていません）」（0 とは書かない） */
+    if (!state.accounts) await loadAccounts().catch(() => {});   /* 控えがあれば通信なし */
     const shopCcOf = {}; Object.keys(byShop).forEach(id => { shopCcOf[id] = byShop[id].cc; }); Object.keys((TA._d && TA._d.shopCc) || {}).forEach(id => { if (!shopCcOf[id]) shopCcOf[id] = TA._d.shopCc[id]; });
-    const shopIds = Object.keys(shopCcOf).sort((a, b) => (allCc.indexOf(shopCcOf[a]) - allCc.indexOf(shopCcOf[b])) || String((byShop[a] || {}).name || a).localeCompare(String((byShop[b] || {}).name || b)));
-    const shopLabel = (id) => { let lb = ''; try { lb = (typeof acctLabel === 'function' ? acctLabel(id) : '') || ''; } catch (_) {} return (shopCcOf[id] ? shopCcOf[id] + ' ' : '') + (lb || (byShop[id] && byShop[id].name) || ('店 ' + id)) + (byShop[id] ? '' : '（注文のみ）'); };
+    const shopIdsOld = Object.keys(shopCcOf);   /* 登録簿を足す前の一覧（前に保存した選択に、新しく増えた店を足すため） */
+    famRegShops().forEach(a => { const id = String(a.shop_id); if (!shopCcOf[id]) shopCcOf[id] = String(a.cc || '').toUpperCase(); });
+    const shopIds = Object.keys(shopCcOf).sort((a, b) => (allCc.indexOf(shopCcOf[a]) - allCc.indexOf(shopCcOf[b])) || ((famNoOfShop(a) || 9) - (famNoOfShop(b) || 9)) || String((byShop[a] || {}).name || a).localeCompare(String((byShop[b] || {}).name || b)));
+    const shopNoData = (id) => !byShop[id] && !((TA._d && TA._d.shopCc) || {})[id];
+    const shopLabel = (id) => { let lb = ''; try { lb = (typeof acctLabel === 'function' ? acctLabel(id) : '') || ''; } catch (_) {} return (shopCcOf[id] ? shopCcOf[id] + ' ' : '') + (lb || (byShop[id] && byShop[id].name) || ('店 ' + id)) + (byShop[id] ? '' : (shopNoData(id) ? ' 記録なし（取り込まれていません）' : '（注文のみ）')); };
     if (!TA.shops || !TA.shops.length) TA.shops = shopIds.slice();
+    else if (TA._d) {   /* 前に保存した選択（smdTrafficAna）に無い、新しく並んだ店（第3など）は選んだ状態で足す。外した店は外したまま（shopsSeen＝前に並んでいた店） */
+      const seen = new Set(Array.isArray(TA.shopsSeen) ? TA.shopsSeen.map(String) : shopIdsOld);
+      const add = shopIds.filter(id => !seen.has(id) && TA.shops.indexOf(id) < 0);
+      if (add.length || !Array.isArray(TA.shopsSeen) || TA.shopsSeen.length !== shopIds.length) { TA.shops = TA.shops.concat(add); TA.shopsSeen = shopIds.slice(); taSave(); }
+    }
     const ents = TA.dim === 'acct' ? TA.shops.filter(id => shopCcOf[id]).map(id => 'S:' + id) : TA.ccs.slice();
     const entLabel = (e) => String(e).indexOf('S:') === 0 ? shopLabel(e.slice(2)) : e;
     const shopCols = ['#2b6cb0', '#7b52c4', '#1e8e3e', '#e8770a', '#c0392b', '#0891b2', '#b45309', '#db2777', '#4d7c0f', '#6b7280', '#0f766e', '#9333ea', '#be123c', '#1d4ed8'];
     const entCol = (e) => String(e).indexOf('S:') === 0 ? shopCols[Math.max(0, shopIds.indexOf(e.slice(2))) % shopCols.length] : ccCol(e);
-    if (!TA._d) { box.innerHTML = '<div class="smd-dim" style="padding:8px">分析のデータを読み込み中…</div>'; try { await taLoad(kv); } catch (e) { box.innerHTML = '<div style="color:#d93025;padding:8px">⚠ 分析のデータを読めませんでした（' + esc(e.message) + '）</div>'; return; } }
     const mi = TA_METRICS.find(x => x[0] === TA.metric) || TA_METRICS[0];
     const days = taDays(TA.period), prev = taDays(TA.period, TA.period);
     const trFirst = (() => { let f = ''; allCc.forEach(cc => Object.keys((kv || {})[cc] || {}).forEach(y => { if (!f || y < f) f = y; })); return f; })();
@@ -21190,7 +21243,6 @@
        開くと：期間＝1行の区切りボタン／単位＝2択／店＝国ごとの選択欄（14個の丸を並べない）／指標＝よく使う4つ＋その他／グラフ＝アイコンだけ（title に名前）／重ねる物は ☑。
        TA の値（period・dim・ccs・shops・metric・chart・ma・cmp・split）の意味は変えていない＝保存されている設定はそのまま効く。決まりは tools/ui-rules.md「絞り込みの帯の作り方」 */
     const FLAG = { PH: '🇵🇭', SG: '🇸🇬', MY: '🇲🇾', BR: '🇧🇷', VN: '🇻🇳', TH: '🇹🇭', TW: '🇹🇼' };
-    const is2nd = (id) => /gs_japan_select|2店舗目|second/i.test(String(((byShop[id] || {}).name) || '') + ' ' + shopLabel(id));
     /* ★11/7 本人「アカウント名の方がいい」：本店／2店舗目ではなく店のアカウント名（アカウント登録簿 state.accounts → 取り込みの店名 → 店ID）。決め打ちにしない */
     const shopKind = (id) => { let lb = ''; try { lb = (typeof acctLabel === 'function' ? acctLabel(id) : '') || ''; } catch (_) {} return lb || ((byShop[id] || {}).name) || ('店 ' + id); };
     const CHARTS = [['line', '📈', '折れ線'], ['stack', '📊', '積み上げ棒'], ['area', '⛰', '積み上げ面'], ['hbar', '▭', '横棒（国の合計）'], ['pie', '◔', '円（国の構成）']];
@@ -21215,7 +21267,7 @@
       const sumHtml = [sp(who), sp(mi[1]), sp(perL) + sp('（' + granL + '）'), sp(ch[1]) + ' ' + sp(ch[2])].concat(ons.map(sp)).join('・');
       const metOthers = TA_METRICS.filter(x => MET4.indexOf(x[0]) < 0);
       const ccRow = TA.dim === 'acct'
-        ? `<div class="ta-brow"><b class="ta-blb">店</b><button class="ta-chip ta-sb${TA.shops.length === shopIds.length ? ' on' : ''}" data-g="shopall" data-v="" data-guide="全部の店をグラフに入れます。選んだ物はこの端末が覚えます。読むだけです。">すべて</button>${allCc.filter(cc => shopIds.some(id => shopCcOf[id] === cc)).map(cc => { const ids = shopIds.filter(id => shopCcOf[id] === cc), on = ids.filter(id => TA.shops.indexOf(id) >= 0); const v = on.length === 0 ? 'none' : on.length === ids.length ? 'all' : on[0]; return `<label class="ta-ccsel" style="border-color:${on.length ? ccCol(cc) : '#d7dbe0'}"><span>${FLAG[cc] || ''} ${cc}</span><select class="ta-shopsel" data-cc="${cc}"><option value="none"${v === 'none' ? ' selected' : ''}>なし</option>${ids.length > 1 ? `<option value="all"${v === 'all' ? ' selected' : ''}>${esc('両方（' + ids.map(shopKind).join('・') + '）')}</option>` : ''}${ids.map(id => `<option value="${esc(id)}"${(v === id || (ids.length === 1 && v === 'all')) ? ' selected' : ''}>${esc(shopKind(id) + (byShop[id] ? '' : '（注文のみ）'))}</option>`).join('')}</select></label>`; }).join('')}</div>`
+        ? `<div class="ta-brow"><b class="ta-blb">店</b><button class="ta-chip ta-sb${TA.shops.length === shopIds.length ? ' on' : ''}" data-g="shopall" data-v="" data-guide="全部の店をグラフに入れます。選んだ物はこの端末が覚えます。読むだけです。">すべて</button>${allCc.filter(cc => shopIds.some(id => shopCcOf[id] === cc)).map(cc => { const ids = shopIds.filter(id => shopCcOf[id] === cc), on = ids.filter(id => TA.shops.indexOf(id) >= 0); const v = on.length === 0 ? 'none' : on.length === ids.length ? 'all' : on[0]; return `<label class="ta-ccsel" style="border-color:${on.length ? ccCol(cc) : '#d7dbe0'}"><span>${FLAG[cc] || ''} ${cc}</span><select class="ta-shopsel" data-cc="${cc}"><option value="none"${v === 'none' ? ' selected' : ''}>なし</option>${ids.length > 1 ? `<option value="all"${v === 'all' ? ' selected' : ''}>${esc('全部（' + ids.map(shopKind).join('・') + '）')}</option>` : ''}${ids.map(id => `<option value="${esc(id)}"${(v === id || (ids.length === 1 && v === 'all')) ? ' selected' : ''}>${esc((famNameOfShop(id) ? famNameOfShop(id) + '：' : '') + shopKind(id) + (byShop[id] ? '' : (shopNoData(id) ? ' 記録なし（取り込まれていません）' : '（注文のみ）')))}</option>`).join('')}</select></label>`; }).join('')}</div>`
         : `<div class="ta-brow"><b class="ta-blb">国</b><span class="ta-seg"><button class="ta-chip ta-sb${TA.ccs.length === allCc.length ? ' on' : ''}" data-g="ccall" data-v="" data-guide="全部の国をグラフに入れます。選んだ物はこの端末が覚えます。読むだけです。">すべて</button>${allCc.map(cc => `<button class="ta-chip ta-sb${TA.ccs.indexOf(cc) >= 0 ? ' on' : ''}" data-g="cc" data-v="${cc}" data-guide="${cc} をグラフに入れる・外す（1つは残ります）。選んだ物はこの端末が覚えます。読むだけです。" style="${TA.ccs.indexOf(cc) >= 0 ? 'background:' + ccCol(cc) + ';border-color:' + ccCol(cc) : ''}">${FLAG[cc] || ''} ${cc}</button>`).join('')}</span></div>`;
       return `<details class="ta-fold ta-band" data-k="band"><summary data-guide="期間・単位・国（店）・指標・グラフの形を変える欄を開く・閉じる。開閉はこの端末が覚えます。読むだけです。"><span class="smd-dim" style="font-size:11.5px">いま</span> <b style="font-size:12.5px">${sumHtml}</b> <span class="ta-bopen"><span class="c">⚙ 変える ▸</span><span class="o">⚙ 閉じる ▾</span></span></summary>
         <div class="ta-bbody">
@@ -21541,7 +21593,11 @@
       : grp === 'pZero' ? '閲覧20以上で、この期間の販売が0の品だけを出します（もう一度押すと外す）。読むだけです。'
       : grp === 'pFree' ? '公開中・売上0・閲覧0・いいね0・出品30日超の品（枠空けの候補）だけを古い順に出し、選んで非公開にする欄を開きます（もう一度押すと閉じる）。押しただけでは何も変えません。' : '';   /* ★11/13 UI 点検 k:5：札ごとにかざす説明（押した時の処理は下の .ta-pchip の click） */
     const pchip = (grp, v, label, on) => `<button class="smd-btn ta-pchip" data-g="${grp}" data-v="${esc(v)}" data-guide="${esc(pchipGuide(grp, v, label))}" style="font-size:11px;padding:2px 8px;${on ? 'background:#5b3fd6;color:#fff;border-color:#5b3fd6' : ''}">${esc(label)}</button>`;
-    const shopIdsP = [...new Set(TA._prod.map(p => p.shop).filter(Boolean))];
+    /* ★2026-11-16 05（本人「ここ第3アカウントのやつないけど？」）：アカウントの札は【登録簿のアクセスの国の全店】＋【商品がある店】。商品が1つも無い店は「（記録なし）」 */
+    const shopIdsP = (() => { const has = new Set(TA._prod.map(p => p.shop).filter(Boolean).map(String)); const all = [...has]; famRegShops().forEach(a => { const id = String(a.shop_id); if (!has.has(id)) all.push(id); });
+      const ccO = REGIONS.map(r => r.cc), ccOf = (id) => ((TA._prod.find(p => String(p.shop) === id) || {}).cc) || famCcOfShop(id);
+      return all.sort((a, b) => (ccO.indexOf(ccOf(a)) - ccO.indexOf(ccOf(b))) || ((famNoOfShop(a) || 9) - (famNoOfShop(b) || 9)) || a.localeCompare(b)); })();
+    const shopNoProd = (id) => !TA._prod.some(p => String(p.shop) === String(id));
     const ingRows = (base.ing && base.ing.rows) || [];
     const hwJa = (h) => (typeof TITLE_HW_JA !== 'undefined' && TITLE_HW_JA[h]) || h;
     const row = (title, html) => `<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center"><b style="font-size:11.5px;min-width:64px">${title}</b>${html}</div>`;
@@ -21584,7 +21640,7 @@
     try { taTabN('prod', TA.pCart ? null : L.length); taTabN('ns', TA._prod.filter(p => (!TA.pCc || p.cc === TA.pCc) && (!TA.pShop || p.shop === TA.pShop) && p.cartU > 0 && !(p.biCu > 0) && p.pSaleC === 0).length); } catch (_) {}   /* ★11/7 タブの件数（売れていない品＝絞り込みと同じ条件） */
     host.innerHTML = `<div style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px">
       ${row('国', pchip('pCc', '', 'すべて', !TA.pCc) + (REGIONS || []).map(r => pchip('pCc', r.cc, r.cc, TA.pCc === r.cc)).join(''))}
-      ${row('アカウント', pchip('pShop', '', 'すべて', !TA.pShop) + shopIdsP.map(id => pchip('pShop', id, ((TA._prod.find(p => p.shop === id) || {}).cc || '') + ' ' + shopLb(id), TA.pShop === id)).join(''))}
+      ${row('アカウント', pchip('pShop', '', 'すべて', !TA.pShop) + shopIdsP.map(id => pchip('pShop', id, (((TA._prod.find(p => String(p.shop) === id) || {}).cc) || famCcOfShop(id) || '') + ' ' + shopLb(id) + (shopNoProd(id) ? '（記録なし）' : ''), String(TA.pShop) === id)).join(''))}
       ${hwTierBarHtml(_hwtList, _hs, { cls: 'ta-hwt', hwLb: hwJa })}
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><b style="font-size:11.5px;min-width:64px">絞り込み</b><input id="ta-pq" placeholder="商品名で絞り込み" value="${esc(TA.pQ || '')}" style="font-size:11.5px;padding:2px 6px;width:200px">
         ${pchip('pCart', '1', '🛒 カートに入っているのに売れていない', TA.pCart)}${TA.pCart ? `<span class="ta-seg" style="margin-left:4px" title="カートの数を数える期間（上のグラフの期間も同じに切り替わります）">${[[7, '直近7日'], [30, '30日']].map(([d, l]) => `<button class="ta-chip ta-sb ta-cper${Number(TA.period) === d ? ' on' : ''}" data-v="${d}" data-guide="カートの数を数える期間を${l}にします（上のグラフの期間も同じに切り替わります）。読むだけです。">${l}</button>`).join('')}</span>` : ''}
@@ -21754,7 +21810,13 @@
   }
   async function trafficIngestStatus_(force) {
     if (!force && _ingSt && Date.now() - _ingSt.at < 5 * 60000) return _ingSt;
-    const pp = await sbGetAll('app_kv', 'select=k,cc:v->>cc,name:v->>name,shop:v->>shop,done:v->>done_at,got:v->>got,total:v->>total,prun:v->>prun,pat:v->>pat&k=like.product_perf_*');
+    const pp = (await sbGetAll('app_kv', 'select=k,cc:v->>cc,name:v->>name,shop:v->>shop,done:v->>done_at,got:v->>got,total:v->>total,prun:v->>prun,pat:v->>pat&k=like.product_perf_*')) || [];
+    /* ★2026-11-16 05（本人「ここ第3アカウントのやつないけど？」）：行は【登録簿のアクセスの国の全店】＋【届いた店】。一度も届いていない店（第3など）も「記録なし（取り込まれていません）」の行で出す。
+       読みの本数は増やさない（登録簿は控え・traffic_daily の店ごとの at は同じ1本の select に店IDを足すだけ） */
+    if (!state.accounts) await loadAccounts().catch(() => {});
+    const regIng = famRegShops();
+    const ppIds = new Set((pp || []).map(r => String(r.shop || String(r.k || '').replace('product_perf_', ''))));
+    regIng.forEach(a => { const id = String(a.shop_id); if (!ppIds.has(id)) { ppIds.add(id); (pp || []).push({ k: '', cc: String(a.cc || '').toUpperCase(), name: a.label || '', shop: id, _reg: true }); } });
     const ids = (pp || []).map(r => String(r.shop || String(r.k || '').replace('product_perf_', ''))).filter(x => /^\d+$/.test(x));
     let tr = {};
     if (ids.length) { const r = await sbGet('app_kv', 'select=' + ids.map(id => 'b' + id + ':v->byShop->%22' + id + '%22->>at').join(',') + '&k=eq.traffic_daily'); tr = (r && r[0]) || {}; }
@@ -21765,14 +21827,16 @@
       const shop = String(r.shop || String(r.k || '').replace('product_perf_', ''));
       const doneT = Date.parse(r.done || '') || 0, patT = Date.parse(r.pat || '') || 0, trT = Date.parse(tr['b' + shop] || '') || 0;
       const sd = sum && sum.shops && sum.shops[shop], dDays = sd && sd.days ? Object.keys(sd.days).sort() : [], dLast = dDays.length ? dDays[dDays.length - 1] : '';
-      const red = [], note = [];
+      const red = [], note = [], never = [];   /* never＝一度も届いていない部分（止まりではない＝赤にしない・灰色で出す。11/16 00 の決め） */
+      if (r._reg && !trT && !dLast) return { shop: shop, cc: String(r.cc || ''), name: String(r.name || ''), done: 0, got: 0, total: 0, pat: 0, prun: '', tr: 0, dLast: '', red: red, note: note, never: ['訪問者・商品・カート'], none: true };   /* 登録簿にあるが、商品・カート・訪問者のどれも一度も届いていない＝止まりではなく「記録なし」 */
       const moving = patT && now - patT < 26 * H;   /* 途中まで送っている＝次の回に続きから（BR は2回の訪問で1回分） */
       /* 50時間（2日ちょっと）届かなければ止まり。途中まで送っている店（BR は2回の訪問で1回分）は72時間までは「続きから」で待つ */
-      if (!doneT || now - doneT > 50 * H) { if (moving && doneT && now - doneT <= 72 * H) note.push('30日分は途中まで（' + jstDateTime(patT) + '）＝次の回に続きから'); else red.push('商品・カート（30日）が ' + (doneT ? Math.floor((now - doneT) / 86400000) + '日' : '一度も') + '届いていない' + (moving ? '（' + jstDateTime(patT) + ' に途中まで）' : '')); }
+      if (r._reg && !doneT && !patT) never.push('商品・カート（30日）');   /* 登録簿にあり訪問者は届くが、商品・カートの控え（product_perf）が一度も無い店 */
+      else if (!doneT || now - doneT > 50 * H) { if (moving && doneT && now - doneT <= 72 * H) note.push('30日分は途中まで（' + jstDateTime(patT) + '）＝次の回に続きから'); else red.push('商品・カート（30日）が ' + (doneT ? Math.floor((now - doneT) / 86400000) + '日' : '一度も') + '届いていない' + (moving ? '（' + jstDateTime(patT) + ' に途中まで）' : '')); }
       else if (r.prun && patT > doneT && now - patT > 30 * 60000) note.push('今回の分は ' + jstDateTime(patT) + ' に途中で止まっている＝次の回に続きから');
       if (trT && now - trT > 2 * 86400000 && now - trT <= 30 * 86400000) red.push('訪問者が ' + Math.floor((now - trT) / 86400000) + '日届いていない');
       if (sum && sum.v) { const yd = new Date(now - 2 * 86400000).toISOString().slice(0, 10); if (!dLast) note.push('前日のカートはまだ1日も届いていない'); else if (dLast < yd) red.push('前日のカートが ' + dLast + ' から届いていない'); }
-      return { shop: shop, cc: String(r.cc || ''), name: String(r.name || ''), done: doneT, got: Number(r.got) || 0, total: Number(r.total) || 0, pat: patT, prun: r.prun || '', tr: trT, dLast: dLast, red: red, note: note };
+      return { shop: shop, cc: String(r.cc || ''), name: String(r.name || ''), done: doneT, got: Number(r.got) || 0, total: Number(r.total) || 0, pat: patT, prun: r.prun || '', tr: trT, dLast: dLast, red: red, note: note, never: never };
     }).sort((a, b) => (ccOrd.indexOf(a.cc) - ccOrd.indexOf(b.cc)) || a.name.localeCompare(b.name));
     _ingSt = { at: now, rows: rows, sum: sum, sumErr: sumErr };
     return _ingSt;
@@ -21782,15 +21846,16 @@
     let st;
     try { st = await trafficIngestStatus_(force); } catch (e) { el.innerHTML = '<div class="tool-card" style="max-width:none;margin:0 0 10px;color:#d93025">⚠ 取り込み状況を読めませんでした（' + esc((e && e.message) || e) + '）。止まっていないとは言えません。</div>'; return; }
     const t = v => v ? esc(jstDateTime(v)) : '<span style="color:#c0392b">—</span>';
-    const nRed = st.rows.filter(r => r.red.length).length;
-    const tr = st.rows.map(r => `<tr style="border-top:1px solid #f1f1f1;${r.red.length ? 'background:#fff5f5' : ''}"><td style="padding:3px 6px;white-space:nowrap"><b style="color:${(regionByCc(r.cc) || {}).color || '#888'}">${esc(r.cc)}</b> ${esc(r.name || r.shop)}</td>`
+    const nRed = st.rows.filter(r => r.red.length).length, nNone = st.rows.filter(r => r.none).length;   /* ★2026-11-16 05：一度も届いていない店（登録簿にある第3など）は「記録なし」＝止まりの数とは別に数える */
+    const tr = st.rows.map(r => r.none ? `<tr style="border-top:1px solid #f1f1f1;background:#f6f7f9"><td style="padding:3px 6px;white-space:nowrap"><b style="color:${(regionByCc(r.cc) || {}).color || '#888'}">${esc(r.cc)}</b> ${esc(r.name || r.shop)}</td><td colspan="4" style="padding:3px 6px;color:#6b7280"><span>記録なし（取り込まれていません）</span></td><td style="padding:3px 6px;font-size:11px;color:#6b7280" title="${av('登録簿にある店ですが、商品・カート・訪問者のどれも一度も届いていません。その店でログインした Seller Center のタブが無いと届きません（0 ではなく、数えられていない状態です）')}"><span>一度も届いていない</span></td></tr>` : `<tr style="border-top:1px solid #f1f1f1;${r.red.length ? 'background:#fff5f5' : ''}"><td style="padding:3px 6px;white-space:nowrap"><b style="color:${(regionByCc(r.cc) || {}).color || '#888'}">${esc(r.cc)}</b> ${esc(r.name || r.shop)}</td>`
       + `<td style="padding:3px 6px;white-space:nowrap">${t(r.done)}</td><td style="padding:3px 6px;text-align:right">${r.got ? r.got.toLocaleString() + (r.total && r.total !== r.got ? '／' + r.total.toLocaleString() : '') : '—'}</td>`
       + `<td style="padding:3px 6px;white-space:nowrap">${r.dLast ? esc(r.dLast) : '<span class="smd-dim">—</span>'}</td><td style="padding:3px 6px;white-space:nowrap">${t(r.tr)}</td>`
-      + `<td style="padding:3px 6px;font-size:11px">${r.red.map(x => '<b style="color:#c0392b">⚠ ' + esc(x) + '</b>').join('<br>')}${r.red.length && r.note.length ? '<br>' : ''}${r.note.map(x => '<span class="smd-dim">' + esc(x) + '</span>').join('<br>')}${!r.red.length && !r.note.length ? '<span style="color:#1a7f37">✓</span>' : ''}</td></tr>`).join('');
+      + `<td style="padding:3px 6px;font-size:11px">${r.red.map(x => '<b style="color:#c0392b">⚠ ' + esc(x) + '</b>').join('<br>')}${r.red.length && r.note.length ? '<br>' : ''}${r.note.map(x => '<span class="smd-dim">' + esc(x) + '</span>').join('<br>')}${(r.never || []).length ? ((r.red.length || r.note.length) ? '<br>' : '') + '<span class="smd-dim">' + esc('記録なし：' + r.never.join('・') + '（一度も取り込まれていません）') + '</span>' : ''}${!r.red.length && !r.note.length && !(r.never || []).length ? '<span style="color:#1a7f37">✓</span>' : ''}</td></tr>`).join('');
+    const noneLine = nNone ? '<span style="color:#6b7280;font-weight:400">・記録なし ' + nNone + '店：' + esc(st.rows.filter(r => r.none).map(r => r.name || (r.cc + ' ' + r.shop)).join('・')) + '（一度も取り込まれていません）</span>' : '';
     const redR = st.rows.filter(r => r.red.length), dMax = redR.reduce((m, r) => { const ds = r.red.map(x => parseInt((String(x).match(/(\d+)日届いていない/) || [])[1], 10) || 0); return Math.max(m, Math.max.apply(null, ds.concat([0]))); }, 0);
     const sumLine = nRed ? '<span style="color:#c0392b">⚠ 止まっている店 ' + nRed + '：' + esc((() => { return redR.map(r => { let lb = ''; try { lb = (typeof acctLabel === 'function' ? acctLabel(r.shop) : '') || ''; } catch (_) {} return lb || r.name || (r.cc + ' ' + r.shop); }).join('・');   /* ★11/7 本人「アカウント名の方がいい」 */ })()) + (dMax ? '（' + dMax + '日届いていない）' : '') + '</span>' : '<span style="color:#1a7f37">✓ 取り込みは止まっていません</span>';
-    try { taTabN('stop', nRed, nRed > 0); } catch (_) {}   /* ★11/7 タブの件数（止まっている店があれば赤） */
-    el.innerHTML = `<details class="tool-card ta-fold" data-k="ing" style="max-width:none;margin:0 0 10px;${nRed ? 'border-color:#e57373' : ''}"><summary style="cursor:pointer;font-size:12.5px" data-guide="アクセス・カートの取り込みが店ごとにいつまで届いているかの表を開く・閉じる。開閉はこの端末が覚えます。読むだけです。"><b>${sumLine}</b> <span class="smd-dim" style="font-size:11px">（店ごとの表）</span></summary>
+    try { taTabN('stop', nRed, nRed > 0); } catch (_) {}   /* ★11/7 タブの件数（止まっている店があれば赤）／★11/16 00 の決め：記録なしの店は止まりではない＝数にも赤にも入れない（表の灰色の行で出す） */
+    el.innerHTML = `<details class="tool-card ta-fold" data-k="ing" style="max-width:none;margin:0 0 10px;${nRed ? 'border-color:#e57373' : ''}"><summary style="cursor:pointer;font-size:12.5px" data-guide="アクセス・カートの取り込みが店ごとにいつまで届いているかの表を開く・閉じる。開閉はこの端末が覚えます。読むだけです。"><b>${sumLine}${noneLine}</b> <span class="smd-dim" style="font-size:11px">（店ごとの表）</span></summary>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0"><b>${nRed ? '<span style="color:#c0392b">⚠ 取り込みが止まっている店 ' + nRed + '</span>' : '✓ 取り込み状況'}<span>（店ごと）</span></b><span class="smd-dim" style="font-size:11px">各国の Seller Center のタブが1日1回（現地11:05すぎ）分析の画面へ行って読みます。止まった分は次の回に続きから読みます</span><button class="smd-btn" id="traffic-ing-re" style="font-size:11px;padding:1px 8px">🔄 読み直す</button></div>
       <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;min-width:760px"><thead><tr style="border-bottom:1px solid #e3e6ea"><th style="text-align:left;padding:3px 6px">店</th><th style="text-align:left;padding:3px 6px">商品・カート（30日）最後に届いた</th><th style="text-align:right;padding:3px 6px">品数</th><th style="text-align:left;padding:3px 6px">前日のカート 最後の日（現地）</th><th style="text-align:left;padding:3px 6px">訪問者 最後に届いた</th><th style="text-align:left;padding:3px 6px">状態</th></tr></thead><tbody>${tr || '<tr><td colspan="6" class="smd-dim" style="padding:6px">まだ1店も届いていません</td></tr>'}</tbody></table></div>
       ${!st.sum ? (st.sumErr ? `<div style="font-size:12px;margin-top:6px;color:#b3261e">⚠ 前日のカート（日ごと）の記録を読めませんでした（${esc(st.sumErr)}）。「まだ無い」とは限りません</div>` : `<div class="smd-dim" style="font-size:11px;margin-top:6px">前日のカート（日ごと）は、GAS の受け口（perf_daily_ingest）を入れた後から貯まります。</div>`) : ''}
@@ -25045,17 +25110,24 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     /* 📈 ★2026-10-25 05 情報システム部の依頼「アクセスの取り込みが止まったら、お知らせに出す」：店ごとの取り込み状況（アクセス（各国）の上の表と同じ数え方・目印だけ読む・5分は控え）。
        読めなかった時は「止まっていない」とは言わない＝1行で出す */
     let ingRows = [];
-    try { ingRows = ((await trafficIngestStatus_(force)).rows || []).filter(r => r.red.length).map(r => ({ cc: r.cc, name: r.name || r.shop, why: r.red.join('／'), last: r.done ? jstDateTime(r.done) : '—' })); }
+    let ingNever = [];   /* ★2026-11-16 00 の決め：一度も届いていない店・部分は「止まり」ではない＝赤いカード・急ぎの数・チップに入れず、灰色の1行で出す */
+    try { const _ist = (await trafficIngestStatus_(force)).rows || []; ingRows = _ist.filter(r => r.red.length).map(r => ({ cc: r.cc, name: r.name || r.shop, why: r.red.join('／'), last: r.done ? jstDateTime(r.done) : '—' })); ingNever = _ist.filter(r => r.none || (r.never || []).length); }
     catch (e) { ingRows = [{ cc: '—', name: '取り込み状況', why: '読めませんでした（' + String((e && e.message) || e).slice(0, 80) + '）＝止まっていないとは言えません', last: '—' }]; }
     const rowsyncRows = (() => {
       if (!settings.depUrl && !settings.openapiUrl) return [];   // 転記を使っていない環境では出さない
-      const ccs = ['ph', 'br', 'vn', 'my', 'th', 'sg', 'tw', 'ph2', 'br2', 'my2', 'th2', 'sg2', 'tw2']; const out = [];   /* ★2026-10-11 {国}2＝第二アカウント（gs_japan_select）の転記。記録が一度も無い鍵は出さない（下で r が無ければ飛ばす） */
+      /* ★2026-10-11 {国}2＝第二アカウント（gs_japan_select）の転記。記録が一度も無い鍵は出さない（下で r が無ければ飛ばす）
+         ★2026-11-16 05（本人「第3アカウントのやつが抜けてる」）：鍵は【本店＝7か国（REGIONS・登録簿が読めなくても必ず見る）】＋【登録簿の本店以外の店＝国＋系統の番号（ph2・ph3…）】。
+         第3の鍵（ph3 など）は転記の側（GAS・row-sync）がまだ書いていない＝記録が無ければ出さない（2店舗目と同じ） */
+      const famSuf = {}; const ccs = REGIONS.map(r => r.cc.toLowerCase()); const out = [];
+      (state.accounts || []).forEach(a => { const fn = a && a.shop_id ? famNoOfAcct(a) : 0, c = String((a && a.cc) || '').toLowerCase(); if (fn > 1 && ccs.indexOf(c) >= 0) famSuf[c + fn] = fn; });
+      Object.keys(rowsync || {}).forEach(k => { const m = /^([a-z]{2})([2-9])$/.exec(k); if (m && ccs.indexOf(m[1]) >= 0 && !famSuf[k]) famSuf[k] = Number(m[2]); });   /* 登録簿が読めない時も、記録がある本店以外の鍵（ph2 など）は見る（前の直書きと同じ） */
+      Object.keys(famSuf).sort((x, y) => (famSuf[x] - famSuf[y]) || (ccs.indexOf(x.slice(0, 2)) - ccs.indexOf(y.slice(0, 2)))).forEach(k => ccs.push(k));
       // 生存記録そのものが動き始めて4時間未満なら「記録なし」の国は責めない（v1.3.4 を入れた直後に7か国が赤くなるのを防ぐ）
       const newest = Math.max(0, ...ccs.map(c => { const r = (rowsync || {})[c]; const t = r && r.at ? Date.parse(r.at) : NaN; return isNaN(t) ? 0 : t; }));
       const warming = !newest || (Date.now() - newest) < 4 * 3600000;
       ccs.forEach(cc => {
         const r = (rowsync || {})[cc];
-        if (/2$/.test(cc) && !r) return;   /* 第二アカウントは転記が始まってから見る */
+        if (famSuf[cc] && !r) return;   /* 本店以外（2店舗目・第3）は転記が始まってから見る */
         const okAt = r && r.okAt ? Date.parse(r.okAt) : NaN, at = r && r.at ? Date.parse(r.at) : NaN;
         const hrs = isNaN(okAt) ? Infinity : (Date.now() - okAt) / 3600000;
         let why = '';
@@ -25064,8 +25136,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         else if (hrs > 4) why = '最後の成功から ' + (isFinite(hrs) ? Math.floor(hrs) + '時間' : '不明') + '（3時間おきのはず）';
         else if (r.ok === false) why = '最後の実行が失敗';
         if (!why) return;
-        const rg = regionByCc(cc.replace(/2$/, '').toUpperCase());
-        out.push({ cc: cc.toUpperCase().replace(/2$/, ' 2店目'), why, lastOk: isNaN(okAt) ? '—' : new Date(okAt).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(5, 16), lastMsg: r ? esc(String(r.msg || '').slice(0, 90)) : '', host: rg ? rg.host : '' });
+        const rg = regionByCc(cc.replace(/\d$/, '').toUpperCase());
+        out.push({ cc: famSuf[cc] ? cc.replace(/\d$/, '').toUpperCase() + (famSuf[cc] === 2 ? ' 2店目' : ' ' + ((famInfo(famSuf[cc]) || {}).name || famSuf[cc] + '店目')) : cc.toUpperCase(), why, lastOk: isNaN(okAt) ? '—' : new Date(okAt).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(5, 16), lastMsg: r ? esc(String(r.msg || '').slice(0, 90)) : '', host: rg ? rg.host : '' });
       });
       return out;
     })();
@@ -25260,7 +25332,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     /* ★2026-11-13 事業本部「見回りのタブが閉じられて止まった時に、黙って止まらないように」：最後の見回りから30分を過ぎたら出す（記録がまだ無い時は出さない＝作る前の誤報を避ける） */
     const mamSeen = (renderAlerts._cache || {}).mamSeen, mamSeenAt = mamSeen && mamSeen.at ? Date.parse(mamSeen.at) : 0;
     const mamBox = (mamSeenAt && Date.now() - mamSeenAt > 30 * 60000) ? `<div data-guide="メルカリ・メルカリShops・Yahoo!フリマの購入後のあいさつは、Chrome で裏にある「購入した商品」のタブが見回りをして送っています。そのタブが無い・前に出ている時は止まります。最後に見回りが動いた時刻から30分を過ぎると出ます。" style="margin:0 4px 10px;padding:8px 12px;border:1px solid #d93025;background:#fff5f5;border-radius:8px;font-size:12.5px"><b style="color:#b71c1c">✉️ メルカリのあいさつの見回りが止まっています</b>（最後 ${esc(new Date(mamSeenAt + 9 * 3600000).toISOString().slice(5, 16).replace('T', ' '))}）<br><span style="font-size:12px">「購入した商品」のタブが裏に1つあれば自動で動きます（前に出しているタブ・触っているタブでは動きません）</span></div>` : '';
-    body.innerHTML = kvBanner + pitmBox + mamBox + dupBox + llogBox + chipBar + `<div id="al-cards">${((totalAll + dead.length + paRecN + hbRows.length) === 0 && !kvErr && !dupBox && !llogBox && !pitmBox && !mamBox) ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>' : html}${alCancelCard}</div>`;
+    const ingNeverBox = ingNever.length ? `<div style="margin:0 4px 10px;padding:6px 12px;border:1px solid #d7dbe0;background:#f6f7f9;border-radius:8px;color:#5f6368;font-size:12px" data-guide="${av('登録簿にある店のうち、アクセス（訪問者・商品・カート）がまだ一度も取り込まれていない店です。止まったのではありません（0 ではなく、数えられていない状態）。その店でログインした Seller Center のタブがあると、毎日 11:05（現地）に取り込まれます。読むだけです。')}">ℹ <span>${esc('記録なし（この店のアクセスはまだ取り込まれていません：' + ingNever.map(r => ((famNameOfShop(r.shop) || r.name || '') + ' ' + r.cc).trim() + (r.none ? '' : '（' + (r.never || []).join('・') + '）')).join('・') + '）')}</span></div>` : '';
+    body.innerHTML = kvBanner + pitmBox + mamBox + dupBox + llogBox + chipBar + ingNeverBox + `<div id="al-cards">${((totalAll + dead.length + paRecN + hbRows.length) === 0 && !kvErr && !dupBox && !llogBox && !pitmBox && !mamBox) ? '<div class="smd-empty">対応が必要なアラートはありません🎉</div>' : html}${alCancelCard}</div>`;
     const alShow = (sel) => { const box = body.querySelector('#al-cards'); if (!box) return; [...box.children].forEach(el => { if (!el.id) { el.style.display = sel === 'all' ? '' : 'none'; return; } el.style.display = (sel === 'all' || el.id === sel) ? '' : 'none'; if (el.id === sel && el.tagName === 'DETAILS') el.open = true; }); };
     alShow(alTab);
     { const rt = body.querySelector('.al-retry'); if (rt) rt.addEventListener('click', () => { rt.disabled = true; rt.textContent = '⏳ 読み直し中'; renderAlerts(true).catch(e => { body.innerHTML = errBox(e); }); }); }
@@ -29566,6 +29639,16 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-16', items: [
+      '🏪 <b>第3の店（maneki_neko_japan）が抜けていた所に、第3も出すようにしました</b>（本人「ポータルのもろもろの機能さ、第3アカウントのやつが抜けてるんだよね」「ここ第3アカウントのやつないけど？」）。店の系統（本店／2店舗目／第3）の名前・色・並び・第3の店IDを<b>1か所の表</b>にまとめ、店の並びは🔑登録簿から引きます（店が増えても抜けません）。登録簿の名前・状態は変えていません。'
+        + '<br>①<b>アクセス（各国）</b>：店の一覧・店の選択欄（「全部」と1店ずつ・本店／2店舗目／第3の名前つき）・比べる表・商品の表のアカウント・取り込み状況に、登録簿の全店を出します。データが届いていない店は0ではなく「<b>記録なし（取り込まれていません）</b>」。前に選んだ店はそのまま、新しく並んだ店は選んだ状態で足します。'
+        + '<br>②<b>やること</b>：一度も届いていない店（第3など）は止まりではないので、赤いカード・急ぎの数には入れず、灰色の1行「記録なし（この店のアクセスはまだ取り込まれていません：…）」で出します。転記の見張りの国の一覧は登録簿から作ります（第3は転記が始まってから見ます）。'
+        + '<br>③<b>商品別の利益</b>：店の絞り込みを「本店／2店舗目／第3／全部の店」に（前は本店とそれ以外の2つで、第3が2店舗目に混ざっていました）。'
+        + '<br>④<b>利益管理表への転記</b>：前は2店舗目でログイン中の時だけ止めていました。<b>本店以外（第3も）でログイン中なら止めて</b>、どの店でログイン中かを出します。画像の転記も本店以外の注文の件数を出します。'
+        + '<br>⑤<b>出品ログ</b>：店の色を第3にも（本店 青・2店舗目 紫・第3 緑青）。🤖の説明に「第3には出さない」を足しました。<b>各国そろえるの出品枠</b>は系統×国の店IDで引きます（第3の枠が届けば出ます）。'
+        + '<br>⑥<b>返品・キャンセル</b>：上の「対象アカウント」で返品の一覧も絞れるようにしました。',
+      '📝 <b>第3（新品だけの店）を出品先に選んだ時の説明を、新品の型にしました</b>（本人「第３店舗は全部新品ってことは留意で」）：⚙️設定の説明テンプレの下に「第3（新品）用の説明の型」を足しました（最初の型は Brand new (unused)／Ships from Japan with tracking／Fast &amp; secure packaging）。本店・2店舗目の説明の型と動きは変えていません。',
+    ] },
     { date: '2026-11-15', items: [
       '💬 <b>注文管理の未入金の行に『💬 支払いのお願いを送る』を付けました</b>（本人「購入後に支払いがない人に追い打ちメッセージをかけたい」「私がボタンを押したら送ってくれる、そういう機能が欲しい」「もちろん、すでに送っているところには送らないようにしたいけど」）：未入金（未支払い）の注文の行の下に、押さなくても見えるボタンを出します（第2・第3の店の行も同じ）。押すと webchat の Smart Reply がそのお客さんに英語の支払いのお願いを1回だけ送ります（ポータルからは送らず頼むだけ）。行には「⏳ 頼み中」「⏳ 送っています」「✅ 送った 時刻（自動／手／会話にあった）」「送ったか分からない」が出て、送った・送ったか分からない注文はもう押せません。送れなかった時は理由を赤、送らなかった時は理由を灰色で出します。状態は画面に出ている未入金の行の分だけ読み、頼み中の行がある間だけ1分ごとに読み直します。',
       '💹 <b>損益・入出金：月は一番上で1つに・純利益を一番大きく・4つのタブを同じ並びに</b>（本人「なんでここ、利益明細は上で月を変えられるのに、入出金経費は下までスクロールしないと変えられないの？意味が分からん」「その営業利益、その経費を抜く前の額って興味ないんだよね。純利益にしか興味ないから」「基本的に直感的に操作しやすくしてください。見にくいのよね」）：①💴入出金・経費の一番上（説明の帯のすぐ下）に利益明細と同じ『📅 月/期間』と［🔄 更新］。下の入力欄の「月:」は外した。利益明細と入出金は同じ月＝どちらで変えても、もう片方も同じ月（月ごとの経費の見出し・「この月へ切り替えて編集」・🏆の「利益明細で見る」も同じ）。利益明細の「過去30日・過去7日」は月ではないので入出金の月はそのまま（上に一言出す）。利益明細の月の選択肢は12か月に。②入出金の上のカードは一番左・一番大きく『純利益（いま）』（粗利−経費−返金・損失＝下の損益の表の「＝ 純利益」と同じ数字）・その下に小さく「月末の見込み」（今月だけ）と「税引後」。粗利のカードは上から外した（粗利は損益の表と利益明細に残る）。「営業利益」の言葉は同じ数字なので「純利益」に（損益の表・率・ふりかえり・日ごとの記録・利益明細の『月の経費差引後利益』）。計算は変えていない。③4つのタブとも［タブ］→［月・期間］→［結論の数字］→［表］：入出金は結論のカードを節の案内より上に・「① この月の結論」、確定申告・帳簿は『📅 対象年』と ⬇ CSV を警告より上の一番上に・その年の所得（事業所得）を大きなカードで表の上に、商品別の利益は『📅 月/期間』の言葉と［🔄 更新］を期間の隣に・粗利の合計を大きく。説明の帯は1行に（くわしくはかざすと出る）。',
@@ -44780,7 +44863,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
   }
 
   /* ★2026-10-03 出品管理のタブを大分類にまとめる（本人「色々増えてきたからスリムにして」）。中身の並びは #list-tab のボタン（data-k）そのもの */
-  const SHOP3_CANDIDATE_SHOPS = Object.freeze({ PH:'1938012303', SG:'1938012197', MY:'1938012258', BR:null, VN:null, TH:'1938012329', TW:'1938012095' });
+  const SHOP3_CANDIDATE_SHOPS = famInfo(3).shops;   /* ★2026-11-16 05：第3の店IDは SHOP_FAMS の1か所（中身・形は前と同じ＝BR・VN は null・凍結） */
   function shop3ExpectedShopLabel(market) {
     return market === 'TW' ? 'manekineko_japan' : 'maneki_neko_japan.' + market.toLowerCase();
   }
@@ -46770,7 +46853,9 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         return head + list.map(arowOf).join(''); }).join('');
       const fsum2 = {}; let fall2 = 0; hwsF2.forEach(hw => { const r = byAcct[hw] || { n: 0 }; cols.forEach(cl => { fsum2[cl] = (fsum2[cl] || 0) + (r[cl] || 0); }); fall2 += r.n || 0; });
       const afoot = `<tr style="border-top:2px solid #d9d0ee;background:#faf7ff"><td style="padding:3px 7px"><b>合計</b></td>${cols.map(c => cell(tc ? (fsum2[c] || 0) : colInfo[c].n, true)).join('')}${cell(tc ? fall2 : tot.all, true)}</tr>`;
-      const acctNote = `<div class="smd-dim" style="font-size:10.5px;margin-top:4px">🤖は各国の1店舗目（gcsonlinestore）に出し、その店の出品枠が満杯の時だけ2店舗目（gs_japan_select）に出します。2店舗目が「—」の国は、まだ1店舗目に空きがある国です。</div>`;
+      /* ★2026-11-16 05（本人「第3アカウントのやつが抜けてる」）：店の名前は SHOP_FAMS の1か所から。🤖が出品先に選ぶのは登録簿で sub（2店舗目）の店だけ＝第3（status new）には出さない（GAS 12884） */
+      const acctNote = (() => { const F1 = famInfo(1), F2 = famInfo(2), F3 = famInfo(3);
+        return `<div class="smd-dim" style="font-size:10.5px;margin-top:4px">${esc('🤖は各国の1店舗目（' + F1.key + '）に出し、その店の出品枠が満杯の時だけ2店舗目（' + F2.key + '）に出します。2店舗目が「—」の国は、まだ1店舗目に空きがある国です。')}${F3 ? `<br><span>${esc('🤖は' + F3.name + '（' + F3.key + '）には出しません（' + F3.name + 'は Amazon の道具が出します）。')}</span>` : ''}</div>`; })();
       return llogAutoRoi() + `<details data-fold="llogTot" ${(() => { try { return localStorage.getItem('smdFold_llogTot') === '0' ? '' : 'open'; } catch (_) { return 'open'; } })()} style="margin-top:8px;border:1px solid #e3d9f5;background:#fff;border-radius:8px;padding:6px 11px">
       <summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:#5e35b1">🤖 これまでに自動で出した明細（機種×アカウント） <span style="color:#ee4d2d">${tot.all.toLocaleString()}件</span> <span class="smd-dim" style="font-weight:400;font-size:10.5px">／ 作品 ${tot.titles.toLocaleString()}件 ・ 1マス＝1明細。🤖の台帳（boshu_auto_done）から数えています（今日のぶんも含む）</span></summary>
       ${tabs}
@@ -46778,7 +46863,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
         ${(() => { /* ★2026-09-24 本人「PH の上に、店名を覆うように列があるイメージ」＝2段見出し：上段＝国（その国の店の数だけ横に結合）・下段＝店名 */
           const groups = []; cols.forEach(c => { const g = groups[groups.length - 1]; if (g && g.cc === colInfo[c].cc) g.n++; else groups.push({ cc: colInfo[c].cc, n: 1 }); });
           const top = `<tr><th rowspan="2" style="text-align:left;padding:3px 7px;vertical-align:bottom;border-bottom:1px solid #e3e6ea">${sh('hw', '区分・機種')}</th>${groups.map(g => `<th colspan="${g.n}" style="text-align:center;padding:2px 7px 1px;color:${ccCol(g.cc)};border-bottom:2px solid ${ccCol(g.cc)};border-left:1px solid #eef0f3">${esc(g.cc)}</th>`).join('')}<th rowspan="2" style="text-align:right;padding:3px 7px;vertical-align:bottom;border-bottom:1px solid #e3e6ea">${sh('n', '合計')}</th></tr>`;
-          const bottom = `<tr style="border-bottom:1px solid #e3e6ea">${cols.map((c, i) => `<th style="text-align:right;padding:2px 7px 3px;white-space:nowrap;font-weight:600;font-size:10.5px;${i === 0 || colInfo[cols[i - 1]].cc !== colInfo[c].cc ? 'border-left:1px solid #eef0f3;' : ''}color:${colInfo[c].lb === '不明' ? '#8a8f98' : (famOfLabel(colInfo[c].lb) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4')}" title="${av(colInfo[c].lb === '不明' ? 'いまの出品データにカタログが見つからない明細（消した・別の店に移した等）' : ('🏪 ' + colInfo[c].lb))}">${sh('A:' + c, esc(colInfo[c].lb))}</th>`).join('')}</tr>`;
+          const bottom = `<tr style="border-bottom:1px solid #e3e6ea">${cols.map((c, i) => `<th style="text-align:right;padding:2px 7px 3px;white-space:nowrap;font-weight:600;font-size:10.5px;${i === 0 || colInfo[cols[i - 1]].cc !== colInfo[c].cc ? 'border-left:1px solid #eef0f3;' : ''}color:${colInfo[c].lb === '不明' ? '#8a8f98' : (((famInfo(famNoOfLabel(colInfo[c].lb)) || {}).color) || '#6b7280')}" title="${av(colInfo[c].lb === '不明' ? 'いまの出品データにカタログが見つからない明細（消した・別の店に移した等）' : ('🏪 ' + colInfo[c].lb))}">${sh('A:' + c, esc(colInfo[c].lb))}</th>`).join('')}</tr>`;
           return `<thead>${top}${bottom}</thead>`; })()}
         <tbody>${arows}${afoot}</tbody></table></div>
       ${acctNote}
@@ -46866,7 +46951,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   /* 出品ログの「店」の丸（logState.acctF）の判定。最新順で300件を取る前にも使う（11/14 本人「なんで？」＝第3を選ぶと0件） */
   function llAfPassOf(af, r) { if (!af) return true; const sid = llShopOf(r.cc, r.item_id); if (af === 'unk') return !sid; if (af.indexOf('fam:') === 0) return !!sid && llShopFam(sid) === af.slice(4); return sid === af; }
   /* 系統の順（事業本部 11/12「第1 gcsonlinestore／第2 gs_japan_select／第3 maneki_neko_japan」）。ほかの系統はその後ろに名前順 */
-  const LL_FAM_ORD = ['gcsonlinestore', 'gs_japan_select', 'maneki_neko_japan'];
+  const LL_FAM_ORD = SHOP_FAMS.map(F => F.key);   /* ★2026-11-16 05：系統の順は SHOP_FAMS の1か所から */
   const llFamRank = (f) => { const i = LL_FAM_ORD.indexOf(f); return i < 0 ? 99 : i; };
   const llFamNo = (f) => { const i = LL_FAM_ORD.indexOf(f); return i < 0 ? '' : '第' + (i + 1) + ' '; };
   const llShopCc = (sid) => { const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid)); return a ? String(a.cc || '').toUpperCase() : ''; };
@@ -47517,7 +47602,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
                 if (!sid) return '<span style="display:block;font-size:9.5px;color:#bbb" title="いまの出品データにこのカタログが見つかりません">店 —</span>';
                 const lb = acctLabel(sid);
                 if (!lb) return `<span style="display:block;font-size:9.5px;color:#8a8f98" title="登録簿にまだ無い店です（shop_id ${esc(sid)}）">🏪 店 ${esc(sid)}</span>`;
-                return `<span style="display:block;font-size:9.5px;font-weight:700;color:${famOfLabel(lb) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4'};word-break:break-all" title="${av('この明細を出した店（アカウント）：' + lb)}">🏪 ${esc(lb)}</span>`;
+                return `<span style="display:block;font-size:9.5px;font-weight:700;color:${famColorOfShop(sid)};word-break:break-all" title="${av('この明細を出した店（アカウント）：' + lb)}">🏪 ${esc(lb)}</span>`;
               })()}
               ${(() => { /* ★2026-09-21 本人「金額も出してほしい、最後まで日本円でも出してほしい」
                    listing_log.price は【その国の通貨】。円換算は注文日と同じ規則（fxRate＝日次レート×国別スプレッド）を使う。
@@ -49280,7 +49365,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (shops.length) {
       const a = state.acct; let row = null;
       if (a && a !== 'all' && a !== 'none') {
-        if (a.slice(0, 4) === 'fam:') { const role = /gs_japan_select/.test(a) ? 'sub' : (/gcsonlinestore/.test(a) ? 'main' : ''); if (role) row = shops.find(x => x && x.cc === cc && x.role === role); }
+        if (a.slice(0, 4) === 'fam:') {   /* ★2026-11-16 05（本人「第3アカウントのやつが抜けてる」）：系統×国の店ID（登録簿）で引く＝第3を選んだ時も第3の枠が来ていれば出す。店IDで当たらない時だけ前の main／sub の対応 */
+          const fIds = new Set((state.accounts || []).filter(x => x && x.shop_id && famOfLabel(x.label) === a.slice(4) && String(x.cc || '').toUpperCase() === String(cc).toUpperCase()).map(x => String(x.shop_id)));
+          row = fIds.size ? shops.find(x => x && fIds.has(String(x.shop_id))) : null;
+          if (!row) { const role = /gs_japan_select/.test(a) ? 'sub' : (/gcsonlinestore/.test(a) ? 'main' : ''); if (role) row = shops.find(x => x && x.cc === cc && x.role === role); }
+        }
         else row = shops.find(x => x && String(x.shop_id) === String(a));
       } else if (a === 'none') row = shops.find(x => x && x.cc === cc && x.role === 'main');
       else { const rs = shops.filter(x => x && x.cc === cc && Number(x.cap) > 0); if (rs.length) return rs.reduce((t, x) => t + Number(x.cap), 0); }   /* 全アカウント＝公開中も全店の合計なので、枠も全店の合計（前は1店舗目の枠と全店の公開中を比べて PH 1,057/1,000 のように超えて見えた） */
@@ -53579,7 +53668,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (!pk3) return '<span class="smd-dim" style="font-size:9px">親SKU必要</span>';
           return ps.map(k2 => `<label style="display:block;color:#1565c0;white-space:nowrap;cursor:pointer" title="この商品ぜんぶの「${av(k2)}」。明細ごとに違うときは▼で明細を開いて入れてください"><input type="checkbox" class="lst-cpart" data-k="${av(pk3)}" data-p="${av(k2)}" ${((pv3.cp || {})[k2] ? 'checked' : '')} style="vertical-align:middle;margin-right:2px">${esc(k2)}</label>`).join('');
         })()}</div>
-        <div style="font-size:10px;word-break:break-all;min-width:0;line-height:1.25" title="出品アカウント">${(function () { const a = (state.accounts || []).find(x => String(x.shop_id) === String(r.shop_id)); return a ? `<span style="color:${famOfLabel(a.label) === 'gcsonlinestore' ? '#2b6cb0' : '#7b52c4'};font-weight:600" title="${esc(a.label)}">🏪${esc(a.label)}</span>` : (r.shop_id ? `<span class="smd-dim" title="登録簿に無いshop_id">🏪${esc(String(r.shop_id))}</span>` : '<span class="smd-dim">—</span>'); })()}</div>
+        <div style="font-size:10px;word-break:break-all;min-width:0;line-height:1.25" title="出品アカウント">${(function () { const a = (state.accounts || []).find(x => String(x.shop_id) === String(r.shop_id)); return a ? `<span style="color:${famColorOfAcct(a)};font-weight:600" title="${esc(a.label)}">🏪${esc(a.label)}</span>` : (r.shop_id ? `<span class="smd-dim" title="登録簿に無いshop_id">🏪${esc(String(r.shop_id))}</span>` : '<span class="smd-dim">—</span>'); })()}</div>
         <div style="text-align:right;line-height:1.15;min-width:0;overflow:hidden" title="現地価格（円換算）">${isSingle && canEdit ? `<span style="white-space:nowrap;color:#1565c0">${cur}<input class="lst-prc" data-mid="0" value="${r.price_min != null ? r.price_min : ''}" inputmode="decimal" style="width:62px;padding:2px 4px;border:1px solid #ddd;border-radius:6px;text-align:right;font-size:12px"></span><div class="lst-jpy smd-dim" data-mid="0" style="font-size:9px">${rg.rateJpy && r.price_min ? jyen(r.price_min) : ''}</div>` : `<div style="font-size:12px;color:#1565c0;font-weight:600">${price}</div>${jpyStr ? `<div class="smd-dim" style="font-size:9px">${jpyStr}</div>` : ''}`}</div>
         <div style="text-align:right;min-width:0">${isSingle && canEdit ? `<input class="lst-stk" data-mid="0" value="${r.stock != null ? r.stock : ''}" inputmode="numeric" style="width:40px;padding:2px 3px;border:1px solid #ddd;border-radius:6px;text-align:right;font-size:12px">` : `<span style="font-size:14px;font-weight:700;color:${oos ? '#d93025' : '#333'}">${r.stock != null ? r.stock : '-'}</span>${oos ? '<div style="font-size:8.5px;color:#d93025;font-weight:700">切れ</div>' : ''}`}</div>
         <div class="lst-stath" data-cc="${av(r.cc)}" data-item="${r.item_id}" data-nm="${av(r.name || '')}" style="text-align:right;min-width:0;font-size:12px;font-weight:700;color:#c2185b;cursor:pointer" title="${_stDelta ? 'この期間の販売の伸び（差分）' : '累計販売数（今までの購入・公式APIのsale）'}｜クリックで日ごとの推移">${_sv(_st.sale)}</div>
@@ -57150,6 +57239,20 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function fillTpl(tpl, map) {
     return String(tpl || '').replace(/\{(\w+)\}/g, (_, k) => (map[k] != null ? map[k] : '')).replace(/\s{2,}/g, ' ').trim();
   }
+  /* ★2026-11-16 05（00・本人「第３店舗は全部新品ってことは留意で」）：出品先の店の系統（famOfLabel の名前）が第3なら第3（新品）用の説明の型。それ以外（本店・2店舗目・分からない）は今まで通り listDescTpl */
+  const LIST_DESC_TPL_SHOP3_DEFAULT = '{title}\n\n- Brand new (unused)\n- Ships from Japan with tracking\n- Fast & secure packaging';
+  function listDescTplFor(fam) {
+    const F3 = famInfo(3);
+    if (!fam || !F3 || fam !== F3.key) return settings.listDescTpl;
+    const t = settings.listDescTplShop3; return (t != null && String(t).trim() !== '') ? t : LIST_DESC_TPL_SHOP3_DEFAULT;
+  }
+  /* コンポーザーの各国カードと同じ決め方で、その国の出品先の系統（国別の上書き → 全体の既定 → その国にある最初の系統。出品しない国は ''） */
+  function listFamForCc(cc) {
+    const C = String(cc || '').toUpperCase(), all = [...new Set((state.accounts || []).filter(a => a && a.shop_id).map(a => famOfLabel(a.label)))];
+    const L = all.filter(f => (state.accounts || []).some(a => a && a.shop_id && String(a.cc || '').toUpperCase() === C && famOfLabel(a.label) === f));
+    const pv = (listState.apiFamByCc || {})[C]; if (pv === '__skip__' || !L.length) return '';
+    if (pv && L.includes(pv)) return pv; if (listState.apiFamily && L.includes(listState.apiFamily)) return listState.apiFamily; return L[0];
+  }
   // 自動生成タイトル：テンプレから生成し、バリエ有りなら「[Used] Variation ...」を自動挿入
   function listTitleAuto() {
     let t = fillTpl(settings.listTitleTpl, { name: listState.name, hardware: listState.hardware, jpseries: listState.jpseries, variation: '' });
@@ -57225,7 +57328,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   }
 
   // 初回の第三SGだけ。通常コンポーザーの listState / 自動保存とは共有しない。
-  const SHOP3_SG_PILOT_ID = '1938012197';
+  const SHOP3_SG_PILOT_ID = famInfo(3).shops.SG;   /* ★2026-11-16 05：SHOP_FAMS の1か所から（前と同じ 1938012197） */
   const SHOP3_SG_PILOT_RECEIPT = 'smdShop3SgTombowPilot';
   async function shop3SgPilotMeta() {
     const registry = await acctReadAll();
@@ -58723,7 +58826,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (hasVar) { const ps = listState.variations.map(v => roundP(v.cost)).filter(p => p > 0); if (ps.length) { const mn = Math.min(...ps), mx = Math.max(...ps); priceHtml = mn === mx ? fmtLocal(rg, mn) : `${fmtLocal(rg, mn)} 〜 ${fmtLocal(rg, mx)}`; } else priceHtml = '<span style="color:#6b7280;font-size:14px">仕入額を入力</span>'; }
     else { const p = roundP(listState.costJpy); priceHtml = p > 0 ? fmtLocal(rg, p) : '<span style="color:#6b7280;font-size:14px">仕入額を入力</span>'; }
     const varChips = hasVar ? listState.variations.map(v => `<span style="display:inline-block;border:1px solid #ee4d2d;color:#ee4d2d;border-radius:4px;padding:3px 9px;font-size:11px;margin:0 5px 5px 0;background:#fff">${esc((v.opt || '').trim() || '(未入力)')}</span>`).join('') : '';
-    const desc = (fillTpl(settings.listDescTpl, { title, name: listState.name }) || '').trim();
+    const desc = (fillTpl(listDescTplFor(listFamForCc(cc)), { title, name: listState.name }) || '').trim();   /* ★11/16 第3は新品の型 */
     const tl = title.length, tlimit = (TITLE_LIMIT[cc] || 100);
     // specifics（商品仕様）: 国別上書き ▶ 国別テンプレ ▶ 全国共通
     const specsFor = (c) => { const o = listState.overrides[c] || {}; if (o.specifics != null) return o.specifics; const t = (settings.listSpecsByCc || {})[c]; return (t != null && t !== '') ? t : settings.listSpecs; };
@@ -58959,7 +59062,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           </div>
         </div>`;
         const ccDescExtra = ov.descExtra != null ? ov.descExtra : listState.descExtra; // 説明の追記も国別上書き可
-        const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (ccDescExtra ? '\n\n' + ccDescExtra : '');
+        const desc = fillTpl(listDescTplFor(effFamOf(rg.cc)), { title, name: listState.name }) + (ccDescExtra ? '\n\n' + ccDescExtra : '');   /* ★11/16 出品先（下の cardFam と同じ effFamOf）が第3なら新品の型 */
         const cp = (label, text) => `<button class="smd-btn licopy" data-t="${encodeURIComponent(text)}">📋 ${label}</button>`;
         // ★自動出品ジョブ（画像はhttp(s)のみ＝data:はhash非対応）
         const job = {
@@ -59505,7 +59608,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const priced = rows.map((v, i) => { const o = ovVars[i] || {}; if (o.off) return null; const wg = v.weightG != null ? v.weightG : undefined; const local = (o.price != null && String(o.price) !== '') ? Number(o.price) : roundLocal(priceLocalFor(cc, v.cost || 0, { weightG: wg }), rg.priceUnit || 1); const nm = hasVar ? ((o.name != null && o.name !== '') ? o.name : varName(v.opt)) : ''; const img = (o.image != null) ? o.image : (v.img || ''); return { nm, local, img }; }).filter(Boolean);
       const prices = priced.map(p => p.local); const pmin = Math.min(...prices), pmax = Math.max(...prices);
       const ccDescExtra = ov.descExtra != null ? ov.descExtra : listState.descExtra;
-      const desc = fillTpl(settings.listDescTpl, { title, name: listState.name }) + (ccDescExtra ? '\n\n' + ccDescExtra : '');
+      const desc = fillTpl(listDescTplFor(listFamForCc(cc)), { title, name: listState.name }) + (ccDescExtra ? '\n\n' + ccDescExtra : '');   /* ★11/16 第3は新品の型 */
       const specs = (function () { if (ov.specifics != null) return ov.specifics; const t = (settings.listSpecsByCc || {})[cc]; return (t != null && t !== '') ? t : settings.listSpecs; })();
       const mainImg = imgs[0] || '';
       box.querySelector('.pv-body').innerHTML = `
@@ -60262,7 +60365,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
      1つの注文に品が2つ以上ある時は、粗利・売上・仕入れを点数で等分（品ごとの値段が注文に無いため）。 */
   const PR = { orders: null, at: 0, period: 'all', from: '', to: '', basis: 'all', group: 'prod', sort: 'gross', dir: 'desc', cc: '', shop: '', front: false, auto: false, req: false, more: false, loading: false, open: null, tier: { big: '', mid: '', hw: '', nw: '' } };
   /* ★2026-11-05 鍵を smdPrank2 に（05 が確かめの時に「今月」を選んだのが本人の画面に残っていた＝全期間から始め直す） */
-  try { const sv = JSON.parse(localStorage.getItem('smdPrank2') || '{}'); ['period', 'from', 'to', 'basis', 'group', 'sort', 'dir', 'cc', 'shop'].forEach(k => { if (sv[k] != null) PR[k] = sv[k]; }); if (PR.sort === 'loss') { PR.sort = 'gross'; PR.dir = 'asc'; } if (PR.dir !== 'asc') PR.dir = 'desc';   /* ★11/7 「赤字の大きい順」＝粗利の合計の小さい順（見出しの並べ替えと同じ状態で持つ） */ if (sv.tier && typeof sv.tier === 'object') PR.tier = { big: String(sv.tier.big || ''), mid: String(sv.tier.mid || ''), hw: String(sv.tier.hw || ''), nw: String(sv.tier.nw || '') }; if (PR.group === 'model') PR.group = 'prod';   /* ★11/5 本人「明細単位の方がいい」：国ごとの明細は、国をまたぐ明細（prod）にまとめた */ PR.period = ({ month: 'thismonth', year: 'thisyear', '30': '1m', '90': '3m' })[PR.period] || PR.period; } catch (_) {}
+  try { const sv = JSON.parse(localStorage.getItem('smdPrank2') || '{}'); ['period', 'from', 'to', 'basis', 'group', 'sort', 'dir', 'cc', 'shop'].forEach(k => { if (sv[k] != null) PR[k] = sv[k]; }); if (PR.sort === 'loss') { PR.sort = 'gross'; PR.dir = 'asc'; } if (PR.dir !== 'asc') PR.dir = 'desc';   /* ★11/7 「赤字の大きい順」＝粗利の合計の小さい順（見出しの並べ替えと同じ状態で持つ） */ if (sv.tier && typeof sv.tier === 'object') PR.tier = { big: String(sv.tier.big || ''), mid: String(sv.tier.mid || ''), hw: String(sv.tier.hw || ''), nw: String(sv.tier.nw || '') }; if (PR.group === 'model') PR.group = 'prod'; PR.shop = ({ main: '1', sub: '2' })[PR.shop] || (/^[123]$/.test(String(PR.shop)) ? String(PR.shop) : '');   /* ★2026-11-16 05：店の絞り込みは系統の番号（1 本店・2 2店舗目・3 第3）。前の保存 main→1・sub→2 */   /* ★11/5 本人「明細単位の方がいい」：国ごとの明細は、国をまたぐ明細（prod）にまとめた */ PR.period = ({ month: 'thismonth', year: 'thisyear', '30': '1m', '90': '3m' })[PR.period] || PR.period; } catch (_) {}
   const prSave = () => { try { localStorage.setItem('smdPrank2', JSON.stringify({ period: PR.period, from: PR.from, to: PR.to, basis: PR.basis, group: PR.group, sort: PR.sort, dir: PR.dir, cc: PR.cc, shop: PR.shop, tier: PR.tier })); } catch (_) {} };
   const prBasisLabel = () => PR.basis === 'fixed' ? '確定分だけ' : '概算を含む';
   /* ★2026-11-05 本人「1ヶ月単位、2ヶ月単位、半年単位、1年単位とか、いろいろ変えられるようにしてほしい」 */
@@ -60431,7 +60534,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const lstOk = !!(lst && lst.loaded && lst.byCc);
     /* 出品の控え（出品の画面が読む物）が手元にある時だけ：明細 → SKU・今の値段・在庫・店。商品の鍵 → 出している国 */
     const mInfo = new Map(), listedBy = new Map(), lstModels = [];
-    const isMain = (sid) => { const a = (state.accounts || []).find(x => String(x.shop_id) === String(sid)); return a ? famOfLabel(a.label) === 'gcsonlinestore' : null; };
+    const shopFamNo = (sid) => famNoOfShop(sid);   /* ★2026-11-16 05：本店／それ以外の2択だった（第3が2店舗目に混ざっていた）→ 系統の番号（SHOP_FAMS・0＝分からない） */
     const prodKey = (cc, itemId, modelId, nm, vr, sku, idOk) => {
       const pid = (pidOk && idOk) ? (productIds['id:' + itemId + '#' + modelId] || productIds['id:' + itemId] || {}) : {};
       const jan = String(pid.jan || '').replace(/\D/g, ''), mpn = String(pid.mpn || '').trim();
@@ -60494,7 +60597,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const rg = regionByCc(o.cc); if (!rg) return;
       const d = ordYmd(o), inP = (!start || d >= start) && (!end || d < end);
       if (PR.cc && o.cc !== PR.cc) return;
-      if (PR.shop) { const mn = isMain(o.shop_id); if (mn === null || (PR.shop === 'main') !== mn) return; }
+      if (PR.shop) { const fn = shopFamNo(o.shop_id); if (!fn || String(fn) !== String(PR.shop)) return; }
       const currentDep = pfDepInfo(o), currentCost = pfCost(o);
       const od = (PR.old && PR.old.items) ? PR.old.items[o.cc + ':' + o.sn] : null;
       // 過去表の入金は、F列（更新前）とG列（更新後）の差を確認できた場合だけ確定扱い。
@@ -60814,8 +60917,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       </div>
       <div class="prk-ctl">
         <span><span class="lbl">国</span>${seg('cc', '', 'すべて')}${REGIONS.map(x => seg('cc', x.cc, x.cc)).join('')}</span>
-        <span>${(() => { const fams = [...new Set((state.accounts || []).map(a => famOfLabel(a.label)).filter(Boolean))], mf = fams.indexOf('gcsonlinestore') >= 0 ? 'gcsonlinestore' : (fams[0] || ''), sf = fams.filter(f => f !== mf).join('・');   /* ★11/7 本人「アカウント名の方がいい」：店の名前はアカウント登録簿から */
-          return `<select class="pr-sel" data-k="shop" data-guide-name="店舗の絞り込み" data-guide="選んだ店舗の注文で販売と粗利を集計します。台帳上の保有在庫は全体のまま表示します。" style="font-size:12.5px"><option value="">${esc('両方（' + [mf, sf].filter(Boolean).join('・') + '）')}</option><option value="main" ${PR.shop === 'main' ? 'selected' : ''}>${esc((mf || '本店') + ' だけ')}</option><option value="sub" ${PR.shop === 'sub' ? 'selected' : ''}>${esc((sf || '2店舗目') + ' だけ')}</option></select>`; })()}</span>
+        <span>${(() => {   /* ★2026-11-16 05（本人「第3アカウントのやつが抜けてる」）：本店／2店舗目／第3／全部。並び・名前は SHOP_FAMS の1か所・登録簿に店がある系統だけ */
+          const fs = SHOP_FAMS.filter(F => String(PR.shop) === String(F.no) || (state.accounts || []).some(a => a && a.shop_id && famNoOfAcct(a) === F.no));
+          return `<select class="pr-sel" data-k="shop" data-guide-name="店舗の絞り込み" data-guide="選んだ店舗の注文で販売と粗利を集計します。台帳上の保有在庫は全体のまま表示します。" style="font-size:12.5px"><option value="">${esc('全部の店')}</option>${fs.map(F => `<option value="${F.no}" ${String(PR.shop) === String(F.no) ? 'selected' : ''}>${esc(F.name + '（' + F.key + '）だけ')}</option>`).join('')}</select>`; })()}</span>
         <span>${chk('front', 'フロントだけ')}${chk('auto', '🤖だけ')}${chk('req', 'リクエスト品だけ')}</span>
         <span>${R.lstOk ? '' : '<button class="pr-lst" style="padding:4px 10px;border:1px solid #c7cdd6;border-radius:6px;background:#fff;cursor:pointer;font-size:12.5px" title="出品の画面と同じ記録を読みます（出している国・今の値段・在庫・SKU が出ます）">📦 出品の記録を読む</button>'}</span>
       </div>
@@ -62819,9 +62923,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     let rowLive = {};
     try { rowLive = (await detectShopIds(CCS.map(cc => regionByCc(String(cc).toUpperCase())).filter(Boolean), 12000)) || {}; } catch (_) { rowLive = {}; }
     if (!state.accounts) await loadAccounts().catch(() => {});
-    const rowSubShops = new Set((state.accounts || []).filter(a => a && a.shop_id && /sub/i.test(String(a.status || ''))).map(a => String(a.shop_id)));
+    /* ★2026-11-16 05（本人「第3アカウントのやつが抜けてる」）：前は status が sub（2店舗目）の時だけ止めていた＝第3（maneki_neko_japan）でログイン中だと本店の表へ第3の注文を書く筋があった。
+       → 登録簿にある【本店以外】の店（系統は SHOP_FAMS・label から決める・status は見ない）でログイン中なら止める。登録簿に無い店・登録簿が読めない時は今まで通り止めない（親の判断待ち） */
+    const rowNotMain = {};
+    (state.accounts || []).forEach(a => { if (a && a.shop_id && famNoOfAcct(a) !== 1) rowNotMain[String(a.shop_id)] = a; });   /* 系統の表に無い店（今後の4つ目など）も本店ではない＝止める */
     const rowBlocked = {};
-    CCS.forEach(cc => { const lv = rowLive[String(cc).toUpperCase()]; if (lv && lv.shop_id && rowSubShops.has(String(lv.shop_id))) rowBlocked[cc] = lv.name || lv.shop_id; });
+    CCS.forEach(cc => { const lv = rowLive[String(cc).toUpperCase()]; const ra = lv && lv.shop_id ? rowNotMain[String(lv.shop_id)] : null; if (ra) rowBlocked[cc] = (famShortOfAcct(ra) ? famShortOfAcct(ra) + ' ' : '') + (ra.label || lv.name || lv.shop_id); });
     const draw = () => {
       listEl.innerHTML = CCS.map(cc => {
         const r = rows[cc];
@@ -62837,7 +62944,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     // ① 対象の国ぶんのエクスポートをいっぺんに作る
     const rids = {};
     await Promise.all(CCS.map(async cc => {
-      if (rowBlocked[cc]) { rows[cc].ok = false; rows[cc].msg = '第二アカウント（' + rowBlocked[cc] + '）でログイン中なので止めました。本店に切り替えてからもう一度押してください'; draw(); return; }
+      if (rowBlocked[cc]) { rows[cc].ok = false; rows[cc].msg = '本店以外の店（' + rowBlocked[cc] + '）でログイン中なので止めました。本店に切り替えてからもう一度押してください'; draw(); return; }
       rows[cc].msg = 'エクスポートを作成中…'; draw();
       try { rids[cc] = await rowCreateReport(cc, mr); rows[cc].msg = '作成しました（' + rids[cc] + '）。順番待ち…'; }
       catch (e) { rows[cc].ok = false; rows[cc].msg = '作成に失敗: ' + ((e && e.message) || e); }
@@ -62848,7 +62955,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const failed = [];
     for (const cc of CCS) {
       if (rowBlocked[cc]) {
-        if (!dryRun) { try { depRunsSave(depRecordRow('明細' + cc.toUpperCase(), tg.plan, '止めました: 第二アカウント（' + rowBlocked[cc] + '）でログイン中')); } catch (_) {} }
+        if (!dryRun) { try { depRunsSave(depRecordRow('明細' + cc.toUpperCase(), tg.plan, '止めました: 本店以外の店（' + rowBlocked[cc] + '）でログイン中')); } catch (_) {} }
         failed.push(cc.toUpperCase()); fail++; continue;
       }
       if (!rids[cc]) {
@@ -63034,7 +63141,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const imgAmbig = [], imgOneLeft = [];
       /* ★2026-10-24 レビュー#7：第二アカウントの注文は本店の表（{国}_p）に無い＝未マッチに入る。件数を出して「書けなかった」と区別する */
       if (!state.accounts) await loadAccounts().catch(() => {});
-      const imgSubShops = new Set((state.accounts || []).filter(a => a && a.shop_id && /sub/i.test(String(a.status || ''))).map(a => String(a.shop_id)));
+      /* ★2026-11-16 05（本人「第3アカウントのやつが抜けてる」）：前は登録簿の status が sub（2店舗目）だけを数えていた＝第3の注文が抜けていた → 系統（SHOP_FAMS）が本店以外の店を数える */
+      const imgSubShops = new Set((state.accounts || []).filter(a => a && a.shop_id && famNoOfAcct(a) !== 1).map(a => String(a.shop_id)));
       REGIONS.filter(r => state.enabled.has(r.cc)).forEach(region => {
         const oc = imgByCc ? { status: 'ok', rows: imgByCc[region.cc] || [] } : state.orders.perCountry.get(region.cc);
         // status==='error'(ライブ取得失敗=△DB)でもDBの行は保持されているので使う。loading中と空だけ除外
@@ -63094,7 +63202,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (imgNoPic) st.textContent += `\n⚠ 画像を持っていない明細 ${imgNoPic}件は送っていません（壊れたURLを書かないため）`;
       if (imgSkipOrd) st.textContent += `\n⚠ 明細の画像が1枚も無い注文 ${imgSkipOrd}件は丸ごと送っていません`;
       if (imgOneLeft.length) st.textContent += `\n⚠ まとめ買いで画像のある明細が1つだけの注文 ${imgOneLeft.length}件は送っていません（送ると画像の無い明細の行にも同じ画像が入るため・手で入れてください）\n　 ${imgOneLeft.slice(0, 8).join('\n　 ')}${imgOneLeft.length > 8 ? '\n　 …ほか' + (imgOneLeft.length - 8) + '件' : ''}`;
-      if (imgSub) st.textContent += `\nℹ 第二アカウントの注文 ${imgSub}件は本店の表（{国}_p）に無いので「未マッチ」に入っています（このボタンは本店の表だけに書きます）`;
+      if (imgSub) st.textContent += `\nℹ 本店以外の店（2店舗目・第3）の注文 ${imgSub}件は本店の表（{国}_p）に無いので「未マッチ」に入っています（このボタンは本店の表だけに書きます）`;
       if (imgAmbig.length) st.textContent += `\n⚠ まとめ買いで同じ明細が複数ある注文 ${imgAmbig.length}件は、どの行に入れるか決められません（手で確認してください）\n　 ${imgAmbig.slice(0, 8).join('\n　 ')}${imgAmbig.length > 8 ? '\n　 …ほか' + (imgAmbig.length - 8) + '件' : ''}`;
     } catch (e) {
       st.textContent = `❌ ${e.message}`;
@@ -63213,6 +63321,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     document.getElementById('set-listvar').value = settings.listVarTpl;
     document.getElementById('set-listspecs').value = settings.listSpecs;
     document.getElementById('set-listdesc').value = settings.listDescTpl;
+    document.getElementById('set-listdesc3').value = settings.listDescTplShop3;
     document.getElementById('set-pcoef').value = settings.priceCoef;
     document.getElementById('set-pfee').value = settings.priceFeePct;
     document.getElementById('set-pship').value = settings.priceShipJpy;
@@ -63337,6 +63446,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     settings.listVarTpl = document.getElementById('set-listvar').value;
     settings.listSpecs = document.getElementById('set-listspecs').value;
     settings.listDescTpl = document.getElementById('set-listdesc').value;
+    settings.listDescTplShop3 = document.getElementById('set-listdesc3').value;
     settings.priceCoef = Number(document.getElementById('set-pcoef').value) || 1.8;
     settings.priceFeePct = Number(document.getElementById('set-pfee').value) || 0;
     settings.priceShipJpy = Number(document.getElementById('set-pship').value) || 0;
@@ -63437,6 +63547,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }
       if (!Array.isArray(rows)) rows = [];
     } catch (_) { rows = []; }
+    rows = rows.map(a => (a && typeof a === 'object') ? { ...a, _fno: famNoOfLabel(a.label) } : a);   /* ★2026-11-16 05：系統はデモで名前を隠す前に決める（SHOP_FAMS）。_fno は画面の中だけ（登録簿へは書かない） */
     if (demoOn()) rows = rows.map(a => ({ ...a, label: dmShop(a.label) }));  // 🎭デモ：ショップ名を匿名化（国コードは保持）
     state.accounts = rows; return rows;
   }
