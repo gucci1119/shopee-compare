@@ -9863,6 +9863,29 @@
     "⚠ 🤖の記録を読めていないので「🤖だけ」は数えられません（0件ではありません）。少し置いて🔄 更新を押してください": "⚠ The 🤖 record could not be read, so ‘🤖 only’ cannot be counted (it is not 0). Wait a moment and press 🔄 Refresh",
     "⚠ 手でまとめた行・言い換えの表を読めませんでした。いまは既定の言い換えだけで束ねています。🔄 更新を押してください": "⚠ Could not read the manually merged rows / alias table. Grouping uses only the default aliases for now. Press 🔄 Refresh",
   });
+  /* ★2026-11-15 05-04 注文管理：未入金の行の『💬 支払いのお願いを送る』 */
+  Object.assign(I18N, {
+    "💬 支払いのお願いを送る": "💬 Send a payment reminder",
+    "⏳ 頼み中（Smart Reply が送ります）": "⏳ Requested (Smart Reply will send it)",
+    "⏳ 送っています": "⏳ Sending",
+    "✅ 送った": "✅ Sent", "（自動）": "(auto)", "（手）": "(by hand)", "（会話にあった）": "(already in the chat)",
+    "送ったか分からない": "Not sure if it was sent",
+    "前回は送れませんでした": "Last attempt failed", "前回は送りませんでした": "Not sent last time",
+    "（記録を読み込み中）": "(loading the record)",
+    "送ったかの記録を読めませんでした（押しても二重には送りません）": "Could not read whether it was sent (pressing will not send it twice)",
+    "デモ表示中は頼めません": "Cannot request while in demo view",
+    "この PC には WRITE_TOKEN が入っていません（⚙️設定）": "This PC has no WRITE_TOKEN (⚙️ Settings)",
+    "取込GAS がまだ新しい版ではありません（支払いのお願いの口がありません）": "The import GAS is not on the new version yet (no payment-reminder endpoint)",
+    "鍵が違うので頼めませんでした（⚙️設定の WRITE_TOKEN）": "Could not request: wrong key (WRITE_TOKEN in ⚙️ Settings)",
+    "頼めませんでした": "Could not request",
+    "頼めたか分かりません。記録を読み直して確かめます": "Not sure the request went through. Re-reading the record to check",
+    "頼めていませんでした。もう一度押してください": "The request did not go through. Please press again",
+    "押すと、webchat の Smart Reply がこのお客さんに英語の支払いのお願いを1回だけ送ります。すでに送った・送ったか分からない注文には送りません（ポータルからは送らず、頼むだけです）": "Press to have Smart Reply in webchat send this customer one payment reminder in English. Orders already sent or with unknown status are skipped (the portal only requests; it does not send).",
+    "頼みました。webchat の Smart Reply がこのお客さんに支払いのお願いを1回送ります。送るとここが「✅ 送った」に変わります（1分ごとに読み直します）。もう一度は押せません": "Requested. Smart Reply in webchat will send this customer one payment reminder. This changes to ‘✅ Sent’ once sent (re-read every minute). It cannot be pressed again.",
+    "webchat の Smart Reply がこのお客さんへ送っている途中です。送るとここが「✅ 送った」に変わります。もう一度は押せません": "Smart Reply in webchat is sending to this customer now. This changes to ‘✅ Sent’ once sent. It cannot be pressed again.",
+    "この注文には支払いのお願いを送りました（自動＝Smart Reply が送った／手＝本人が Smart Reply で送った／会話にあった＝前に送った文が会話に見つかった）。二重に送らないため、もう押せません。時刻は日本時間です": "A payment reminder was sent for this order (auto = sent by Smart Reply / by hand = sent by you in Smart Reply / already in the chat = an earlier message was found in the chat). It cannot be pressed again so nothing is sent twice. Time is JST.",
+    "送れたかどうかを確かめられなかった注文です。二重に送らないため、ここからはもう頼めません。webchat のこのお客さんの会話で確かめてください": "Could not confirm whether it was sent. To avoid sending twice, it cannot be requested here. Check this customer’s chat in webchat.",
+  });
   const I18N_PAT = [
     /* ★2026-11-15 💹損益・入出金：月を1つに・純利益 */
     [/^(\d{4})年(\d{1,2})月（今月）$/, (m, y, mo) => ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][+mo] + ' ' + y + ' (this month)'],
@@ -14994,6 +15017,120 @@
     const add = panel.querySelector('#sc-add'); if (add) add.addEventListener('click', async () => { const t = prompt('出荷前チェックに足す1行（起きたミスを「二度と起きないための確認」の形で）'); if (t) await shipCheckAdd(t, { by: 'manual' }); });
     panel.querySelectorAll('.sc-off').forEach(b => b.addEventListener('click', async () => { const id = b.dataset.id; b.disabled = true; b.textContent = '⏳'; await shipCheckSave(items => { const it = items.find(x => x.id === id); if (!it) return false; it.on = false; it.offAt = jstToday(); }); shipCheckRender(true); }));
   }
+  /* ★2026-11-15 05-04（00 の決め・本人「購入後に支払いがない人に追い打ちメッセージをかけたい」「私がボタンを押したら送ってくれる、そういう機能が欲しい」「もちろん、すでに送っているところには送らないようにしたいけど」）
+     未入金（UNPAID）の行の下に『💬 支払いのお願いを送る』。ポータルは取込GAS 本体の unpaid_req で「頼む」だけ・送るのは webchat の Smart Reply だけ（8/24 の決め）。
+     状態は台帳 app_kv unpaid_msg_state の v.orders[注文番号] を、画面に出ている未入金の行の鍵だけ読む（全部は読まない・鍵は "…" で包む＝数字だけの番号を配列の添字と読ませない）。
+     読み直しは画面を開いている間・1分に1回まで・頼み中／送っている途中の行がある時だけ（Supabase を読むだけ・GAS は呼ばない・書かない）。
+     もう一度送る道は作らない（押せるのは記録が無い・failed・skip だけ＝GAS と同じ）。状態は state.orders.up に持ち、描き直しても消えない。 */
+  function upSt_() { const o = state.orders; return o.up || (o.up = { m: new Map(), readAt: new Map(), setAt: new Map(), busy: new Set(), err: new Map(), readErr: 0, reading: false, timer: 0 }); }
+  function upIsUnpaidRow_(r) { return !!r && (String(r.tab) === '200' || /^unpaid$/i.test(String(r.status || '').trim())); }   /* 💳未支払いの絞り込み（tab 200）と同じ行。GAS が UNPAID かを読み直して確かめる */
+  function upVisible_() { const s = new Set(); document.querySelectorAll('#ord-list .ord-upline').forEach(el => { if (el.dataset.sn) s.add(el.dataset.sn); }); return [...s]; }
+  function upPending_(sn) { const U = upSt_(), st = U.m.get(sn); return U.busy.has(sn) || !!(st && (st.s === 'req' || st.s === 'claimed')); }
+  function upWhen_(ms) {
+    const n = Number(ms) || 0; if (!n) return '';
+    try {
+      const dOpt = { timeZone: 'Asia/Tokyo', month: 'numeric', day: 'numeric' };
+      const d = new Date(n).toLocaleDateString('ja-JP', dOpt), today = new Date().toLocaleDateString('ja-JP', dOpt);
+      return (d === today ? '' : d + ' ') + new Date(n).toLocaleTimeString('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' });
+    } catch (_) { return ''; }
+  }
+  function upLineHtml_(sn, cc) {
+    const U = upSt_(), st = U.m.get(sn) || null, er = U.err.get(sn), busy = U.busy.has(sn);
+    const s = busy ? 'req' : String((st && st.s) || '');
+    const lab = (t, color, guide) => `<span data-guide="${esc(guide)}" style="font-weight:700;color:${color};white-space:nowrap">${t}</span>`;
+    const detail = t => t ? `<span data-noi18n style="font-size:11px">（${esc(String(t).slice(0, 140))}）</span>` : '';
+    let body = '';
+    if (s === 'req') body = lab('⏳ 頼み中（Smart Reply が送ります）', '#8a5a00', '頼みました。webchat の Smart Reply がこのお客さんに支払いのお願いを1回送ります。送るとここが「✅ 送った」に変わります（1分ごとに読み直します）。もう一度は押せません');
+    else if (s === 'claimed') body = lab('⏳ 送っています', '#8a5a00', 'webchat の Smart Reply がこのお客さんへ送っている途中です。送るとここが「✅ 送った」に変わります。もう一度は押せません');
+    else if (s === 'sent') {
+      const via = String(st.via || '');
+      const viaJa = via === 'manual' ? '（手）' : via === 'conv' ? '（会話にあった）' : '（自動）';
+      body = lab('✅ 送った', '#1a7f37', 'この注文には支払いのお願いを送りました（自動＝Smart Reply が送った／手＝本人が Smart Reply で送った／会話にあった＝前に送った文が会話に見つかった）。二重に送らないため、もう押せません。時刻は日本時間です')
+        + ` <span style="color:#1a7f37;font-weight:700;white-space:nowrap">${esc(upWhen_(st.sentAt || st.at))}</span><span style="color:#1a7f37;white-space:nowrap">${viaJa}</span>`;
+    }
+    else if (s === 'unknown') body = lab('送ったか分からない', '#5b6472', '送れたかどうかを確かめられなかった注文です。二重に送らないため、ここからはもう頼めません。webchat のこのお客さんの会話で確かめてください');
+    else {
+      const GUIDE = '押すと、webchat の Smart Reply がこのお客さんに英語の支払いのお願いを1回だけ送ります。すでに送った・送ったか分からない注文には送りません（ポータルからは送らず、頼むだけです）';
+      const demo = demoOn();
+      body = `<button type="button" class="smd-btn b-write ord-upreq" data-sn="${esc(sn)}" data-cc="${esc(cc || '')}" data-guide="${esc(demo ? 'デモ表示中は頼めません' : GUIDE)}"${demo ? ' disabled' : ''} style="font-size:11px;padding:2px 10px;white-space:nowrap">💬 支払いのお願いを送る</button>`;
+      if (er) body += ' <span style="color:#d93025;font-weight:700;white-space:nowrap">' + esc(er.t) + '</span>' + detail(er.d);
+      else if (st && st.s === 'failed') body += ' <span style="color:#d93025;font-weight:700;white-space:nowrap">前回は送れませんでした</span>' + detail(st.note);
+      else if (st && st.s === 'skip') body += ' <span style="color:#5b6472;white-space:nowrap">前回は送りませんでした</span><span style="color:#5b6472">' + detail(st.note) + '</span>';
+      else if (!U.readAt.has(sn)) body += U.readErr ? ' <span style="color:#5b6472;font-size:11px">送ったかの記録を読めませんでした（押しても二重には送りません）</span>' : ' <span style="color:#5b6472;font-size:11px">（記録を読み込み中）</span>';
+    }
+    return `<div class="ord-upline" data-sn="${esc(sn)}" data-cc="${esc(cc || '')}" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 0 40px;font-size:11px;line-height:1.4">${body}</div>`;
+  }
+  function upPaint_() { document.querySelectorAll('#ord-list .ord-upline').forEach(el => { el.outerHTML = upLineHtml_(el.dataset.sn, el.dataset.cc); }); }
+  function upSchedule_() {
+    const U = upSt_();
+    if (U.timer || !upVisible_().some(upPending_)) return;
+    U.timer = setTimeout(() => {
+      U.timer = 0;
+      const pg = document.getElementById('page-orders');
+      if (document.hidden || !pg || pg.style.display === 'none') { upSchedule_(); return; }   /* 見ていない間は読まない（1分後にまた見るだけ） */
+      upSync_();
+    }, 60000);
+  }
+  /* 画面に出ている未入金の行のうち、まだ読んでいない物・頼み中／送っている途中で1分たった物があれば、出ている行の分を1回で読む（それ以外は読み直さない＝押しても GAS が二重には頼まない） */
+  function upSync_() {
+    const U = upSt_(), sns = upVisible_(), now = Date.now();
+    if (!sns.length || U.reading) return;
+    if (U.readErr && now - U.readErr < 60000) { upSchedule_(); return; }   /* 読めなかった時は1分あける */
+    const need = sns.some(sn => { const a = U.readAt.get(sn) || 0; return !a || (upPending_(sn) && now - a >= 60000); });
+    if (need) upRead_(sns); else upSchedule_();
+  }
+  async function upRead_(sns) {
+    const U = upSt_(), list = sns.slice(0, 50), t0 = Date.now();
+    U.reading = true;
+    try {
+      const sel = list.map((sn, i) => 'o' + i + ':v->orders->' + encodeURIComponent('"' + sn + '"')).join(',');
+      const rows = await sbGet('app_kv', 'select=' + sel + '&k=eq.unpaid_msg_state');
+      if (!Array.isArray(rows)) throw new Error('返事の形が違います');
+      const r0 = rows[0] || {}, now = Date.now();   /* 行が無い＝まだ1件も頼んでいない（読めなかったのとは別） */
+      list.forEach((sn, i) => {
+        if ((U.setAt.get(sn) || 0) > t0) return;   /* 読んでいる間に GAS の返事が来た行は、GAS の返事の方を正にする */
+        if (!U.busy.has(sn)) {   /* 押して返事待ちの行は値を上書きしない（読んだ印だけ付ける＝読みの輪にしない） */
+          const v = r0['o' + i];
+          if (v && typeof v === 'object' && v.s) U.m.set(sn, v); else U.m.delete(sn);
+          const er = U.err.get(sn);
+          if (er && er.chk) { if (U.m.has(sn)) U.err.delete(sn); else U.err.set(sn, { t: '頼めていませんでした。もう一度押してください' }); }
+        }
+        U.readAt.set(sn, now);
+      });
+      U.readErr = 0;
+    } catch (e) { U.readErr = Date.now(); try { console.warn('[支払いのお願い] 記録を読めませんでした', e); } catch (_) {} }
+    finally { U.reading = false; }
+    upPaint_();
+    if (!U.readErr && upVisible_().some(sn => !U.readAt.has(sn))) setTimeout(upSync_, 0);   /* 読んでいる間に増えた行 */
+    else upSchedule_();
+  }
+  async function upReq_(sn, cc) {
+    const U = upSt_(), cur = U.m.get(sn);
+    if (U.busy.has(sn) || (cur && /^(req|claimed|sent|unknown)$/.test(cur.s))) return;
+    if (demoOn()) { U.err.set(sn, { t: 'デモ表示中は頼めません' }); upPaint_(); return; }
+    if (!settings.writeToken) { U.err.set(sn, { t: 'この PC には WRITE_TOKEN が入っていません（⚙️設定）' }); upPaint_(); return; }
+    U.busy.add(sn); U.err.delete(sn); upPaint_();   /* 押した瞬間に「⏳ 頼み中」 */
+    let res = null, ex = null;
+    try { res = await jsonp(INV_GAS_URL + '?action=unpaid_req&token=' + encodeURIComponent(settings.writeToken) + '&order=' + encodeURIComponent(sn) + '&by=portal', 60000, true); }
+    catch (e) { ex = e; }
+    U.busy.delete(sn);
+    if (res && res.ok) {
+      U.m.set(sn, { s: String(res.s || 'req'), at: res.at || Date.now(), sentAt: res.sentAt || null, via: res.via || '' });
+      U.setAt.set(sn, Date.now()); U.readAt.set(sn, Date.now());
+      if (!res.already) { try { logAct('注文管理', '支払いのお願いを頼んだ', sn, cc); } catch (_) {} }
+    } else if (res) {
+      const er = String(res.error || '返事がありません');
+      U.err.set(sn, /unknown action/i.test(er) ? { t: '取込GAS がまだ新しい版ではありません（支払いのお願いの口がありません）' }
+        : /bad token/i.test(er) ? { t: '鍵が違うので頼めませんでした（⚙️設定の WRITE_TOKEN）' }
+        : { t: '頼めませんでした', d: er });
+    } else {
+      /* 返事が届かなかった＝向こうでは頼めているかもしれない。記録を読み直して確かめる（押し直しても GAS が二重には頼まない） */
+      U.err.set(sn, { chk: true, t: '頼めたか分かりません。記録を読み直して確かめます', d: /__DISCONNECTED__/.test(String((ex && ex.message) || ex || '')) ? '通信が切れました' : String((ex && ex.message) || ex || '').slice(0, 80) });
+      U.readAt.delete(sn); U.setAt.set(sn, Date.now()); U.readErr = 0;   /* 返事の前に始まった読みでは決めない（次の読みで決める） */
+    }
+    upPaint_();
+    if (!res) upSync_(); else upSchedule_();
+  }
   function renderOrders() {
     ordSearchClrSync();
     renderOrdersSummary();
@@ -15156,7 +15293,7 @@
         `<span class="ol-slot ol-split">${(r.tab === 300 && r.items.length > 1 && r.shopId && settings.openapiUrl && settings.writeToken) ? `<a href="#" class="ord-split" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="この注文を複数梱包に分割（VNで別便にする時）。公式APIのsplit_orderで分割→梱包ごとに発送手配＋伝票印刷" style="text-decoration:none;font-size:10.5px;color:#7b52c4;font-weight:700;white-space:nowrap">✂️分割</a>` : ''}</span>` +
         `</div>` +
         `<div class="ord-item">${itemsHtml}</div>` +
-        `</div>`;
+        `</div>` + (upIsUnpaidRow_(r) ? upLineHtml_(r.sn, r.cc) : '');   /* ★2026-11-15 05-04 未入金の行の『💬 支払いのお願いを送る』（店で分けない＝第2・第3の店の行にも出す） */
       row.querySelector('.buyer').textContent = r.buyer;
       row.title = r.items.map(it => `${it.name}${it.variation ? ' [' + it.variation + ']' : ''} ×${it.qty}`).join('\n');
       // 行クリックでの自動オープンは廃止（Shopee注文詳細は内部ID必須で直リンク不可＝404の元。注文一覧は右の📄から、注文番号は📋でコピー）
@@ -15170,6 +15307,7 @@
       frag.appendChild(row);
     });
     list.appendChild(frag);
+    try { upSync_(); } catch (e) { try { console.warn("[支払いのお願い]", e); } catch (_) {} }   /* ★2026-11-15 05-04 出ている未入金の行の「支払いのお願い」の状態を読む（読むのは出ている行の分だけ） */
     if (rows.length > ordPer) { const more = document.createElement('div'); more.innerHTML = pageNav(rows.length, ordPer, ordPage); list.appendChild(more.firstElementChild); wirePageNav(list, p => { state.orders.page = p; renderOrders(); list.scrollIntoView({ block: 'start', behavior: 'smooth' }); }); }
     // 🚚倉庫へ発送済（未スキャン）トグル: costs.self_transit_at をON/OFF（利益管理と共有）
     list.querySelectorAll('.ord-selftransit').forEach(el => el.addEventListener('click', async e => {
@@ -15220,6 +15358,14 @@
     finally { if (btn) { btn.disabled = false; if (btn.dataset.orig) btn.innerHTML = btn.dataset.orig; } }
   }
   document.getElementById('ord-reload').addEventListener('click', () => { refreshOrders(); });
+  /* ★2026-11-15 05-04 『💬 支払いのお願いを送る』は描き直しで差し替わるので、一覧の枠で受ける */
+  document.getElementById('ord-list').addEventListener('click', e => {
+    const b = e.target && e.target.closest ? e.target.closest('.ord-upreq') : null;
+    if (!b) return;
+    e.stopPropagation(); e.preventDefault();
+    if (b.disabled) return;
+    upReq_(b.dataset.sn, b.dataset.cc);
+  });
   // ⚡今すぐ取得＝公式API(GAS)で最新注文をその場で取り込む（ブリッジ不要）。今出した注文をすぐ発送したい時用。
   { const sb = document.getElementById('ord-syncnow'); if (sb) sb.addEventListener('click', async () => {
     if (!settings.openapiUrl || !settings.writeToken) { alert('⚙️設定に「OpenAPI同期GAS URL」と「WRITE_TOKEN」を入れてください（公式APIでの即時取得に必要）。'); return; }
@@ -29421,6 +29567,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-15', items: [
+      '💬 <b>注文管理の未入金の行に『💬 支払いのお願いを送る』を付けました</b>（本人「購入後に支払いがない人に追い打ちメッセージをかけたい」「私がボタンを押したら送ってくれる、そういう機能が欲しい」「もちろん、すでに送っているところには送らないようにしたいけど」）：未入金（未支払い）の注文の行の下に、押さなくても見えるボタンを出します（第2・第3の店の行も同じ）。押すと webchat の Smart Reply がそのお客さんに英語の支払いのお願いを1回だけ送ります（ポータルからは送らず頼むだけ）。行には「⏳ 頼み中」「⏳ 送っています」「✅ 送った 時刻（自動／手／会話にあった）」「送ったか分からない」が出て、送った・送ったか分からない注文はもう押せません。送れなかった時は理由を赤、送らなかった時は理由を灰色で出します。状態は画面に出ている未入金の行の分だけ読み、頼み中の行がある間だけ1分ごとに読み直します。',
       '💹 <b>損益・入出金：月は一番上で1つに・純利益を一番大きく・4つのタブを同じ並びに</b>（本人「なんでここ、利益明細は上で月を変えられるのに、入出金経費は下までスクロールしないと変えられないの？意味が分からん」「その営業利益、その経費を抜く前の額って興味ないんだよね。純利益にしか興味ないから」「基本的に直感的に操作しやすくしてください。見にくいのよね」）：①💴入出金・経費の一番上（説明の帯のすぐ下）に利益明細と同じ『📅 月/期間』と［🔄 更新］。下の入力欄の「月:」は外した。利益明細と入出金は同じ月＝どちらで変えても、もう片方も同じ月（月ごとの経費の見出し・「この月へ切り替えて編集」・🏆の「利益明細で見る」も同じ）。利益明細の「過去30日・過去7日」は月ではないので入出金の月はそのまま（上に一言出す）。利益明細の月の選択肢は12か月に。②入出金の上のカードは一番左・一番大きく『純利益（いま）』（粗利−経費−返金・損失＝下の損益の表の「＝ 純利益」と同じ数字）・その下に小さく「月末の見込み」（今月だけ）と「税引後」。粗利のカードは上から外した（粗利は損益の表と利益明細に残る）。「営業利益」の言葉は同じ数字なので「純利益」に（損益の表・率・ふりかえり・日ごとの記録・利益明細の『月の経費差引後利益』）。計算は変えていない。③4つのタブとも［タブ］→［月・期間］→［結論の数字］→［表］：入出金は結論のカードを節の案内より上に・「① この月の結論」、確定申告・帳簿は『📅 対象年』と ⬇ CSV を警告より上の一番上に・その年の所得（事業所得）を大きなカードで表の上に、商品別の利益は『📅 月/期間』の言葉と［🔄 更新］を期間の隣に・粗利の合計を大きく。説明の帯は1行に（くわしくはかざすと出る）。',
       '📊 <b>ダッシュボード「月を比べる」を棒で見られるように：［日ごと｜週ごと｜累計］</b>（本人「なんか折れ線の比較だと、ちょっと見づらい気がするんだよね」）：週ごと（既定）＝1〜7日・8〜14日・15〜21日・22〜28日・29日〜末の合計を月ごとの棒で並べ、棒の上に値。今日を含む週は薄く「途中」。月の日数より先の区切り（2月の 29日〜末など）は描かない。日ごと＝1日に月の数だけ細い棒（今日は薄い棒・0 の日は細い線・取り込み前の日は棒なし）。累計＝今までの線と見込みの点線のまま。どれも図にかざすと、その日（週）の各月の値が1つの吹き出しに並ぶ。前に日ごとを選んでいた端末はそのまま日ごと。',
       '📊 <b>ダッシュボード「月を比べる」を日ごとの値で比べられるようにしました</b>（本人「こうやって見たいんじゃなくて、日ごとの売上を月で比較してみたいっていう感じなのよね。合計値じゃないのよ」「売上とかオーダー数とか商品数ね、日ごとで見たい」）：月の札の行の頭に［日ごと｜累計］の切り替え（既定は日ごと・選んだ方はこの端末に覚える）。日ごと＝その日1日の売上¥・オーダー数・商品数の線に点つき（キャンセルも含むの切り替えはそのまま）。図にかざすと、その日の各月の値が1つの吹き出しに並ぶ。今日はまだ途中なので白抜きの点と点線で薄く・吹き出しに「途中」。取り込みより前の日は 0 にせず線を切る。見込みの点線は累計の時だけ。下の国の表は日ごとの時「1日平均（N日まで）」の列も並べる。今までの累計は「累計」でそのまま見られます。',
