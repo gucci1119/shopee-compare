@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-1130'
+var SRC_VER = '20261115-1200'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -703,8 +703,10 @@ function doGetInner_(e) {
         var rtwt = P_().getProperty('WRITE_TOKEN');
         if (!rtwt || p.token !== rtwt) throw new Error('WRITE_TOKEN不正');
         var rtn = syncReturnsRange_(Math.max(1, Math.min(730, parseInt(p.days, 10) || 45)));   /* ★2026-11-07 days で過去の分も取り直せる（買い手の文・写真の埋め戻し） */
+        /* ★2026-11-15 05（00 の見張り 11:28・返品の同期が650分のまま）：手の口でも成功したら取り札に時刻を書く＝見張りが実際の最後の同期を見られる・直後に定例が二重に走らない */
+        var rtClaim = false; try { sbUpsert_('app_kv', [{ k: 'sync_claim_syncReturnsAll', v: { at: now_(), by: (isChild_() ? 'child' : 'main') + ':run_returns' }, updated_at: new Date().toISOString() }], 'k'); rtClaim = true; } catch (eRc) {}
         ufPersist_();
-        rtout = { ok: true, action: 'run_returns', rows: rtn };
+        rtout = { ok: true, action: 'run_returns', rows: rtn, claim: rtClaim };
       } catch (rterr) { rtout = { ok: false, error: String((rterr && rterr.message) || rterr) }; }
       return ContentService.createTextOutput(rtcb + '(' + JSON.stringify(rtout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -9557,6 +9559,17 @@ function hbWatchRun_(me, heal) {
       var age = last ? (now - Date.parse(last)) / 60000 : null;
       var it = { id: 'kv_' + x[0], name: x[1], last: last, maxMin: x[2], state: (!last || age > x[2]) ? 'red' : (extra ? 'warn' : 'ok'), why: !last ? (r ? '時刻の項目が無い' : '記録が無い') : (age > x[2] ? Math.round(age) + '分動いていない（線 ' + x[2] + '分）' : '') + (extra ? (age > x[2] ? '・' : '') + extra : '') };
       if (r && r.brake && r.brake.at && x[3] === 'boshu') { it.state = 'red'; it.why = '🛑 ブレーキで止まっている（' + String(r.brake.why || '').slice(0, 80) + '）＝ポータルの ▶ 再開が要る'; }
+      /* ★2026-11-15 05（00 の見張り 11:28）：返品の同期は各台6時間ごとのトリガー＝本体が1回飛ばすと、子の台が引き継ぐのが次の自分の回（最長6時間後）になり線を越える。
+         見張りが赤を見たら1回だけ立て直す（3時間に1回まで・本体が断られている間は2台目・それ以外は本体で run_returns＝成功すると取り札に時刻が入る） */
+      if (heal && it.state === 'red' && x[0] === 'sync_claim_syncReturnsAll' && last) {
+        var hkR = 'HB_HEAL_returns', lastR = Number(P.getProperty(hkR) || 0);
+        if (now - lastR > 3 * 3600 * 1000) {
+          P.setProperty(hkR, String(now));
+          var whoR = HB_MAIN_BLOCKED_ ? 'child' : 'main', hr = hbExec_(whoR, 'action=run_returns&days=45&token=' + tok), jr = hr && hr.j;
+          it.state = (jr && jr.ok) ? 'warn' : 'red';
+          it.why += (jr && jr.ok) ? '→ 見張りが' + (HB_NAME_[whoR] || whoR) + 'で1回回した（' + (jr.rows || 0) + '件）' : '→ 立て直しに失敗（' + String((jr && jr.error) || (hr && hr.err) || '答えなし').slice(0, 60) + '）';
+        }
+      }
       add(it);
     });
   }
