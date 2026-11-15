@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261116-0145'
+var SRC_VER = '20261116-0320'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -876,6 +876,26 @@ function doGetInner_(e) {
         wout = updateWeightSafe_(wshop, p.item_id, p.weight);
       } catch (err) { wout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(wcb + '(' + JSON.stringify(wout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    /* ★2026-11-16 05（00・01）：第3の店の設定の口。読む＝shop_profile_get・logi_channels（どの店も）／書く＝shop_profile_set・logi_channel_set・logi_items_apply（登録簿の status＝new＝第3の店だけ）。
+       全部 WRITE_TOKEN・書いた後に Shopee から読み直して返す。dry=1 は書かずに「何をするか」だけ返す。 */
+    if (p.action === 'shop_profile_get' || p.action === 'shop_profile_set' || p.action === 'logi_channels' || p.action === 'logi_channel_set' || p.action === 'logi_items_apply') {
+      var s3cb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
+      var s3out;
+      try {
+        var s3wt = P_().getProperty('WRITE_TOKEN'); if (!s3wt || p.token !== s3wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        if (p.action === 'shop_profile_get') { var s3r = shopSetReadable_(p.shop_id); s3out = { ok: true, shop_id: s3r, profile: shopProfileGet_(s3r) }; }
+        else if (p.action === 'logi_channels') { var s3c = shopSetReadable_(p.shop_id); s3out = { ok: true, shop_id: s3c, channels: logiChannels_(s3c) }; }
+        else {
+          var s3g = shopSetGuard_(p.shop_id);
+          if (p.action === 'shop_profile_set') s3out = shopProfileSet_(s3g.sid, s3g.cc, p);
+          else if (p.action === 'logi_channel_set') s3out = logiChannelSet_(s3g.sid, p);
+          else s3out = logiItemsApply_(s3g.sid, p);
+          s3out.shop_id = s3g.sid; s3out.label = s3g.label;
+        }
+      } catch (err) { s3out = { ok: false, error: String((err && err.message) || err) }; }
+      s3out.src = SRC_VER;
+      return ContentService.createTextOutput(s3cb + '(' + JSON.stringify(s3out) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'update_item') {
       var ucb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -6807,6 +6827,115 @@ function updateItem_(body) {
   var warn = ''; try { var _w = j.warning || (j.response && j.response.warning); warn = _w ? String(typeof _w === 'string' ? _w : JSON.stringify(_w)).slice(0, 300) : ''; } catch (eW) {}
   var echo = {}; try { var _r = j.response || {}; ['weight', 'item_name', 'item_sku', 'condition', 'category_id'].forEach(function (k) { if (_r[k] != null) echo[k] = _r[k]; }); } catch (eE) {}
   return { ok: !err, shop_id: shopId, item_id: itemId, error: err, warn: warn, sent: payload.weight != null ? { weight: payload.weight } : undefined, echo: echo };
+}
+/* ★2026-11-16 05（00・01 の頼み）：第3の店（maneki_neko_japan）の設定を本店にそろえる口。
+   ・shop/update_profile＝店の紹介文・ロゴ（店の名前は変えない＝00 の決め）
+   ・logistics/update_channel＝店で配送の手段を有効にする（SG 5-Day Delivery・MY Lockers・TW 海運の店到店〔代引き〕など）
+   ・update_item の logistic_info＝出し済みの出品にその手段を足す（今ある有効な手段は残す・足すだけ）
+   書けるのは登録簿 accounts の status＝new の店だけ（本店・2店舗目の設定をうっかり変えない）。接続は全部 callShop_／fetchRetry_ 経由＝ufBump_ で数える。 */
+function shopSetReadable_(shopId) {
+  var sid = parseInt(shopId, 10); if (!sid) throw new Error('shop_id 必須');
+  if (!getToken_(sid)) throw new Error('この台では未認可 shop_id=' + sid + '（第3は3台目で使う）');
+  return sid;
+}
+function shopSetGuard_(shopId) {
+  var sid = shopSetReadable_(shopId);
+  var r = sbSelect_('accounts', 'select=status,cc,label&shop_id=eq.' + sid + '&limit=1') || [];
+  var a = r[0] || {}, st = String(a.status || '');
+  if (st !== 'new') throw new Error('書けるのは第3の店（登録簿の status＝new）だけです（shop_id=' + sid + ' は ' + (st || '登録簿に無い') + '）');
+  return { sid: sid, cc: String(a.cc || ''), label: String(a.label || '') };
+}
+function shopProfileGet_(sid) {
+  var r = (callShop_(sid, '/api/v2/shop/get_profile', null, 'get') || {}).response || {};
+  return { shop_name: String(r.shop_name || ''), shop_logo: String(r.shop_logo || ''), description: String(r.description || '') };
+}
+/* 画像の URL を Shopee の媒体に上げて、Shopee 側の画像 URL を返す（店のロゴは image_id でなく URL で渡す）。国に合う URL を選ぶ */
+function uploadImageForUrl_(imageUrl, cc) {
+  var res0 = fetchRetry_(String(imageUrl), { muteHttpExceptions: true, __tag: '画像の取り寄せ' });
+  if (res0.getResponseCode() !== 200) throw new Error('ロゴの画像が取れません（HTTP ' + res0.getResponseCode() + '）');
+  var blob = res0.getBlob();
+  var ts = now_(), path = '/api/v2/media_space/upload_image';
+  var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&sign=' + signPublic_(path, ts);
+  var j = JSON.parse(fetchRetry_(url, { method: 'post', muteHttpExceptions: true, payload: { image: blob }, __tag: '画像のアップロード' }).getContentText());
+  if (j.error && j.error !== '') throw new Error('upload_image ' + j.error + ' ' + (j.message || ''));
+  var info = (j.response || {}).image_info || (((j.response || {}).image_info_list || [])[0]) || {};
+  var list = info.image_url_list || [], pick = null;
+  for (var i = 0; i < list.length; i++) if (String(list[i].image_url_region || '').toUpperCase() === String(cc || '').toUpperCase()) { pick = list[i].image_url; break; }
+  if (!pick && list.length) pick = list[0].image_url;
+  return { image_id: info.image_id || '', url: pick || '' };
+}
+function shopProfileSet_(sid, cc, p) {
+  var before = shopProfileGet_(sid), body = {};
+  if (p.description != null && String(p.description) !== '') body.description = String(p.description);
+  if (p.logo_url) {
+    if (!/^https:\/\//.test(String(p.logo_url))) throw new Error('logo_url は https の画像の URL');
+    if (p.dry === '1') body.shop_logo = '（上げてから決まる）' + String(p.logo_url);
+    else { var up = uploadImageForUrl_(p.logo_url, cc); if (!up.url) throw new Error('ロゴを上げましたが Shopee の画像の URL が返りませんでした'); body.shop_logo = up.url; }
+  }
+  if (!Object.keys(body).length) throw new Error('変える物がありません（description か logo_url）');
+  if (p.dry === '1') return { ok: true, dry: true, before: before, would: body };
+  callShop_(sid, '/api/v2/shop/update_profile', null, 'post', body);
+  var after = shopProfileGet_(sid);
+  var okD = body.description == null || after.description === body.description;
+  var okL = body.shop_logo == null || (!!after.shop_logo && after.shop_logo !== before.shop_logo);
+  return { ok: okD && okL, checked: { description: okD, logo: okL }, before: before, after: after };
+}
+function logiChannels_(sid) {
+  var list = (((callShop_(sid, '/api/v2/logistics/get_channel_list', null, 'get') || {}).response || {}).logistics_channel_list) || [];
+  return list.map(function (c) { return { id: c.logistics_channel_id, name: String(c.logistics_channel_name || ''), enabled: !!c.enabled, preferred: !!c.preferred, cod: !!c.cod_enabled, mask: c.mask_channel_id || 0 }; });
+}
+function logiChannelSet_(sid, p) {
+  var cid = parseInt(p.channel_id, 10); if (!cid) throw new Error('channel_id 必須（logi_channels で番号を見る）');
+  var c0 = logiChannels_(sid).filter(function (x) { return x.id === cid; })[0];
+  if (!c0) throw new Error('この店に無い配送の手段です: ' + cid);
+  var body = { logistics_channel_id: cid, enabled: String(p.enabled) !== '0' };
+  if (p.cod === '1' || p.cod === '0') body.cod_enabled = p.cod === '1';
+  if (p.preferred === '1' || p.preferred === '0') body.preferred = p.preferred === '1';
+  if (p.dry === '1') return { ok: true, dry: true, before: c0, would: body };
+  callShop_(sid, '/api/v2/logistics/update_channel', null, 'post', body);
+  try { P_().deleteProperty('logi2_' + sid); } catch (eP) {}   /* 新しく出す出品が、有効にした手段を最初から付けるように控えを捨てる（次の add_item で作り直す） */
+  var c1 = logiChannels_(sid).filter(function (x) { return x.id === cid; })[0] || null;
+  var ok = !!c1 && c1.enabled === body.enabled && (body.cod_enabled == null || c1.cod === body.cod_enabled) && (body.preferred == null || c1.preferred === body.preferred);
+  return { ok: ok, before: c0, after: c1 };
+}
+/* 出し済みの出品に配送の手段を足す。1回に max 件（既定40・上限80）＝6分の制限の中で終わる。続きは返事の next を offset に入れてもう一度 */
+function logiItemsApply_(sid, p) {
+  var ids = String(p.channel_ids || '').split(',').map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
+  if (!ids.length) throw new Error('channel_ids 必須（カンマ区切り）');
+  var en = {}; logiChannels_(sid).forEach(function (c) { if (c.enabled) en[c.id] = 1; });
+  var off = ids.filter(function (id) { return !en[id]; });
+  if (off.length) throw new Error('店で有効になっていない配送の手段: ' + off.join(',') + '（先に logi_channel_set で有効に）');
+  var max = Math.min(parseInt(p.max, 10) || 40, 80), offset = Math.max(parseInt(p.offset, 10) || 0, 0), all = [];
+  ['NORMAL', 'UNLIST'].forEach(function (st) {
+    var o = 0;
+    for (var g = 0; g < 30; g++) {
+      var r = (callShop_(sid, '/api/v2/product/get_item_list', { offset: o, page_size: 100, item_status: st }, 'get') || {}).response || {};
+      (r.item || []).forEach(function (x) { all.push(x.item_id); });
+      if (!r.has_next_page) break; o = r.next_offset;
+    }
+  });
+  all.sort(function (a, b) { return a - b; });
+  var slice = all.slice(offset, offset + max), done = [], already = 0, errs = [];
+  for (var i = 0; i < slice.length; i += 50) {
+    var items = (((callShop_(sid, '/api/v2/product/get_item_base_info', { item_id_list: slice.slice(i, i + 50).join(',') }, 'get') || {}).response || {}).item_list) || [];
+    items.forEach(function (it) {
+      var cur = (it.logistic_info || []).filter(function (x) { return x.enabled; }).map(function (x) { return { logistic_id: x.logistic_id, enabled: true }; });
+      var miss = ids.filter(function (id) { return !cur.some(function (x) { return x.logistic_id === id; }); });
+      if (!miss.length) { already++; return; }
+      if (p.dry === '1') { done.push(it.item_id); return; }
+      try {
+        var u = updateItem_({ shop_id: sid, item_id: it.item_id, logistic_info: cur.concat(miss.map(function (id) { return { logistic_id: id, enabled: true }; })) });
+        if (u.ok) done.push(it.item_id); else errs.push({ item_id: it.item_id, e: String(u.error || '').slice(0, 200) });
+      } catch (eU) { errs.push({ item_id: it.item_id, e: String((eU && eU.message) || eU).slice(0, 200) }); }
+    });
+  }
+  var verified = 0, notYet = [];
+  if (p.dry !== '1') for (var k = 0; k < done.length; k += 50) {
+    var back = (((callShop_(sid, '/api/v2/product/get_item_base_info', { item_id_list: done.slice(k, k + 50).join(',') }, 'get') || {}).response || {}).item_list) || [];
+    back.forEach(function (it) { var have = {}; (it.logistic_info || []).forEach(function (x) { if (x.enabled) have[x.logistic_id] = 1; }); if (ids.every(function (id) { return have[id]; })) verified++; else notYet.push(it.item_id); });
+  }
+  var next = offset + slice.length < all.length ? offset + slice.length : null;
+  return { ok: !errs.length && (p.dry === '1' || verified === done.length), dry: p.dry === '1', total: all.length, offset: offset, next: next, updated: done.length, already: already, verified: verified, not_yet: notYet.slice(0, 20), errors: errs.slice(0, 20) };
 }
 // 公開/非公開の切替（unlist=false で公開=NORMAL、true で非公開=UNLIST）。未公開商品の「公開」ボタン用。
 function unlistItem_(shopId, itemId, unlist) {
