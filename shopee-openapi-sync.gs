@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-1000'
+var SRC_VER = '20261115-1130'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9579,6 +9579,8 @@ function hbWatchRun_(me, heal) {
     (Array.isArray(v.items) ? v.items : []).forEach(function (f) {
       if (!f || !f.fn) return;
       var mx = Number(f.maxMin) || 60, ok = Number(f.okAt) || 0, fail = Number(f.failAt) || 0, pend = Number(f.pending) || 0;
+      /* ★2026-11-15 05（03-42 の知らせ）：health_put の okAt は1つ前の回の物（送る中身を作った後に成功の印が付く）＝届いた時刻（置いた時刻 at／updated_at）を成功として数える。1回だけ届かなかった後に、届いているのに赤になるのを止める */
+      if (f.fn === 'health_put') ok = Math.max(ok, Number(v.at) || 0, Date.parse(r.updated_at) || 0);
       var stale = !ok || (now - ok) / 60000 > mx, bad = stale && (fail > ok || pend > 0);
       if (!bad) return;
       var old = !pend && fail && now - fail > 86400000;   /* 押した時だけ動く物の昔の失敗は警告 */
