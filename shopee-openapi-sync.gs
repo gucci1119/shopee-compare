@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-2240'
+var SRC_VER = '20261115-2320'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9597,28 +9597,38 @@ function hbWatchRun_(me, heal) {
   (hs || []).forEach(function (r) {
     var v = (r.v && typeof r.v === 'object') ? r.v : {}, tag = String(v.tool || '').toUpperCase() + '（' + String(v.pc || '') + '）', at = Date.parse(r.updated_at);
     if (now - at > 3 * 86400000) { add({ id: r.k, name: tag + ' の道具', last: r.updated_at, maxMin: 90, state: 'warn', why: '3日より古い控え（PC の名前を変えた・使っていない PC の見込み）' }); return; }
-    if (now - at > 90 * 60000) { add({ id: r.k, name: tag + ' の道具', last: r.updated_at, maxMin: 90, state: 'red', why: Math.round((now - at) / 60000) + '分 知らせが来ない＝タブが閉じた・止まった見込み（推測）' }); return; }
+    /* ★2026-11-15 23時 05（03-22・03 の頼み）：SR は5分ごと・WA は page_awake を足して送る＝止まっている最中は送れない。SR・WA は40分で赤（Zalo・Viber は今までどおり90分） */
+    var stMax = /^(sr|wa)$/i.test(String(v.tool || '')) ? 40 : 90;
+    if (now - at > stMax * 60000) { add({ id: r.k, name: tag + ' の道具', last: r.updated_at, maxMin: stMax, state: 'red', why: '状態が ' + Math.round((now - at) / 60000) + '分 届いていない（Mac の眠りか、画面の裏で止まっている見込み・タブが閉じた見込みも・推測）' }); return; }
     (Array.isArray(v.items) ? v.items : []).forEach(function (f) {
       if (!f || !f.fn) return;
       var mx = Number(f.maxMin) || 60, ok = Number(f.okAt) || 0, fail = Number(f.failAt) || 0, pend = Number(f.pending) || 0;
       /* ★2026-11-15 05（03 の頼み・SR 6.19.350〜）：道具の窓が画面の裏（document.hidden）にある間は、注文メッセージ・📮が動かない（21:17 に Chrome の全タブが hidden）。
          道具は fn＝webchat_visible（WA も同じ形の予定）・failAt＝hidden の始まり（3分以上続いた時だけ）・maxMin 10 を送る。成否の印（okAt と failAt の大小）では見ず、failAt からの長さで見る。枠の断りの黄色にもしない */
-      if (/_visible$/.test(f.fn)) {
+      if (/_visible$|^page_awake$/.test(f.fn)) {
         if (fail && (now - fail) / 60000 >= mx) add({ id: r.k + ':' + f.fn, name: tag + ' の窓（画面の裏で止まっている）', last: new Date(fail).toISOString(), maxMin: mx, state: 'red', why: '窓が画面の裏（hidden）のまま ' + Math.round((now - fail) / 60000) + '分（' + Utilities.formatDate(new Date(fail), 'Asia/Tokyo', 'HH:mm') + '〜）＝注文メッセージ・📮などが動かない。窓を少しでも見える所に出す' + (f.why ? '：' + String(f.why).slice(0, 80) : '') });
         return;
       }
       /* ★2026-11-15 05（03-42 の知らせ）：health_put の okAt は1つ前の回の物（送る中身を作った後に成功の印が付く）＝届いた時刻（置いた時刻 at／updated_at）を成功として数える。1回だけ届かなかった後に、届いているのに赤になるのを止める */
       if (f.fn === 'health_put') ok = Math.max(ok, Number(v.at) || 0, Date.parse(r.updated_at) || 0);
-      var stale = !ok || (now - ok) / 60000 > mx, bad = stale && (fail > ok || pend > 0);
-      if (!bad) return;
-      var old = !pend && fail && now - fail > 86400000;   /* 押した時だけ動く物の昔の失敗は警告 */
+      /* ★2026-11-15 23時 05（03 の頼み・SR 6.19.348 の柱と同じ線）：1回失敗すると後で成功しても赤が残っていた（押した時だけ動く translate・pa_call 等は okAt を送っていなかった）。
+         ・待ちがある：成功が線（maxMin）を越えて無ければ赤
+         ・okAt を送る物：成功より新しい失敗が、線の内にある時だけ赤（線を越えた古い失敗は黄色）
+         ・okAt の無い物：3回続けて失敗（failRun）か、30分以内の失敗だけ赤（24時間以内は黄色） */
+      var fr = Number(f.failRun) || 0, failAge = fail ? (now - fail) / 60000 : Infinity, sev = '';
+      if (pend > 0 && (!ok || (now - ok) / 60000 > mx)) sev = 'red';
+      else if (fail && fail > ok) {
+        if (ok) sev = failAge <= mx ? 'red' : 'warn';
+        else sev = (fr >= 3 || failAge <= 30) ? 'red' : (failAge <= 1440 ? 'warn' : '');
+      }
+      if (!sev) return;
       /* ★2026-11-15 05（00 の見張り 07:29）：本体アカウント（取込GAS と同じ Google アカウント）が1日の枠に断られている間の、取込GAS を呼ぶ口の失敗・時間切れは、止まりと分けて黄色で出す（17:00 に戻る） */
       var qWhy = String(f.why || '');
       if (HB_MAIN_BLOCKED_ || /回数が多すぎ|urlfetch|too many times/i.test(qWhy)) {   /* ★11/15 09 05（00 の見張り 08:29）：道具の項目は全部が取込GAS（本体アカウント）を呼ぶ＝名前で絞らない（postbox_sync が漏れていた） */
         add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: 'warn', why: '本体アカウントの1日の枠の断りの間（' + ufResetJstStr_() + ' に戻る）の見込み：' + qWhy.slice(0, 80) });
         return;
       }
-      add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: old ? 'warn' : 'red', why: (f.why ? String(f.why).slice(0, 120) : (pend ? '待ち ' + pend + '件があるのに' : '失敗の後') + ' ' + mx + '分 成功が無い') });
+      add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: sev, why: (fr >= 3 ? '続けて ' + fr + '回失敗：' : '') + (f.why ? String(f.why).slice(0, 120) : (pend ? '待ち ' + pend + '件があるのに' : '失敗の後') + ' ' + mx + '分 成功が無い') });
     });
   });
   /* ⑥ 注文メッセージの送り漏れ（★2026-11-15 05・03／00 の頼み：10:06 の BR の注文が 11:02 に失敗したのに 11:28 の見張りで赤にならず、本人が先に見つけた。
