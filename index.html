@@ -19708,6 +19708,7 @@
      段階：①案内済み ②返事あり ③依頼あり ④金額調整中 ⑤購入待ち ⑥購入済み ⑦発送済み ⑧完了 ×対象外
      自動＝台帳（本体 GAS outreach_board：顧客リストの「営業送信」）の状態＋Shopee の注文（buyer＝Shopee名・最初の案内より後）。④⑤・PayPal受取・× は手で（outreach_stage） */
   const OUT_ST = [
+    ['unreached', '届かなかった（会話が開かず・飛ばした）', 0],   /* ★11/16 05（03 の決め）：案内が相手に届いていない人＝① 案内済みに入れない（返事率の分母を水増ししない）・消さずに別に数える。いちばん下の段（先に進んだ人の数えに入らない） */
     ['friend_req', '⓪ 友だち申請中（承認待ち）', 7], ['sent', '① 案内済み', 0], ['replied', '② 返事あり・依頼待ち', 7], ['requested', '③ 依頼あり・見積もり前', 3], ['quote', '④ 金額調整中', 3],
     ['wait_buy', '⑤ 購入待ち（リンク送付済み）', 3], ['bought', '⑥ 購入済み', 7], ['shipped', '⑦ 発送済み', 0], ['done', '⑧ 完了', 0], ['x', '× 対象外', 0]
   ];
@@ -19775,7 +19776,7 @@
       if (/^reply/.test(status) && t >= ((p.lastReply && p.lastReply.t) || 0)) p.lastReply = { t, note, ja };
       if (/^stage:/.test(status)) { const k = status.slice(6); if (k === 'paypal') p.paypal = true; else if (k === 'paypal_off') p.paypal = false; else p.manual = { k, t }; }
     });
-    const list = Object.values(ppl).filter(p => !p.ev.every(x => /^(existing|skipped)$/.test(x.status)));   /* 既に会話があって送っていない人は除く（★11/16 05：照らせず飛ばしただけ＝skipped だけの人も送っていない） */
+    const list = Object.values(ppl).filter(p => !p.ev.every(x => /^(existing)$/.test(x.status)));   /* 既に会話があって送っていない人は除く（飛ばしただけ・会話が開かなかっただけの人は「届かなかった」に数える＝下） */
     /* Shopee の注文（Shopee名＝buyer）。最初の案内より後のものだけ */
     const accs = [...new Set(list.map(p => (p.acc || '').trim()).filter(Boolean))];
     let orders = [];
@@ -19793,6 +19794,8 @@
       const sts = p.ev.map(x => x.status);
       /* ★2026-10-24 Zalo は友だち申請だけの人を requested（案内文はまだ）と書く＝①に数えず⓪へ。承認されて案内を送ると sent が付いて①に進む */
       let st = (sts.includes('requested') && !sts.some(x => /^(sent|unknown)$/.test(x))) ? 'friend_req' : 'sent';
+      /* ★11/16 05（03 の決め）：一度も sent・requested・unknown が無く、会話が開かなかった（notopened）か飛ばした（skipped）だけの人＝案内が届いていない */
+      if (!sts.some(x => /^(sent|requested|unknown)$/.test(x)) && sts.some(x => /^(notopened|skipped)$/.test(x)) && sts.every(x => /^(notopened|skipped|existing|contact|stage:.*)$/.test(x))) st = 'unreached';
       /* ★2026-10-24 AI が型を決められなかった返事は reply:0（userscript・GAS outreachAi_）＝返事はあったので②に数える */
       if (sts.some(x => /^(reply(:\d+)?|auto:\d(:failed)?)$/.test(x))) st = 'replied';
       if (sts.some(x => /^(reply:2|task|auto:2(:failed)?)$/.test(x))) st = 'requested';
@@ -20559,9 +20562,9 @@
     try { new MutationObserver(kick).observe(document.body || document.documentElement, { childList: true, subtree: true }); } catch (_) {}
     kick();
   })();
-  const OUT_NEXT = { friend_req: '承認を待つ', sent: '返事を待つ', replied: '追いかけの定型文を送る', requested: '見積もりを作る', quote: '金額を詰める', wait_buy: '購入されたか確かめる', bought: '発送する', shipped: '届いたか聞く', done: '—', x: '—' };
+  const OUT_NEXT = { unreached: '次の回にもう一度（1日あけて3回まで）', friend_req: '承認を待つ', sent: '返事を待つ', replied: '追いかけの定型文を送る', requested: '見積もりを作る', quote: '金額を詰める', wait_buy: '購入されたか確かめる', bought: '発送する', shipped: '届いたか聞く', done: '—', x: '—' };
   const OUT_GUIDE = {
-    friend_req: 'Zalo の友だち申請だけ出して、案内文はまだ送れていない人', sent: '案内を送って、まだ返事が無い人', replied: '返事は来たが、商品の依頼はまだの人（7日動きが無いと停滞）',
+    unreached: '案内がまだ届いていない人（会話が開かなかった・照らせずに飛ばした）。① 案内済みや返事率の分母には入れない。道具が1日あけて合わせて3回まで送り直す', friend_req: 'Zalo の友だち申請だけ出して、案内文はまだ送れていない人', sent: '案内を送って、まだ返事が無い人', replied: '返事は来たが、商品の依頼はまだの人（7日動きが無いと停滞）',
     requested: '商品の依頼が来て、まだ見積もりを送っていない人', quote: '見積もりを送り、金額を相談している人（見積もりの記録があると自動でここまで進む）', wait_buy: '購入のリンクを送り、買ってもらうのを待っている人',
     bought: '買ってもらった人（見積もりから買われた Shopee の注文〔Request page の明細・見積もりの品物〕・見積もりの「買ってもらった」で自動でここまで進む。見積もりから買われた注文だけを数えます）', shipped: '発送した人（手で付ける）', done: '取引が終わった人（手で付ける）', x: '「送らないで」「別人」・番号が見つからない人。手で × を付けた人も'
   };
@@ -20651,7 +20654,7 @@
     const xN = L.filter(p => p.stage === 'x').length, stN = L.filter(p => p.stalled).length, advN = L.filter(p => p.stage !== 'x' && OUT_IDX[p.stage] >= OUT_IDX.replied).length;
     const fchip = (k, l, n, g) => `<button class="smd-btn out-fl" data-v="${k}" data-guide="${esc(g)}" style="font-size:11.5px;padding:2px 9px${flt === k ? ';background:#fff4e5;border-color:#f0b35a;font-weight:700' : ''}">${l} ${n}</button>`;
     const flBar = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:8px 0 6px;font-size:12px">${fchip('stalled', '🔴 停滞', stN, '決めた日数より長く動きが無い人だけ（停滞の長い順）')}${fchip('adv', '② 返事より先', advN, '返事が来た人より先に進んだ人だけ')}${fchip('all', '全員（× を除く）', L.length - xN, '× 対象外を除く全員')}${fchip('x', '× 対象外', xN, '「送らないで」「別人」・番号が見つからない人')}${OUT_IDX[flt] != null ? '<span>絞り込み中：<b>' + esc((OUT_ST[OUT_IDX[flt]] || [])[1] || '') + '</b></span>' : ''} <button class="smd-btn" id="out-reload" style="font-size:11px;padding:2px 8px" data-guide="営業の台帳と見積もりの記録を読み直す">🔄 読み直す</button></div>`;
-    const opt = (cur) => OUT_ST.map(([k, ja]) => `<option value="${k}"${k === cur ? ' selected' : ''}>${esc(ja)}</option>`).join('');
+    const opt = (cur) => OUT_ST.filter(([k]) => k !== 'unreached' || k === cur).map(([k, ja]) => `<option value="${k}"${k === cur ? ' selected' : ''}>${esc(ja)}</option>`).join('');   /* 届かなかったは手で選ぶ段階ではない */
     const demo = demoOn();
     let tb = '<div class="smd-vbox" style="max-height:65vh"><table class="smd-table" style="font-size:12px;width:100%"><thead><tr>' + th('進み具合', '今その人がいる進み具合。停滞＝決めた日数より長く動きが無い', 1) + th('名前（Shopee名）', '営業の台帳の名前と Shopee 名', 1) + th('国・アプリ', '台帳の国と、営業に使ったアプリ') + th('最後の動き', '台帳に最後に付いた印と、その日数。細かい事はマウスを乗せると出ます', 1) + th('勧めた物', '見積もりの記録にある商品（写真・名前）。記録が無い人は —', 1) + th('次にやること', 'この進み具合で次にやること', 1) + th('会話', 'WhatsApp・Zalo・Viber の会話を開く') + th('PayPal', 'PayPal で受け取った時に付ける（購入に数える）') + th('進み具合を変える', '進み具合を手で付ける（手で付けた進み具合は自動では前に戻さない）', 1) + '</tr></thead><tbody>';
     rows.slice(0, 400).forEach(p => {
@@ -29645,7 +29648,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-16', items: [
-      '📣 <b>営業の流れの数え方</b>：WhatsApp の「欲しい物の声かけ」（本人が押した時だけ送る）は、営業の流れ（① 案内済み・最後の動き）に数えないようにしました。照らせずに飛ばしただけ（一度も送っていない）の人も、① 案内済みに入れません。',
+      '📣 <b>営業の流れの数え方</b>：WhatsApp の「欲しい物の声かけ」（本人が押した時だけ送る）は、営業の流れ（① 案内済み・最後の動き）に数えないようにしました。会話が開かなかった・照らせずに飛ばしただけで、案内が一度も届いていない人は、① 案内済みから外し、新しい段「届かなかった」に別に数えます（返事率の分母を水増ししない・03 の決め）。',
       '🏪 <b>第3の店（maneki_neko_japan）が抜けていた所に、第3も出すようにしました</b>（本人「ポータルのもろもろの機能さ、第3アカウントのやつが抜けてるんだよね」「ここ第3アカウントのやつないけど？」）。店の系統（本店／2店舗目／第3）の名前・色・並び・第3の店IDを<b>1か所の表</b>にまとめ、店の並びは🔑登録簿から引きます（店が増えても抜けません）。登録簿の名前・状態は変えていません。'
         + '<br>①<b>アクセス（各国）</b>：店の一覧・店の選択欄（「全部」と1店ずつ・本店／2店舗目／第3の名前つき）・比べる表・商品の表のアカウント・取り込み状況に、登録簿の全店を出します。データが届いていない店は0ではなく「<b>記録なし（取り込まれていません）</b>」。前に選んだ店はそのまま、新しく並んだ店は選んだ状態で足します。'
         + '<br>②<b>やること</b>：一度も届いていない店（第3など）は止まりではないので、赤いカード・急ぎの数には入れず、灰色の1行「記録なし（この店のアクセスはまだ取り込まれていません：…）」で出します。転記の見張りの国の一覧は登録簿から作ります（第3は転記が始まってから見ます）。'
