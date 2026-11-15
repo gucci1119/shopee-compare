@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-0945'
+var SRC_VER = '20261115-1000'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -428,8 +428,13 @@ function ufProbeMaybe_(o) {
 function ufProbeLog_(x) { try { P_().setProperty('ufProbe', JSON.stringify(x)); } catch (e) {} }
 function ufProbeInfo_() { try { return JSON.parse(P_().getProperty('ufProbe') || 'null'); } catch (e) { return null; } }
 function ufBlockedInfo_() { try { var s = P_().getProperty('ufBlocked'); var o = s ? JSON.parse(s) : null; return (o && o.d === ufToday_()) ? o : null; } catch (e) { return null; } }
+/* ★2026-11-15 05（01 の指摘）：UrlFetchApp の例外の文には呼んだ URL がそのまま入る＝access_token・token・sign などの鍵が、失敗の文・控え・伝言に残る。
+   外へ出す失敗の文はこれを通して鍵の値を伏せる */
+function redactSecrets_(s) {
+  return String(s == null ? '' : s).replace(/([?&](?:access_token|refresh_token|token|sign|partner_key|apikey|key|wt|rk)=)[^&\s"')]+/gi, '$1***');
+}
 function ufNoteErr_(e) {
-  var m = String((e && e.message) || e || '');
+  var m = redactSecrets_((e && e.message) || e || '');   /* ★11/15 控えに残す前に鍵を伏せる */
   /* ★Codex指摘（2026-09-21・P1）：Google には2種類ある。
        ・1日の枠切れ … 「Service invoked too many times for one day」「1 日にサービス〜回数が多すぎます」→ その日はもう無理
        ・短時間の連打 … 「too many times in a short time」「短時間に〜」→ 少し待てば直る
@@ -2800,7 +2805,7 @@ function childTokens_() {
   u += (u.indexOf('?') >= 0 ? '&' : '?') + 'action=shop_tokens&with_refresh=1&token=' + encodeURIComponent(P_().getProperty('WRITE_TOKEN') || '');
   ufBump_(1, '本体からトークンを受け取る');
   var txt = '';
-  try { txt = UrlFetchApp.fetch(u, { muteHttpExceptions: true }).getContentText(); } catch (e2) { txt = 'fetch失敗: ' + e2; }
+  try { txt = UrlFetchApp.fetch(u, { muteHttpExceptions: true }).getContentText(); } catch (e2) { txt = 'fetch失敗: ' + redactSecrets_(e2); }
   var j = null;
   try { j = JSON.parse(String(txt).replace(/^\s*[A-Za-z_$][\w$]*\(/, '').replace(/\)\s*;?\s*$/, '')); } catch (e3) { j = null; }
   if (!j || !j.ok || !j.list || !j.list.length) {
@@ -3075,7 +3080,7 @@ function callShop_(shopId, path, query, method, body, beforeFetch) {
     }
     catch (e) { lastErr = e; ufNoteErr_(e); if (/too many times|回数が多すぎます|quota|rate/i.test(String(e))) break; if (beforeFetch || String(method || '').toLowerCase() === 'post' && /add_item|add_model|init_tier_variation|update_tier_variation|delete_|unlist_item|boost_item|ship_order|copy|register_brand|add_voucher/.test(String(path)) || /\/(add_discount|add_bundle_deal|split_order)$/.test(String(path))) break; Utilities.sleep(700 * (a + 1)); }   /* ★2026-09-28 Codex：作る・消す・並べ替える POST は、通信例外（Shopee側で済んでいて返事だけ落ちた可能性）で送り直さない＝二重作成・二重削除を防ぐ */ // クォータ枯渇は即諦める＋【断られた事実】を残す（2026-09-21）
   }
-  if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + ((lastErr && lastErr.message) || lastErr));
+  if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + redactSecrets_((lastErr && lastErr.message) || lastErr));   /* ★11/15 鍵を伏せる */
   var j = JSON.parse(txt);
   if (j.error) { var _fl = ''; try { var _f = (j.response || {}).failure_list; if (_f && _f.length) _fl = ' failure_list=' + JSON.stringify(_f).slice(0, 300); } catch (eFl) {}   /* ★2026-10-18 unlist_item 等は上の error が「all failed」だけで、本当の理由は response.failure_list[].failed_reason に入る。これを捨てていたので『公開失敗＝枠満杯』と決めつけ、172/1,000 の TH 2店舗目に満杯の印を付けていた */
     var _se = new Error(path + ' error=' + j.error + ' ' + (j.message || '') + _fl); _se.shopeeError = String(j.error); _se.shopeeMsg = String(j.message || '').slice(0, 300); throw _se; }   /* ★2026-11-13 中19：Shopee が返事で断った印（通信の失敗・JSON でない返事と見分ける） */
@@ -6311,7 +6316,7 @@ function shop3PubTake_(src, token) {
   ufBump_(1, '第3店の公開控えの引き継ぎ');
   var txt = UrlFetchApp.fetch(url + '?action=shop3_pub_handoff&to=' + encodeURIComponent(baRunnerId_()) + '&token=' + encodeURIComponent(token) + '&callback=cb', { muteHttpExceptions: true }).getContentText();
   var j = null; try { j = JSON.parse(String(txt).replace(/^\s*[A-Za-z_$][\w$]*\(/, '').replace(/\)\s*;?\s*$/, '')); } catch (e) { j = null; }
-  if (!j || !j.ok || !j.shards || typeof j.shards !== 'object') throw new Error('今の受け持ちから控えを受け取れませんでした（どの台も公開しない状態です・もう一度 take を）：' + String(txt).slice(0, 160));
+  if (!j || !j.ok || !j.shards || typeof j.shards !== 'object') throw new Error('今の受け持ちから控えを受け取れませんでした（どの台も公開しない状態です・もう一度 take を）：' + redactSecrets_(txt).slice(0, 160));
   var lock = shop3PubLock_(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（もう一度 take を）');
   try {
     var pr = P_(), rank = function (v) { var c = String(v || '').charAt(0); return { r: 1, p: 2, i: 3, s: 4, a: 5 }[c] || 0; }, add = 0, kept = 0, toP = 0;
