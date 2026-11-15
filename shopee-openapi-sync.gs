@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261116-0000'
+var SRC_VER = '20261116-0050'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9380,7 +9380,7 @@ var HB_KV_ = [
   ['mam_patrol_seen', '購入後あいさつの見回り（メルカリのタブ）', 60, 'upd'],
   ['rowsync_last', '利益管理表への転記（Seller Center のタブ）', 300, 'upd'],
   ['chat_sender_hb', 'Shopee チャットの取り込み（webchat のタブ）', 60, 'upd'],
-  ['uf_ext_mercari', '仕入れの取り込み（取込GAS）', 90, 'upd'],
+  ['ingest_hb', '仕入れの取り込み（取込GAS）', 90, 'upd'],   /* ★2026-11-16 05：uf_ext_mercari は接続の回数が100回増えた時にしか書かれない＝夜は90分を越えて誤って赤（11/15 23:29）。取り込みが最後まで走った時の印（30分に1回まで）を見る */
   ['profit_sheet', '利益管理表の取り込み', 1560, 'upd'],
   ['ai_actual', 'AI の実績（コスト画面のタブ）', 1800, 'at']
 ];
