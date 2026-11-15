@@ -1848,7 +1848,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261115-0406';
+  const APP_BUILD = '20261116-0359';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -12318,15 +12318,19 @@
     const rg = regionByCc(cc), cost = context.cost, opt = context.opt || {};
     const price = prices.reduce((sum, value) => sum + value, 0);
     const yen = n => '¥' + n.toLocaleString(i18nOn() ? 'en-US' : 'ja-JP');
-    if (!['1', '2', '3'].includes(plan) || !prices.length || prices.some(p => !Number.isFinite(p) || p <= 0)
-      || context.sample || !Number.isFinite(cost) || cost <= 0 || !Number.isFinite(opt.weightG) || opt.weightG <= 0
-      || !Number.isFinite(rg?.rateJpy) || rg.rateJpy <= 0
-      || !Array.isArray(settings.priceFees?.[cc]) || !Array.isArray(settings.priceSls?.[cc])) {
-      return fail('inputs', tr('仕入額・重量・為替・送料・販売額を確認してください。', 'Check the cost, weight, exchange rate, shipping, and sale amount.'));
+    /* ★11/16 05（全体レビュー 11/16 高2）：本人の決め（11/14「止めるのは決めた金額と出す額が違う時だけ」）の止めを一番上に。
+       前は仕入れ・重さ・為替・送料の表の欠け（inputs＝⚠で通す）が先に返り、決めた金額の照らしまで届かずに違う額のまま出品へ進んだ */
+    if (!['1', '2', '3'].includes(plan) || !prices.length || prices.some(p => !Number.isFinite(p) || p <= 0)) {
+      return fail('bad_price', tr('出品する額が読めません（0・空・数字でない）。見積もりを開き直してください。', 'The listing amount is unreadable (zero, empty or not a number). Reopen the quote.'));
     }
     const agreedPrice = agreed?.ref === ref && agreed.plan === plan ? agreed.price : null;
     if (agreedPrice > 0 && Math.abs(price - agreedPrice) > pcAmtTol(cc)) {   /* ★2026-11-15 05（全面改修・型D）：許容を自動の入口と同じにそろえた */
       return fail('agreed_price', tr(`Shopeeの掲載額 ${price} ${quote.ISO} が、お客さんと決めた金額 ${agreedPrice} と一致しません。`, `The Shopee listing amount of ${price} ${quote.ISO} differs from the agreed amount of ${agreedPrice}.`));
+    }
+    if (context.sample || !Number.isFinite(cost) || cost <= 0 || !Number.isFinite(opt.weightG) || opt.weightG <= 0
+      || !Number.isFinite(rg?.rateJpy) || rg.rateJpy <= 0
+      || !Array.isArray(settings.priceFees?.[cc]) || !Array.isArray(settings.priceSls?.[cc])) {
+      return fail('inputs', tr('仕入額・重量・為替・送料・販売額を確認してください。', 'Check the cost, weight, exchange rate, shipping, and sale amount.'));
     }
     const split = plan !== '1';
     if (split && (stage !== 'paid' || !ref || receipt?.ref !== ref || !Number.isSafeInteger(receipt.netJpy) || receipt.netJpy <= 0)) {
@@ -12441,11 +12445,12 @@
       const belowOut = {};
       const issue = pcReqProfitCheck(L, pList, anyUser ? Object.assign({}, profitContext, { userSet: true, notes: upNotes, belowOut }) : profitContext, readStage(), receipt(), pcQuote.agreedReq);
       if (!issue && belowOut.need) pcQuote.belowLine = { need: belowOut.need, got: belowOut.got };
-      if (issue && issue.code !== 'agreed_price') { _pfNote(issue); }
+      if (issue && issue.code !== 'agreed_price' && issue.code !== 'bad_price') { _pfNote(issue); }   /* ★11/16 05：額が読めない（bad_price）も決めた金額と同じく止める */
       else if (issue && reportProfitBlock(issue)) return true;   /* ★11/12 再レビュー中2：承認済み（false）なら品物ごとの確かめへ進む */
       /* ★2026-11-12 レビュー高2（23.6）：品物ごとの値段の明細は1点ずつ別の注文で買える＝品物ごとに、その品物の仕入れ・重さ・1件分の線で粗利を確かめる（重さが無い品は合計の重さ＝高めの送料で見る） */
       if (BQ && BQ.perItem) { for (let ii = 0; ii < BQ.items.length; ii++) { const x = BQ.items[ii], o0 = profitContext.opt || {};
         const iss = pcReqProfitCheck(L, [pList[ii]], Object.assign({}, profitContext, { cost: x.cost, opt: Object.assign({}, o0, x.w > 0 ? { weightG: x.w } : {}), grossT: 0, marginT: 0, roiT: 0, userSet: true, notes: upNotes, itemName: x.en || ('品物' + (ii + 1)) }), readStage(), receipt(), null);
+        if (iss && iss.code === 'bad_price' && reportProfitBlock(Object.assign({}, iss, { msg: iss.msg + '（' + (x.en || ('品物' + (ii + 1))) + '）', item: ii }))) return true;   /* ★11/16 05：品物ごとの額が読めない時も止める */
         if (iss) { _pfNote(Object.assign({}, iss, { msg: iss.msg + '（' + (x.en || ('品物' + (ii + 1))) + '）' })); continue; }
         if (iss && reportProfitBlock(Object.assign({}, iss, { msg: iss.msg + '（品物ごとの値段：' + (x.en || ('品物' + (ii + 1))) + ' ' + pList[ii] + '・この品だけ買われた時）', item: ii }))) return true; } }   /* 承認済みの品は次へ */
       { const _pn = pcQuote.userProfitNote; pcQuote.userProfitNote = (upNotes.length ? '手で決めた粗利で作りました（' + upNotes.join('／') + '）' : '') + (_pn ? (upNotes.length ? '／' : '') + _pn : ''); }
@@ -29662,6 +29667,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-16', items: [
+      '🛡 <b>Request page に足す時の止め</b>（全体レビュー 11/16 高2）：お客さんと決めた金額と出す額が違う時は、仕入れ・重さ・為替・送料の表が欠けていても必ず止めます（前は表の欠けの⚠が先に出て、違う額のまま出品へ進む筋がありました）。出す額が読めない（0・空）時も止めます。あわせて、版の印を記録のたびに自動で書くようにしました（古い窓が自分で読み直す仕組みが効くように）。',
       '🆕 <b>出品管理（出品ログ）を見やすく</b>（本人「直感的に・見にくいのよね」）：国ごとの枠の店の名前が「maneki_neko_japan.p／h」と途中で折れていたのを「🏪 第3」「🏪 本店」の1行に（かざすと全部の名前）、日ごとの棒の上の件数（8px の薄い灰色）を大きく濃く。',
       '🏷 <b>在庫管理を見やすく</b>（本人「直感的に・見にくいのよね」）：有在庫化候補の表の「🔁 6ヶ月」「¥789 1件」が折れて縦に伸びていたのを1行に、在庫台帳の「自動・シート」の札の字（8.5px）を大きく。',
       '📦 <b>注文管理を見やすく</b>（本人「直感的に・見にくいのよね」）：上の段を「段階のタブ（すべて・要対応・未手配…）と絞り込み（🤖自動出品だけ・検索）」、下の段を「操作のボタン（更新・今すぐ取得・一括印刷…）」に分けました（前はボタンが先でタブが後ろ）。表の「店」は切れた名前（gcsonline…）でなく「本店・2店舗目・第3」の太字に（かざすと全部の名前）。注文番号・バイヤー・追跡番号が途中で切れないように幅を広げ、商品名は1行で切らず2行まで、注文日時は年を省いて「11/15(日)23:42」の形に（前は「2026/11/1」で切れていた）。',
