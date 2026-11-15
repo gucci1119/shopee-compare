@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-1640'
+var SRC_VER = '20261115-2240'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2879,7 +2879,7 @@ function baClaimAtomic_(k, holdSec, me) {
     ufBump_(1, '取り札(取得)');
     var r = UrlFetchApp.fetch(base + '?on_conflict=k', { method: 'post', contentType: 'application/json', muteHttpExceptions: true,
       headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'resolution=ignore-duplicates,return=representation' },
-      payload: JSON.stringify([{ k: k, v: { at: now_(), by: me }, updated_at: new Date().toISOString() }]) });
+      payload: jsonSafe_([{ k: k, v: { at: now_(), by: me }, updated_at: new Date().toISOString() }]) });
     if (r.getResponseCode() >= 300) return null;
     var rows = JSON.parse(r.getContentText() || '[]');
     if (BA_KV_CACHE) { try { delete BA_KV_CACHE[k]; } catch (e0) {} }
@@ -9169,20 +9169,28 @@ function sbSelectAll_(table, query) {
   if (capped) { Logger.log('⚠ sbSelectAll_(' + table + ') が20,000件で打ち切られました＝取りこぼしています: ' + query.slice(0, 120)); throw new Error('sbSelectAll_(' + table + ') が20,000件を超えました＝一部しか読めていないので、この処理は止めます'); }   /* ★2026-09-28 Codex：一部しか読めていないのに全件として集計・上書きしない */
   return out;
 }
+/* ★2026-11-15 05（03 の頼み・SR 6.19.350 で分かった型）：文を途中で切ると絵文字の片割れが残り、その JSON を Supabase（jsonb）が丸ごと断る。
+   Supabase へ送る JSON は全部ここを通し、片割れだけを消す（組の絵文字は残す・回数は変わらない）。見張りも道具の理由の文を切って hb_watch に書くため */
+function jsonSafe_(x) {
+  var s = JSON.stringify(x);
+  if (typeof s !== 'string') return s;
+  s = s.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '');
+  return s.replace(/(?<!\\)((?:\\\\)*)\\u[dD][89a-fA-F][0-9a-fA-F]{2}/g, '$1');
+}
 function sbUpsert_(table, rows, onConflict) {
   /* ★2026-10-22 app_kv は updated_at を付けないと作った日のまま（listing_stats_* が 7/28 のまま＝ポータルの「統計の日付」が古く見えた）＝付け忘れていても必ず付ける */
   if (table === 'app_kv' && rows && rows.length) { var nowU = new Date().toISOString(); rows = rows.map(function (r) { if (!r || r.updated_at) return r; var o = {}; Object.keys(r).forEach(function (kk) { o[kk] = r[kk]; }); o.updated_at = nowU; return o; }); }
   var url = cfg_('SB_URL') + '/rest/v1/' + table + (onConflict ? ('?on_conflict=' + onConflict) : ''), key = cfg_('SB_SERVICE_KEY');
   for (var i = 0; i < rows.length; i += 200) {
     ufBump_(1, 'Supabase書き(' + table + ')');
-    var res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'resolution=merge-duplicates,return=minimal' }, payload: JSON.stringify(rows.slice(i, i + 200)) });
+    var res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'resolution=merge-duplicates,return=minimal' }, payload: jsonSafe_(rows.slice(i, i + 200)) });
     if (res.getResponseCode() >= 300) throw new Error('Supabase upsert ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
   }
 }
 function sbPatch_(table, query, obj) {
   var key = cfg_('SB_SERVICE_KEY');
   ufBump_(1, 'Supabase更新(' + table + ')');
-  var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'patch', contentType: 'application/json', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'return=minimal' }, payload: JSON.stringify(obj) });
+  var res = UrlFetchApp.fetch(cfg_('SB_URL') + '/rest/v1/' + table + '?' + query, { method: 'patch', contentType: 'application/json', muteHttpExceptions: true, headers: { apikey: key, Authorization: 'Bearer ' + key, Prefer: 'return=minimal' }, payload: jsonSafe_(obj) });
   if (res.getResponseCode() >= 300) throw new Error('Supabase patch ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
 }
 /* 🚚 ヤマト「Web請求書提供サービス＞運賃情報参照」の明細（userscript が拾う・日次の速報）
@@ -9593,6 +9601,12 @@ function hbWatchRun_(me, heal) {
     (Array.isArray(v.items) ? v.items : []).forEach(function (f) {
       if (!f || !f.fn) return;
       var mx = Number(f.maxMin) || 60, ok = Number(f.okAt) || 0, fail = Number(f.failAt) || 0, pend = Number(f.pending) || 0;
+      /* ★2026-11-15 05（03 の頼み・SR 6.19.350〜）：道具の窓が画面の裏（document.hidden）にある間は、注文メッセージ・📮が動かない（21:17 に Chrome の全タブが hidden）。
+         道具は fn＝webchat_visible（WA も同じ形の予定）・failAt＝hidden の始まり（3分以上続いた時だけ）・maxMin 10 を送る。成否の印（okAt と failAt の大小）では見ず、failAt からの長さで見る。枠の断りの黄色にもしない */
+      if (/_visible$/.test(f.fn)) {
+        if (fail && (now - fail) / 60000 >= mx) add({ id: r.k + ':' + f.fn, name: tag + ' の窓（画面の裏で止まっている）', last: new Date(fail).toISOString(), maxMin: mx, state: 'red', why: '窓が画面の裏（hidden）のまま ' + Math.round((now - fail) / 60000) + '分（' + Utilities.formatDate(new Date(fail), 'Asia/Tokyo', 'HH:mm') + '〜）＝注文メッセージ・📮などが動かない。窓を少しでも見える所に出す' + (f.why ? '：' + String(f.why).slice(0, 80) : '') });
+        return;
+      }
       /* ★2026-11-15 05（03-42 の知らせ）：health_put の okAt は1つ前の回の物（送る中身を作った後に成功の印が付く）＝届いた時刻（置いた時刻 at／updated_at）を成功として数える。1回だけ届かなかった後に、届いているのに赤になるのを止める */
       if (f.fn === 'health_put') ok = Math.max(ok, Number(v.at) || 0, Date.parse(r.updated_at) || 0);
       var stale = !ok || (now - ok) / 60000 > mx, bad = stale && (fail > ok || pend > 0);
