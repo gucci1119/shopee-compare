@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261115-1200'
+var SRC_VER = '20261115-1640'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -9607,6 +9607,37 @@ function hbWatchRun_(me, heal) {
       add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: old ? 'warn' : 'red', why: (f.why ? String(f.why).slice(0, 120) : (pend ? '待ち ' + pend + '件があるのに' : '失敗の後') + ' ' + mx + '分 成功が無い') });
     });
   });
+  /* ⑥ 注文メッセージの送り漏れ（★2026-11-15 05・03／00 の頼み：10:06 の BR の注文が 11:02 に失敗したのに 11:28 の見張りで赤にならず、本人が先に見つけた。
+     道具の health の okAt は後の回の「送る物なし」でも新しくなり、失敗を隠す＝道具の成否では見ない）。
+     注文（orders）と台帳（app_kv order_msg_state）を突き合わせる。直近48時間・支払い済み（キャンセル・未払いでない）・お客さんの名前あり・注文から30分たった注文で、
+     台帳が sent でも skip（同じお客さんに7日以内に送った＝送らない決め・取込GAS omsgPull_ と同じ線）でもない物が1件でもあれば赤。
+     読みは小さく：注文は5列だけ、台帳はその注文の鍵だけ（40件ずつ）。画面が変わっても窓が変わっても、送れていなければここで拾う */
+  var om = null, omErr = '';
+  try {
+    var nowS = Math.floor(now / 1000);
+    var os = sbSelect_('orders', 'select=sn,cc,status,order_ts,buyer&order_ts=gte.' + (nowS - 48 * 3600) + '&order_ts=lte.' + (nowS - 30 * 60) + '&status=not.in.(CANCELLED,UNPAID,IN_CANCEL)&order=order_ts.asc&limit=300') || [];
+    var seenO = {};
+    os = os.filter(function (o) { var k = String(o.sn || '').trim(); if (!/^\d{6}[A-Z0-9]{8}$/.test(k) || seenO[k] || !o.buyer || /cancel|unpaid/i.test(String(o.status || ''))) return false; seenO[k] = 1; o.sn = k; return true; });
+    om = { orders: os, led: {}, since: 0 };
+    for (var oi = 0; oi < os.length; oi += 40) {
+      var part = os.slice(oi, oi + 40), sel = part.map(function (o, j) { return 'o' + j + ':v->orders->' + o.sn; }).join(',');
+      var lr = hbSel_('select=since:v->since,' + sel + '&k=eq.order_msg_state'), l0 = (lr && lr[0]) || null;
+      if (!l0) throw new Error('台帳 order_msg_state が無い');
+      om.since = Number(l0.since) || 0;
+      part.forEach(function (o, j) { om.led[o.sn] = l0['o' + j] || null; });
+    }
+  } catch (eO) { om = null; omErr = String((eO && eO.message) || eO).slice(0, 120); }
+  if (!om) add({ id: 'omsg_read', name: '注文メッセージの突き合わせの読み', state: 'blind', why: '読めなかった＝この回は注文メッセージの送り漏れを見ていない（0件ではない）' + (omErr ? '（' + omErr + '）' : ''), last: null });
+  else {
+    var omJa = { failed: '失敗', claimed: '送っている途中のまま', unknown: '送れたか分からない', retry: 'やり直し待ち' }, omMiss = [];
+    om.orders.forEach(function (o) {
+      if (om.since && Number(o.order_ts) < om.since) return;
+      var st = om.led[o.sn], s0 = st && st.s;
+      if (s0 === 'sent' || s0 === 'skip') return;
+      omMiss.push(o.cc + ' ' + o.sn + '（' + Utilities.formatDate(new Date(Number(o.order_ts) * 1000), 'Asia/Tokyo', 'MM/dd HH:mm') + ' の注文・' + (s0 ? (omJa[s0] || s0) : '台帳に無い＝道具が拾っていない') + (st && st.note ? '：' + String(st.note).slice(0, 40) : '') + '）');
+    });
+    add({ id: 'omsg_unsent', name: '注文メッセージ（支払い済みで30分たっても送れていない注文）', state: omMiss.length ? 'red' : 'ok', why: omMiss.length ? omMiss.length + '件：' + omMiss.slice(0, 5).join('／') + (omMiss.length > 5 ? ' ほか ' + (omMiss.length - 5) + '件' : '') : '直近48時間の ' + om.orders.length + '件は送付済み（または送らない決め）', last: null });
+  }
   return fin();
 }
 
