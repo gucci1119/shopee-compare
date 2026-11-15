@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261116-0320'
+var SRC_VER = '20261116-0420'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -897,6 +897,22 @@ function doGetInner_(e) {
       s3out.src = SRC_VER;
       return ContentService.createTextOutput(s3cb + '(' + JSON.stringify(s3out) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
+    if (p.action === 'noedit_add' || p.action === 'noedit_del' || p.action === 'noedit_list') {   /* ★11/16 05：出品ごとの「自動で触らない」印（案内の画像・配送の絵・説明の追記を入れ直さない）・WRITE_TOKEN */
+      var necb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), neout;
+      try {
+        var newt = P_().getProperty('WRITE_TOKEN'); if (!newt || p.token !== newt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var nem = baKvFresh_('noedit_items'); if (nem == null) { if (BA_KV_FAIL['noedit_items']) throw new Error('noedit_items を読めない＝書かない（空で上書きしない）'); nem = {}; }
+        if (p.action !== 'noedit_list') {
+          var neids = String(p.items || p.item_id || '').split(',').map(function (x) { return x.replace(/[^0-9]/g, ''); }).filter(Boolean);
+          if (!neids.length) throw new Error('items 必須（カンマ区切りの item_id）');
+          neids.forEach(function (id) { if (p.action === 'noedit_add') nem[id] = { at: new Date().toISOString(), why: String(p.why || '').slice(0, 120) }; else delete nem[id]; });
+          baKvSet_('noedit_items', nem);
+          var neb = baKvFresh_('noedit_items') || {}; neout = { ok: neids.every(function (id) { return p.action === 'noedit_add' ? !!neb[id] : !neb[id]; }), items: neids, n: Object.keys(neb).length };
+        } else neout = { ok: true, map: nem, n: Object.keys(nem).length };
+      } catch (err) { neout = { ok: false, error: String((err && err.message) || err) }; }
+      neout.src = SRC_VER;
+      return ContentService.createTextOutput(necb + '(' + JSON.stringify(neout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'update_item') {
       var ucb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var uout;
@@ -909,7 +925,7 @@ function doGetInner_(e) {
         // ★画像：URLをカンマ区切りで受け取り、media_space へアップして image_id に変換する（既存の uploadImageUrl_ を利用）
         var uImgs = null;
         if (p.images != null && String(p.images) !== '') uImgs = String(p.images).split(',').map(function (u) { return u.trim(); }).filter(Boolean);
-        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, brand_id: p.brand_id, brand_name: p.brand_name, condition: p.condition, pre_order: uPre, attribute_list: uAttrs, images: uImgs, category_id: p.category_id, min_purchase: p.min_purchase, logistic_info: (function () { try { return p.logistic_info ? JSON.parse(p.logistic_info) : null; } catch (e) { return null; } })() });
+        uout = updateItem_({ shop_id: p.shop_id, item_id: p.item_id, item_name: p.name, item_sku: p.sku, description: p.desc, desc_type: p.desc_type, weight: p.weight, brand_id: p.brand_id, brand_name: p.brand_name, condition: p.condition, pre_order: uPre, attribute_list: uAttrs, images: uImgs, category_id: p.category_id, min_purchase: p.min_purchase, logistic_info: (function () { try { return p.logistic_info ? JSON.parse(p.logistic_info) : null; } catch (e) { return null; } })(), no_video: p.no_video === '1' });
       } catch (err) { uout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ucb + '(' + JSON.stringify(uout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
@@ -3856,6 +3872,9 @@ function promoAfterCreate_(shopId, itemId, P, result) {
   if (vok && !P.imgErr) { try { var fr = baKvFreshMany_(['promo_new']); if (fr) { var mp = ((fr.promo_new || {}).map) || {}; mp[itemId] = { cc: cc, shop: String(shopId), at: Date.now(), add: P.add }; baKvSet_('promo_new', { map: mp, at: new Date().toISOString() }); } } catch (eN) {} }
 }
 function promoNewDrop_(ids) { if (!ids || !ids.length) return; try { var fr = baKvFreshMany_(['promo_new']); if (!fr) return; var mp = ((fr.promo_new || {}).map) || {}; ids.forEach(function (id) { delete mp[id]; }); baKvSet_('promo_new', { map: mp, at: new Date().toISOString() }); } catch (e) {} }
+/* ★11/16 05（01・BANNED の直しは1回だけ）：出品ごとの「自動で触らない」印 app_kv noedit_items = {item_id: {at, why}}。案内の画像（promo）・配送の絵（dimg）・説明の追記（dnote）の自動処理は、この印の出品を飛ばす＝本人や部署が直した後に入れ直さない */
+var _NOEDIT = null;
+function noEditItems_() { if (_NOEDIT) return _NOEDIT; try { _NOEDIT = baKvFresh_('noedit_items') || {}; } catch (e) { _NOEDIT = {}; } return _NOEDIT; }
 var PROMO_DAILY_HOUR = 18;   /* 日本時間。枠のリセット（夏16時・冬17時）の後＝🤖に枠を使い切られた後に当たらない */
 /* ★全出品への一括（10分ごと・GAS の中で回す＝Chrome が落ちても止まらない）。
    promo_job = {on, limit(試運転の上限・0=無制限), n(今までに処理した数), ok, ng, at, msg}
@@ -3904,7 +3923,7 @@ function promoTickBody_() {
       var galPick = 0;
       var gfixLeft = Math.max(0, GFIX_DAILY - dayCount_(job, 'gfix', 0)), gfixPick = 0, hadRet = {}, gfixOnly = {};
       var needsGfix = function (r, d) { if (!(r.images || []).some(function (x) { return retired[x]; })) return false; hadRet[r.item_id] = 1; if (d && d.gfixAt && !(Date.parse(r.synced_at || '') > Number(d.gfixAt))) return false; if (Number((d && d.gfixN) || 0) >= 3) return false; return !(Number(r.update_time || 0) > nowSec - BULK_SKIP_RECENT_SEC); };   /* 入れ直した後、同期で写真の並びが新しくなるまでは選ばない */
-      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id || isShop3Shop_(r.shop_id)) return false; var d = doneMap[r.item_id]; var gf = needsGfix(r, d); if (!d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d)) return true; if (gf && gfixPick < gfixLeft) { gfixPick++; gfixOnly[r.item_id] = 1; return true; } if (needsGal(d, r) && galPick < galLeft) { galPick++; return true; } return false; });
+      var _ne = noEditItems_(); var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id || isShop3Shop_(r.shop_id) || _ne[String(r.item_id)]) return false; var d = doneMap[r.item_id]; var gf = needsGfix(r, d); if (!d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d)) return true; if (gf && gfixPick < gfixLeft) { gfixPick++; gfixOnly[r.item_id] = 1; return true; } if (needsGal(d, r) && galPick < galLeft) { galPick++; return true; } return false; });
       var redoIds = {}; todo.forEach(function (r) { var d = doneMap[r.item_id]; if (d && d.ok) redoIds[r.item_id] = 1; });
       if (!todo.length) continue;
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
@@ -4225,7 +4244,7 @@ function dnoteTickBody_(budgetMs) {
     for (var ci = 0; ci < ccs.length; ci++) {
       var cc = ccs[ci];
       var rows = sbSelectAll_('listings', 'select=item_id,shop_id&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
-      var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && (!d || Number(d.v || 1) < DNOTE_VER || (!d.ok && Number(d.tries || 1) < 3) || (cc === 'BR' && job.body && d.ok && !d.bodyv)); });   /* ★2026-11-04 前の版の済み（v が無い／1）もやり直す・BR は本文の切り替えの後にもう1回（bodyv） */
+      var _ne2 = noEditItems_(); var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && !_ne2[String(r.item_id)] && (!d || Number(d.v || 1) < DNOTE_VER || (!d.ok && Number(d.tries || 1) < 3) || (cc === 'BR' && job.body && d.ok && !d.bodyv)); });   /* ★2026-11-04 前の版の済み（v が無い／1）もやり直す・BR は本文の切り替えの後にもう1回（bodyv） */
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
       var shops = Object.keys(byShop);
       for (var si = 0; si < shops.length; si++) {
@@ -4326,7 +4345,7 @@ function dimgTickBody_() {
     for (var ci = 0; ci < ccs.length; ci++) {
       var cc = ccs[ci];
       var rows = sbSelectAll_('listings', 'select=item_id,shop_id&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
-      var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && (!d || (!d.ok && Number(d.tries || 1) < 3)); });
+      var _ne2 = noEditItems_(); var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && !_ne2[String(r.item_id)] && (!d || (!d.ok && Number(d.tries || 1) < 3)); });
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
       var shops = Object.keys(byShop);
       for (var si = 0; si < shops.length; si++) {
@@ -6309,6 +6328,18 @@ function shop3PubClear_(shopId, asinsCsv, dry) {
       else { var ids = ((r && r.response) || {}).item_id_list || []; if (ids.length) found[a] = 'Shopee にある（' + ids.slice(0, 3).join(',') + '）＝外さない'; } }
     catch (e) { found[a] = 'Shopee で探せない（' + String((e && e.message) || e).slice(0, 40) + '）＝外さない'; }
   });
+  /* ★11/16 05（全体レビュー 11/16 高3）：前に作った出品は親に SKU が無い＝search_item で見つからない。外す前に、控えの時刻より後に動いた出品の明細の SKU も照らす（get_item_list → get_model_list）。50件を超えて調べきれない時・読めない時は外さない */
+  var modelHit = null, modelWhy = '';
+  try {
+    var pr0 = P_(), minTs = 0;
+    asins.forEach(function (a) { if (found[a]) return; var hash = 0; for (var i = 0; i < a.length; i++) hash = Math.imul(hash, 31) + a.charCodeAt(i); var v0 = {}; try { v0 = JSON.parse(pr0.getProperty('shop3_pub_' + sid + '_' + ((hash >>> 0) % 8)) || '{}'); } catch (e0) { v0 = {}; } var m0 = /^[rp]:(\d+):/.exec(String(v0[a] || '')); if (m0) { var t0 = Number(m0[1]); if (t0 > 1e12) t0 = Math.floor(t0 / 1000); if (!minTs || t0 < minTs) minTs = t0; } });
+    if (minTs) {
+      var recent = [];
+      ['NORMAL', 'UNLIST'].forEach(function (st0) { var off = 0; for (var g = 0; g < 5; g++) { var lr = (callShop_(Number(sid), '/api/v2/product/get_item_list', { offset: off, page_size: 100, item_status: st0, update_time_from: minTs - 600, update_time_to: Math.floor(Date.now() / 1000) }, 'get') || {}).response || {}; (lr.item || []).forEach(function (x) { recent.push(x.item_id); }); if (!lr.has_next_page) break; off = lr.next_offset; } });
+      if (recent.length > 50) modelWhy = '控えの後に動いた出品が ' + recent.length + ' 件あり調べきれない＝外さない';
+      else { modelHit = {}; recent.forEach(function (iid) { var ml = ((callShop_(Number(sid), '/api/v2/product/get_model_list', { item_id: iid }, 'get') || {}).response || {}).model || []; ml.forEach(function (m) { var k = String(m.model_sku || '').trim().toUpperCase(); if (/^AMZ_[A-Z0-9]{10}$/.test(k)) modelHit[k.slice(4)] = iid; }); }); }
+    }
+  } catch (eM) { modelHit = null; modelWhy = '控えの後の出品を読めない（' + String((eM && eM.message) || eM).slice(0, 40) + '）＝外さない'; }
   var lock = shop3PubLock_(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です');
   try {
     var pr = P_();
@@ -6320,6 +6351,9 @@ function shop3PubClear_(shopId, asinsCsv, dry) {
       if (!st) { out.kept.push({ asin: a, why: '控えに無い' }); return; }
       if (!/^[rp]:/.test(st)) { out.kept.push({ asin: a, why: '商品ができている印（' + st + '）' }); return; }
       if (found[a]) { out.kept.push({ asin: a, why: found[a] }); return; }
+      if (modelWhy) { out.kept.push({ asin: a, why: modelWhy }); return; }
+      if (modelHit && modelHit[a]) { out.kept.push({ asin: a, why: '明細の SKU で見つかった（' + modelHit[a] + '）＝外さない' }); return; }
+      if (!modelHit) { out.kept.push({ asin: a, why: '控えの時刻が読めず照らせない＝外さない' }); return; }
       out.cleared.push({ asin: a, was: st.slice(0, 2) });
       if (!dry) { delete v[a]; pr.setProperty(key, JSON.stringify(v)); }
     });
@@ -6535,6 +6569,8 @@ function addItem_(body, attempt) {
     logistic_info: logisticInfo
   };
   if (body.dimension) payload.dimension = body.dimension;
+  /* ★11/16 05（全体レビュー 11/16 高3）：第3の公開では、出品そのものにも先頭の ASIN の SKU（AMZ_<ASIN>）を付ける。控えを外す口（shop3PubClear_）は search_item を item_sku で探す＝前は明細にしか SKU が無く「無い」と外して出し直し＝二重公開の筋 */
+  if (candidate) { var _amz = (vars || []).map(function (v) { return String((v && v.sku) || '').trim().toUpperCase(); }).filter(function (k) { return /^AMZ_[A-Z0-9]{10}$/.test(k); })[0]; if (_amz) payload.item_sku = _amz; }
   if (body.attribute_list && body.attribute_list.length) payload.attribute_list = body.attribute_list;
   /* ★2026-09-23 本人「switchが少ない原因は何？」。TW の Switch カタログの複製が毎回
      `Attribute "Adult products" is ...`（必須の属性が無い）で落ちていた。属性は作った【あと】に写す作り（copyAttrs_）なので、
@@ -6820,7 +6856,8 @@ function updateItem_(body) {
     if (!_ids.length) throw new Error('画像のアップロードに失敗しました（URLを確認してください）');
     payload.image = { image_id_list: _ids };
   }
-  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight/pre_order/attribute_list/image/category_id/logistic_info のいずれか）');
+  if (body.no_video) payload.video_upload_id = [];   /* ★11/16 05（01・TW2 の BANNED の直しを1回で送る）：動画を外す＝remove_item_video と同じ指定 */
+  if (Object.keys(payload).length <= 1) throw new Error('更新項目がありません（name/sku/desc/weight/pre_order/attribute_list/image/category_id/logistic_info/no_video のいずれか）');
   var j = callShop_(shopId, '/api/v2/product/update_item', null, 'post', payload);
   var err = (j.error && j.error !== '') ? (j.error + ' ' + (j.message || '')) : '';
   /* ★2026-10-26 01 商品部：TW 本店 54462537115 で weight=0.2 が ok なのに 0.5 のまま・update_time も不変。Shopee の注意書き（warning）と、返ってきた中身の重さを返す（何が効かなかったかを見るため） */
