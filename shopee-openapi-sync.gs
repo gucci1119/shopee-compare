@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261116-0110'
+var SRC_VER = '20261116-0145'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -3085,8 +3085,16 @@ function callShop_(shopId, path, query, method, body, beforeFetch) {
   if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + redactSecrets_((lastErr && lastErr.message) || lastErr));   /* ★11/15 鍵を伏せる */
   var j = JSON.parse(txt);
   if (j.error) { var _fl = ''; try { var _f = (j.response || {}).failure_list; if (_f && _f.length) _fl = ' failure_list=' + JSON.stringify(_f).slice(0, 300); } catch (eFl) {}   /* ★2026-10-18 unlist_item 等は上の error が「all failed」だけで、本当の理由は response.failure_list[].failed_reason に入る。これを捨てていたので『公開失敗＝枠満杯』と決めつけ、172/1,000 の TH 2店舗目に満杯の印を付けていた */
-    var _se = new Error(path + ' error=' + j.error + ' ' + (j.message || '') + _fl); _se.shopeeError = String(j.error); _se.shopeeMsg = String(j.message || '').slice(0, 300); throw _se; }   /* ★2026-11-13 中19：Shopee が返事で断った印（通信の失敗・JSON でない返事と見分ける） */
+    var _se = new Error(path + ' error=' + j.error + ' ' + (j.message || '') + _fl); _se.shopeeError = String(j.error); _se.shopeeMsg = String(j.message || '').slice(0, 300); throw _se; }
+  if (body && body.item_id && LIST_DIRTY_PATHS_.test(path)) listDirtyMark_(shopId, body.item_id);   /* ★11/16 05：値段・在庫・明細を書いたら写しの取り直しの印 */   /* ★2026-11-13 中19：Shopee が返事で断った印（通信の失敗・JSON でない返事と見分ける） */
   return j;
+}
+/* ★2026-11-16 05（01 が見つけた・00 の決め 1）：値段・在庫・明細だけの変更では Shopee の update_time が進まない＝出品の写し（listings）の明細が古いまま（MY 51906638079・BR で消えた明細が写しに残る 等・本店210出品の突き合わせで7件）。
+   書く口が成功したら印 app_kv ldirty_<店>_<出品> を書き（接続1回・印は重ねても1行）、2時間ごとの増分の同期（syncListingsChangedAll）が印の出品を必ず取り直して印を消す */
+var LIST_DIRTY_PATHS_ = /^\/api\/v2\/product\/(update_price|update_stock|add_model|delete_model|update_model|update_tier_variation|init_tier_variation)$/;
+var _LDIRTY_DONE = {};
+function listDirtyMark_(shopId, itemId) {
+  try { if (!shopId || !itemId) return; var dk = shopId + '_' + itemId; if (_LDIRTY_DONE[dk]) return; _LDIRTY_DONE[dk] = 1; sbUpsert_('app_kv', [{ k: 'ldirty_' + shopId + '_' + itemId, v: { at: new Date().toISOString() } }], 'k'); } catch (e) { try { Logger.log('listDirtyMark_ ' + e); } catch (e2) {} }
 }
 function shopInfo_(shopId) { var j = callShop_(shopId, '/api/v2/shop/get_shop_info', null, 'get'); return { region: j.region, shop_name: j.shop_name }; }
 
@@ -8672,11 +8680,13 @@ function priceOfInfo_(pi0) { if (!pi0) return 0; return pi0.original_price != nu
 function stockOfV2_(sv) { sv = sv || {}; var ss = (sv.seller_stock || [])[0] || {}; if (ss.stock != null) return ss.stock; var su = sv.summary_info || {}; return su.total_available_stock != null ? su.total_available_stock : 0; }
 
 // 1店舗ぶんを取得して listings に upsert（本体）
-function syncListingsForShop_(tok, sinceSec) {
+function syncListingsForShop_(tok, sinceSec, forceIds) {
   var mdlFailIds = [];   // ★明細を取れなかった商品。保存せず飛ばした分＝呼び出し元に返して見えるようにする
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
   var shopId = tok.shop_id;
   var ids = listItemIds_(shopId, sinceSec);
+  var _force = {};   /* ★11/16 05：書いた出品（印 ldirty_）は変わった一覧に無くても加え、明細を必ず取り直す */
+  if (forceIds && forceIds.length) { var _have = {}; ids.forEach(function (x) { _have[String(x.item_id)] = 1; }); forceIds.forEach(function (x) { _force[String(x)] = 1; if (!_have[String(x)]) ids.push({ item_id: Number(x), status: null }); }); }
   if (!ids.length) return { cc: cc, shop_id: shopId, listings: 0, mode: sinceSec ? 'changed' : 'full' };
   var statusById = {}; ids.forEach(function (x) { statusById[x.item_id] = x.status; });
   var rows = [];
@@ -8740,6 +8750,7 @@ function syncListingsForShop_(tok, sinceSec) {
         && Array.isArray(_prev.models) && _prev.models.length
         && !(it.has_model && _prev.models.some(function (m) { return m && !m.ghost && !Number(m.id); })));   /* ★11/7 明細のある商品の控えに「明細0」が混ざっていたら取り直す（前の失敗で壊れた控えを使い続けない） */
       if (_sameTime && _rotOn && it.has_model && (Number(String(it.item_id).slice(-6)) % 7) === (_rotDay % 7)) { _sameTime = false; _rotN++; }   // 今日の組は取り直す
+      if (_sameTime && _force[String(it.item_id)]) _sameTime = false;   // 書いた出品は取り直す
       if (it.has_model && _sameTime) {
         // ★前回と同じ更新時刻＝中身は変わっていない。保存済みの明細をそのまま使う（APIを叩かない）
         models = _prev.models;
@@ -8877,7 +8888,8 @@ function syncListingsRoundRobin() {
   var log = [], _fullNow = false;
   try {
     var _lastRR = parseInt(P_().getProperty('listRR_at') || '0', 10) || 0;
-    if (Date.now() - _lastRR >= LIST_RR_EVERY_MS) { P_().setProperty('listRR_at', String(Date.now())); _fullNow = true; }
+    if (baRunnerId_() === 'main') Logger.log('全件同期は本体の台では回さない（11/16 00 の決め・子の台で回す）');
+    else if (Date.now() - _lastRR >= LIST_RR_EVERY_MS) { P_().setProperty('listRR_at', String(Date.now())); _fullNow = true; }
     else Logger.log('全件同期は見送り: 前回から ' + Math.round(LIST_RR_EVERY_MS / 60000) + ' 分たっていない（増分は下で続ける）');
   } catch (eRR) {}
   if (_fullNow) {
@@ -8918,7 +8930,9 @@ function syncListingsRoundRobin() {
 function syncListingsChangedAll(hours) {
   var since = now_() - (hours || 2) * 3600;
   var toks = listTokens_(), log = [];
-  toks.forEach(function (tok) { try { log.push(syncListingsForShop_(tok, since)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+  var dirty = {}, dkeys = {};   /* ★11/16 05：書いた出品の印（ldirty_<店>_<出品>）を読み、その店の増分で必ず取り直す・取り直せた店の印は消す */
+  try { (sbSelect_('app_kv', 'select=k&k=like.ldirty_*&limit=500') || []).forEach(function (r) { var m = String(r.k || '').match(/^ldirty_(\d+)_(\d+)$/); if (!m) return; (dirty[m[1]] = dirty[m[1]] || []).push(m[2]); (dkeys[m[1]] = dkeys[m[1]] || []).push(r.k); }); } catch (eD) { dirty = {}; dkeys = {}; }
+  toks.forEach(function (tok) { var sid = String(tok.shop_id); try { log.push(syncListingsForShop_(tok, since, dirty[sid])); if (dkeys[sid] && dkeys[sid].length) { try { sbDelete_('app_kv', 'k=in.(' + dkeys[sid].join(',') + ')'); } catch (eDel) {} } } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
   Logger.log('listings増分同期(changed ' + (hours || 2) + 'h): ' + JSON.stringify(log)); return log;
 }
 
