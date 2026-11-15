@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261116-0050'
+var SRC_VER = '20261116-0110'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -975,7 +975,7 @@ function doGetInner_(e) {
       try {
         var ilwt = P_().getProperty('WRITE_TOKEN');
         if (!ilwt || p.token !== ilwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-        var accs = sbSelectAll_('accounts', 'select=cc,shop_id,status&status=in.(main,sub)') || [];
+        var accs = sbSelectAll_('accounts', 'select=cc,shop_id,status&status=in.(main,sub,new)') || [];   /* ★11/16 05：第3（登録簿の status＝new）の枠も取る＝各国そろえるの出品枠に出す */
         var ilShops = [], ilErrs = [];
         accs.forEach(function (a) {
           if (!a || !a.shop_id) return;
@@ -13207,7 +13207,7 @@ function llogShiftWatch_(budgetMs, dry) {
 }
 /* ★2026-11-05 出品枠の控え（shop_item_limit）が24時間より古ければ取り直す（1店1回＝13回の接続・失敗した店は前の値を残す・試すのは1時間に1回まで） */
 function baItemLimitRefresh_() {
-  var accs = sbSelectAll_('accounts', 'select=cc,shop_id,status&status=in.(main,sub)') || [], got = [], errs = [];
+  var accs = sbSelectAll_('accounts', 'select=cc,shop_id,status&status=in.(main,sub,new)') || [], got = [], errs = [];   /* ★11/16 05：第3（status＝new）も */
   accs.forEach(function (a) {
     if (!a || !a.shop_id) return;
     try { var lim = callShop_(parseInt(a.shop_id, 10), '/api/v2/product/get_item_limit', {}, 'get'); var cap = Number((((lim.response || {}).item_count_limit) || {}).max_limit) || 0; if (cap > 0) got.push({ cc: a.cc, shop_id: String(a.shop_id), role: a.status, cap: cap }); }
