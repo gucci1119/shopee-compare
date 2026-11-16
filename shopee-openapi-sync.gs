@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-0215'
+var SRC_VER = '20261117-0309'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -12135,7 +12135,7 @@ function boshuAutoTick(manual) {
       return { ok: false, skipped: 'not_runner', runner: _runner, child: isChild_(), note: '🤖の担当は「' + (_runner === 'child' ? '2台目（別Googleアカウント）' : '本体') + '」です。担当側のGASへ送ってください' };
     }
     var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
-    if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0 };
+    if (!st.today || st.today.d !== todayJ) st.today = baTodayRoll_(st, todayJ, { d: todayJ, n: 0, added: 0, cc: {} });
     /* ★2026-10-03 残高切れの間に失敗まで数えて上限(12,000)に張り付いた今日の数を一度だけ戻す（以後は成功だけ数える） */
     if (st.today.d === '2026-10-03' && !st.today.aiFix1003) { st.today.aiText = 0; st.today.capT = 0; st.today.aiFix1003 = 1; }
     if (baAiDownLoad_(st)) baLog_(st, '⛔ AIが使えない（' + String(BA_AI_DOWN).slice(0, 50) + '）→この回はAIを呼ばない。' + Math.round(BA_AI_DOWN_RETRY_MS / 60000) + '分ごとに1回だけ試す');
@@ -12595,7 +12595,7 @@ function boshuAutoPrejudge_(hw, maxN) {
     { var aymP = baAiYenMonth_(), capP = baAiMonthCap_(cfg); if (capP > 0 && (aymP.unreadable || aymP.yen >= capP)) return { ok: false, error: aymP.unreadable ? '💴 今月のAI料金の実績を読めなかったので判定しません（もう一度押してください）' : ('💴 今月のAI料金が上限 ¥' + capP + '（実績 ¥' + aymP.actual + '＋今日 ¥' + aymP.est + '）＝上げるには本人の許可が要ります') }; }
     var fam = cfg.family[hw]; var ccs = (fam.ccs && fam.ccs.length) ? fam.ccs.slice() : (cfg.ccs || []).slice();
     var ctx = baLoadCtx_(cfg, hw, ccs); var st = baKv_(BA_ST) || {}; st.log = st.log || [];
-    var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'); if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0 };
+    var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'); if (!st.today || st.today.d !== todayJ) st.today = baTodayRoll_(st, todayJ, { d: todayJ, n: 0, added: 0, cc: {} });
     var dailyMax = Number(cfg.dailyMax) || 100; st.aiTextCap = dailyMax * 4;
     baPreHEnsure_(hw);
     var judged = baKv_(BA_JUDGED) || {}, sameCache = baKv_(BA_SAME) || {}, pre = baKv_('boshu_auto_pre') || {};
@@ -12803,6 +12803,10 @@ function setupCondIndexTrigger() {
 /* ★2026-10-29 本人「なんで今日、こんなに出品できてないん？」→「数える仕組みを入れて」：見送りの控え（skipped）は直近300件（約30分）しか残らず、1日の理由別の数が分からなかった。
    状態の鍵に1日分の数を持つ＝st.skipDay { d:日本の日付, n:{理由:回数（同じ作品を何度見ても数える）}, u:{理由:作品の数の目安（30分の重複を除く）}, hw:{'機種|理由':作品の数の目安} }。
    日付が変わったら前の日を st.skipDayPrev に移す（朝に前の日の分を読める）。理由には見送り（nojan・costhigh 等）のほか shopfull:国（その国は満杯で足さない）・taishonashi（候補が全部出済み／見送り）も入る */
+/* ★2026-11-17 05（00・01 の調べ「🤖の today（added の控え）は400件で古い方が切れ、2台目は 0〜4時の分が数えられない」）：
+   日付が変わる時に前の日の today を st.todayPrev に移す（skipDayPrev と同じ形・数バイト）。today.cc＝国ごとの足した明細の数（足した記録 st.added と同じ所で +1）。接続の回数は増えない */
+function baTodayRoll_(st, todayJ, fresh) { try { if (st && st.today && st.today.d && st.today.d !== todayJ) st.todayPrev = st.today; } catch (e) {} return fresh; }
+function baTodayCc_(st, cc) { try { if (!st || !st.today || !cc) return; var t = st.today; t.cc = t.cc || {}; t.cc[cc] = (t.cc[cc] || 0) + 1; } catch (e) {} }
 function baSkipDay_(st, hw, why, isNew, k) {
   try {
     var d = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), S = st.skipDay, c = Math.max(1, Number(k) || 1);
@@ -13934,7 +13938,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
            出品ログの写真表示がこの明細だけ素通りする（img は URL ではなく **imageId** を入れる） */
         try {
           baLooseMark_(hw, cc, _x0._p.ja, tgt.item_id);
-          st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', mpn: _x0._p.mpn || '', jc: _x0._p.jc || 0, jw: _x0._p.jan ? 1 : 0, jv: baRuleVerFor_(hw),
+          baTodayCc_(st, cc); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', mpn: _x0._p.mpn || '', jc: _x0._p.jc || 0, jw: _x0._p.jan ? 1 : 0, jv: baRuleVerFor_(hw),
             shop_id: tgt.shop_id, key: _x0._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: _x0._p.src || '', srcTitle: String(_x0._p.srcTitle || '').slice(0, 60), srcPrice: Number(_x0._p.srcPrice) || 0, q: _x0._p.q || '', from: _x0._p.from || 'yahoo',
             en: _x0.option, ja: String(_x0._p.ja || '').slice(0, 80), price: _x0.price, stock: (_ru.stock != null ? _ru.stock : _x0.stock),
             img: _x0._p.imageId || '', cost: _x0._p.cost || 0, hits: _x0._p.hits || 0, reused: 1, partial: _ru.partial ? 1 : 0 });
@@ -13998,7 +14002,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       if (mid) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; _addedHere++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
         if (mid && x._p.jan && !BA_LOOSE_HW.test(String(hw))) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
-        try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', mpn: x._p.mpn || '', jc: x._p.jc || 0, jw: (mid && x._p.jan) ? 1 : 0, jv: baRuleVerFor_(hw), shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', srcTitle: String(x._p.srcTitle || '').slice(0, 60), srcPrice: Number(x._p.srcPrice) || 0, q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
+        try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); baTodayCc_(st, cc); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', mpn: x._p.mpn || '', jc: x._p.jc || 0, jw: (mid && x._p.jan) ? 1 : 0, jv: baRuleVerFor_(hw), shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', srcTitle: String(x._p.srcTitle || '').slice(0, 60), srcPrice: Number(x._p.srcPrice) || 0, q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
     });
@@ -15311,7 +15315,7 @@ function tcgTick(manual) {
       if (capM > 0 && aym.unreadable) return finish_('💴 今月のAI料金の実績（ai_actual）を読めなかったので、この回は止めました（次の回にまた読みます）');   /* ★#15 */
       if (capM > 0 && aym.yen >= capM) return finish_('💴 今月のAI料金が上限 ¥' + capM + ' に達したので止めています（実績 ¥' + aym.actual + '＋今日の見積 ¥' + aym.est + '）。上げるには本人の許可が要ります'); } catch (eM) {}
     var todayJ = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
-    if (!st.today || st.today.d !== todayJ) st.today = { d: todayJ, n: 0, added: 0, judged: 0 };
+    if (!st.today || st.today.d !== todayJ) st.today = baTodayRoll_(st, todayJ, { d: todayJ, n: 0, added: 0, judged: 0, cc: {} });
     var dailyMax = Math.ceil((Number(tc.dailyMax) || 60) / TCG_RUNNERS_N);   /* ★2026-10-12 台ごとに数えるので台数で割る＝全体の上限 cfg.tcg.dailyMax は今まで通り */
     if (st.today.added >= dailyMax && manual !== true) return finish_('今日の上限 ' + dailyMax + '件に達したので明日まで休み');
     var hws = (tc.hws || ['pokeca']).filter(function (h) { return cfg.family && cfg.family[h] && (cfg.family[h].sku || cfg.family[h].nameKey); });
