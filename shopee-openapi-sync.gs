@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-0309'
+var SRC_VER = '20261117-0407'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -782,6 +782,11 @@ function doGetInner_(e) {
     //   そのため「1分前に作った出品がポータルに出てこない」が起きる。ここは
     //   get_item_list の update_time_from を使って【直近hours時間で作られた/変わった出品だけ】を取る＝速い。
     //   ?action=listings_now&token=&hours=12&shop_id=（shop_id省略時は全店）
+    if (p.action === 'listings_dirty_now') {   /* ★2026-11-17 05：印の付いた出品だけ今すぐ取り直す（書き込みの鍵が要る） */
+      var dwt = P_().getProperty('WRITE_TOKEN'); if (!dwt || p.token !== dwt) throw new Error('WRITE_TOKEN不正');
+      var dlog = syncListingsDirty_(Math.min(300000, (parseInt(p.ms, 10) || 240000))); ufPersist_();
+      return out_({ ok: true, log: dlog }, p.callback);
+    }
     if (p.action === 'listings_now') {
       var ncb2 = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var nout2;
@@ -8944,7 +8949,7 @@ function syncListingsForShop_(tok, sinceSec, forceIds) {
   var mdlFailIds = [];   // ★明細を取れなかった商品。保存せず飛ばした分＝呼び出し元に返して見えるようにする
   var cc = tok.cc || (function () { var i = shopInfo_(tok.shop_id); tok.cc = REGION_TO_CC[i.region] || i.region; saveToken_(tok); return tok.cc; })();
   var shopId = tok.shop_id;
-  var ids = listItemIds_(shopId, sinceSec);
+  var ids = (sinceSec === -1) ? [] : listItemIds_(shopId, sinceSec);   /* ★11/17 -1＝印の出品だけ（変わった出品の一覧を読まない＝店ごとの一覧の接続2回を使わない） */
   var _force = {};   /* ★11/16 05：書いた出品（印 ldirty_）は変わった一覧に無くても加え、明細を必ず取り直す */
   if (forceIds && forceIds.length) { var _have = {}; ids.forEach(function (x) { _have[String(x.item_id)] = 1; }); forceIds.forEach(function (x) { _force[String(x)] = 1; if (!_have[String(x)]) ids.push({ item_id: Number(x), status: null }); }); }
   if (!ids.length) return { cc: cc, shop_id: shopId, listings: 0, mode: sinceSec ? 'changed' : 'full' };
@@ -9176,6 +9181,8 @@ function syncListingsRoundRobin() {
     }
   } else log.push({ fullSkipped: _fullWhy || 'too_soon' });
   if (!gateOk) { ufPersist_(); Logger.log('listings同期(RR・全件だけ): ' + JSON.stringify(log)); return log; }   /* 増分は担当（門を通った台）だけ */
+  /* ★2026-11-17 05：印の付いた出品は2時間を待たずに毎回（30分ごと）取り直す（古い印の店から・2分半まで） */
+  try { var _dl = syncListingsDirty_(150000); if (_dl && _dl.length) log.push({ dirty: _dl }); } catch (eDl) { log.push({ dirtyError: String(eDl).slice(0, 140) }); }
   // 「変更のあった出品だけ」の全店増分同期は毎回(30分毎)ではなく最短2時間おき＝urlfetch枠の節約（教訓：食うポーリングを毎回走らせない）。
   // 2h窓ぶんを一度に拾うので取りこぼしなし（画像/タイトル/在庫/価格/バリエ変更は最長2時間で反映）。
   try {
@@ -9215,6 +9222,26 @@ function syncListingsChangedAll(hours) {
   Logger.log('listings増分同期(changed ' + (hours || 2) + 'h): ' + JSON.stringify(log)); return log;
 }
 
+/* ★2026-11-17 05（00・本人「ここの画像は、いつになったら最新のやつが入りますか？」）：取り直しの印（ldirty_）の付いた出品【だけ】を取り直す。
+   明細の画像だけの差し替えは Shopee の更新時刻が動かず、時間の窓（listings_now・増分）では拾えない（実測 11/17 02:3x）。
+   2時間ごとの増分の中で印を消化していたが、全店を1回で回すので6分の制限で後ろの店まで届かない回があった（推測・04:06 に 02:11 の印が残っていた）。
+   → 印のある店だけ・古い印の店から・時間の上限つきで回す。接続＝印の出品ごとに約2回（変わった出品の一覧は読まない）。定例（30分ごと）と /exec（listings_dirty_now）から呼ぶ */
+function syncListingsDirty_(maxMs) {
+  var t0 = Date.now(), lim = Math.max(30000, Number(maxMs) || 150000), log = [], dirty = {}, dkeys = {}, oldest = {}, dirtyDelErr = 0;
+  try { (sbSelect_('app_kv', 'select=k,v&k=like.ldirty_*&order=k.asc&limit=1000') || []).forEach(function (r) { var m = String(r.k || '').match(/^ldirty_(\d+)_(\d+)$/); if (!m) return; (dirty[m[1]] = dirty[m[1]] || []).push(m[2]); (dkeys[m[1]] = dkeys[m[1]] || []).push(r.k); var at = String((r.v && r.v.at) || ''); if (!oldest[m[1]] || at < oldest[m[1]]) oldest[m[1]] = at; }); }
+  catch (eD) { return [{ error: '印を読めませんでした: ' + String(eD).slice(0, 100) }]; }
+  var toks = listTokens_().filter(function (t) { return dirty[String(t.shop_id)]; });
+  toks.sort(function (a, b) { return String(oldest[String(a.shop_id)] || '').localeCompare(String(oldest[String(b.shop_id)] || '')); });   /* 古い印の店から */
+  toks.forEach(function (tok) { var sid = String(tok.shop_id);
+    if (Date.now() - t0 > lim) { log.push({ cc: tok.cc, shop_id: sid, deferred: dirty[sid].length }); return; }
+    try { var t0iso = new Date().toISOString(); var res = syncListingsForShop_(tok, -1, dirty[sid]); var failSet = {}; ((res && res._mdlFailAll) || []).forEach(function (x) { failSet[x] = 1; }); if (res) delete res._mdlFailAll;
+      var del = dkeys[sid].filter(function (k) { var m = /^ldirty_\d+_(\d+)$/.exec(k); return m && !failSet[m[1]]; });
+      for (var di = 0; di < del.length; di += 100) { try { sbDelete_('app_kv', 'k=in.(' + del.slice(di, di + 100).join(',') + ')&v-%3E%3Eat=lt.' + encodeURIComponent(t0iso)); } catch (eDel) { dirtyDelErr++; } }
+      log.push({ cc: tok.cc, shop_id: sid, marked: dirty[sid].length, listings: res && res.listings, mdlFail: res && res.mdlFail }); }
+    catch (e) { log.push({ cc: tok.cc, shop_id: sid, error: String(e).slice(0, 140) }); } });
+  if (dirtyDelErr) log.push({ ldirtyDelErr: dirtyDelErr });
+  Logger.log('listings 印の取り直し: ' + JSON.stringify(log)); return log;
+}
 // ★まず1店だけで中身確認（本番listingsに書く前の検証。Supabaseには書かない）
 function testSyncListingsOneShop() {
   var toks = listTokens_(); if (!toks.length) { Logger.log('認可店なし'); return; }
