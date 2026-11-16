@@ -1855,7 +1855,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-0008';
+  const APP_BUILD = '20261117-0017';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -22216,7 +22216,7 @@
         [orders, income, costs, inv, expenses, kv, tasks, issues, shKv] = await Promise.all([
           // ★order_ts を取らないと、下の JST 判定が必ず else（各国ローカル日）に落ちる。
           //   月境界と、注文日レートの基準日がずれる（2026-09-06に発覚）。
-          sbGetAll('orders', 'select=cc,sn,total,order_date,order_ts,tab&order=order_date.desc'),
+          sbGetAll('orders', 'select=cc,sn,total,order_date,order_ts,tab,items&order=order_date.desc'),   /* ★2026-11-17 items＝注文の個数（在庫が一部だけ紐付いた注文を利益明細と同じに扱う） */
           // ★buyer_paid も取る。orders.total は空のことがあり、売上が黙って落ちる。
           sbGetAll('income', 'select=cc,sn,amount,buyer_paid'),
           sbGetAll('costs', 'select=cc,sn,cost,deposit'),
@@ -22255,7 +22255,7 @@
     if (!plan.cfg.monthTargets) plan.cfg.monthTargets = {};
     if (!Array.isArray(plan.cfg.fixBreak)) plan.cfg.fixBreak = [];
     // 利益エンジンと同じ突合：仕入原価=costs.cost 優先→在庫(shopee_sn)の仕入額合算／入金=income.amount 優先→costs.deposit（いずれもローカル通貨）
-    const invBySn = {}; inv.forEach(it => { if (it.shopee_sn) invBySn[it.shopee_sn] = (invBySn[it.shopee_sn] || 0) + (Number(it.price) || 0); });
+    const invItemsBySn = {}; inv.forEach(it => { if (it.shopee_sn) (invItemsBySn[it.shopee_sn] = invItemsBySn[it.shopee_sn] || []).push(it); });   /* ★2026-11-17 仕入は orderCostJpy（利益明細と同じ）で決める＝注文ごとの在庫の一覧を渡す */
     const incBySn = {}; income.forEach(i => { incBySn[i.cc + ':' + i.sn] = i; });
     const costBySn = {}; costs.forEach(c => { costBySn[c.cc + ':' + c.sn] = c; });
     // ★PayPal差分＝Shopeeの入金とは別に買主から受け取った円（主にBR）。利益明細では既に粗利へ足しているので、月次でも同じにする
@@ -22281,9 +22281,7 @@
       // ★優先順位は利益明細（pfCost）と同じにする：①手入力/確定 → ②在庫台帳 → ③スプシ取込。
       //   ここだけ順序が逆で、しかもスプシ取込を一切見ていなかったため、
       //   同じ月の粗利が💹利益明細と📈事業計画で違う値になっていた（2026-09-06）。
-      const cost = (cm && cm.cost != null) ? Number(cm.cost)
-        : (invBySn[o.sn] != null) ? invBySn[o.sn]
-        : (Number((shMap[o.cc + ':' + o.sn] || {}).cost) > 0 ? Number(shMap[o.cc + ':' + o.sn].cost) : null);   // ③📗利益計算表(スプシ)の控え
+      const cost0 = orderCostJpy(o, cm, invItemsBySn[o.sn], shMap[key]), cost = cost0 == null ? null : Number(cost0);   /* ★2026-11-17 利益明細（損益のカード）と同じ1つの関数 */
       // ★入金は【仕入が分からなくても】足す。両方そろった分だけで数えていたため、
       //   「入金は分かっているが仕入が未紐付け」の注文は入金までまるごと0になり、
       //   週次報告の「売上（入金ベース）」が月初ほど過少に出ていた（2026-09-06に発覚）。
@@ -29967,6 +29965,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '🧮 <b>損益のカードと、グラフ・事業計画の月の粗利が同じ数字になるようにしました</b>（11月が ¥2,098 ずれていた）。ずれていたのは PH の注文1件（Switch のソフト3本）でした。在庫台帳に紐付いていたのは2本（¥4,500）だけで、事業計画は2本ぶん、カードは利益管理表の注文全体（¥6,598）で数えていました。仕入額を決める計算を1つにまとめ、どの画面も同じ数え方（①手入力 → ②在庫台帳。個数より紐付きが少ない時は利益管理表の注文全体 → ③利益管理表）にしました',
       '🤖 <b>第3の店の Amazon からの出品が、公開してすぐ出品ログと「🤖 第3・Amazon：今日 N件（最後 hh:mm）」に出るようにしました</b>（本人「出品進んでるのかこれ？」）。前は公開した明細が出品ログに入るのが、ポータルの1時間ごとの取り込み待ちで、最大1時間ほど遅れていました。今は公開した時に GAS が出品ログに書きます（6台とも版 20261116-2345）',
     ] },
     { date: '2026-11-16', items: [
@@ -50241,6 +50240,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (state || positive) return { state: state === 'received' || state === 'shopee_only' ? 'unverified' : (state || 'recorded'), yen: null, pending: true };
     return { state: request ? 'unknown_method' : '', yen: null, pending: request };
   }
+  /* ★2026-11-17 05（00「グラフ・カード・計画の月ごとの実績が同じ関数から出る形」）：注文1件の仕入額（円）を決めるのはここ1か所。
+     利益明細（損益のカード）と事業計画（グラフ・計画の月の実績・国×月の表）が両方これを使う。
+     11月に PH 261114AESKNWRH（Switch のソフト3本）で、在庫に紐付いたのが2本だけ（¥4,500）＝計画は ¥4,500、カードは利益管理表の注文全体 ¥6,598 で、粗利が ¥2,098 ずれた。
+     優先：①手入力/確定（costs.cost）→ ②在庫台帳（紐付いた在庫の仕入額の合計。注文の個数より紐付きが少ない＝「一部だけ」の時は、利益管理表の注文全体の額が大きければそれ・無ければ未入力）→ ③利益管理表の控え */
+  function orderUnits(o) { return ((o && o.items) || []).reduce((s, it) => s + (Number(it && it.qty) || 1), 0); }
+  function orderCostJpy(o, cm, invItems, sheet) {
+    if (cm && cm.cost != null) return cm.cost;
+    const inv = (invItems || []).filter(it => it && it.price != null);
+    if (inv.length) { const invSum = inv.reduce((t, it) => t + it.price, 0); const u = orderUnits(o); if (!(u > 1 && inv.length < u)) return invSum;
+      const shc = Number((sheet || {}).cost) || 0; return shc > invSum ? shc : null; }
+    return (sheet && Number(sheet.cost) > 0) ? Number(sheet.cost) : null;
+  }
   function orderPayPalReceipt(sheet, order) {
     const request = (order.items || []).some(it => /^REQ_/i.test(String(it.sku || it.model_sku || '').trim()) || /request\s*page|solicitar/i.test(String(it.name || '')));
     return payPalReceipt(sheet, request);
@@ -61547,14 +61558,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
      その時はスプシの注文全体の額が大きければそれ、無ければ未入力扱い（粗利に入れず、仕入額のセルと KPI に件数を出す。🔗仕入れ自動マッチの対象にも戻る） */
   const pfUnits = o => (o.items || []).reduce((s, it) => s + (Number(it && it.qty) || 1), 0);
   const pfCostPartial = o => { const cm = pf.costMap.get(o.cc + ':' + o.sn); if (cm && cm.cost != null) return null; const inv = pfInv(o).filter(it => it.price != null); const u = pfUnits(o); return (inv.length && u > 1 && inv.length < u) ? { have: inv.length, need: u } : null; };
-  const pfCost = o => {
-    const cm = pf.costMap.get(o.cc + ':' + o.sn);
-    if (cm && cm.cost != null) return cm.cost;         // ①ポータルで手入力/確定した値が最優先
-    const inv = pfInv(o).filter(it => it.price != null);
-    if (inv.length) { const invSum = inv.reduce((s, it) => s + it.price, 0); if (!pfCostPartial(o)) return invSum;   // ②在庫台帳（紐付いた在庫の仕入額）
-      const shc = Number((pfSheet(o) || {}).cost) || 0; return shc > invSum ? shc : null; }   // 一部だけ：スプシの注文全体の額が大きければそれ・無ければ未入力扱い（レビュー#3）
-    const sh = pfSheet(o); return (sh && Number(sh.cost) > 0) ? Number(sh.cost) : null;  // ③利益計算表(スプシ)の控え
-  };
+  const pfCost = o => orderCostJpy(o, pf.costMap.get(o.cc + ':' + o.sn), pfInv(o), pfSheet(o));   /* ★2026-11-17 計画と同じ1つの関数（①手入力→②在庫台帳（一部だけはスプシ）→③スプシ） */
   // 在庫No（Stock No.）が付いているか＝仕入れた実物が到着し在庫台帳に載った注文（到着待ちはstock_no空）。📗スプシ取込のstock_no配列 or 紐付いた在庫で判定。
   const pfStock = o => { const sh = pfSheet(o); return !!((sh && Array.isArray(sh.stock_no) && sh.stock_no.length) || pfInv(o).length); };
   const pfManualCost = o => { const cm = pf.costMap.get(o.cc + ':' + o.sn); return cm && cm.cost != null ? cm.cost : null; };
