@@ -1854,7 +1854,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261116-2304';
+  const APP_BUILD = '20261116-2306';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -21239,6 +21239,59 @@
     _chartJsP = new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js'; sc.onload = () => res(window.Chart); sc.onerror = () => { _chartJsP = null; rej(new Error('グラフの部品を読めませんでした')); }; document.head.appendChild(sc); });
     return _chartJsP;
   }
+  /* ★2026-11-16 本人「グラフとかも見れるとありがたい」：損益・計画の4つのタブに1枚ずつ（結論の数字の下・表の上）。
+     色は分類ごとに固定（どの画面でも同じ）・金額の軸は ¥ と桁区切り・2026-01 から・暗い画面でも読める色・Chart.js 4.4.1（今使っている版） */
+  const FIN_COL = { 売上: '#5b8def', 粗利: '#34a853', 経費: '#f29900', 純利益: '#d93025', 目標: '#9aa0a6', ツール代: '#5b8def', 家賃: '#8e63ce', 人件費: '#e8710a', 送料: '#12a4af', 梱包資材: '#7cb342', 備品費: '#c0ca33', 水道光熱費: '#f06292', 初期投資: '#7b52c4', その他: '#9aa0a6' };
+  const finColOf = k => FIN_COL[k] || FIN_COL[String(k).replace(/（その他）$/, '')] || '#9aa0a6';
+  window.__finCharts = window.__finCharts || {};
+  async function finChartsDraw(kind) {
+    const boxId = { pl: 'pl-chart-box', exp: 'exp-chart-box', payback: 'pay-chart-box', plan: 'plan-chart-box' }[kind]; const box = document.getElementById(boxId); if (!box) return;
+    const yen = v => '¥' + Math.round(Number(v) || 0).toLocaleString('en-US');
+    const txt = (() => { try { return getComputedStyle(document.body).color || '#555'; } catch (_) { return '#555'; } })(), grid = 'rgba(127,127,127,.18)';
+    let mr = window.__planMonthRows;
+    if ((kind === 'pl' || kind === 'payback' || kind === 'plan') && !mr) {
+      box.innerHTML = '<div class="smd-dim" style="font-size:11.5px;margin:0 0 10px"><span class="smd-spin"></span> グラフの数字を読み込み中…</div>';
+      try { if (kind === 'pl') { await renderPlanBody_(false); } } catch (_) {}
+      mr = window.__planMonthRows; if (!mr) { box.innerHTML = ''; return; }
+    }
+    let Chart; try { Chart = await loadChartJs(); } catch (e) { box.innerHTML = '<div class="smd-dim" style="font-size:11px;margin:0 0 10px">グラフの部品を読めませんでした（通信を確かめてください）</div>'; return; }
+    const title = { pl: '📊 月ごとの売上・粗利・経費・純利益（2026-01〜）', exp: '📊 月ごとの経費（分類ごとの積み上げ・2026-01〜・棒を押すとその月へ）', payback: '📊 純利益の累計と初期投資の合計（線に届いた月が回収）', plan: '📊 目標と実績（月の純利益・2026-01〜）' }[kind];
+    box.innerHTML = `<div class="tool-card" style="margin:0 0 12px;max-width:none;padding:10px 14px"><div style="font-weight:700;font-size:13px;margin-bottom:6px">${title}</div><div style="position:relative;height:250px"><canvas></canvas></div></div>`;
+    const cv = box.querySelector('canvas'); try { if (window.__finCharts[boxId]) window.__finCharts[boxId].destroy(); } catch (_) {}
+    const axes = (stack) => ({ x: { stacked: !!stack, ticks: { color: txt }, grid: { color: grid } }, y: { stacked: !!stack, ticks: { color: txt, callback: v => yen(v) }, grid: { color: grid } } });
+    const opt = (stack, extra) => Object.assign({ responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { labels: { color: txt, boxWidth: 12 } }, tooltip: { callbacks: { label: c => (c.dataset.label || '') + '：' + (c.parsed.y == null ? '—' : yen(c.parsed.y)) } } }, scales: axes(stack) }, extra || {});
+    let cfg = null;
+    if (kind === 'pl') {
+      const L = mr.map(r => r.ym.slice(2));
+      cfg = { type: 'bar', data: { labels: L, datasets: [
+        { label: '売上', data: mr.map(r => r.gmv), backgroundColor: finColOf('売上') + 'aa' },
+        { label: '粗利', data: mr.map(r => r.gross), backgroundColor: finColOf('粗利') + 'cc' },
+        { label: '経費', data: mr.map(r => r.cost), backgroundColor: finColOf('経費') + 'cc' },
+        { label: '純利益', type: 'line', data: mr.map(r => r.net), borderColor: finColOf('純利益'), backgroundColor: finColOf('純利益'), tension: .2, spanGaps: true, pointRadius: 3 }] }, options: opt(false) };
+    } else if (kind === 'exp') {
+      const all = (exp._allRows || []).filter(r => String(r.ymd || '').slice(0, 7) >= '2026-01' && !plIsInvest(r.category));
+      const yms = [...new Set(all.map(r => String(r.ymd).slice(0, 7)))].sort();
+      const key = c => String(c || '').trim().replace(/（その他）$/, '');
+      const cats = [...new Set(all.map(r => key(r.category)))]; const sum = (c, y) => all.filter(r => key(r.category) === c && String(r.ymd).slice(0, 7) === y).reduce((t, r) => t + (Number(r.amount) || 0), 0);
+      cats.sort((a, b) => yms.reduce((t, y) => t + sum(b, y), 0) - yms.reduce((t, y) => t + sum(a, y), 0));
+      cfg = { type: 'bar', data: { labels: yms.map(y => y.slice(2)), datasets: cats.map(c => ({ label: c, data: yms.map(y => sum(c, y) || null), backgroundColor: finColOf(c) })) },
+        options: opt(true, { onClick: (e, els) => { if (!els || !els.length) return; const y = yms[els[0].index]; if (y) { finPickYm(y); renderExpenses(); } } }) };
+    } else if (kind === 'payback') {
+      const pi = window.__payInfo || {}; let c2 = 0; const known = mr.filter(r => r.net != null);
+      const L = known.map(r => r.ym.slice(2)), cumD = known.map(r => (c2 += r.net));
+      const proj = []; if (pi.avg > 0 && known.length) { let c3 = c2, [yy, mm] = known[known.length - 1].ym.split('-').map(Number); for (let i = 0; i < 24 && c3 < (pi.invTotal || 0); i++) { mm++; if (mm > 12) { mm = 1; yy++; } c3 += pi.avg; L.push(String(yy).slice(2) + '-' + String(mm).padStart(2, '0')); proj.push(c3); } }
+      const projData = cumD.map((v, i) => i === cumD.length - 1 ? v : null).concat(proj);
+      cfg = { type: 'line', data: { labels: L, datasets: [
+        { label: '純利益の累計', data: cumD, borderColor: finColOf('純利益'), backgroundColor: finColOf('純利益'), tension: .2, pointRadius: 3 },
+        { label: '見込み（直近3か月の平均で）', data: projData, borderColor: finColOf('純利益'), borderDash: [5, 4], pointRadius: 0, spanGaps: true },
+        { label: '初期投資の合計', data: L.map(() => pi.invTotal || 0), borderColor: finColOf('初期投資'), borderWidth: 2, pointRadius: 0 }] }, options: opt(false) };
+    } else if (kind === 'plan') {
+      cfg = { type: 'bar', data: { labels: mr.map(r => r.ym.slice(2)), datasets: [
+        { label: '純利益（実績）', data: mr.map(r => r.net), backgroundColor: finColOf('純利益') + 'cc' },
+        { label: '目標', type: 'line', data: mr.map(r => r.tgt), borderColor: finColOf('目標'), borderDash: [6, 4], pointRadius: 2, spanGaps: true }] }, options: opt(false) };
+    }
+    if (cfg) window.__finCharts[boxId] = new Chart(cv, cfg);
+  }
   const taYmd = (d) => new Date(d).toISOString().slice(0, 10);
   function taDays(n, endOffset) { const out = []; const base = Date.now() - (endOffset || 0) * 86400000; for (let i = n; i >= 1; i--) out.push(taYmd(base - i * 86400000)); return out; }
   function taBucket(ymd, gran) {
@@ -22392,7 +22445,7 @@
       const cum = known.reduce((t, r) => t + (opProfitOf(r) || 0), 0);
       const last3 = known.filter(r => r.ym < curYm).slice(-3);
       const avg = last3.length ? Math.round(last3.reduce((t, r) => t + (opProfitOf(r) || 0), 0) / last3.length) : null;
-      const remain = invTotal - cum, rate = invTotal > 0 ? Math.round(cum / invTotal * 100) : null;
+      const remain = invTotal - cum, rate = invTotal > 0 ? Math.round(cum / invTotal * 100) : null; try { window.__payInfo = { invTotal, avg, startYm }; } catch (_) {};
       const ymAdd = (ym, n) => { const [a, b] = ym.split('-').map(Number); const d = new Date(Date.UTC(a, b - 1 + n, 1)); return d.getUTCFullYear() + '年' + (d.getUTCMonth() + 1) + '月'; };
       const etaOf = rem => rem <= 0 ? '回収済み' : (avg != null && avg > 0 ? ymAdd(curYm, Math.ceil(rem / avg)) + 'ごろ（あと約' + Math.ceil(rem / avg) + 'か月）' : '分からない（直近の純利益が黒字でない・または読めない）');
       const lineM = Number(P.lineMonths) > 0 ? Number(P.lineMonths) : 2;
@@ -22605,8 +22658,10 @@
         </table></div>
         <div class="smd-dim" style="font-size:11px;margin-top:8px">💡 <b>入金</b>=Shopeeの預かり金（escrow）を円換算（Shopee手数料は差引済）／<b>仕入</b>=在庫の仕入額を注文に突合／<b>粗利</b>=入金−仕入／<b>固定費</b>=登録した人件費・家賃・ツール等の実額（<span style="color:#e8710a">*</span>＝未登録で見込み額を使用）／<b>その他経費</b>=梱包資材など登録分／<b>返金</b>=返品ページの返金（当月分）／<b>実利益</b>=粗利−固定費−その他経費−返金（送料・手数料は固定費/入金側）。<b>この表が月次損益の「正」</b>です（注文別の内訳は💹損益・入出金＞利益明細へ）。入金・仕入データ未取得の古い月は「—」（GMVは全月）。</div>
       </div><div id="plan-conv"><div class="smd-dim" style="font-size:12px;margin:0 0 12px"><span class="smd-spin"></span> 📐 出品→注文の転換率を読み込み中…</div></div>`);
+    try { window.__planMonthRows = rows.filter(r => r.ym >= '2026-01' && r.ym <= curYm).map(r => { const net = opProfitOf(r); return { ym: r.ym, n: r.n, gmv: Math.round(r.gmv || 0), gross: reli(r) ? Math.round(r.gross || 0) : null, cost: net != null && reli(r) ? Math.round((r.gross || 0) - net) : Math.round(r.exp || 0), net, tgt: (r.ym === curYm ? targetNet : targetOf(r.ym)) || null }; }); } catch (_) {}   /* ★11/16 グラフ用（2026-01 から） */
     if ((window.__planView || 'plan') === 'payback') body.innerHTML = loadFailBanner(plan._fails, '返金・補償を含む数字') + `<div id="pay-chart-box"></div>` + paybackHtml + investHtml;   /* ★11/16 💰 投資の回収タブ（中身は1か所＝計画タブからは外した） */
     else body.insertAdjacentHTML('afterbegin', '<div id="plan-chart-box"></div>');
+    try { finChartsDraw((window.__planView || 'plan') === 'payback' ? 'payback' : 'plan'); } catch (_) {}
     planConvLoad(body).catch(() => {});
     /* 💰 投資の候補の足す・消す・線（app_kv invest_plan を読み直してから書く＝ほかの PC の書き込みを消さない） */
     { const pb = body.querySelector('#inv-payback');
@@ -27138,6 +27193,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <div class="exp-full exp-v-exp">${costNotes}</div>
       </div>`;
     { const pe = document.getElementById('page-expenses'); if (pe) pe.dataset.view = window.__finView || 'exp'; }
+    try { finChartsDraw((window.__finView || 'exp') === 'pl' ? 'pl' : 'exp'); } catch (_) {}
     try { plReviewHistFill(); } catch (_) {}
     body.querySelectorAll('.exp-jump-b').forEach(b => b.addEventListener('click', () => { const el = body.querySelector('#exp-sec-' + b.dataset.sec); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }));
     try { plWire(body, exp.ym); } catch (_) {}
@@ -29896,6 +29952,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-16', items: [
+      '📊 <b>損益・計画の4つのタブにグラフを付けました</b>（本人「グラフとかも見れるとありがたい」）。💹 損益＝月ごとの売上・粗利・経費（棒）と純利益（線）／💴 経費＝分類ごとの積み上げ（棒を押すとその月へ）／💰 投資の回収＝純利益の累計と初期投資の合計の線（点線は直近3か月の平均での見込み＝線に届いた月が回収）／📈 計画＝月の純利益と目標。色は分類ごとに固定・¥ と桁区切り・2026-01 から。',
       '🧭 <b>「損益・入出金」と「事業計画」を、左のメニューの「💹 損益・計画」1つにまとめました</b>（本人「それで」・9/23 の別にする決めは取り消し）。中のタブは 💹 損益（純利益と月ごとの推移）／💴 経費（月ごとの経費の表・入れる・Amazon の分類・直す・取り込み・固定費の内訳）／💰 投資の回収（初期投資の合計と内訳・回収率・追いつく月・買う前の判断）／📈 計画（目標と逆算・月ごとの実績・転換率）。ほかの表（利益明細（注文ごと）・商品別の利益・確定申告・帳簿）は同じ帯の右に残しています。月の切り替えはどのタブでも上の同じ位置で、タブを替えても同じ月のまま。何も消していません（同じ中身は1か所＝投資の回収は計画のタブから外して💰へ）。',
       '🧼 <b>月ごとの経費の表をすっきりさせ、全期間の合計を足しました・🛒 Amazon の分類を続けて押せるように</b>（本人「ツメツメで見にくいな、特に…絵面が書いてあるところ」「初期投資の全部の合計額とかさ、どこで見れるわけ？」「1個押すたびに閉じよるの、それがマジ鬱陶しい。こっちは連続してやりたい」）。月のマスは金額だけ（出どころは1件ずつの行に文字で・マスにかざすと内訳）・行と列の間を広く・¥0 は「—」・ツール代とツール代（その他）、人件費と人件費（その他）は表の上で1行に・分類名の右に「全期間の合計（2026-01〜）」（2025年以前を開くと、それも足した列）。🛒 Amazon で買ったもの：分類のボタンを押しても一覧を閉じず描き直さない（押した行だけ「いまの扱い」が変わる・位置そのまま）・「扱いが決まった」の開閉を覚える。',
       '🧹 <b>💴入出金・経費の重なりを外して並べ直しました</b>（本人「同じようなことが書いてあるところは多分重複してると思うから削っていいんじゃない？あんまごちゃごちゃしてても見にくい」）。外した物＝②の「分類ごとの合計」のカード（→③ 月ごとの経費の表のその月の列）・AI 利用料のカードの「購入（経費の行）」の一覧（→③の表の ツール代（その他）▸ Claude ▸ Claude API）。並び＝① この月の結論 → ② 経費を入れる（手で足す・ヤマトの取り込み）→ ③ 月ごとの経費の表 → ④ この月の経費を直す・消す・CSV → ⑤ 取り込み・自動登録（AI・固定費の内訳・Amazon・削減メモ）。経費のデータは1行も消していません。',
