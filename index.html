@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-0029';
+  const APP_BUILD = '20261117-0031';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -26578,6 +26578,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return { k: '', cat: '', sure: false };
   }
   const amzMemo = it => `[Amazon] ${it.item_id} ${String(it.name_supplier || it.name || '').slice(0, 40)}`;
+  /* ★2026-11-17 05：経費の行は在庫番号（ITM-…）で同じ物と見る（前はメモの全文が一致した時だけ＝品名の書き方が違う行（手で移した・別の道で入った）を見つけられず「未登録」に出て、もう一度入れると二重になった） */
+  const amzPosted = (it, expRows) => { const memo = amzMemo(it), pre = '[Amazon] ' + it.item_id + ' '; return (expRows || []).find(r => String(r.memo || '') === memo) || (expRows || []).find(r => String(r.memo || '').indexOf(pre) === 0 || String(r.memo || '') === '[Amazon] ' + it.item_id) || null; };
   async function amzLoad(ym) {
     const [rows, kv] = await Promise.all([
       sbGetAll('inventory', `select=item_id,name,name_supplier,price,purchase_date,supplier,supplier_order,status,shopee_sn,image&supplier=ilike.${encodeURIComponent('*amazon*')}&purchase_date=gte.${ym}-01&purchase_date=lt.${plNextYm(ym)}-01&order=purchase_date.desc`),
@@ -26594,13 +26596,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function amzPostExpense(it, cat, expRows) {
     const memo = amzMemo(it);
-    const has = (expRows || []).find(r => String(r.memo || '') === memo);
+    const has = amzPosted(it, expRows);
     if (has) { if (has.category !== cat) await sbPatch('expenses', 'id=eq.' + has.id, { category: cat }); return 'patched'; }
     await sbUpsert('expenses', [{ ymd: String(it.purchase_date || '').slice(0, 10) || jstToday(), category: cat, amount: Math.round(Number(it.price) || 0), memo }]);
     return 'added';
   }
   async function amzRemoveExpense(it, expRows) {
-    const memo = amzMemo(it); const has = (expRows || []).find(r => String(r.memo || '') === memo);
+    const has = amzPosted(it, expRows);
     if (has) await sbDelete('expenses', 'id=eq.' + has.id);
   }
   // 名前で明らかな資材だけ自動で経費に（それ以外は触らない）。返り値：入れた件数
@@ -26609,12 +26611,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     for (const it of data.rows) {
       /* ★2026-11-17 05（00・本人「仕入れ品目がこのその他とかに入ってくるのおかしくないか？」）：Shopee で売れた（在庫台帳に shopee_sn が付いた）品が経費に入っていたら、
          🛒 の「仕入れ品」ボタンと同じ扱いで経費から外す（仕入れは注文の仕入額で数える＝経費にも入ると二重）。外した行は操作ログに残す */
-      if (it.shopee_sn) { const pz = (expRows || []).find(r => String(r.memo || '') === amzMemo(it));
+      if (it.shopee_sn) { const pz = amzPosted(it, expRows);
         if (pz && data.clsOk) { try { await amzRemoveExpense(it, expRows); await amzSetClass(it.item_id, 'goods', ''); data.cls[it.item_id] = { k: 'goods', cat: '' }; logAct('入出金・経費', '売れた仕入れ品を経費から外した', it.item_id, 'id ' + pz.id + '・' + pz.category + '・¥' + (Number(pz.amount) || 0) + '・注文 ' + it.shopee_sn); n++; } catch (_) {} }
         continue; }
       const c = data.cls[it.item_id]; if (c) continue;                 // 本人が決めたものは動かさない
       const sg = amzSuggest(it.name_supplier || it.name); if (!sg.sure) continue;
-      if ((expRows || []).some(r => String(r.memo || '') === amzMemo(it))) continue;
+      if (amzPosted(it, expRows)) continue;
       if (!(Number(it.price) > 0)) continue;   /* ★2026-10-11 本人「0円ってありえない」＝金額が無い行を ¥0 の経費にしない（金額は取込GASが注文メールから後で埋める） */
       await amzPostExpense(it, sg.cat, expRows); n++;
     }
@@ -26623,7 +26625,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   function amzCardHtml(ym, data, expRows, autoOn) {
     const rows = data.rows;
-    const st = it => { const c = data.cls[it.item_id]; const posted = (expRows || []).find(r => String(r.memo || '') === amzMemo(it)); const sg = amzSuggest(it.name_supplier || it.name);
+    const st = it => { const c = data.cls[it.item_id]; const posted = amzPosted(it, expRows); const sg = amzSuggest(it.name_supplier || it.name);
       if (it.shopee_sn) return posted ? { lab: '⚠ 売れた仕入れ品なのに経費に入っています（次の読み込みで自動で外します）', col: '#b5341a', done: false } : { lab: '仕入れ品（注文に紐付き）', col: '#1565c0', done: true };
       if (c && c.k === 'goods') return { lab: '仕入れ品', col: '#1565c0', done: true };
       if (c && c.k === 'personal') return { lab: '私物（事業外）', col: '#6b7280', done: true };
