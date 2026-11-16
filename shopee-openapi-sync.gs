@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261116-0600'
+var SRC_VER = '20261116-2133'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2191,7 +2191,7 @@ function doGetInner_(e) {
         var topLen = []; try { sbLenFlush_(); var _ul = JSON.parse(P_().getProperty('sbLenBy') || 'null'); if (_ul && _ul.d === ufToday_()) topLen = Object.keys(_ul.m || {}).map(function (k) { return { k: k, mb: Math.round(_ul.m[k] / 10485.76) / 100 }; }).sort(function (a2, b2) { return b2.mb - a2.mb; }).slice(0, 30); } catch (eUl) {}   /* ★2026-11-08 処理×表ごとの読んだ量（圧縮前の文字数・MB） */
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, src: SRC_VER, shop3CandidateRead: true, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, topBy: topBy, topLen: topLen, aiSpend: aiSpendLoad_() };
+        ufo = { ok: true, src: SRC_VER, acct: acctEmail_(), shop3CandidateRead: true, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, topBy: topBy, topLen: topLen, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -9577,7 +9577,16 @@ var HB_EXEC_ = {
   child2: 'https://script.google.com/macros/s/AKfycbx1QS5CTVC2X04GjI80X88KuJNMlH1iEKwGSD2LakQCnbCbEGSbel9HOrRheXZdOpeO/exec',
   child3: 'https://script.google.com/macros/s/AKfycbxV02tSfDsnAB82XXwZWSALAt2H1g41wZ5uMsn1D-u9TJ4lilLRZeAQWXLOfR-r2Qzasg/exec'
 };
-var HB_NAME_ = { main: '本体', child: '2台目', child2: '3台目', child3: '4台目' };
+var HB_NAME_ = { main: '本体', child: '2台目', child2: '3台目', child3: '4台目', child4: '5台目', child5: '6台目' };
+/* ★2026-11-16 本人「Gmail名ちゃんと表示して」：この GAS が動いている Google アカウントのアドレス（ポータルの接続枠のカードに出す）。
+   Drive の持ち主から取る＝もう付いている Drive の権限で足りる（Session.getEffectiveUser は新しい権限が要り、6台とも承認のやり直しになるので使わない）。
+   uf_status は数分ごとに呼ばれるので、スクリプト プロパティに7日控える。取れない時は空（ポータルが「分からない」と出す） */
+function acctEmail_() {
+  var P = PropertiesService.getScriptProperties(), v = P.getProperty('ACCT_EMAIL') || '', at = Number(P.getProperty('ACCT_EMAIL_AT') || 0);
+  if (v && Date.now() - at < 7 * 86400000) return v;
+  try { var e = DriveApp.getRootFolder().getOwner().getEmail(); if (e) { P.setProperty('ACCT_EMAIL', e); P.setProperty('ACCT_EMAIL_AT', String(Date.now())); return e; } } catch (eA) {}
+  return v;
+}
 /* 自分で消えるトリガー（基準に入れない・欠けても赤にしない） */
 var HB_TRANSIENT_ = { promoTick: 1, dnoteTick: 1, dimgTick: 1, probeReturns: 1 };
 /* 作り直さず知らせるだけの物（間隔が分からない・本人の off がある） */
