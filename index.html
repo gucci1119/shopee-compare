@@ -1848,7 +1848,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261116-0436';
+  const APP_BUILD = '20261116-1111';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -29750,6 +29750,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-16', items: [
+      '🆕 <b>出品ログの「最新順（日をまたぐ）」で店を選んだ時、画面を開いた後に出した明細が抜けていたのを直しました</b>（本人「これ、新しい順になってなくね？」）：第3を選ぶと一番上が 01:25 で、今日 10:47 の物が出ていませんでした。どの店の明細かの控えを画面を開いた時に1回だけ読んでいたため、開いた後にできた新しいカタログ（第3は商品ごとに新しいカタログ）が「不明」に回っていました。店が分からない新しい明細の分だけ、2分おきに読み足します。並びは前から「出した時刻の新しい順」です。',
       '🛡 <b>全体レビュー 11/16 の直し（ポータル）</b>：①値付けの見直しで単品を作る時の「作り中の印」を、入れられなかった時に条件なしで消さない（30分より古い印・別の作品の印だけ）＝2台の PC で2冊作らない ②②を作って移す時、公開を読み直して確かめてから元を外す（確かめられない時は②を非公開・在庫0にしてから元を戻す）＝両方で売れない ③店の登録簿を読めない時は空で済ませず次に読み直す・利益管理表への転記は「どの店か分からない」で止める ④全店分の読みの「今日済み」は読めた後に付ける ⑤ジョブを1回動かした後もタブの自動の読み直しが止まらないように。',
       '💰 <b>📈事業計画に「投資の回収と使い道」</b>（本人「経費・初期費用を踏まえ、今の利益と照らしてどれくらい追いついているか」「どのタイミングで金かけるかの判断にも」）：「📊 これまでの実績」の一番上に、始めてからの投資の合計と純利益の累計・回収率・残り・追いつく月（直近3か月の平均の純利益で）を出しました。「買う前の判断」に買いたい物と金額を入れると、純利益の何か月分か・回収が何か月延びるかが出ます（線は既定2か月分・変えられます）。倉庫の契約費用（礼金・保証料・火災保険・鍵交換・仲介＝¥268,300）を初期投資に入れ、敷金 ¥73,000 は戻る見込みの預け金として別に注記。フロンティアの入会金は未入力と出します（0円とは見せません）。',
       '🛡 <b>Request page に足す時の止め</b>（全体レビュー 11/16 高2）：お客さんと決めた金額と出す額が違う時は、仕入れ・重さ・為替・送料の表が欠けていても必ず止めます（前は表の欠けの⚠が先に出て、違う額のまま出品へ進む筋がありました）。出す額が読めない（0・空）時も止めます。あわせて、版の印を記録のたびに自動で書くようにしました（古い窓が自分で読み直す仕組みが効くように）。',
@@ -47068,6 +47069,33 @@ create policy "listing_log all" on listing_log for all using (true) with check (
   const llAcctPass = (set, sid) => !set || (set === 'none' ? !sid : (!!sid && set.has(String(sid))));
   /* 出品ログの「店」の丸（logState.acctF）の判定。最新順で300件を取る前にも使う（11/14 本人「なんで？」＝第3を選ぶと0件） */
   function llAfPassOf(af, r) { if (!af) return true; const sid = llShopOf(r.cc, r.item_id); if (af === 'unk') return !sid; if (af.indexOf('fam:') === 0) return !!sid && llShopFam(sid) === af.slice(4); return sid === af; }
+  /* ★2026-11-16 05（本人「これ、新しい順になってなくね？」・最新順で第3を選ぶと一番上が 01:25 で、今日 10:47 の物が出ない）：
+     店の控え（logState.shopMap）は画面を開いた時に1回だけ読む＝開いた後に出した【新しいカタログ】は店が分からず「不明」に回り、
+     店で絞った最新順から抜けていた（第3は商品ごとに新しいカタログを作るので、開いた後の出品が丸ごと抜ける）。
+     店が分からない新しい行のカタログだけを、新しい順に300件まで・2分あけて読み足す（3列だけ・数KB）。足せたら描き直す */
+  function llShopFillUnknown(rows) {
+    if (logState._shopFillBusy || !logState.shopMap) return;
+    if (logState._shopFillAt && Date.now() - logState._shopFillAt < 120000) return;
+    const seen = new Set(), ids = [];
+    const srt = (rows || []).filter(r => r && r.created_at && !r.seeded && r.item_id).sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
+    for (const r of srt) {
+      if (ids.length >= 300) break;
+      const k = r.cc + '|' + r.item_id; if (seen.has(k)) continue; seen.add(k);
+      if (llShopOf(r.cc, r.item_id)) continue;
+      ids.push(String(r.item_id));
+    }
+    const u = [...new Set(ids)].filter(x => /^\d+$/.test(x));
+    if (!u.length) return;
+    logState._shopFillBusy = true; logState._shopFillAt = Date.now();
+    (async () => {
+      const sm = logState.shopMap; let got = 0;
+      for (let i = 0; i < u.length; i += 100) {
+        const li = await sbGetAll('listings', 'select=cc,item_id,shop_id&item_id=in.(' + u.slice(i, i + 100).join(',') + ')');
+        (li || []).forEach(l => { const k = l.cc + '|' + l.item_id; if (l.shop_id && !sm[k]) { sm[k] = String(l.shop_id); got++; } });
+      }
+      if (got) { logState._latC = null; logState._detailDay = null; try { if (typeof renderListingLog === 'function' && document.getElementById('list-log')) renderListingLog(); } catch (_) {} }
+    })().catch(() => {}).finally(() => { logState._shopFillBusy = false; });
+  }
   /* 系統の順（事業本部 11/12「第1 gcsonlinestore／第2 gs_japan_select／第3 maneki_neko_japan」）。ほかの系統はその後ろに名前順 */
   const LL_FAM_ORD = SHOP_FAMS.map(F => F.key);   /* ★2026-11-16 05：系統の順は SHOP_FAMS の1か所から */
   const llFamRank = (f) => { const i = LL_FAM_ORD.indexOf(f); return i < 0 ? 99 : i; };
@@ -47228,6 +47256,7 @@ create policy "listing_log all" on listing_log for all using (true) with check (
       logState._latShopN = { shop: shopN, unk: unkN, all: all.length };
       logState._latC = { key, src: logState.rows, out }; return out;
     })() : null;
+    if (_llLatest) llShopFillUnknown(rows);   /* ★11/16 開いた後に出した新しいカタログの店を読み足す（店の絞り込み・店ごとの数・不明の数が今に合う） */
     const _latMin = _llLatest && _latestRows.length ? _latestRows[_latestRows.length - 1].created_at : '';
     /* ★2026-09-21 機種で分ける（本人「ハードごとにタブを分ける」「間違ったハードで出している商品などに気づける」）
        機種は【明細SKUの頭】が正（機種_作品名）。SKUが無ければカタログ名から拾う。
