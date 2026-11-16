@@ -1852,7 +1852,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261116-2134';
+  const APP_BUILD = '20261116-2229';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -6514,6 +6514,15 @@
     "どのアカウントで何が動いたか": "Which account ran what",
     "3台目の自動出品GAS URL（任意・さらに別のGoogleアカウント）": "3rd auto-listing GAS URL (optional, yet another Google account)",
     "3台目": "3rd account",
+    "出どころ": "Source",
+    "出どころ・メモ": "Source / memo",
+    "初期投資": "Initial investment",
+    "手入力（元が分からない）": "Manual entry (source unknown)",
+    "分からない": "Unknown",
+    "自動（固定費の内訳）": "Auto (fixed-cost list)",
+    "契約金計算書": "Lease contract statement",
+    "（初期投資を含めない）": "(excluding initial investment)",
+    "（別枠・純利益に入れない）": "(separate; not in net profit)",
     "5台目の自動出品GAS URL（任意・gcsonlinestore631.2。🤖出品用の別の Google アカウント）": "5th auto-listing GAS URL (optional, gcsonlinestore631.2, a separate Google account for 🤖 listing)",
     "6台目の GAS URL（任意・gcsonlinestore631.3。控え＝枠を見るだけ・🤖は起こさない）": "6th GAS URL (optional, gcsonlinestore631.3, standby: quota shown only, 🤖 not started)",
     "5台目": "5th account",
@@ -25603,6 +25612,33 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const PL_MODE_LABEL = { auto: '毎月 自動登録', perOrder: '件数連動で自動', remind: '手入力（未登録なら知らせる）' };
   // 経費の分類→損益の区分（人件費／ツール代 など言い方が違っても同じ区分に寄せる）
   const plIsInvest = cat => /^初期投資|^投資[:：]/.test(String(cat || ''));
+  /* ★2026-11-16 本人「どっからその数字持ってきたかも欲しいね。PayPay とか」：経費の行の出どころを memo から決める（列は足さない＝新しい行も memo の書き方で自動で決まる）。
+     memo に「出どころ：◯◯」と書けばそれを使う。読めない時は空にせず「手入力（元が分からない）」か「分からない」と出す */
+  const EXP_SRC = [
+    ['paypay', '🅿', r => /PayPay/i.test(r) ? ('PayPay' + (/Anna|アンナ/.test(r) ? '（Anna さん）' : '')) : ''],
+    ['contract', '📄', r => /契約金計算書|契約金/.test(r) ? '契約金計算書' : ''],
+    ['bank', '🏦', r => /ヤチン/.test(r) ? 'ソニー銀行（SMBC ヤチン）' : /ソニー銀行/.test(r) ? 'ソニー銀行' : /ドコモSMTB/.test(r) ? 'ドコモSMTB 銀行' : /振込|デビット|引き落とし/.test(r) ? '銀行' : ''],
+    ['card', '💳', r => /ライフカード/.test(r) ? 'ライフカード' : /MF ?ビジネスカード/.test(r) ? 'MF ビジネスカード' : /カード下4桁|クレジットカード/.test(r) ? 'カード' : ''],
+    ['amazon', '🛒', r => /^\s*\[Amazon\]/.test(r) ? 'Amazon の注文（取り込み）' : /楽天/.test(r) ? '楽天の注文' : ''],
+    ['yamato', '🚚', r => /^\s*\[自動:ヤマト\]/.test(r) ? 'ヤマトの運賃（取り込み）' : ''],
+    ['mail', '✉', r => /^\s*\[Claude API\]/.test(r) ? 'Claude の請求（領収書）' : /Gmail|領収書|請求書/.test(r) ? 'メールの領収書' : ''],
+    ['auto', '⚙', r => /^\s*\[自動\]/.test(r) ? '自動（固定費の内訳）' : ''],
+    ['mf', '📒', r => /\bMF\b|MF の明細|MF で確認|MF・/.test(r) ? 'MF の明細' : '']
+  ];
+  function expSrcOf(row) {
+    const m = String((row && row.memo) || '');
+    const ex = m.match(/出どころ[:：]\s*([^／\n）)]+)/);
+    if (ex) return { keys: ['manual'], icon: '✍', label: ex[1].trim(), auto: false };
+    const hit = []; EXP_SRC.forEach(([k, ic, f]) => { const l = f(m); if (l) hit.push({ k, ic, l }); });
+    let use = hit;
+    if (hit.length > 1) use = hit.filter(h => h.k !== 'mf' && !(h.k === 'bank' && hit.some(x => x.k === 'card')) );   /* MF は銀行・カードが読めた時は重ねない */
+    if (!use.length) return m.trim() ? { keys: ['manual'], icon: '✍', label: '手入力（元が分からない）', auto: false } : { keys: ['unknown'], icon: '❓', label: '分からない', auto: false };
+    return { keys: use.map(h => h.k), icon: use.map(h => h.ic).join(''), label: use.map(h => h.l).join('／'), auto: use.length === 1 && use[0].k === 'auto' };
+  }
+  function expSrcSum(rows) {   /* 出どころごとの合計（0円の行は数えない）→「PayPay（Anna さん） ¥340,000」の行の並び */
+    const t = {}; (rows || []).forEach(r => { const a = Number(r.amount) || 0; if (!a) return; const l = expSrcOf(r).label; t[l] = (t[l] || 0) + a; });
+    return Object.keys(t).sort((a, b) => t[b] - t[a]).map(l => l + ' ¥' + Math.round(t[l]).toLocaleString('en-US'));
+  }
   function plGroupOf(cat) { const c = String(cat || ''); if (plIsInvest(c)) return 'invest'; if (/送料|運賃/.test(c)) return 'ship'; if (/梱包|資材|備品|什器/.test(c)) return 'pack'; if (/人件|外注|給料|スタッフ/.test(c)) return 'labor'; if (/家賃|倉庫|保管|光熱|オフィス/.test(c)) return 'place'; if (/ツール|通信|サブスク/.test(c)) return 'tool'; if (/Shopee手数料|決済手数料|広告|返金|補償|関税/.test(c)) return 'sell'; return 'other'; }
   async function plCfg() {   // plan_cfg（固定費の内訳・自動登録の設定）。📈事業計画を開いていなくても読む
     if (plan.cfg) return plan.cfg;
@@ -25797,6 +25833,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const rows = Array.isArray(expRows) ? expRows : [];
     const g = { ship: 0, pack: 0, labor: 0, place: 0, tool: 0, sell: 0, other: 0, invest: 0 };
     rows.forEach(r => { g[plGroupOf(r.category)] += Number(r.amount) || 0; });
+    { const gr = {}; rows.forEach(r => { (gr[plGroupOf(r.category)] = gr[plGroupOf(r.category)] || []).push(r); }); c.gsrc = {}; Object.keys(gr).forEach(k => { c.gsrc[k] = expSrcSum(gr[k]); }); c.gsrcAll = expSrcSum(rows.filter(r => !plIsInvest(r.category))); }   /* ★11/16 出どころの内訳（かざすと出る） */
     c.g = g; c.expTotal = rows.reduce((s, r) => s + (plIsInvest(r.category) ? 0 : (Number(r.amount) || 0)), 0); c.expOk = Array.isArray(expRows);   /* 初期投資は営業利益に含めない（別枠） */
     c.refund = (extras && extras.refund != null) ? extras.refund : null;   /* 手で記録した返金（PayPal返金など）だけ。正式返品は入金に織り込み済み */
     c.retBack = plRetBack(ym);
@@ -25895,7 +25932,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function plCardHtml(c) {
     const y = v => fmtJpy(Math.round(v || 0));
     const pct = (a, b) => (b > 0 && a != null) ? Math.round(a / b * 100) + '%' : '—';
-    const line = (label, val, o) => { o = o || {}; const big = o.big ? 'font-size:18px;padding:8px 8px;' : ''; return `<tr style="${o.strong ? 'font-weight:700;border-top:2px solid #d9e2ec;' : ''}${o.bg ? 'background:' + o.bg + ';' : ''}${o.big ? 'border-bottom:2px solid #d9e2ec;' : ''}"><td style="padding:2px 8px;white-space:nowrap;${o.indent ? 'padding-left:22px;' : ''}${o.big ? 'font-size:15px;padding:8px 8px;' : ''}">${label}</td><td style="padding:2px 8px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;color:${o.col || '#2b3440'};${big}">${val}</td><td class="smd-dim" style="padding:2px 8px;font-size:10.5px;line-height:1.3">${o.sub || ''}</td></tr>`; };
+    const line = (label, val, o) => { o = o || {}; const big = o.big ? 'font-size:18px;padding:8px 8px;' : ''; return `<tr style="${o.strong ? 'font-weight:700;border-top:2px solid #d9e2ec;' : ''}${o.bg ? 'background:' + o.bg + ';' : ''}${o.big ? 'border-bottom:2px solid #d9e2ec;' : ''}"><td style="padding:2px 8px;white-space:nowrap;${o.indent ? 'padding-left:22px;' : ''}${o.big ? 'font-size:15px;padding:8px 8px;' : ''}">${label}</td><td style="padding:2px 8px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;color:${o.col || '#2b3440'};${big}${o.tip ? 'cursor:help;text-decoration:underline dotted #9aa4b2;' : ''}"${o.tip ? ` title="${esc('出どころ：\n' + o.tip.join('\n'))}"` : ''}>${val}</td><td class="smd-dim" style="padding:2px 8px;font-size:10.5px;line-height:1.3">${o.sub || ''}</td></tr>`; };
     const head = `<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px"><span style="font-weight:800;font-size:15px">🧮 月次の損益（${esc(c.ym)}）</span><span class="smd-dim" style="font-size:11px">入金 − 仕入 ＝ 粗利 ／ 粗利 − 経費 − 返金・損失 ＝ 純利益</span></div>`;
     if (!c.ok) return `<div class="tool-card" style="margin:0 0 12px;max-width:none">${head}<div class="smd-dim" style="font-size:12px">この月の粗利を計算中…（💹利益明細の読み込みが終わると出ます）</div></div>`;
     const warn = [];
@@ -25914,13 +25951,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${line('− 仕入', '− ' + y(c.cost), { col: '#a15', sub: c.noCost ? `未入力 ${c.noCost}件` : '' })}
         ${c.pp ? line('＋ PayPal差分（別途受取）', '+ ' + y(c.pp), { col: '#0f9d58' }) : ''}
         ${line('＝ 粗利', y(c.gross), { strong: true, col: c.gross < 0 ? '#d93025' : '#1a7f37', sub: `粗利率 ${pct(c.gross, c.depFix + c.depProv)}（入金比）／${c.grossN}件` })}
-        ${line('− 国内送料（ヤマト等）', '− ' + y(gm.ship), { indent: true, col: gm.ship ? '#a15' : '#d93025', sub: gm.ship ? '' : '⚠ 未登録（④の📦ヤマトから取り込む）' })}
-        ${line('− 梱包資材・備品', '− ' + y(gm.pack), { indent: true, col: '#a15' })}
-        ${line('− 人件費・外注', '− ' + y(gm.labor), { indent: true, col: '#a15' })}
-        ${line('− 家賃・倉庫・光熱', '− ' + y(gm.place), { indent: true, col: '#a15' })}
-        ${line('− ツール・通信', '− ' + y(gm.tool), { indent: true, col: '#a15' })}
+        ${line('− 国内送料（ヤマト等）', '− ' + y(gm.ship), { tip: (c.gsrc || {}).ship, indent: true, col: gm.ship ? '#a15' : '#d93025', sub: gm.ship ? '' : '⚠ 未登録（④の📦ヤマトから取り込む）' })}
+        ${line('− 梱包資材・備品', '− ' + y(gm.pack), { tip: (c.gsrc || {}).pack, indent: true, col: '#a15' })}
+        ${line('− 人件費・外注', '− ' + y(gm.labor), { tip: (c.gsrc || {}).labor, indent: true, col: '#a15' })}
+        ${line('− 家賃・倉庫・光熱', '− ' + y(gm.place), { tip: (c.gsrc || {}).place, indent: true, col: '#a15' })}
+        ${line('− ツール・通信', '− ' + y(gm.tool), { tip: (c.gsrc || {}).tool, indent: true, col: '#a15' })}
         ${(gm.sell || gm.other) ? line('− その他の経費', '− ' + y(gm.sell + gm.other), { indent: true, col: '#a15' }) : ''}
-        ${line('− 経費合計', '− ' + y(c.expTotal), { strong: true, col: '#a15', sub: `粗利比 ${pct(c.expTotal, c.gross)}（初期投資は含めない）` })}
+        ${line('− 経費合計', '− ' + y(c.expTotal), { tip: c.gsrcAll, strong: true, col: '#a15', sub: `粗利比 ${pct(c.expTotal, c.gross)}（初期投資は含めない）` })}
         ${line('− 手で記録した返金（PayPal返金など）', '− ' + y(c.refund || 0), { indent: true, col: '#a15', sub: c.refund == null ? '（この画面では未集計＝💴入出金・経費で出ます）' : '' })}
         ${c.retBack.n ? line('　返品で入金が減った分', '（織り込み済）', { indent: true, col: '#6b7280', sub: `${c.retBack.n}件・${y(c.retBack.drop)}（上の入金に反映済み${c.retBack.unmeasured ? '・測れない ' + c.retBack.unmeasured + '件' : ''}）` }) : ''}
         ${c.cxl ? line('− キャンセル損失（日本を出た後）', '− ' + y(c.cxl), { indent: true, col: '#a15', sub: c.cxlN + '件' }) : ''}
@@ -26777,8 +26814,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!all.length) return head + '<div class="smd-dim" style="font-size:11.5px">この条件の経費はありません</div>';
     let lastYm = '';
     const rowsHtml = all.map(r => { const ym = String(r.ymd || '').slice(0, 7); const sep = (!pick.ym && ym !== lastYm) ? `<tr><td colspan="3" style="padding:5px 8px 2px;font-weight:700;color:#1565c0;border-top:1px solid #e6e9ef">${esc(ym)} <span class="smd-dim" style="font-weight:400;font-size:11px">${yen0(all.filter(x => String(x.ymd || '').slice(0, 7) === ym).reduce((a, x) => a + (Number(x.amount) || 0), 0))}</span></td></tr>` : ''; lastYm = ym;
-      return sep + `<tr><td style="padding:2px 8px;border-top:1px solid #f0f0f0;white-space:nowrap">${esc(String(r.ymd || '').slice(0, 10))}</td><td style="text-align:right;padding:2px 8px;border-top:1px solid #f0f0f0;white-space:nowrap;font-weight:700">${yen0(r.amount)}</td><td style="padding:2px 8px;border-top:1px solid #f0f0f0;font-size:11px;color:#555">${esc(r.memo || '')}${r.memo ? '' : '<span class="smd-dim">（メモなし）</span>'}</td></tr>`; }).join('');
-    return head + `<div style="max-height:320px;overflow:auto;border:1px solid #eee;border-radius:6px"><table style="border-collapse:collapse;font-size:11.5px;width:100%"><thead><tr style="background:#f4f6fa"><th style="text-align:left;padding:3px 8px">日付</th><th style="text-align:right;padding:3px 8px">金額</th><th style="text-align:left;padding:3px 8px">メモ</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
+      return sep + `<tr><td style="padding:2px 8px;border-top:1px solid #f0f0f0;white-space:nowrap">${esc(String(r.ymd || '').slice(0, 10))}</td><td style="text-align:right;padding:2px 8px;border-top:1px solid #f0f0f0;white-space:nowrap;font-weight:700">${yen0(r.amount)}</td><td style="padding:2px 8px;border-top:1px solid #f0f0f0;font-size:11px;color:#555">${(() => { const sr = expSrcOf(r); return `<b style="color:${sr.keys[0] === 'unknown' || sr.keys[0] === 'manual' ? '#9a6700' : '#1565c0'};font-weight:600">${sr.icon} ${esc(sr.label)}</b>　`; })()}${esc(r.memo || '')}${r.memo ? '' : '<span class="smd-dim">（メモなし）</span>'}</td></tr>`; }).join('');
+    return head + `<div style="max-height:320px;overflow:auto;border:1px solid #eee;border-radius:6px"><table style="border-collapse:collapse;font-size:11.5px;width:100%"><thead><tr style="background:#f4f6fa"><th style="text-align:left;padding:3px 8px">日付</th><th style="text-align:right;padding:3px 8px">金額</th><th style="text-align:left;padding:3px 8px">出どころ・メモ</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
   }
   /* ★2026-11-15 本人「なんでここ、利益明細は上で月を変えられるのに、入出金経費は下までスクロールしないと変えられないの？意味が分からん」：
      💹利益明細と💴入出金・経費の月を1つに（exp.ym＝入出金の月・localStorage smdPfMonth＝利益明細の月/期間）。
@@ -26925,14 +26962,15 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       catList.filter(c => byCat[c]).map(c => `<div class="tool-card" style="margin:0;padding:8px 12px;min-width:120px"><div class="smd-dim" style="font-size:12px">${esc(c)}</div><div style="font-weight:700;font-size:15px">${fmtJpy(byCat[c] || 0)}</div></div>`).join('') +
       `<div class="tool-card" style="margin:0;padding:8px 12px;min-width:120px;background:#fff4f2"><div class="smd-dim" style="font-size:12px">経費合計</div><div style="font-weight:700;font-size:15px;color:#d93025">${fmtJpy(plCtxV.expTotal)}</div>${plCtxV.g.invest ? `<div class="smd-dim" style="font-size:11px"><span>初期投資</span> ${fmtJpy(plCtxV.g.invest)} <span>は含めない</span></div>` : ''}</div></div>`;   /* ★レビュー#30：損益の表と同じ（初期投資は別枠） */
     // 明細
-    const table = `<div class="tool-card exp-fill" style="margin:0;max-width:720px"><div class="pf-scroll" style="max-height:34vh"><table data-smdsort="expenses" data-smdauto class="pf-table"><tr><th>日付</th><th>カテゴリ</th><th>金額</th><th>メモ</th><th></th></tr>` +
+    const table = `<div class="tool-card exp-fill" style="margin:0;max-width:720px"><div class="pf-scroll" style="max-height:34vh"><table data-smdsort="expenses" data-smdauto class="pf-table"><tr><th>日付</th><th>カテゴリ</th><th>金額</th><th title="この数字をどこから持ってきたか（メモから読む・メモに「出どころ：◯◯」と書けばそれを出す）">出どころ</th><th>メモ</th><th></th></tr>` +
       (rows.length ? rows.map(r => `<tr>
         <td style="font-size:12px;white-space:nowrap">${esc(r.ymd)}</td>
         <td style="font-size:12px">${esc(r.category)}</td>
         <td><input type="number" class="exp-amt-e" data-id="${r.id}" value="${r.amount}" style="width:96px;padding:2px 4px;font-size:12px;text-align:right"></td>
+        ${(() => { const sr = expSrcOf(r); return `<td style="font-size:11.5px;white-space:nowrap;color:${sr.keys[0] === 'unknown' || sr.keys[0] === 'manual' ? '#9a6700' : '#333'}" title="出どころ：${esc(sr.label)}">${sr.icon} ${esc(sr.label)}</td>`; })()}
         <td><input type="text" class="exp-memo-e" data-id="${r.id}" value="${esc(r.memo || '')}" style="width:100%;min-width:140px;padding:2px 4px;font-size:12px"></td>
         <td><button class="exp-del" data-id="${r.id}" title="削除" style="border:none;background:none;cursor:pointer;color:#d93025">🗑</button></td></tr>`).join('')
-        : `<tr><td colspan="5" class="smd-dim" style="padding:12px">この月の経費はまだありません。</td></tr>`) +
+        : `<tr><td colspan="6" class="smd-dim" style="padding:12px">この月の経費はまだありません。</td></tr>`) +
       `</table></div></div>`;
     // CSVエクスポート（旧「月次サマリー」タブから統合）
     const exportCard = `<div class="tool-card" style="margin:12px 0 0;max-width:640px"><div style="font-weight:700;font-size:14px;margin-bottom:8px">📥 CSVエクスポート <span class="smd-dim" style="font-weight:400;font-size:11px">（Excel対応・BOM付き。確定申告/古物台帳用）</span></div>
@@ -26949,18 +26987,31 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const c = String(x.category || '').trim();
       (histMap[ym] = histMap[ym] || {})[c] = (histMap[ym][c] || 0) + (Number(x.amount) || 0); });
     const histYms = Object.keys(histMap).sort().reverse();
-    const histCats = [...new Set(histYms.flatMap(y => Object.keys(histMap[y])))];
+    const histCatsAll = [...new Set(histYms.flatMap(y => Object.keys(histMap[y])))];
+    /* ★2026-11-16 本人「初期費用は全部くくったらいいやん。その中の内訳で分ければいいんじゃない？」「入ってるか入ってへんか、パッと見て分からんのかも」：
+       運転の経費 → 固定費 計 → 経費合計（初期投資を含めない）→ 初期投資（1行・▸ で内訳）。マスに出どころの印・[自動] だけのマスは色を変える */
+    const histCats = histCatsAll.filter(c => !plIsInvest(c)), histInv = histCatsAll.filter(c => plIsInvest(c));
+    const histSrc = {};   // ym|cat → {icons, auto}
+    (exp._allRows || []).forEach(x => { const ym = String(x.ymd || '').slice(0, 7); if (!ym || !(Number(x.amount) || 0)) return; const k = ym + '|' + String(x.category || '').trim(); const sr = expSrcOf(x);
+      const h = histSrc[k] = histSrc[k] || { ic: new Set(), lb: new Set(), auto: true }; [...sr.icon].forEach(ch => h.ic.add(ch)); h.lb.add(sr.label); if (!sr.auto) h.auto = false; });
+    const invOf = y => histInv.reduce((a2, c) => a2 + (histMap[y][c] || 0), 0);
     const isFix = c => /^(人件費|家賃|地代家賃|倉庫代|倉庫|倉庫代・家賃|倉庫費|保管料|ツール|ツール代|サブスク|固定費|通信費|通信|外注費|外注|オフィス|水道光熱費|什器・棚)/.test(String(c || ''));
     const yen0 = n => '¥' + Math.round(n || 0).toLocaleString('en-US');
+    const histCell = (y, c, sub) => { const v = histMap[y][c] || 0; const hs = histSrc[y + '|' + c];
+      const col = !v ? '#c9c9c9' : (hs && hs.auto ? '#b26a00' : '#333');
+      return `<td class="${v ? 'exp-hc' : ''}" data-cat="${av(c)}" data-ym="${y}" style="text-align:right;padding:3px 10px;color:${col};${v ? 'cursor:pointer;text-decoration:underline dotted #bbb;' : ''}${hs && hs.auto && v ? 'font-style:italic;' : ''}" title="${v ? esc('この月・この分類の明細を下に出す\n出どころ：' + (hs ? [...hs.lb].join('・') : '分からない') + (hs && hs.auto ? '\n（自動で入った見込みの数字）' : '')) : 'この月に1件も無い'}">${v ? yen0(v) + (hs ? `<span style="font-size:10px;margin-left:3px;font-style:normal">${[...hs.ic].join('')}</span>` : '') : '—'}</td>`; };
     const histCard = histYms.length ? `<div class="tool-card" style="margin:0 0 12px">
-      <div style="font-weight:700;font-size:14px;margin-bottom:8px">📆 月ごとの経費（過去の遍歴）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">月の見出し＝その月へ切替／<b>金額のマス＝その月・その分類の明細を下に出す</b>／分類名＝全部の月の明細／<b>青字＝固定費</b></span></div>
+      <div style="font-weight:700;font-size:14px;margin-bottom:8px">📆 月ごとの経費（過去の遍歴）<span class="smd-dim" style="font-weight:400;font-size:11px;margin-left:6px">月の見出し＝その月へ切替／<b>金額のマス＝その月・その分類の明細を下に出す</b>／分類名＝全部の月の明細／<b>青字＝固定費</b>／初期投資は一番下に1行（▸ で内訳）</span></div>
       <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;white-space:nowrap">
         <thead><tr style="background:#f4f6fa"><th style="text-align:left;padding:4px 8px;position:sticky;left:0;background:#f4f6fa">カテゴリ</th>${histYms.map(y => `<th class="exp-ymh" data-ym="${y}" style="text-align:right;padding:4px 10px;cursor:pointer;color:${y === exp.ym ? '#ee4d2d' : '#333'}" title="この月に切り替える">${y.slice(2)}</th>`).join('')}</tr></thead>
         <tbody>
-        ${histCats.map(c => `<tr><td class="exp-hc" data-cat="${av(c)}" style="padding:3px 8px;position:sticky;left:0;background:#fff;cursor:pointer;color:${isFix(c) ? '#1565c0' : '#333'};font-weight:${isFix(c) ? 700 : 400}" title="この分類の明細（全部の月）を下に出す">${esc(c)}</td>${histYms.map(y => `<td class="${(histMap[y][c] || 0) ? 'exp-hc' : ''}" data-cat="${av(c)}" data-ym="${y}" style="text-align:right;padding:3px 10px;color:${(histMap[y][c] || 0) ? '#333' : '#c9c9c9'};${(histMap[y][c] || 0) ? 'cursor:pointer;text-decoration:underline dotted #bbb' : ''}" title="${(histMap[y][c] || 0) ? 'この月・この分類の明細を下に出す' : ''}">${(histMap[y][c] || 0) ? yen0(histMap[y][c]) : '—'}</td>`).join('')}</tr>`).join('')}
+        ${histCats.map(c => `<tr><td class="exp-hc" data-cat="${av(c)}" style="padding:3px 8px;position:sticky;left:0;background:#fff;cursor:pointer;color:${isFix(c) ? '#1565c0' : '#333'};font-weight:${isFix(c) ? 700 : 400}" title="この分類の明細（全部の月）を下に出す">${esc(c)}</td>${histYms.map(y => histCell(y, c)).join('')}</tr>`).join('')}
         <tr style="border-top:2px solid #e6e9ef;font-weight:700"><td style="padding:4px 8px;position:sticky;left:0;background:#fff;color:#1565c0">固定費 計</td>${histYms.map(y => `<td style="text-align:right;padding:4px 10px;color:#1565c0">${yen0(Object.keys(histMap[y]).filter(isFix).reduce((a2, c) => a2 + histMap[y][c], 0))}</td>`).join('')}</tr>
-        <tr style="font-weight:700"><td style="padding:4px 8px;position:sticky;left:0;background:#fff">経費 合計</td>${histYms.map(y => `<td style="text-align:right;padding:4px 10px">${yen0(Object.values(histMap[y]).reduce((a2, v) => a2 + v, 0))}</td>`).join('')}</tr>
+        <tr style="font-weight:700"><td style="padding:4px 8px;position:sticky;left:0;background:#fff">経費 合計<span class="smd-dim" style="font-weight:400;font-size:10.5px">（初期投資を含めない）</span></td>${histYms.map(y => `<td style="text-align:right;padding:4px 10px">${yen0(histCats.reduce((a2, c) => a2 + (histMap[y][c] || 0), 0))}</td>`).join('')}</tr>
+        ${histInv.length ? `<tr style="border-top:2px solid #e6e9ef;font-weight:700;color:#7b52c4"><td class="exp-inv-tg" style="padding:4px 8px;position:sticky;left:0;background:#fff;cursor:pointer" title="押すと内訳（契約費用・設備・その他）が開く。内訳の行の金額を押すと明細（倉庫の契約・Frontier 入会金など）が下に出る"><span class="exp-inv-arrow">${exp.histInvOpen ? '▾' : '▸'}</span> 初期投資<span class="smd-dim" style="font-weight:400;font-size:10.5px">（別枠・純利益に入れない）</span></td>${histYms.map(y => `<td style="text-align:right;padding:4px 10px;color:${invOf(y) ? '#7b52c4' : '#c9c9c9'}">${invOf(y) ? yen0(invOf(y)) : '—'}</td>`).join('')}</tr>
+        ${histInv.map(c => `<tr class="exp-inv-sub" style="display:${exp.histInvOpen ? '' : 'none'}"><td class="exp-hc" data-cat="${av(c)}" style="padding:3px 8px 3px 24px;position:sticky;left:0;background:#fff;cursor:pointer;color:#7b52c4" title="この分類の明細（全部の月）を下に出す">${esc(c.replace(/^初期投資：/, ''))}</td>${histYms.map(y => histCell(y, c)).join('')}</tr>`).join('')}` : ''}
         </tbody></table></div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:6px;line-height:1.6"><b>見方</b>：「—」＝その月に1件も無い／<span style="color:#b26a00;font-style:italic">茶色の斜体</span>＝自動で入った見込みの数字（固定費の内訳から）／印＝出どころ：🅿 PayPay・🏦 銀行・💳 カード・📄 契約金計算書・🛒 Amazon・楽天の注文・🚚 ヤマトの運賃・✉ メールの領収書・⚙ 自動・📒 MF の明細・✍ 手入力（元が分からない）・❓ 分からない（マスにかざすと名前が出る）</div>
       <div id="exp-hist-detail" style="margin-top:8px">${exp.histPick ? expHistDetailHtml(exp.histPick) : '<span class="smd-dim" style="font-size:11px">金額のマスか分類名を押すと、ここに明細（日付・金額・メモ）が出ます。</span>'}</div></div>` : '';
     // ★読めなかったものがあるなら、数字より先に言う。0円と見分けが付かないまま
     //   月次損益CSVを落とせてしまうため（2026-09-10 是正・返品ページは対応済みでここだけ残っていた）。
@@ -27023,6 +27074,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { plWire(body, exp.ym); } catch (_) {}
     try { amzWire(body, exp.ym, amzData, rows); } catch (_) {}
     body.querySelectorAll('.exp-ymh').forEach(th => th.addEventListener('click', () => { finPickYm(th.dataset.ym); renderExpenses(); }));
+    body.querySelectorAll('.exp-inv-tg').forEach(td => td.addEventListener('click', () => { exp.histInvOpen = !exp.histInvOpen; body.querySelectorAll('.exp-inv-sub').forEach(tr => { tr.style.display = exp.histInvOpen ? '' : 'none'; }); body.querySelectorAll('.exp-inv-arrow').forEach(a => { a.textContent = exp.histInvOpen ? '▾' : '▸'; }); }));   /* ★11/16 初期投資の内訳を開く（再描画しない） */
     // ★月ごとの経費のマス／分類名→明細（本人 2026-10-11「これの詳細を見たい」）。再描画せず下の枠だけ差し替える（表の位置が動かない）
     body.querySelectorAll('.exp-hc').forEach(td => td.addEventListener('click', () => {
       const pick = { cat: td.dataset.cat || '', ym: td.dataset.ym || '' };
@@ -29780,6 +29832,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-16', items: [
+      '🧾 <b>経費に「出どころ」を出しました・月ごとの経費の表を見やすくしました</b>（本人「どっからその数字持ってきたかも欲しいね。PayPay とか」「初期費用は全部くくったらいいやん」「入ってるか入ってへんか、パッと見て分からんのかも」）。①💴経費の一覧に「出どころ」の列（PayPay（Anna さん）・ソニー銀行（SMBC ヤチン）・契約金計算書・ライフカード・Amazon の注文・ヤマトの運賃・メールの領収書・自動（固定費の内訳）など。メモから読む・メモに「出どころ：◯◯」と書けばそれを出す・読めない時は「手入力（元が分からない）」「分からない」）。②💹損益の内訳の数字（人件費・家賃・送料・ツール・経費合計など）にかざすと出どころの内訳（PayPay（Anna さん） ¥340,000 など）。③📆月ごとの経費：初期投資を一番下の1行にまとめた（▸ で契約費用・設備・その他の内訳、行の金額を押すと明細）・経費合計は初期投資を含めない・金額のマスに出どころの印・自動で入った見込みの数字は茶色の斜体・「—」＝その月に1件も無い の見方を表の下に。',
       '📧 <b>接続枠の内訳のカードに、各台の Google アカウントのアドレスを省かずに出すようにしました</b>（本人「Gmail名ちゃんと表示して」）。見出しは「本体」「2台目」…の番号だけにし、その下にアドレス（GAS が自分の持ち主を答える＝もう1台の PC でもアカウントが変わっても正しく出る）。長いアドレスはカードの幅で折り返し、「🤖出品の担当」「控え」の札と重なりません。GAS が答えない時は「分からない」と出します。',
       '🔌 <b>5台目（gcsonlinestore631.2）・6台目（631.3）の GAS を足しました</b>（本人が鍵を入れて保存）。⚙️設定に URL の欄（このPCごとに入れる・ほかのPCには写らない）。接続枠の内訳と上のピルに5台目・6台目の残り％と版が出ます。🤖は機種の担当表で5台目（child4）を割り振った機種だけ5台目へ送り、ポータルからも起こします。6台目は控え（枠を見るだけ・🤖は起こさない）。本体が枯れた時の逃げ先にも入れました。',
       '🆕 <b>出品ログの「最新順（日をまたぐ）」で店を選んだ時、画面を開いた後に出した明細が抜けていたのを直しました</b>（本人「これ、新しい順になってなくね？」）：第3を選ぶと一番上が 01:25 で、今日 10:47 の物が出ていませんでした。どの店の明細かの控えを画面を開いた時に1回だけ読んでいたため、開いた後にできた新しいカタログ（第3は商品ごとに新しいカタログ）が「不明」に回っていました。店が分からない新しい明細の分だけ、2分おきに読み足します。並びは前から「出した時刻の新しい順」です。',
