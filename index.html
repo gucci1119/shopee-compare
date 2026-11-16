@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-042310';
+  const APP_BUILD = '20261117-045605';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -30109,6 +30109,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '🖼 <b>🏆 の写真：出品番号の無い古い注文も今の出品の画像に</b>（本人「画像差し変わってるのと、差し変わってないのとある？」）：BR の1〜6月の注文などは出品番号が無く名前も前の書き方（Usado …）＝前の写真のままだった。国＋そろえた名前でも今の出品を探す（同じ名前で画像が違う物は使わない）・同じ行の中で今の出品につながった国の画像を、つながらなかった名前にも使う',
       '✏️ <b>編集ページ（✏️）のリンクに店の番号（cnsc_shop_id）を付けた</b>：Seller Center は今選んでいる店で開くので、2店舗目・第3の出品は「商品が見つからない」になっていた。明細の店の番号を付ける（本店にも）＝🏆 商品別の利益・出品ログ・出品一覧・在庫の自動復活など ✏️ を出す所すべて',
       '🔗 <b>🏆 商品別の利益の各行から、売れた出品の販売ページ（🛒）と編集ページ（✏️）へ飛べるように</b>（本人「ここから、そのカタログページとか各国の商品ページ、商品編集ページにも飛べるようにしてください」）：行の下に国ごと・出品ごとに最初から小さく出す。2店舗目・第3の出品はその店の番号で',
       '🖼 <b>🏆 商品別の利益の写真を「今の出品の画像」に</b>（本人「それで」）：注文の時に残った画像を出していた＝出品の画像を差し替えても、その品がまた売れるまで前の写真のままだった。今の明細の画像（明細名でつなぐ・単品は商品の画像）を先に使い、見つからない時だけ注文の画像。出品表は2時間ごとの取り込みで新しい画像になる',
@@ -61115,7 +61116,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     /* ★2026-11-17 05（00・本人「それで」）：写真は【今の出品の画像】を先に使う＝出品の画像を差し替えたら、その品がまた売れる前からここも新しい絵になる。
        明細とのつなぎは 国:商品ID｜そろえた明細名（model_id は消した後に別のソフトに移る＝番号だけで結ばない・記憶 model-id-shifts-after-delete）。単品は 国:商品ID｜（空） */
     const curImg = new Map();
-    const curImgOf = (cc, itemId, vr) => curImg.get(cc + ':' + itemId + '|' + prNorm(vr || '')) || (!vr ? curImg.get(cc + ':' + itemId + '|*') : '') || '';
+    /* ★2026-11-17 05（00・本人「画像差し変わってるのと、差し変わってないのとある？」）：古い注文（BR の1〜6月など）は出品番号が無く、名前も前の書き方（Usado …／[Used] …）＝出品につながらず注文の画像に落ちていた。
+       → 国＋そろえた名前（[Usado]・Usado・Used の印を外し、語の並びをそろえる）でも今の出品を引く。同じ鍵に別の画像が2つ以上ある時は使わない（機種違いの同名に効かせない） */
+    const curNmImg = new Map(), curNmBad = new Set();
+    const nmKeyOf = (t) => [...new Set(prNorm(t).split(' ').filter(w => w && !/^(used|usado|usada|usados|二手|中古)$/.test(w)))].sort().join(' ');
+    const curNmSet = (k, im) => { if (!k || !im || curNmBad.has(k)) return; const was = curNmImg.get(k); if (was && was !== im) { curNmBad.add(k); curNmImg.delete(k); } else curNmImg.set(k, im); };
+    const curImgOf = (cc, itemId, vr, nm) => (itemId ? (curImg.get(cc + ':' + itemId + '|' + prNorm(vr || '')) || (!vr ? curImg.get(cc + ':' + itemId + '|*') : '')) : '')
+      || (nm != null ? (curNmImg.get(cc + '|' + nmKeyOf(vr ? nm + ' ' + vr : nm)) || (vr ? curNmImg.get(cc + '|m:' + nmKeyOf(vr)) : '')) : '') || '';
     const shopFamNo = (sid) => famNoOfShop(sid);   /* ★2026-11-16 05：本店／それ以外の2択だった（第3が2店舗目に混ざっていた）→ 系統の番号（SHOP_FAMS・0＝分からない） */
     const prodKey = (cc, itemId, modelId, nm, vr, sku, idOk) => {
       const pid = (pidOk && idOk) ? (productIds['id:' + itemId + '#' + modelId] || productIds['id:' + itemId] || {}) : {};
@@ -61128,7 +61135,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!m) return; const sku = String(m.sku || m.model_sku || '').trim();
         const inf = { cc, sku, n: String(m.n || ''), price: Number(m.price) || null, stock: Number(m.stock) || 0, shop: r.shop_id, ct: r.create_time || null };
         mInfo.set(cc + ':' + r.item_id + '#' + (m.id != null ? m.id : 0), inf);
-        { const im = String(m.img || (!(r.models || []).length ? r.image : '') || '').trim(); if (im) curImg.set(cc + ':' + r.item_id + '|' + prNorm(m.n || ''), im); if (r.image && !curImg.has(cc + ':' + r.item_id + '|*')) curImg.set(cc + ':' + r.item_id + '|*', String(r.image)); }
+        { const im = String(m.img || (!(r.models || []).length ? r.image : '') || '').trim(); if (im) { curImg.set(cc + ':' + r.item_id + '|' + prNorm(m.n || ''), im); curNmSet(cc + '|' + nmKeyOf(m.n ? String(r.name || '') + ' ' + m.n : String(r.name || '')), im); if (m.n) curNmSet(cc + '|m:' + nmKeyOf(m.n), im); } if (r.image && !curImg.has(cc + ':' + r.item_id + '|*')) curImg.set(cc + ':' + r.item_id + '|*', String(r.image)); }
         if (PR.group === 'prod') lstModels.push({ cc, item: r.item_id, mid: m.id, nm: String(r.name || ''), vr: String(m.n || ''), sku, inf });
       });
     })); } catch (_) {} }
@@ -61241,8 +61248,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         gr.labels = gr.labels || {}; gr.labels[label] = (gr.labels[label] || 0) + q;
         gr.lcc = gr.lcc || {}; (gr.lcc[label] || (gr.lcc[label] = {}))[o.cc] = ((gr.lcc[label] || {})[o.cc] || 0) + q;
         gr.lnk = gr.lnk || {}; if (!gr.lnk[label]) gr.lnk[label] = 'nm:' + prNameKey(nm, vr);
-        const itImg = curImgOf(o.cc, it.item_id, vr) || it.image || '';   /* ★11/17 今の出品の画像 → 無ければ注文の時の画像 */
-        if (itImg) { gr.limg = gr.limg || {}; const li = gr.limg[label]; if (!li || d > li.d || (/_tn$/.test(li.src) && !/_tn$/.test(itImg))) gr.limg[label] = { src: itImg, d }; }
+        const itCur = curImgOf(o.cc, it.item_id, vr, nm), itImg = itCur || it.image || '';   /* ★11/17 今の出品の画像（番号→そろえた名前）→ 無ければ注文の時の画像 */
+        if (itCur) { gr.ccCur = gr.ccCur || {}; gr.ccCur[o.cc] = itCur; }   /* 束の中で今の出品につながった国の画像＝つながらなかったラベルにも使う */
+        if (itImg) { gr.limg = gr.limg || {}; const li = gr.limg[label]; if (!li || (itCur && !li.cur) || (!!itCur === !!li.cur && (d > li.d || (/_tn$/.test(li.src) && !/_tn$/.test(itImg))))) gr.limg[label] = { src: itImg, d, cur: !!itCur }; }
         if (itImg) { gr.imgs = gr.imgs || new Map(); const ik = String(itImg).replace(/_tn$/, ''); const ix = gr.imgs.get(ik); if (ix) { ix.q += q; if (!/_tn$/.test(itImg)) ix.src = itImg; } else gr.imgs.set(ik, { src: itImg, q }); }
         if (d > gr.last) { gr.last = d; if (itImg) gr.img = itImg; } else if (!gr.img && itImg) gr.img = itImg;   /* ★本人「画像ないやん？」：いちばん新しく売れた注文の写真 */
         if (!known) {
@@ -61463,7 +61471,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const prNameList = (r, open) => {
       const lines = [{ l: r.label, cc: Object.keys((r.lcc || {})[r.label] || {}).sort((a, b) => r.lcc[r.label][b] - r.lcc[r.label][a]), rep: true }].concat((r.alt || []).map(a => ({ l: a.l, cc: a.cc })));
       const all = open || (PR.expAlt && PR.expAlt.has(r.key)); const L = all ? lines : lines.slice(0, 2); const more = lines.length - L.length;   /* ★11/5 事業本部の決め：閉じている時は代表＋1つ（行の高さ 約140px） */
-      const pic = (l) => { const im = ((r.limg || {})[l] || {}).src || (l === r.label ? r.img : ''); return im ? `<img class="zimg prk-pic" loading="lazy" src="${IMG_CDN}${esc(im)}" onerror="this.style.opacity=.15" title="クリックで最大表示（ホバーで拡大プレビュー）" style="cursor:zoom-in">` : '<span class="prk-pic"></span>'; };
+      const pic = (l) => { const li0 = (r.limg || {})[l] || {}; let im = li0.src || (l === r.label ? r.img : ''); if (!li0.cur && r.ccCur) { const lc = Object.keys((r.lcc || {})[l] || {}).sort((a, b) => r.lcc[l][b] - r.lcc[l][a]); const c0 = lc.find(c => r.ccCur[c]); if (c0) im = r.ccCur[c0]; }   /* ★11/17 つながらなかったラベルは同じ国の今の画像 */ return im ? `<img class="zimg prk-pic" loading="lazy" src="${IMG_CDN}${esc(im)}" onerror="this.style.opacity=.15" title="クリックで最大表示（ホバーで拡大プレビュー）" style="cursor:zoom-in">` : '<span class="prk-pic"></span>'; };
       const txt = (l, rep) => { const i = l.indexOf(' ／ '); const a = i < 0 ? l : l.slice(0, i), b = i < 0 ? '' : l.slice(i + 3); return `<span class="${rep ? 'nm1' : 'nm'}">${esc(a)}</span>${b ? `<span class="cat">${esc(b)}</span>` : ''}`; };
       return L.map(x => `<div class="prk-nl">${pic(x.l)}<span class="prk-ccs">${x.cc.map(ccTag).join('')}</span><span class="prk-txt">${txt(x.l, x.rep)}${x.rep && PR.group !== 'hw' && r.hw !== '他' ? `<span class="cat">${esc(r.hw)}</span>` : ''}</span></div>`).join('') + prLinks(r, all);
     };
