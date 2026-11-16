@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-015928';
+  const APP_BUILD = '20261117-020142';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -1971,7 +1971,9 @@
     bigKv.get('listImgFavs').then(v => { const merged = Array.isArray(v) ? v.slice() : []; favLs.concat(settings.listImgFavs || []).forEach(u => { if (u && !merged.includes(u)) merged.push(u); });
       settings.listImgFavs = merged; _favIdbReady = true; _favLastJson = Array.isArray(v) ? JSON.stringify(v) : null;
       const done = () => { _favIdbOk = true; saveSettings._quiet = true; try { saveSettings(); } finally { saveSettings._quiet = false; } try { if (typeof listImgFavsRender === 'function') listImgFavsRender(); } catch (_) {} };
-      if (_favLastJson === JSON.stringify(merged)) done(); else bigKv.set('listImgFavs', merged).then(() => { _favLastJson = JSON.stringify(merged); done(); }).catch(() => { _favIdbReady = false; });
+      /* ★11/17 00「書いて読み直せたのを確かめてから外す」：書いた後に読み直し、中身が同じ時だけ smdSettings から外す */
+      const mj = JSON.stringify(merged), verify = () => bigKv.get('listImgFavs').then(r => { if (JSON.stringify(r || null) === mj) { _favLastJson = mj; done(); } else { _favIdbReady = false; } });
+      (_favLastJson === mj ? verify() : bigKv.set('listImgFavs', merged).then(verify)).catch(() => { _favIdbReady = false; });
     }).catch(() => { /* IndexedDB が使えない＝今まで通り smdSettings に置く */ }); }
   /* ★2026-09-26 1回だけ：入金為替手数料 2% → 0%（本人「よーわからん」→点検で確定：円換算のスプレッドに Payoneer 2% が既に入っている＝価格計算・利益で二重に引いていた） */
   /* （9/26 の入金為替 0% の移行は、下の「全部の設定を移すリンク」の取り込みの後へ移した＝2026-10-25） */
@@ -23050,7 +23052,9 @@
   setTimeout(() => { try { const rm = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i) || '';
       if (/^srcDeals1[01]:/.test(k)) rm.push(k);
       else if (k.indexOf('mdet:') === 0) { let at = 0; try { at = (JSON.parse(localStorage.getItem(k) || 'null') || {}).at || 0; } catch (_) {} if (!at || Date.now() - at > 72 * 3600000) rm.push(k); } }
-    rm.forEach(k => { try { localStorage.removeItem(k); } catch (_) {} }); if (rm.length) console.info('[保存領域] 使わない控えを ' + rm.length + ' 本片づけました'); } catch (_) {} }, 15000);
+    if (rm.length) { const list = rm.map(k => [k, k.length + (localStorage.getItem(k) || '').length]);   /* ★11/17 00：消す前に鍵の名前と字数の一覧を控える（IndexedDB smdBigKv の ls_cleanup_log・直近5回） */
+      bigKv.get('ls_cleanup_log').then(v => { const a = Array.isArray(v) ? v : []; a.unshift({ at: new Date().toISOString(), n: list.length, chars: list.reduce((t, x) => t + x[1], 0), keys: list }); return bigKv.set('ls_cleanup_log', a.slice(0, 5)); }).catch(() => {}).then(() => { rm.forEach(k => { try { localStorage.removeItem(k); } catch (_) {} }); }); }
+    if (false) rm.forEach(k => { try { localStorage.removeItem(k); } catch (_) {} }); if (rm.length) console.info('[保存領域] 使わない控えを ' + rm.length + ' 本片づけました'); } catch (_) {} }, 15000);
   const _detLsSet = (id, d) => { try { if (d) localStorage.setItem('mdet:' + id, JSON.stringify({ at: Date.now(), d })); } catch (_) {} };
   function mercDetailQ(itemId) {
     if (!itemId) return Promise.resolve(null);
@@ -35328,7 +35332,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   /* ★2026-11-17 05（localStorage が上限に近い・smdCatNames2 が151万字）：カテゴリ名の控えは IndexedDB へ。前の控え（localStorage）は IndexedDB に書けたのを確かめてから消す */
   const _catIdbP = (() => { const fromLs = Object.keys(catNameCache).length > 0;
     return bigKv.get('smdCatNames2').then(v => { if (v && typeof v === 'object') Object.keys(v).forEach(cc => { if (!catNameCache[cc] || !Object.keys(catNameCache[cc]).length) catNameCache[cc] = v[cc]; });
-      if (fromLs) return bigKv.set('smdCatNames2', catNameCache).then(() => { try { localStorage.removeItem('smdCatNames2'); } catch (_) {} }); }).catch(() => {}); })();
+      if (fromLs) { const cj = JSON.stringify(catNameCache); return bigKv.set('smdCatNames2', catNameCache).then(() => bigKv.get('smdCatNames2')).then(r => { if (JSON.stringify(r || null) === cj) { try { localStorage.removeItem('smdCatNames2'); } catch (_) {} } }); } }).catch(() => {}); })();   /* 読み直して同じ時だけ前の置き場を消す */
   async function loadCatNames(cc, shopId) {
     try { await _catIdbP; } catch (_) {}
     if (catNameCache[cc] || !shopId || !settings.openapiUrl) return;
