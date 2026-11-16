@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-020510';
+  const APP_BUILD = '20261117-022550';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -30100,6 +30100,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '🖼 <b>🏆 商品別の利益の写真を「今の出品の画像」に</b>（本人「それで」）：注文の時に残った画像を出していた＝出品の画像を差し替えても、その品がまた売れるまで前の写真のままだった。今の明細の画像（明細名でつなぐ・単品は商品の画像）を先に使い、見つからない時だけ注文の画像。出品表は2時間ごとの取り込みで新しい画像になる',
       '🛒 <b>出品ログ・出品一覧の販売ページ（🛒）を、明細の店の番号で作るように</b>（本人「なんで購入者ページへは飛べなくなっちゃったんだろう？アイコンも出てないし」）：店の番号を本店の設定だけで作っていた＝出品表に入る前の第3の明細は 🛒 が出ず、2店舗目・第3の明細に本店の番号が付くと別の店の URL になった。明細の店（出品の店の控え・出品表・第3の控え）を先に使う',
       '🧹 <b>ブラウザの保存領域（localStorage）があふれかけていたのを空けた</b>（02 業務部：約507万字で上限の5MB 近く）：画像テンプレ（約147万字）とカテゴリ名の控え（約151万字）を IndexedDB へ移した（書けたと確かめてから前の置き場を消す）・読まなくなった控え（72時間を過ぎた発送の詳細・前の版の仕入れ先検索）を起動の後に片づける・設定が満杯で保存できない時は黙って捨てず、作り直せる控えを捨ててもう一度・それでもダメなら画面に出す',
       '💹 <b>損益のグラフの売上の横に「商品の仕入れ額」</b>（本人「ここ、仕入れも欲しいな」「備品とかの経費分は抜いてね」「単純に商品の仕入れ額ね」）：在庫台帳の仕入日の月ごとに、売るために買った品の値段の合計（私物・取消・キャンセル・経費に入れた品・Amazon の備品や資材は除く）。値は万円で常に表示・かざすと「仕入れ値（その月に売れた品）」も出る（記録の無い月は「—」）',
@@ -61100,6 +61101,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const lstOk = !!(lst && lst.loaded && lst.byCc);
     /* 出品の控え（出品の画面が読む物）が手元にある時だけ：明細 → SKU・今の値段・在庫・店。商品の鍵 → 出している国 */
     const mInfo = new Map(), listedBy = new Map(), lstModels = [];
+    /* ★2026-11-17 05（00・本人「それで」）：写真は【今の出品の画像】を先に使う＝出品の画像を差し替えたら、その品がまた売れる前からここも新しい絵になる。
+       明細とのつなぎは 国:商品ID｜そろえた明細名（model_id は消した後に別のソフトに移る＝番号だけで結ばない・記憶 model-id-shifts-after-delete）。単品は 国:商品ID｜（空） */
+    const curImg = new Map();
+    const curImgOf = (cc, itemId, vr) => curImg.get(cc + ':' + itemId + '|' + prNorm(vr || '')) || (!vr ? curImg.get(cc + ':' + itemId + '|*') : '') || '';
     const shopFamNo = (sid) => famNoOfShop(sid);   /* ★2026-11-16 05：本店／それ以外の2択だった（第3が2店舗目に混ざっていた）→ 系統の番号（SHOP_FAMS・0＝分からない） */
     const prodKey = (cc, itemId, modelId, nm, vr, sku, idOk) => {
       const pid = (pidOk && idOk) ? (productIds['id:' + itemId + '#' + modelId] || productIds['id:' + itemId] || {}) : {};
@@ -61112,6 +61117,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!m) return; const sku = String(m.sku || m.model_sku || '').trim();
         const inf = { cc, sku, n: String(m.n || ''), price: Number(m.price) || null, stock: Number(m.stock) || 0, shop: r.shop_id, ct: r.create_time || null };
         mInfo.set(cc + ':' + r.item_id + '#' + (m.id != null ? m.id : 0), inf);
+        { const im = String(m.img || (!(r.models || []).length ? r.image : '') || '').trim(); if (im) curImg.set(cc + ':' + r.item_id + '|' + prNorm(m.n || ''), im); if (r.image && !curImg.has(cc + ':' + r.item_id + '|*')) curImg.set(cc + ':' + r.item_id + '|*', String(r.image)); }
         if (PR.group === 'prod') lstModels.push({ cc, item: r.item_id, mid: m.id, nm: String(r.name || ''), vr: String(m.n || ''), sku, inf });
       });
     })); } catch (_) {} }
@@ -61223,9 +61229,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         gr.labels = gr.labels || {}; gr.labels[label] = (gr.labels[label] || 0) + q;
         gr.lcc = gr.lcc || {}; (gr.lcc[label] || (gr.lcc[label] = {}))[o.cc] = ((gr.lcc[label] || {})[o.cc] || 0) + q;
         gr.lnk = gr.lnk || {}; if (!gr.lnk[label]) gr.lnk[label] = 'nm:' + prNameKey(nm, vr);
-        if (it.image) { gr.limg = gr.limg || {}; const li = gr.limg[label]; if (!li || d > li.d || (/_tn$/.test(li.src) && !/_tn$/.test(it.image))) gr.limg[label] = { src: it.image, d }; }
-        if (it.image) { gr.imgs = gr.imgs || new Map(); const ik = String(it.image).replace(/_tn$/, ''); const ix = gr.imgs.get(ik); if (ix) { ix.q += q; if (!/_tn$/.test(it.image)) ix.src = it.image; } else gr.imgs.set(ik, { src: it.image, q }); }
-        if (d > gr.last) { gr.last = d; if (it.image) gr.img = it.image; } else if (!gr.img && it.image) gr.img = it.image;   /* ★本人「画像ないやん？」：いちばん新しく売れた注文の写真 */
+        const itImg = curImgOf(o.cc, it.item_id, vr) || it.image || '';   /* ★11/17 今の出品の画像 → 無ければ注文の時の画像 */
+        if (itImg) { gr.limg = gr.limg || {}; const li = gr.limg[label]; if (!li || d > li.d || (/_tn$/.test(li.src) && !/_tn$/.test(itImg))) gr.limg[label] = { src: itImg, d }; }
+        if (itImg) { gr.imgs = gr.imgs || new Map(); const ik = String(itImg).replace(/_tn$/, ''); const ix = gr.imgs.get(ik); if (ix) { ix.q += q; if (!/_tn$/.test(itImg)) ix.src = itImg; } else gr.imgs.set(ik, { src: itImg, q }); }
+        if (d > gr.last) { gr.last = d; if (itImg) gr.img = itImg; } else if (!gr.img && itImg) gr.img = itImg;   /* ★本人「画像ないやん？」：いちばん新しく売れた注文の写真 */
         if (!known) {
           if (paypal.pending) skipProfit(gr, 'paypal', q);
           else if (cost != null || (dep == null && !(salesL > 0))) skipProfit(gr, 'payout', q);
