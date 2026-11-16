@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-020158';
+  const APP_BUILD = '20261117-020510';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -1872,8 +1872,13 @@
   ];
   // Shopeeカタログの直リンク。編集ページは item_id だけ／販売(公開)ページは shop_id が要る(同期時に自動採取→settings.shopIds)
   const editUrlFor = (host, itemId) => `https://${host}/portal/product/${itemId}?pageEntry=product_list`;
-  const buyerUrlFor = (cc, itemId) => {
-    const r = REGIONS.find(x => x.cc === cc); const sid = (settings.shopIds || {})[cc];
+  /* ★2026-11-17 05（本人「なんで購入者ページへは飛べなくなっちゃったんだろう？アイコンも出てないし」・出品ログの第3・Amazon のカード）：
+     店番号は settings.shopIds[国]（本店の番号・本人の PC では空）だけで作っていた＝出品表に入る前の第3の明細は URL が作れず 🛒 が出なかった。
+     2店舗目・第3の明細に本店の番号を付けると別の店の URL になる。→ 明細の店（引数 → 出品の店の控え／出品表／第3の控え＝llShopOf）を先に使い、分からない時だけ設定の番号 */
+  const buyerUrlFor = (cc, itemId, shopId) => {
+    const r = REGIONS.find(x => x.cc === cc); let sid = shopId ? String(shopId) : '';
+    if (!sid && itemId) { try { sid = (typeof llShopOf === 'function' && llShopOf(cc, itemId)) || ''; } catch (_) { sid = ''; } }
+    if (!sid) sid = (settings.shopIds || {})[cc];
     return (r && r.buyer && sid && itemId) ? `https://${r.buyer}/product/${sid}/${itemId}` : null;
   };
   const PAGE_SIZE = 50;
@@ -30095,6 +30100,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '🛒 <b>出品ログ・出品一覧の販売ページ（🛒）を、明細の店の番号で作るように</b>（本人「なんで購入者ページへは飛べなくなっちゃったんだろう？アイコンも出てないし」）：店の番号を本店の設定だけで作っていた＝出品表に入る前の第3の明細は 🛒 が出ず、2店舗目・第3の明細に本店の番号が付くと別の店の URL になった。明細の店（出品の店の控え・出品表・第3の控え）を先に使う',
       '🧹 <b>ブラウザの保存領域（localStorage）があふれかけていたのを空けた</b>（02 業務部：約507万字で上限の5MB 近く）：画像テンプレ（約147万字）とカテゴリ名の控え（約151万字）を IndexedDB へ移した（書けたと確かめてから前の置き場を消す）・読まなくなった控え（72時間を過ぎた発送の詳細・前の版の仕入れ先検索）を起動の後に片づける・設定が満杯で保存できない時は黙って捨てず、作り直せる控えを捨ててもう一度・それでもダメなら画面に出す',
       '💹 <b>損益のグラフの売上の横に「商品の仕入れ額」</b>（本人「ここ、仕入れも欲しいな」「備品とかの経費分は抜いてね」「単純に商品の仕入れ額ね」）：在庫台帳の仕入日の月ごとに、売るために買った品の値段の合計（私物・取消・キャンセル・経費に入れた品・Amazon の備品や資材は除く）。値は万円で常に表示・かざすと「仕入れ値（その月に売れた品）」も出る（記録の無い月は「—」）',
       '🏷 <b>出品ログの「店」で第3がすぐ数えられるように</b>（本人「いや、0件って出てるじゃん」「第３アカウント」）：第3・Amazon で今出した明細は出品表の取り込み（約15分ごと）の前だと店が分からず「不明」に入っていた → 公開の時の仕入れ目安の控え（Amazon から）で第3の店と分かるようにした',
@@ -54132,7 +54138,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       : '';
     const editUrl = rg.host ? editUrlFor(rg.host, r.item_id) : '#';
     // 販売ページURL：settings.shopIdsが空でも出品行のr.shop_idから直接生成（🛍️が出ない対策）
-    const buyUrl = buyerUrlFor(r.cc, r.item_id) || (() => { const reg = REGIONS.find(x => x.cc === r.cc); return (reg && reg.buyer && r.shop_id && r.item_id) ? `https://${reg.buyer}/product/${r.shop_id}/${r.item_id}` : null; })();
+    const buyUrl = buyerUrlFor(r.cc, r.item_id, r.shop_id) || (() => { const reg = REGIONS.find(x => x.cc === r.cc); return (reg && reg.buyer && r.shop_id && r.item_id) ? `https://${reg.buyer}/product/${r.shop_id}/${r.item_id}` : null; })();
     // 💰📗経済列（利益台帳と共用の商品名突合）：_ps=実売利益統計 _sug=直近仕入(原価) _roi=実売直近÷原価 _cov=何か国に出品
     const _ps = ledgerProfitStatsByName(r.name);
     const _sug = ledgerSugCostByName(r.name);
