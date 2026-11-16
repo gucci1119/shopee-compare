@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-013213';
+  const APP_BUILD = '20261117-015928';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -1950,7 +1950,29 @@
     // 変換中にEnterで確定した直後も走らせる（compositionendが来ない環境向けの保険）
     el.addEventListener('keyup', (e) => { if (e.key === 'Enter' && !composing) run(); });
   }
-  const saveSettings = () => { localStorage.setItem('smdSettings', JSON.stringify(settings)); try { if (!saveSettings._quiet) setsyncQueue(); } catch (_) {} };
+  /* ★2026-11-17 05（02 業務部・00「localStorage が約 5.07M 字で上限に近い」）：大きい控えはブラウザの IndexedDB（数百MB まで入る）へ。
+     数えた結果（本人のタブ）：smdSettings 148万字のうち listImgFavs（画像テンプレ5枚を data:image のまま）が 147万字・smdCatNames2（カテゴリ名）151万字。 */
+  const bigKv = (() => { let dbP = null;
+    const open = () => dbP || (dbP = new Promise((res, rej) => { try { const r = indexedDB.open('smdBigKv', 1); r.onupgradeneeded = () => { try { r.result.createObjectStore('kv'); } catch (_) {} }; r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error || new Error('IndexedDB を開けません')); } catch (e) { rej(e); } }).catch(e => { dbP = null; throw e; }));
+    const run = (mode, fn) => open().then(db => new Promise((res, rej) => { const tx = db.transaction('kv', mode); const q = fn(tx.objectStore('kv')); tx.oncomplete = () => res(q ? q.result : undefined); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('保存を取り消されました')); }));
+    return { get: k => run('readonly', st => st.get(k)), set: (k, v) => run('readwrite', st => st.put(v, k)) }; })();
+  /* 画像テンプレ（listImgFavs）は IndexedDB に置く。IndexedDB に書けたと確かめた後だけ smdSettings から外す（書けない PC では今まで通り smdSettings に残す） */
+  let _favIdbReady = false, _favIdbOk = false, _favLastJson = null;
+  const _favPersist = () => { if (!_favIdbReady) return; const f = settings.listImgFavs || []; const j = JSON.stringify(f); if (j === _favLastJson) return; _favLastJson = j;
+    bigKv.set('listImgFavs', f).then(() => { _favIdbOk = true; }).catch(e => { _favIdbOk = false; _favLastJson = null; try { toast('⚠ 画像テンプレを保存できませんでした（' + String((e && e.message) || e).slice(0, 60) + '）', true); } catch (_) {} }); };
+  const saveSettings = () => {
+    const str = JSON.stringify(_favIdbOk ? Object.assign({}, settings, { listImgFavs: undefined }) : settings);
+    try { localStorage.setItem('smdSettings', str); }
+    catch (eS) { /* ★2026-11-17 満杯で書けない時に黙って捨てない：作り直せる控えを捨ててもう一度（lsSet）・それでもダメなら画面に出す。起動の途中は lsSet がまだ使えないので少し後で */
+      setTimeout(() => { try { lsSet('smdSettings', JSON.stringify(_favIdbOk ? Object.assign({}, settings, { listImgFavs: undefined }) : settings)); } catch (_) { try { console.warn('[保存領域] 設定を保存できません', eS); } catch (__) {} } }, 2500); }
+    try { _favPersist(); } catch (_) {}
+    try { if (!saveSettings._quiet) setsyncQueue(); } catch (_) {} };
+  { const favLs = Array.isArray(settings.listImgFavs) ? settings.listImgFavs.slice() : [];
+    bigKv.get('listImgFavs').then(v => { const merged = Array.isArray(v) ? v.slice() : []; favLs.concat(settings.listImgFavs || []).forEach(u => { if (u && !merged.includes(u)) merged.push(u); });
+      settings.listImgFavs = merged; _favIdbReady = true; _favLastJson = Array.isArray(v) ? JSON.stringify(v) : null;
+      const done = () => { _favIdbOk = true; saveSettings._quiet = true; try { saveSettings(); } finally { saveSettings._quiet = false; } try { if (typeof listImgFavsRender === 'function') listImgFavsRender(); } catch (_) {} };
+      if (_favLastJson === JSON.stringify(merged)) done(); else bigKv.set('listImgFavs', merged).then(() => { _favLastJson = JSON.stringify(merged); done(); }).catch(() => { _favIdbReady = false; });
+    }).catch(() => { /* IndexedDB が使えない＝今まで通り smdSettings に置く */ }); }
   /* ★2026-09-26 1回だけ：入金為替手数料 2% → 0%（本人「よーわからん」→点検で確定：円換算のスプレッドに Payoneer 2% が既に入っている＝価格計算・利益で二重に引いていた） */
   /* （9/26 の入金為替 0% の移行は、下の「全部の設定を移すリンク」の取り込みの後へ移した＝2026-10-25） */
   // 📱 スマホ用セットアップリンク：#s=<base64({k:読取キー[,s:書込キー]})> を開くと自動でキーを設定（外部にキーを渡さず端末間コピー）
@@ -23024,6 +23046,11 @@
      読めた詳細は6時間だけこの端末に控える（開き直すたびに問い合わせない） */
   const _detQ = []; let _detBusy = false;
   const _detLsGet = (id) => { try { const v = JSON.parse(localStorage.getItem('mdet:' + id) || 'null'); return (v && Date.now() - v.at < 72 * 3600000) ? v.d : null;   /* ★2026-10-09 本人「前に読み込んだやつは保存しておいて」：発送元・日数・取引日はすぐには変わらないので3日控える */ } catch (_) { return null; } };
+  /* ★2026-11-17 05（localStorage が上限に近い）：起動の後に1回、もう読まない控えを片づける＝72時間を過ぎた mdet:（_detLsGet が読まない）・前の版の名前の srcDeals10/11:（今は srcDeals12: だけ読む） */
+  setTimeout(() => { try { const rm = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i) || '';
+      if (/^srcDeals1[01]:/.test(k)) rm.push(k);
+      else if (k.indexOf('mdet:') === 0) { let at = 0; try { at = (JSON.parse(localStorage.getItem(k) || 'null') || {}).at || 0; } catch (_) {} if (!at || Date.now() - at > 72 * 3600000) rm.push(k); } }
+    rm.forEach(k => { try { localStorage.removeItem(k); } catch (_) {} }); if (rm.length) console.info('[保存領域] 使わない控えを ' + rm.length + ' 本片づけました'); } catch (_) {} }, 15000);
   const _detLsSet = (id, d) => { try { if (d) localStorage.setItem('mdet:' + id, JSON.stringify({ at: Date.now(), d })); } catch (_) {} };
   function mercDetailQ(itemId) {
     if (!itemId) return Promise.resolve(null);
@@ -30064,6 +30091,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '🧹 <b>ブラウザの保存領域（localStorage）があふれかけていたのを空けた</b>（02 業務部：約507万字で上限の5MB 近く）：画像テンプレ（約147万字）とカテゴリ名の控え（約151万字）を IndexedDB へ移した（書けたと確かめてから前の置き場を消す）・読まなくなった控え（72時間を過ぎた発送の詳細・前の版の仕入れ先検索）を起動の後に片づける・設定が満杯で保存できない時は黙って捨てず、作り直せる控えを捨ててもう一度・それでもダメなら画面に出す',
       '💹 <b>損益のグラフの売上の横に「商品の仕入れ額」</b>（本人「ここ、仕入れも欲しいな」「備品とかの経費分は抜いてね」「単純に商品の仕入れ額ね」）：在庫台帳の仕入日の月ごとに、売るために買った品の値段の合計（私物・取消・キャンセル・経費に入れた品・Amazon の備品や資材は除く）。値は万円で常に表示・かざすと「仕入れ値（その月に売れた品）」も出る（記録の無い月は「—」）',
       '🏷 <b>出品ログの「店」で第3がすぐ数えられるように</b>（本人「いや、0件って出てるじゃん」「第３アカウント」）：第3・Amazon で今出した明細は出品表の取り込み（約15分ごと）の前だと店が分からず「不明」に入っていた → 公開の時の仕入れ目安の控え（Amazon から）で第3の店と分かるようにした',
       '🛡 <b>全体レビュー（11/17）の直し（ポータル）</b>：見込みの経費の数え方を1つの関数に（ダッシュボード・計画・グラフ・経費の合計と CSV。確定申告は見込みを数えない）・「その他」どうしで見込みを差し替えない・💹 損益のグラフは実際に入った経費で・回収の計算を1つに・仕入額を値付けの見直し／儲かっていない出品／有在庫化候補／キャンセル損でも同じ関数に・全部取り直しの間も在庫台帳の保存が落ちない・VN の1注文 500万ドンと②の 909,090 を知らせる（自動で足す時は止める）・明細SKU は書く前に今の明細名を照らす・代表のタブの取り札はログインの後・📱 返信は読むだけの鍵で・値下げに戻せなかった品物に写真と名前',
@@ -35297,7 +35325,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // カテゴリID→名前。国ごとに1回だけ取ってlocalStorageへ（数千件だが数百KB程度）。
   // v2: {n:末端名, p:大>中>小のフルパス} を持つ（旧v1は名前の文字列だけだったのでキーを分けた）
   const catNameCache = (() => { try { return JSON.parse(localStorage.getItem('smdCatNames2') || '{}'); } catch (_) { return {}; } })();
+  /* ★2026-11-17 05（localStorage が上限に近い・smdCatNames2 が151万字）：カテゴリ名の控えは IndexedDB へ。前の控え（localStorage）は IndexedDB に書けたのを確かめてから消す */
+  const _catIdbP = (() => { const fromLs = Object.keys(catNameCache).length > 0;
+    return bigKv.get('smdCatNames2').then(v => { if (v && typeof v === 'object') Object.keys(v).forEach(cc => { if (!catNameCache[cc] || !Object.keys(catNameCache[cc]).length) catNameCache[cc] = v[cc]; });
+      if (fromLs) return bigKv.set('smdCatNames2', catNameCache).then(() => { try { localStorage.removeItem('smdCatNames2'); } catch (_) {} }); }).catch(() => {}); })();
   async function loadCatNames(cc, shopId) {
+    try { await _catIdbP; } catch (_) {}
     if (catNameCache[cc] || !shopId || !settings.openapiUrl) return;
     catNameCache[cc] = {};   // 二重取得を防ぐ（失敗しても空で確定させる）
     try {
@@ -35309,7 +35342,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const j = JSON.parse(m[1]); if (!j || !j.ok || !j.map) return;
       const flat = {}; Object.keys(j.map).forEach(k => { flat[k] = { n: j.map[k].n || '', p: j.map[k].p || '' }; });
       catNameCache[cc] = flat;
-      lsSet('smdCatNames2', JSON.stringify(catNameCache));
+      bigKv.set('smdCatNames2', catNameCache).catch(() => lsSet('smdCatNames2', JSON.stringify(catNameCache)));   /* ★11/17 IndexedDB に書けない時だけ前の置き場へ */
     } catch (_) { }
   }
   const _catEnt = (cc, id) => (catNameCache[cc] && catNameCache[cc][String(id)]) || null;
