@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261116-2133'
+var SRC_VER = '20261116-2345'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -6295,6 +6295,15 @@ function shop3PublishReceipt_(claim, phase, itemId) {
 function shop3CostOk_(v) { var c = Number(v && v.cost); return isFinite(c) && c > 0; }
 function shop3Jan_(v) { var j = String((v && v.jan) || '').trim(); return /^\d{8,14}$/.test(j) ? j : ''; }
 function shop3Mpn_(v) { var m = String((v && v.mpn) || '').trim(); return (m && m.length <= 60) ? m : ''; }
+function shop3ListLogSave_(cc, itemId, vars, rows, itemName) {
+  var ymd = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), out = [];
+  (vars || []).forEach(function (v, i) { var r = (rows || [])[i]; if (!r || !r.model_id || !cc) return;
+    out.push({ cc: String(cc), item_id: Number(itemId), model_id: Number(r.model_id), ymd: ymd, name: String(itemName || '').slice(0, 200),
+      model_name: String((v && v.name) || '').slice(0, 120), image: String((v && v.image) || ''), price: (v && Number.isFinite(Number(v.price))) ? Number(v.price) : null, seeded: false }); });
+  if (!out.length) return 0;
+  sbUpsert_('listing_log', out, 'cc,item_id,model_id');
+  return out.length;
+}
 function shop3LlogCostSave_(cc, itemId, vars, rows) {
   var kk = 'llog_cost_shop3', add = {}, at = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
   (vars || []).forEach(function (v, i) { var r = (rows || [])[i]; if (!r || !r.model_id || !shop3CostOk_(v)) return;
@@ -6722,6 +6731,8 @@ function addItem_(body, attempt) {
     if (_s3Rows) { try { result.llog_cost = shop3LlogCostSave_(String(body.market || ''), itemId, vars, _s3Rows); } catch (eLc) { result.llog_cost_warn = '仕入れ目安の控え（llog_cost_shop3）を書けませんでした: ' + String((eLc && eLc.message) || eLc).slice(0, 160); } }
     else result.llog_cost_warn = '明細の番号を確かめられなかったので、仕入れ目安の控え（llog_cost_shop3）を書いていません';
     result.product_ids_note = 'JAN・型番は product_ids（大物）には書いていません（丸ごと読み書きになるため）';
+    /* ★2026-11-16 05（本人「出品進んでるのかこれ？」）：公開できた明細を出品ログ（listing_log）にもその場で書く。前はポータルの1時間ごとの取り込み（出品表との差分）待ちで、第3の数と最新の明細が最大1時間ほど遅れていた。書けなくても公開は失敗にしない */
+    if (_s3Rows) { try { result.llog_rows = shop3ListLogSave_(String(body.market || ''), itemId, vars, _s3Rows, (payload && payload.item_name) || body.item_name); } catch (eLl) { result.llog_rows_warn = '出品ログ（listing_log）に書けませんでした（ポータルの1時間ごとの取り込みで後から入ります）: ' + String((eLl && eLl.message) || eLl).slice(0, 160); } }
   }
   /* ★2026-09-26 統一動画は作った【後】に update_item で付ける（add_item では送らない＝cloneItem_ の実測に合わせる）。失敗しても作成は成功のまま */
   if (itemId && _promo) { try { promoAfterCreate_(shopId, itemId, _promo, result); } catch (ePa) { result.promo_warn = String((ePa && ePa.message) || ePa).slice(0, 160); } }
