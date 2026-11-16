@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-045907';
+  const APP_BUILD = '20261117-050240';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -6347,6 +6347,11 @@
     "🌱 総称のバリエーションで売れた作品": "🌱 Titles sold in generic variations",
     "📚 シリーズのカタログで売れた分": "📚 sold in a series listing",
     "🔄いま反映": "🔄 Sync now",
+    "🛒 入れた人": "🛒 Carted (people)",
+    "🛒 個数": "🛒 Carted (units)",
+    "カート率": "Cart rate",
+    "カート→注文": "Cart → order",
+    "—（取れていない）": "— (not collected)",
     "Shopee の商品ページ（お客さんが見る画面）を開く": "Open the Shopee product page (what buyers see)",
     "セラーセンターの編集ページを開く": "Open the edit page in Seller Centre",
     "🤖自動／手動の内訳と昨日比を見る。": "see 🤖 auto / manual split and change vs yesterday.",
@@ -21621,7 +21626,17 @@
     // 🌏 国ごとの比較表
     const cols = [['uv', '訪問者'], ['pv', 'PV'], ['ppv', 'PV/訪問'], ['nv', '新規'], ['bounce', '直帰率'], ['stay', '滞在秒'], ['ord', 'オーダー（件）'], ['qty', '商品（点）'], ['cvr', '注文率'], ['gmv', '売上'], ['aov', '客単価']];
     const rowsCc = (TA.dim === 'acct' ? shopIds.map(id => 'S:' + id) : allCc).map(cc => ({ cc, v: cols.map(([k]) => taTotal([cc], days, k)) })).sort((a, b) => (b.v[0] || 0) - (a.v[0] || 0));
-    document.getElementById('ta-cc').innerHTML = `<table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr>${['国'].concat(cols.map(c => c[1])).map(h => `<th style="text-align:right;padding:3px 6px;border-bottom:1px solid #e3e6ea;white-space:nowrap">${h}</th>`).join('')}</tr>${rowsCc.map(r => `<tr><td style="padding:3px 6px;white-space:nowrap"><b style="color:${entCol(r.cc)}">${esc(entLabel(r.cc))}</b></td>${r.v.map((v, i) => `<td style="text-align:right;padding:3px 6px;white-space:nowrap">${taFmt(cols[i][0], v)}</td>`).join('')}</tr>`).join('')}</table>`;
+    /* ★2026-11-17 05（本人「これ、今までにカゴに入れられた数とかは？」）：カートの4列（カートに入れた人・個数・カート率＝人÷訪問者・カート→注文＝注文÷人）。出どころは 🛒 カートのタブと同じ perf_d_sum（Business Insights の前日1日ぶん・店×日）。
+       期間の日のうちカートが届いている日だけ足す・カート率の訪問者も同じ日だけ・注文も同じ BI の数。1日も届いていない店・国は「—（取れていない）」（0 にしない）。届いた日数が期間より少ない時は（N日分）と出す */
+    const taCartCols = (ent, st) => { const sum = st && st.sum; if (!sum || !sum.shops) return null; const ids = String(ent).indexOf('S:') === 0 ? [ent.slice(2)] : Object.keys(sum.shops).filter(id => (sum.shops[id] || {}).cc === ent);
+      const dset = new Set(days); let au = 0, ab = 0, co = 0; const got = new Set();
+      ids.forEach(id => { const dd = ((sum.shops[id] || {}).days) || {}; Object.keys(dd).forEach(d => { if (!dset.has(d)) return; const a = dd[d] || []; got.add(d); au += Number(a[0]) || 0; ab += Number(a[1]) || 0; co += Number(a[3]) || 0; }); });
+      if (!got.size) return { none: true }; const gd = [...got]; const uv = taTotal([ent], gd, 'uv') || 0; return { ab, au, co, n: gd.length, cr: uv > 0 ? ab / uv : null, c2o: ab > 0 ? co / ab : null }; };
+    const taCartTd = (c) => { const td = (t, tip) => `<td style="text-align:right;padding:3px 6px;white-space:nowrap;font-variant-numeric:tabular-nums"${tip ? ` title="${av(tip)}"` : ''}>${t}</td>`; if (!c) return td('…') + td('…') + td('…') + td('…'); if (c.none) return `<td colspan="4" style="text-align:center;padding:3px 6px;color:#9aa0a6;white-space:nowrap">—（取れていない）</td>`;
+      const part = c.n < days.length ? ` <span class="smd-dim" style="font-size:10px">（${c.n}日分）</span>` : ''; const pct = v => v == null ? '—' : (v * 100).toFixed(1) + '%';
+      return td(Math.round(c.ab).toLocaleString() + part, 'カートに入れた人（日の合計）・届いた ' + c.n + '日分') + td(Math.round(c.au).toLocaleString(), 'カートに入った個数') + td(pct(c.cr), 'カートに入れた人 ÷ 訪問者（カートが届いた日だけ）') + td(pct(c.c2o), '注文 ÷ カートに入れた人（どちらも Business Insights）'); };
+    document.getElementById('ta-cc').innerHTML = `<table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr>${['国'].concat(cols.map(c => c[1]), ['🛒 入れた人', '🛒 個数', 'カート率', 'カート→注文']).map(h => `<th style="text-align:right;padding:3px 6px;border-bottom:1px solid #e3e6ea;white-space:nowrap">${h}</th>`).join('')}</tr>${rowsCc.map(r => `<tr data-ent="${av(r.cc)}"><td style="padding:3px 6px;white-space:nowrap"><b style="color:${entCol(r.cc)}">${esc(entLabel(r.cc))}</b></td>${r.v.map((v, i) => `<td style="text-align:right;padding:3px 6px;white-space:nowrap">${taFmt(cols[i][0], v)}</td>`).join('')}${taCartTd(null)}</tr>`).join('')}</table>`;
+    trafficIngestStatus_().then(st => { const tb = document.getElementById('ta-cc'); if (!tb) return; tb.querySelectorAll('tr[data-ent]').forEach(tr => { const c = taCartCols(tr.dataset.ent, st); const tds = [...tr.children].slice(-4); const tmp = document.createElement('tbody'); tmp.innerHTML = '<tr>' + (c ? taCartTd(c) : `<td colspan="4" style="text-align:center;color:#b3261e">⚠ 読めませんでした</td>`) + '</tr>'; tds.forEach(t => t.remove()); [...tmp.firstChild.children].forEach(t => tr.appendChild(t)); }); }).catch(() => {});
     // 📅 曜日ごとの平均
     const wdN = [0, 0, 0, 0, 0, 0, 0], wdS = [0, 0, 0, 0, 0, 0, 0];
     /* ★2026-10-24 全体レビュー #9：率・平均（直帰率・注文率・客単価・滞在）を国の数で割っていた＝取り込みが抜けた国も分母・TW と BR が同じ重さ → 上の数字の欄（taTotal）と同じく、国をまたいで足してから割る */
@@ -30109,6 +30124,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '🛒 <b>アクセス（各国）の国・アカウントごとの比較にカートの4列</b>（本人「これ、今までにカゴに入れられた数とかは？」）：カートに入れた人・個数・カート率（人÷訪問者）・カート→注文（注文÷人）。期間の切り替えに合わせる。カートが届いていない店は「—（取れていない）」、届いた日が期間より短い時は（N日分）',
       '🔄 <b>🏆 の写真を開いた時と10分おきに新しくする</b>（本人「なんで画像 Tested&Working とかじゃないん？original もない」）：画面を開いた時に読んだ出品の控えの画像のままだった。出ている行の出品だけ画像の列を軽く読み直し、変わった出品だけ明細を読み直して描き直す（全件は読まない）',
       '🖼 <b>🏆 の写真：出品番号の無い古い注文も今の出品の画像に</b>（本人「画像差し変わってるのと、差し変わってないのとある？」）：BR の1〜6月の注文などは出品番号が無く名前も前の書き方（Usado …）＝前の写真のままだった。国＋そろえた名前でも今の出品を探す（同じ名前で画像が違う物は使わない）・同じ行の中で今の出品につながった国の画像を、つながらなかった名前にも使う',
       '✏️ <b>編集ページ（✏️）のリンクに店の番号（cnsc_shop_id）を付けた</b>：Seller Center は今選んでいる店で開くので、2店舗目・第3の出品は「商品が見つからない」になっていた。明細の店の番号を付ける（本店にも）＝🏆 商品別の利益・出品ログ・出品一覧・在庫の自動復活など ✏️ を出す所すべて',
