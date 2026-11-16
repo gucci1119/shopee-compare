@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261116-2345'
+var SRC_VER = '20261117-0215'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2089,14 +2089,15 @@ function doGetInner_(e) {
       } catch (err) { ssout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(sscb + '(' + JSON.stringify(ssout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
-    if (p.action === 'shop3_pub_handoff' || p.action === 'shop3_pub_take' || p.action === 'shop3_pub_status' || p.action === 'shop3_pub_clear') {   /* ★2026-11-15 05：第3の公開の受け持ちを1台ずつ移す */
+    if (p.action === 'shop3_pub_handoff' || p.action === 'shop3_pub_gave_clear' || p.action === 'shop3_pub_take' || p.action === 'shop3_pub_status' || p.action === 'shop3_pub_clear') {   /* ★2026-11-15 05：第3の公開の受け持ちを1台ずつ移す */
       var s3cb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), s3o;
       try {
         var s3wt = P_().getProperty('WRITE_TOKEN'); if (!s3wt || p.token !== s3wt) throw new Error('WRITE_TOKEN不正');
-        if (p.action === 'shop3_pub_handoff') s3o = shop3PubHandoff_(p.to);
+        if (p.action === 'shop3_pub_handoff') s3o = shop3PubHandoff_(p.to, s3wt);
+        else if (p.action === 'shop3_pub_gave_clear') s3o = shop3PubGaveClear_(p.to);   /* ★2026-11-17 05（中20）：受けた側が渡し元の印を片付ける */
         else if (p.action === 'shop3_pub_take') s3o = shop3PubTake_(p.src, s3wt);
         else if (p.action === 'shop3_pub_clear') s3o = shop3PubClear_(p.shop_id, p.asins, String(p.dry || '') !== '0');
-        else { var s3h = shop3PubHome_(), s3s = shop3PubShards_(), s3n = 0; Object.keys(s3s).forEach(function (k) { try { s3n += Object.keys(JSON.parse(s3s[k] || '{}')).length; } catch (e) {} }); s3o = { ok: true, runner: baRunnerId_(), here: s3h.here, why: s3h.why || '', asins: s3n }; }
+        else { var s3h = shop3PubHome_(), s3s = shop3PubShards_(), s3n = 0; Object.keys(s3s).forEach(function (k) { try { s3n += Object.keys(JSON.parse(s3s[k] || '{}')).length; } catch (e) {} }); var s3pr = P_(); s3o = { ok: true, runner: baRunnerId_(), here: s3h.here, why: s3h.why || '', asins: s3n, gave: shop3PubGaveParse_(s3pr.getProperty('SHOP3_PUB_GAVE')).who || '', ackPending: !!s3pr.getProperty('SHOP3_PUB_ACK_PENDING') }; }   /* ★2026-11-17 中20：渡した印・片付け待ちも見せる */
         s3o.src = SRC_VER;
       } catch (err) { s3o = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(s3cb + '(' + JSON.stringify(s3o) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -2191,7 +2192,11 @@ function doGetInner_(e) {
         var topLen = []; try { sbLenFlush_(); var _ul = JSON.parse(P_().getProperty('sbLenBy') || 'null'); if (_ul && _ul.d === ufToday_()) topLen = Object.keys(_ul.m || {}).map(function (k) { return { k: k, mb: Math.round(_ul.m[k] / 10485.76) / 100 }; }).sort(function (a2, b2) { return b2.mb - a2.mb; }).slice(0, 30); } catch (eUl) {}   /* ★2026-11-08 処理×表ごとの読んだ量（圧縮前の文字数・MB） */
         var _blk = ufBlockedInfo_(), _self = st.n + ufSpillTotal_(), _ext = ufExt_(), _tot = _self + _ext;
         /* ★2026-09-21 「残り75%」と出しながら実際は使い切っていた。**断られた事実**と**もう一方のGASの分**を必ず返す */
-        ufo = { ok: true, src: SRC_VER, acct: acctEmail_(), shop3CandidateRead: true, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, topBy: topBy, topLen: topLen, aiSpend: aiSpendLoad_() };
+        /* ★2026-11-17 05（全体レビュー 11/17 中16）：acct（Google アカウントのアドレス）は鍵（rk か token が WRITE_TOKEN と同じ）が合う時だけ返す。/exec の URL は公開のリポジトリにあるので鍵なしでは返さない。
+           WRITE_TOKEN が無い台も返さない（入口の読み口の照らしと同じ形・鍵が無い時は acctEmail_ を呼ばない）。枠の数字は今までどおり鍵なしで返す */
+        var _ufwt = ''; try { _ufwt = P_().getProperty('WRITE_TOKEN') || ''; } catch (eUw) {}
+        var _ufKeyOk = !!(_ufwt && (p.rk === _ufwt || p.token === _ufwt));
+        ufo = { ok: true, src: SRC_VER, acct: _ufKeyOk ? acctEmail_() : '', acctHidden: !_ufKeyOk, shop3CandidateRead: true, runner: baRunnerId_(), day: st.d, used: _tot, usedSelf: _self, usedExt: _ext, blocked: !!_blk, blockedAt: _blk ? _blk.at : '', blockedMsg: _blk ? _blk.msg : '', probe: ufProbeInfo_(), probeBgCap: ufProbeCap_() || 0, stopLine: ufStopLine_(), stopLineCore: UF_STOP_CORE, child: isChild_(), perListing: UF_PER_LISTING, coreAllowed: !_blk && _tot < UF_STOP_CORE, cap: 20000, capEff: UF_CAP_EFF, capHard: 20000, leftForManual: Math.max(0, UF_CAP_EFF - _tot), bgAllowed: !_blk && _tot < ufStopLine_(), top: top, topBy: topBy, topLen: topLen, aiSpend: aiSpendLoad_() };
       }
       catch (err) { ufo = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(ufcb + '(' + JSON.stringify(ufo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -3884,7 +3889,16 @@ function promoAfterCreate_(shopId, itemId, P, result) {
 function promoNewDrop_(ids) { if (!ids || !ids.length) return; try { var fr = baKvFreshMany_(['promo_new']); if (!fr) return; var mp = ((fr.promo_new || {}).map) || {}; ids.forEach(function (id) { delete mp[id]; }); baKvSet_('promo_new', { map: mp, at: new Date().toISOString() }); } catch (e) {} }
 /* ★11/16 05（01・BANNED の直しは1回だけ）：出品ごとの「自動で触らない」印 app_kv noedit_items = {item_id: {at, why}}。案内の画像（promo）・配送の絵（dimg）・説明の追記（dnote）の自動処理は、この印の出品を飛ばす＝本人や部署が直した後に入れ直さない */
 var _NOEDIT = null;
-function noEditItems_() { if (_NOEDIT) return _NOEDIT; try { _NOEDIT = baKvFresh_('noedit_items') || {}; } catch (e) { _NOEDIT = {}; } return _NOEDIT; }
+/* ★2026-11-17 05（全体レビュー 11/17 中14）：読めなかった回（BA_KV_FAIL・例外）は空の {} にせず null を返す＝呼び元（promo・dnote・dimg）はその回の自動の書き込みを止める（印が読めない＝触らない）。
+   鍵がまだ無い（読めたが行が無い）時だけ {}。読めなかった結果は覚えない（次の回に読み直す） */
+function noEditItems_() {
+  if (_NOEDIT) return _NOEDIT;
+  var v = null;
+  try { v = baKvFresh_('noedit_items'); } catch (e) { return null; }
+  if (BA_KV_FAIL['noedit_items']) return null;
+  _NOEDIT = (v && typeof v === 'object') ? v : {};
+  return _NOEDIT;
+}
 var PROMO_DAILY_HOUR = 18;   /* 日本時間。枠のリセット（夏16時・冬17時）の後＝🤖に枠を使い切られた後に当たらない */
 /* ★全出品への一括（10分ごと・GAS の中で回す＝Chrome が落ちても止まらない）。
    promo_job = {on, limit(試運転の上限・0=無制限), n(今までに処理した数), ok, ng, at, msg}
@@ -3910,6 +3924,8 @@ function promoTickBody_() {
     Object.keys(DIMG_KEY).forEach(function (c) { var g = (Ag0.gal || {})[DIMG_KEY[c]]; if (g) curGal[g] = 1; });
     Object.keys(Ag0.gal || {}).forEach(function (k) { var g = Ag0.gal[k]; if (g && !curGal[g]) retired[g] = 1; });
     var _pSkip = editSkip_();
+    var _ne = noEditItems_();   /* ★2026-11-17 05（中14）：「自動で触らない」印が読めない回は、どの国も書き換えない（次の回へ） */
+    if (!_ne) { job.msg = '「自動で触らない」印（noedit_items）を読めないので止めました（次の回へ）'; return promoSaveJob_(job); }
     for (var ci = 0; ci < PROMO_CCS.length; ci++) {
       var cc = PROMO_CCS[ci]; if (_pSkip[cc]) continue;   /* ★2026-11-05 VN ほか外した国は写真も書き換えない */
       /* ★2026-09-26 読めなかった時に {} で進むと、下の baKvSet_ が promo_done を丸ごと上書きし【戻す控え from】が全部消える＝止める */
@@ -3933,7 +3949,7 @@ function promoTickBody_() {
       var galPick = 0;
       var gfixLeft = Math.max(0, GFIX_DAILY - dayCount_(job, 'gfix', 0)), gfixPick = 0, hadRet = {}, gfixOnly = {};
       var needsGfix = function (r, d) { if (!(r.images || []).some(function (x) { return retired[x]; })) return false; hadRet[r.item_id] = 1; if (d && d.gfixAt && !(Date.parse(r.synced_at || '') > Number(d.gfixAt))) return false; if (Number((d && d.gfixN) || 0) >= 3) return false; return !(Number(r.update_time || 0) > nowSec - BULK_SKIP_RECENT_SEC); };   /* 入れ直した後、同期で写真の並びが新しくなるまでは選ばない */
-      var _ne = noEditItems_(); var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id || isShop3Shop_(r.shop_id) || _ne[String(r.item_id)]) return false; var d = doneMap[r.item_id]; var gf = needsGfix(r, d); if (!d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d)) return true; if (gf && gfixPick < gfixLeft) { gfixPick++; gfixOnly[r.item_id] = 1; return true; } if (needsGal(d, r) && galPick < galLeft) { galPick++; return true; } return false; });
+      var todo = (rows || []).filter(function (r) { if (!r || !r.item_id || !r.shop_id || isShop3Shop_(r.shop_id) || _ne[String(r.item_id)]) return false; var d = doneMap[r.item_id]; var gf = needsGfix(r, d); if (!d || (!d.ok && Number(d.tries || 1) < 3 && Date.now() - Number(d.at || 0) > 6 * 3600000) || needsRedo(r, d)) return true; if (gf && gfixPick < gfixLeft) { gfixPick++; gfixOnly[r.item_id] = 1; return true; } if (needsGal(d, r) && galPick < galLeft) { galPick++; return true; } return false; });
       var redoIds = {}; todo.forEach(function (r) { var d = doneMap[r.item_id]; if (d && d.ok) redoIds[r.item_id] = 1; });
       if (!todo.length) continue;
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
@@ -4250,11 +4266,12 @@ function dnoteTickBody_(budgetMs) {
     if (dayCount_(job, 'day', 0) >= dCap) { job.msg = '今日の上限 ' + dCap + ' 件（明日続き）'; baKvSet_('dnote_job', job); return; }
     var fr = baKvFreshMany_(['dnote_done']); if (!fr) { job.msg = 'dnote_done を読めない＝次の回へ'; baKvSet_('dnote_job', job); return; }
     var done = fr.dnote_done || {};
+    var _ne2 = noEditItems_(); if (!_ne2) { job.msg = '「自動で触らない」印（noedit_items）を読めない＝次の回へ'; baKvSet_('dnote_job', job); return; }   /* ★2026-11-17 05（中14）：印が読めない回は書き換えない */
     var _skip = editSkip_(), ccs = Object.keys(DNOTE_TEXT).filter(function (c) { return !_skip[c]; });   /* ★2026-11-05 VN ほか外した国は回さない */
     for (var ci = 0; ci < ccs.length; ci++) {
       var cc = ccs[ci];
       var rows = sbSelectAll_('listings', 'select=item_id,shop_id&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
-      var _ne2 = noEditItems_(); var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && !_ne2[String(r.item_id)] && (!d || Number(d.v || 1) < DNOTE_VER || (!d.ok && Number(d.tries || 1) < 3) || (cc === 'BR' && job.body && d.ok && !d.bodyv)); });   /* ★2026-11-04 前の版の済み（v が無い／1）もやり直す・BR は本文の切り替えの後にもう1回（bodyv） */
+      var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && !_ne2[String(r.item_id)] && (!d || Number(d.v || 1) < DNOTE_VER || (!d.ok && Number(d.tries || 1) < 3) || (cc === 'BR' && job.body && d.ok && !d.bodyv)); });   /* ★2026-11-04 前の版の済み（v が無い／1）もやり直す・BR は本文の切り替えの後にもう1回（bodyv） */
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
       var shops = Object.keys(byShop);
       for (var si = 0; si < shops.length; si++) {
@@ -4351,11 +4368,12 @@ function dimgTickBody_() {
     var t0 = Date.now();
     var fr = baKvFreshMany_(['dimg_done']); if (!fr) { job.msg = 'dimg_done を読めない＝次の回へ'; baKvSet_('dimg_job', job); return; }
     var done = fr.dimg_done || {};
+    var _ne2 = noEditItems_(); if (!_ne2) { job.msg = '「自動で触らない」印（noedit_items）を読めない＝次の回へ'; baKvSet_('dimg_job', job); return; }   /* ★2026-11-17 05（中14）：印が読めない回は書き換えない */
     var ccs = job.ccs && job.ccs.length ? job.ccs : Object.keys(DIMG_KEY);
     for (var ci = 0; ci < ccs.length; ci++) {
       var cc = ccs[ci];
       var rows = sbSelectAll_('listings', 'select=item_id,shop_id&cc=eq.' + cc + '&status=in.(1,8)&order=item_id.asc');
-      var _ne2 = noEditItems_(); var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && !_ne2[String(r.item_id)] && (!d || (!d.ok && Number(d.tries || 1) < 3)); });
+      var todo = (rows || []).filter(function (r) { var d = done[r.item_id]; return r.shop_id && !_ne2[String(r.item_id)] && (!d || (!d.ok && Number(d.tries || 1) < 3)); });
       var byShop = {}; todo.forEach(function (r) { (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r.item_id); });
       var shops = Object.keys(byShop);
       for (var si = 0; si < shops.length; si++) {
@@ -6384,16 +6402,47 @@ function shop3PubShards_() {
   Object.keys(all).forEach(function (k) { if (/^shop3_pub_\d+_[0-7]$/.test(k)) out[k] = all[k]; });
   return out;
 }
+/* ★2026-11-17 05（全体レビュー 11/17 中20）：渡した側の SHOP3_PUB_GAVE が残り、後で誤った take（古い渡し元から）を受けると、古い控えで2台目の受け持ちができた。
+   → ① GAVE は「渡した先|時刻」で持ち、同じ先へのやり直しはこの形の印の時だけ（前の形＝時刻の無い印は断る＝受け持ちでなければ渡さない）。期限は付けない（take が途中でこけた後に、いつでもやり直せるように）
+     ② take が済んだら、受けた側が渡した側へ action=shop3_pub_gave_clear を呼んで GAVE を消す（渡した先が同じ時だけ・何度呼んでも同じ結果）
+     ③ その片付けが済むまで、受けた側は SHOP3_PUB_ACK_PENDING（渡し元の /exec|時刻）を持ち、次に自分が渡す前に片付けをやり直す（済まなければ渡さない）
+   順は「受けた側が受け持ちになる → 片付け」（片付けを先にすると、途中で落ちた時に誰も受け持ちにならず、やり直しも断られる）。6台とも同じ版が前提 */
+function shop3PubGaveParse_(v) { var s0 = String(v || ''), i = s0.indexOf('|'); return i < 0 ? { who: s0, at: 0 } : { who: s0.slice(0, i), at: Number(s0.slice(i + 1)) || 0 }; }
+/* 渡した側で呼ばれる：GAVE が to の時だけ消す */
+function shop3PubGaveClear_(to) {
+  var who = String(to || '').replace(/[^\w-]/g, '').slice(0, 20); if (!who) throw new Error('to（受けた台の RUNNER_ID）が分かりません');
+  var lock = shop3PubLock_(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（少し待ってもう一度）');
+  try {
+    var pr = P_(), g = shop3PubGaveParse_(pr.getProperty('SHOP3_PUB_GAVE'));
+    if (g.who && g.who === who) { pr.deleteProperty('SHOP3_PUB_GAVE'); return { ok: true, runner: baRunnerId_(), cleared: true }; }
+    return { ok: true, runner: baRunnerId_(), cleared: false, gave: g.who || '' };
+  } finally { lock.releaseLock(); }
+}
+/* 受けた側：渡し元の GAVE の片付けを呼ぶ（済めば ACK_PENDING を消す） */
+function shop3PubAck_(token) {
+  var pr = P_(), pend = String(pr.getProperty('SHOP3_PUB_ACK_PENDING') || ''); if (!pend) return { ok: true, none: true };
+  var url = pend.split('|')[0];
+  if (!GAS_EXEC_RE_.test(url)) { pr.deleteProperty('SHOP3_PUB_ACK_PENDING'); return { ok: false, error: '片付け先の /exec の形が違う（印だけ外した）' }; }
+  ufBump_(1, '第3店の受け持ちの片付け');
+  var txt = ''; try { txt = UrlFetchApp.fetch(url + '?action=shop3_pub_gave_clear&to=' + encodeURIComponent(baRunnerId_()) + '&token=' + encodeURIComponent(token) + '&callback=cb', { muteHttpExceptions: true }).getContentText(); } catch (eT) { return { ok: false, error: '渡し元に届きませんでした：' + redactSecrets_(String((eT && eT.message) || eT)).slice(0, 120) }; }
+  var j = null; try { j = JSON.parse(String(txt).replace(/^\s*[A-Za-z_$][\w$]*\(/, '').replace(/\)\s*;?\s*$/, '')); } catch (e) { j = null; }
+  if (!j || !j.ok || typeof j.cleared !== 'boolean') return { ok: false, error: '渡し元が片付けに答えませんでした：' + redactSecrets_(String(txt)).slice(0, 120) };
+  pr.deleteProperty('SHOP3_PUB_ACK_PENDING');
+  return { ok: true, cleared: !!j.cleared };
+}
 /* 今の受け持ちが呼ばれる：自分を止めてから控えを全部返す（何度呼ばれても同じ控えを返す） */
-function shop3PubHandoff_(to) {
+function shop3PubHandoff_(to, token) {
+  /* ★2026-11-17 05（中20）：前に受けた時の片付けが済んでいなければ、先にやり直す（済まなければ渡さない＝渡し元の古い印を残したまま次へ渡さない） */
+  if (P_().getProperty('SHOP3_PUB_ACK_PENDING')) { var _ak = shop3PubAck_(token); if (!_ak.ok) throw new Error('前に受けた時の渡し元の印をまだ片付けられていません（' + (_ak.error || '') + '）＝渡しません'); }
   var lock = shop3PubLock_(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（少し待ってもう一度）');
   try {
     var pr = P_(), who = String(to || '').replace(/[^\w-]/g, '').slice(0, 20);
     /* ★2026-11-15 05（レビュー H1）：渡せるのは今の受け持ちだけ。止めた後のやり直しは、前に渡したのと同じ先（SHOP3_PUB_GAVE）の時だけ（古い控えで2台目の受け持ちを作らない） */
     if (!who || who === 'child') throw new Error('渡す先（to＝RUNNER_ID）が分かりません');
-    var gave = pr.getProperty('SHOP3_PUB_GAVE') || '';
-    if (!shop3PubHome_().here && gave !== who) throw new Error('この台は第3の受け持ちではありません（前に ' + (gave || '？') + ' へ渡した）');
-    pr.setProperty('SHOP3_PUB_GAVE', who);
+    var gave = shop3PubGaveParse_(pr.getProperty('SHOP3_PUB_GAVE'));
+    var _retryOk = !!(gave.who === who && gave.at);   /* ★2026-11-17 中20：同じ先へのやり直しは時刻つきの印（この版で渡した印）の時だけ */
+    if (!shop3PubHome_().here && !_retryOk) throw new Error('この台は第3の受け持ちではありません（前に ' + (gave.who || '？') + ' へ渡した' + (gave.who === who ? '・前の版の印なので、やり直しは受けない' : '') + '）');
+    pr.setProperty('SHOP3_PUB_GAVE', who + '|' + (_retryOk ? gave.at : Date.now()));
     if (isChild_()) pr.deleteProperty('SHOP3_PUB_ON'); else pr.setProperty('SHOP3_PUB_OFF', who);
     var sh = shop3PubShards_(), n = 0; Object.keys(sh).forEach(function (k) { try { n += Object.keys(JSON.parse(sh[k] || '{}')).length; } catch (e) {} });
     return { ok: true, from: baRunnerId_(), stopped: true, shards: sh, asins: n };
@@ -6404,6 +6453,9 @@ function shop3PubTake_(src, token) {
   var url = String(src || '');   /* ★2026-11-15 05（レビュー H1）：src は必須（今の受け持ちの /exec）。既定の本体をやめた */
   if (isChild_() && (!P_().getProperty('RUNNER_ID'))) throw new Error('この台の RUNNER_ID がありません（受け持ちを見分けられない）');
   if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) throw new Error('今の受け持ちの /exec が分かりません');
+  /* ★2026-11-17 中20：前の受けの片付けが残っていれば先に1回やり直す。済まず、その渡し元が今回の src と違う時は take を断る（印を上書きして古い渡し元の GAVE を見失わない）。同じ src なら進める（下で同じ印に上書き） */
+  var _pend0 = String(P_().getProperty('SHOP3_PUB_ACK_PENDING') || '');
+  if (_pend0) { var _ak0 = null; try { _ak0 = shop3PubAck_(token); } catch (eAk0) { _ak0 = { ok: false, error: String((eAk0 && eAk0.message) || eAk0).slice(0, 120) }; } if (!_ak0.ok && _pend0.split('|')[0] !== url) throw new Error('前に受けた時の渡し元の印をまだ片付けられていません（' + (_ak0.error || '') + '）＝別の台からは受けません'); }
   ufBump_(1, '第3店の公開控えの引き継ぎ');
   var txt; try { txt = UrlFetchApp.fetch(url + '?action=shop3_pub_handoff&to=' + encodeURIComponent(baRunnerId_()) + '&token=' + encodeURIComponent(token) + '&callback=cb', { muteHttpExceptions: true }).getContentText(); } catch (eT) { throw new Error('今の受け持ちに届きませんでした：' + redactSecrets_(String((eT && eT.message) || eT)).slice(0, 120)); }   /* ★11/16 05（全体レビュー中8）：例外の文に token= 入りの URL が入る＝伏せる */
   var j = null; try { j = JSON.parse(String(txt).replace(/^\s*[A-Za-z_$][\w$]*\(/, '').replace(/\)\s*;?\s*$/, '')); } catch (e) { j = null; }
@@ -6425,8 +6477,12 @@ function shop3PubTake_(src, token) {
     });
     if (isChild_()) pr.setProperty('SHOP3_PUB_ON', '1'); else pr.deleteProperty('SHOP3_PUB_OFF');
     pr.deleteProperty('SHOP3_PUB_GAVE');
-    return { ok: true, here: baRunnerId_(), from: j.from || '', added: add, kept: kept, reservedToPending: toP, asins: j.asins || 0 };
+    pr.setProperty('SHOP3_PUB_ACK_PENDING', url + '|' + Date.now());   /* ★2026-11-17 中20：渡し元の GAVE の片付けが済むまでの印（下で呼ぶ） */
+    var _tk = { ok: true, here: baRunnerId_(), from: j.from || '', added: add, kept: kept, reservedToPending: toP, asins: j.asins || 0 };
   } finally { lock.releaseLock(); }
+  /* ★2026-11-17 中20：受け持ちになった後に、渡し元の GAVE を片付ける（錠の外で1回呼ぶ）。済まなければ印が残り、次にこの台が渡す前にやり直す */
+  try { _tk.ack = shop3PubAck_(token); } catch (eAk) { _tk.ack = { ok: false, error: String((eAk && eAk.message) || eAk).slice(0, 120) }; }
+  return _tk;
 }
 function shop3CandidatePublish_(body) {
   var attempt = { claim:null, submitted:false };
@@ -6538,7 +6594,10 @@ function addItem_(body, attempt) {
   /* ★2026-11-05 01 商品部（本人「出品取り下げを調べて対応」）：ポケモンなどカードのカタログが「Toys & Games > Others（101409）」で作られ、
      Shopee が「Dice, Board & Card Games（101400）」へ直すよう降格を付けていた（BR 7件・TH 2店舗目・13店で55件）。複製は元のカテゴリを写すので、作る所1か所で直す。
      101400 は BR で brand_id 0（NoBrand）が要る（01 が update_item で確かめた）。必須の属性（Bluetooth を含むか＝No）は断られた時に mandatoryAttrFill_ が No で埋める */
-  if (!candidate && categoryId === 101409 && /\b(trading\s*cards?|cards?|tcg|ccg)\b|カード|ポケカ/i.test(String(body.item_name || '')) && !/memory\s*card|sd\s*card|amiibo/i.test(String(body.item_name || ''))) {
+  /* ★2026-11-17 05（全体レビュー 11/17 中15）：複製・種まき（cloneItem_・seedShopCatalog_）は baFixCat_ が先に 101400 を返すので、101409 だけの条件に当たらず
+     brand_id=0 と BR の 106664 が付かなかった。既に 101400 の時は名前を見ずに付ける（区分で決めた題名に card の語が無いカードもある）。101409 は今までどおり名前で判定して付け替え。
+     第3（candidate）は今までどおり外す。手で 101400 を指定した add_item にも効く（ノーブランドになる） */
+  if (!candidate && (categoryId === 101400 || (categoryId === 101409 && /\b(trading\s*cards?|cards?|tcg|ccg)\b|カード|ポケカ/i.test(String(body.item_name || '')) && !/memory\s*card|sd\s*card|amiibo/i.test(String(body.item_name || ''))))) {
     categoryId = 101400; body.brand_id = 0;
     /* ★2026-11-05 01：BR の 101400 は「Contains Bluetooth, Wireless and/or RF Technology」（106664）が要り、付けずに送ると10件断られ、No（20997）を付けると全部通った＝BR は最初から付ける */
     var _ccCard = ''; try { _ccCard = baCcOfShop_(shopId); } catch (eCc) {}
@@ -8580,7 +8639,10 @@ function cloneItem_(shopId, itemId, newName, publish, hw) {
     try { setItemVideo_(shopId, out.item_id, vurl); out.video = 1; }
     catch (e) { out.video_warn = String((e && e.message) || e); }
   }
-  var acp = copyAttrs_(shopId, itemId, out.item_id, base);
+  /* ★2026-11-17 05（中15）：BR のカード（101400）は作る時に 106664＝No を付けた（body._cardBr）。後で写す元の属性（元のカテゴリの物）にも足しておく＝写した時に落とさない（update_item が属性を丸ごと置き換えるかは確かめていない・推測） */
+  var _baseAttr = base;
+  if (body._cardBr && !(base.attribute_list || []).some(function (a) { return Number(a.attribute_id) === 106664; })) _baseAttr = Object.assign({}, base, { attribute_list: (base.attribute_list || []).concat([{ attribute_id: 106664, attribute_value_list: [{ value_id: 20997 }] }]) });
+  var acp = copyAttrs_(shopId, itemId, out.item_id, _baseAttr);
   out.attr_debug = acp.debug;
   if (acp.warn) out.attr_warn = acp.warn;
   if (acp.dropped && acp.dropped.length) out.attr_dropped = acp.dropped;
@@ -9100,9 +9162,13 @@ function syncListingsRoundRobin() {
     if (!toks.length) { log.push({ skipped: 'no_token' }); }
     else {
       toks.sort(function (a, b) { return (a.shop_id || 0) - (b.shop_id || 0); });
-      var start = parseInt(P_().getProperty('listCursor') || '0', 10) || 0;
-      if (start >= toks.length) start = 0;
-      P_().setProperty('listCursor', String((start + LIST_RR_BATCH) % toks.length)); // 先に進める=1店がタイムアウトしても次回は次店へ(詰まり防止)
+      /* ★2026-11-17 05（全体レビュー 11/17 中18）：次に読む店を台ごとのスクリプト プロパティ（listCursor）で持っていた＝取り札は台をまたいで1つなのに、どの店かは台ごと＝同じ店を何台かが続けて読み、ほかの店が何日も全件同期されなかった。
+         → 台をまたいだ小さい鍵 app_kv list_rr_cursor = {last: 最後に読んだ shop_id, at, by} にする（全件の取り札 sync_claim_listRRfull の中なので読み書きは1台だけ）。
+         番号でなく「最後に読んだ shop_id の次」で持つ＝店が増えても減ってもずれない。読めなかった回は時刻から決まる番号（205分ごとに1つ進む）で回し、書かない（baKvSet_ が止める） */
+      var start = Math.floor(Date.now() / LIST_RR_EVERY_MS) % toks.length, _rrLast = null;
+      try { var _rrc = baKvFresh_('list_rr_cursor'); if (!BA_KV_FAIL['list_rr_cursor']) { _rrLast = (_rrc && _rrc.last != null) ? String(_rrc.last) : ''; } } catch (eRc) { _rrLast = null; }
+      if (_rrLast !== null) { start = 0; if (_rrLast) { for (var _ri = 0; _ri < toks.length; _ri++) { if (Number(toks[_ri].shop_id || 0) > Number(_rrLast)) { start = _ri; break; } } } }   /* 最後に読んだ店より大きい最初の店（無ければ先頭へ戻る） */
+      if (_rrLast !== null) { try { var _rrTo = toks[(start + Math.min(LIST_RR_BATCH, toks.length) - 1) % toks.length]; baKvSet_('list_rr_cursor', { last: String(_rrTo.shop_id || ''), at: new Date().toISOString(), by: baRunnerId_() }); } catch (eRw) {} }   // 先に進める=1店がタイムアウトしても次回は次店へ(詰まり防止)
       for (var i = 0; i < LIST_RR_BATCH && i < toks.length; i++) {
         var tok = toks[(start + i) % toks.length];
         try { log.push(syncListingsForShop_(tok)); } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); }
@@ -9581,7 +9647,7 @@ function dailyAdjustmentsCheckBody_() {
    - /exec が1回こけただけで赤にしない（3秒あけて1回だけやり直す）。見張りの台の枠が切れていたら1行だけ書いて抜ける
    - 読めなかった物は「読めなかった」の赤（0件・「まだ無い」に化けさせない）
    - 道具の health：古い行（3日）は警告・24時間より前の失敗だけで待ちが無い物は警告・並びを決めて60件まで
-   - 1回の通信：相手の3台の uf_status＋promo_status（並行・6回）＋Supabase の読み6回＋書き1回（3台目は見張らない回も毎時1回読む）。増える分は同じ日の boshu_auto_cfg の5分の覚え（1日約5,900回の読みを減らした）と組。自分の台は直接見る。最後に必ず ufPersist_ */
+   - 1回の通信：相手の台の uf_status＋promo_status（並行・相手1台につき2回・自分の台は uf_status の1回。★2026-11-17 台の一覧は app_kv gas_runners＝6台なら11回・前の4台は7回。gas_runners を読むのは10分に1回まで）＋Supabase の読み6回＋書き1回（3台目は見張らない回も毎時1回読む）。増える分は同じ日の boshu_auto_cfg の5分の覚え（1日約5,900回の読みを減らした）と組。自分の台は直接見る。最後に必ず ufPersist_ */
 var HB_EXEC_ = {
   main: 'https://script.google.com/macros/s/AKfycbwbCbQpW0ZrsnWQ4WMX5FXDinIEd8DkVwikbFSjxbkss2NFl72dhZoiLJt-mqUEBLG7yA/exec',
   child: 'https://script.google.com/macros/s/AKfycbzmh47e-hl6FvJA6-1CEjvdDSLkON-hQXXA6glvFdXRCQo9k6viM6RcawKLv9XGxlyi/exec',
@@ -9589,6 +9655,32 @@ var HB_EXEC_ = {
   child3: 'https://script.google.com/macros/s/AKfycbxV02tSfDsnAB82XXwZWSALAt2H1g41wZ5uMsn1D-u9TJ4lilLRZeAQWXLOfR-r2Qzasg/exec'
 };
 var HB_NAME_ = { main: '本体', child: '2台目', child2: '3台目', child3: '4台目', child4: '5台目', child5: '6台目' };
+/* ★2026-11-17 05（全体レビュー 11/17 中17・中19）：台の一覧（名前と /exec）を app_kv gas_runners から読む（5台目 child4・6台目 child5 も見張る）。
+   形：{ runners: { main: '<本体の /exec>', child: …, child2: …, child3: …, child4: …, child5: … }, watch: ['main', …]（任意・見張る台。無ければ runners の全部）, outreach: '<営業の窓口の /exec>'（任意） }
+   上の直書き（HB_EXEC_ の4台・OUTREACH_API）を土台に、app_kv の分で足す・差し替える＝読めない・形が違う・鍵が無い時は今までどおり直書きで動く（落ちない）。
+   URL は script.google.com/macros/s/…/exec の形だけ受ける（ほかの所へ WRITE_TOKEN を送らない）。台の名前は main・child・child<数字> だけ。
+   読むのは小さい鍵1本・CacheService で10分覚える（見張りは毎時・営業の鍵の確かめは公開の口なので、そのたびに Supabase を読まない） */
+var GAS_EXEC_RE_ = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
+var _GAS_RUNNERS = null;
+function gasRunners_() {
+  if (_GAS_RUNNERS) return _GAS_RUNNERS;
+  var v = null, C = null, err = '', cached = false;
+  try { C = CacheService.getScriptCache(); var c = C.get('gas_runners10'); if (c) { v = JSON.parse(c); cached = true; } } catch (eC) { v = null; }
+  if (!cached) {
+    try { var r = sbSelect_('app_kv', 'select=v&k=eq.gas_runners'); v = (r && r[0] && r[0].v) || null; try { if (C) C.put('gas_runners10', JSON.stringify(v), 600); } catch (eP) {} }
+    catch (eR) { v = null; err = redactSecrets_(String((eR && eR.message) || eR)).slice(0, 100); }
+  }
+  var exec = {}, outreach = OUTREACH_API, n = 0;
+  Object.keys(HB_EXEC_).forEach(function (id) { exec[id] = HB_EXEC_[id]; });
+  if (v && v.runners && typeof v.runners === 'object') Object.keys(v.runners).forEach(function (id) { var u = String(v.runners[id] || '').trim(); if (/^(main|child\d*)$/.test(id) && GAS_EXEC_RE_.test(u)) { exec[id] = u; n++; } });
+  if (v && GAS_EXEC_RE_.test(String(v.outreach || '').trim())) outreach = String(v.outreach).trim();
+  var ord = function (id) { return id === 'main' ? -1 : (Number(id.replace('child', '')) || 0); };
+  var ids = Object.keys(exec).sort(function (a, b) { return ord(a) - ord(b); });
+  var watch = (v && Array.isArray(v.watch)) ? ids.filter(function (id) { return v.watch.indexOf(id) >= 0; }) : ids;
+  if (!watch.length) watch = ids;
+  _GAS_RUNNERS = { exec: exec, ids: ids, watch: watch, outreach: outreach, src: n ? 'app_kv' : 'code', err: err, unset: !err && !v };
+  return _GAS_RUNNERS;
+}
 /* ★2026-11-16 本人「Gmail名ちゃんと表示して」：この GAS が動いている Google アカウントのアドレス（ポータルの接続枠のカードに出す）。
    Drive の持ち主から取る＝もう付いている Drive の権限で足りる（Session.getEffectiveUser は新しい権限が要り、6台とも承認のやり直しになるので使わない）。
    uf_status は数分ごとに呼ばれるので、スクリプト プロパティに7日控える。取れない時は空（ポータルが「分からない」と出す） */
@@ -9622,13 +9714,13 @@ var HB_KV_ = [
 ];
 var HB_LAST_ERR = '';
 function hbSel_(q) { q = String(q).replace(/>/g, '%3E'); try { return sbSelect_('app_kv', q); } catch (e1) { Utilities.sleep(3000); try { return sbSelect_('app_kv', q); } catch (e2) { HB_LAST_ERR = String((e2 && e2.message) || e2).slice(0, 120); throw e2; } } }   /* ★11/15 00：読めなかった理由を残す（枠・鍵・読み先・版を分けるため） */   /* ★11/15 実測：UrlFetchApp は URL の「>」で Invalid argument になる（-> を %3E に） */   /* ★11/15 レビュー8：1回こけただけで赤にしない */
-function hbExecReq_(who, qs) { var u = HB_EXEC_[who]; return { url: u + (u.indexOf('?') >= 0 ? '&' : '?') + qs + '&callback=cb', muteHttpExceptions: true, followRedirects: true }; }
+function hbExecReq_(who, qs) { var u = gasRunners_().exec[who];   /* ★2026-11-17 05（中17・19）：台の一覧は gas_runners（読めなければ直書き） */ return { url: u + (u.indexOf('?') >= 0 ? '&' : '?') + qs + '&callback=cb', muteHttpExceptions: true, followRedirects: true }; }
 function hbParse_(r) {
   try { var code = r.getResponseCode(), t = String(r.getContentText() || ''), m = t.match(/^\s*cb\(([\s\S]*)\)\s*;?\s*$/); var j = null; try { j = JSON.parse(m ? m[1] : t); } catch (e) { j = null; } return { http: code, j: j, err: j ? '' : ('返事が読めない（HTTP ' + code + '）') }; }
   catch (e2) { return { http: 0, err: String((e2 && e2.message) || e2).slice(0, 120) }; }
 }
 function hbExec_(who, qs) {
-  if (!HB_EXEC_[who]) return { http: 0, err: 'URL なし' };
+  if (!gasRunners_().exec[who]) return { http: 0, err: 'URL なし' };
   try { ufBump_(1, '見張り(/exec)'); var q = hbExecReq_(who, qs); return hbParse_(UrlFetchApp.fetch(q.url, q)); }
   catch (e) { return { http: 0, err: redactSecrets_(String((e && e.message) || e)).slice(0, 120) }; }   /* ★11/16 05（全体レビュー中8）：例外の文に token= 入りの URL が入りうる＝伏せてから返す */
 }
@@ -9719,14 +9811,18 @@ function hbWatchRun_(me, heal) {
   /* 見張りの台の枠が切れていたら、1行だけ書いて抜ける（4台とも「答えない」と取り違えない） */
   if (ufIsBlocked_()) { add({ id: 'watcher_quota', name: '見張りの台（' + (HB_NAME_[me] || me) + '）の接続枠', state: 'warn', why: 'Google の1日の枠に断られている＝この回は見ていない（日本時間 ' + ufResetJstStr_() + ' に戻る）', last: null }); return fin(); }
   /* ① 基準（4台分）を1回で読む */
-  var bases = null; try { bases = {}; (hbSel_('select=k,v&k=in.(hb_trig_main,hb_trig_child,hb_trig_child2,hb_trig_child3)') || []).forEach(function (r) { bases[r.k] = r.v; }); } catch (eB) { bases = null; }
+  /* ★2026-11-17 05（全体レビュー 11/17 中17・中19）：見張る台は gas_runners（app_kv）から。読めない・無い時は直書きの4台（落ちない）＝その時は1行の警告で知らせる */
+  var _GR = gasRunners_(), _W = _GR.watch.slice();
+  if (_GR.err) add({ id: 'gas_runners_read', name: '台の一覧（app_kv gas_runners）の読み', state: 'warn', why: '読めなかった＝この回は直書きの台（' + _W.join('・') + '）だけ見ている（' + _GR.err + '）', last: null });
+  else if (_GR.unset) add({ id: 'gas_runners_unset', name: '台の一覧（app_kv gas_runners）', state: 'warn', why: 'まだ入っていない＝直書きの台（' + _W.join('・') + '）だけ見ている（5台目・6台目は見ていない）', last: null });
+  var bases = null; try { bases = {}; (hbSel_('select=k,v&k=in.(' + _W.map(function (w) { return 'hb_trig_' + w; }).join(',') + ')') || []).forEach(function (r) { bases[r.k] = r.v; }); } catch (eB) { bases = null; }
   if (!bases) add({ id: 'trigbase_read', name: 'トリガーの基準の読み（Supabase）', state: 'blind', why: '読めなかった＝この回はトリガーの欠けを見ていない' + (HB_LAST_ERR ? '（' + HB_LAST_ERR + '）' : ''), last: null });
-  /* ② 相手の3台の /exec（並行・こけた台だけ1回やり直す）。自分の台は直接見る */
-  var reqs = []; ['main', 'child', 'child2', 'child3'].forEach(function (w) { reqs.push({ id: w + ':st', who: w, qs: 'action=uf_status' }); if (w !== me) reqs.push({ id: w + ':tg', who: w, qs: 'action=promo_status&token=' + tok }); });   /* ★11/15 レビュー5：自分の台の /exec も外から確かめる（トリガーの一覧は直接） */
+  /* ② 相手の台の /exec（並行・こけた台だけ1回やり直す）。自分の台は直接見る */
+  var reqs = []; _W.forEach(function (w) { reqs.push({ id: w + ':st', who: w, qs: 'action=uf_status' }); if (w !== me) reqs.push({ id: w + ':tg', who: w, qs: 'action=promo_status&token=' + tok }); });   /* ★11/15 レビュー5：自分の台の /exec も外から確かめる（トリガーの一覧は直接） */
   var res = hbExecMany_(reqs);
   if (ufIsBlocked_()) { items.length = 0; add({ id: 'watcher_quota', name: '見張りの台（' + (HB_NAME_[me] || me) + '）の接続枠', state: 'warn', why: 'Google の1日の枠に断られた＝この回は見ていない（日本時間 ' + ufResetJstStr_() + ' に戻る）', last: null }); return fin(); }
-  ['main', 'child', 'child2', 'child3'].forEach(function (who) {
-    var nm = HB_NAME_[who], fns = null;
+  _W.forEach(function (who) {
+    var nm = HB_NAME_[who] || who, fns = null;
     var st = res[who + ':st'] || {};
     if (who === me) { fns = hbTrigNow_(); if (!st.j || st.j.ok === false) add({ id: 'exec_' + who, name: nm + '（見張りの台）の GAS（/exec）', state: 'red', why: '2回続けて答えない：' + (st.err || ('HTTP ' + st.http)) + '＝トリガーは動くが /exec の口が止まっている（承認切れ・配備の誤りの見込み・推測）', last: null }); else if (st.j.src && st.j.src !== SRC_VER) add({ id: 'src_' + who, name: nm + 'の GAS の版', state: 'warn', why: '/exec の版（' + st.j.src + '）がトリガーの版（' + SRC_VER + '）と違う＝配備し直しが要る', last: null }); }
     else {
@@ -10936,7 +11032,8 @@ function outreachAuth_(token) {
   /* ★2026-10-29 レビュー（脆弱性 1）：違う鍵でも毎回営業窓口へ問い合わせて接続枠を1回使っていた（公開の /exec を叩かれると枠が尽きる）。
      断った鍵は10分覚える・断りが1時間に30回を超えたらその時間は問い合わせない */
   try { var hk = 'oa_ng_' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMddHH'); var ng = Number(c.get(hk) || 0); if (ng >= 30) return false; } catch (e) {}
-  try { ufBump_(1, 'outreach_auth'); var r = UrlFetchApp.fetch(OUTREACH_API + '?action=outreach_stats&token=' + encodeURIComponent(token), { muteHttpExceptions: true, followRedirects: true }); var j = JSON.parse(r.getContentText() || '{}'); if (j && j.ok) { try { c.put(ck, '1', 300); } catch (e2) {} return true; }
+  var _oaUrl = OUTREACH_API; try { _oaUrl = gasRunners_().outreach || OUTREACH_API; } catch (eGr) {}   /* ★2026-11-17 05（中19）：営業の窓口の /exec は gas_runners.outreach（無ければ直書き・10分覚える） */
+  try { ufBump_(1, 'outreach_auth'); var r = UrlFetchApp.fetch(_oaUrl + '?action=outreach_stats&token=' + encodeURIComponent(token), { muteHttpExceptions: true, followRedirects: true }); var j = JSON.parse(r.getContentText() || '{}'); if (j && j.ok) { try { c.put(ck, '1', 300); } catch (e2) {} return true; }
     if (j && j.ok === false && String(j.error || '') === 'token') { try { c.put(ck, '0', 600); var hk2 = 'oa_ng_' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMddHH'); c.put(hk2, String(Number(c.get(hk2) || 0) + 1), 3700); } catch (e3) {} } } catch (e) {}   /* 窓口が「違う」と答えた時だけ覚える（通信の失敗は覚えない）。★2026-11-04 レビュー 10/31 低-14：窓口の一時的な不調（シートが開けない等）も ok:false で返るので、error が 'token' の時だけ覚える */
   return false;
 }
