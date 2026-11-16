@@ -1853,7 +1853,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261116-2243';
+  const APP_BUILD = '20261116-2247';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -26563,7 +26563,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ${rows.length ? (() => { const th = `<tr class="smd-dim" style="font-size:11px"><th style="text-align:left;padding:2px 6px">日付</th><th></th><th style="text-align:left;padding:2px 6px">商品</th><th style="text-align:right;padding:2px 6px">金額</th><th style="text-align:left;padding:2px 6px">いまの扱い</th><th style="text-align:left;padding:2px 6px">これにする</th></tr>`;
         const done = rows.filter(it => st(it).done); const doneSum = done.reduce((t, it) => t + (Number(it.price) || 0), 0);
         return (pending.length ? `<div style="overflow:auto;max-height:300px;margin-top:6px"><table data-smdsort="amz-pending" data-smdauto style="border-collapse:collapse;font-size:12px;width:100%">${th}${pending.map(tr).join('')}</table></div>` : '<div style="font-size:12px;margin-top:6px;color:#137333">✔ 分類待ちはありません</div>')
-          + (done.length ? `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px" class="smd-dim">✓ 扱いが決まった ${done.length}件・${fmtJpy(doneSum)}（開くと一覧・取消できます）</summary><div style="overflow:auto;max-height:300px;margin-top:4px"><table data-smdsort="amz-done" data-smdauto style="border-collapse:collapse;font-size:12px;width:100%">${th}${done.map(tr).join('')}</table></div></details>` : ''); })() : '<div class="smd-dim" style="font-size:12px;margin-top:6px">この月はAmazonの購入がありません。</div>'}
+          + (done.length ? `<details class="amz-done-dt" style="margin-top:6px"${(() => { try { return localStorage.getItem('smdAmzDoneOpen') === '1' ? ' open' : ''; } catch (_) { return ''; } })()}><summary style="cursor:pointer;font-size:12px" class="smd-dim">✓ 扱いが決まった ${done.length}件・${fmtJpy(doneSum)}（開くと一覧・取消できます）</summary><div style="overflow:auto;max-height:300px;margin-top:4px"><table data-smdsort="amz-done" data-smdauto style="border-collapse:collapse;font-size:12px;width:100%">${th}${done.map(tr).join('')}</table></div></details>` : ''); })() : '<div class="smd-dim" style="font-size:12px;margin-top:6px">この月はAmazonの購入がありません。</div>'}
       <div class="smd-dim" style="font-size:11px;margin-top:4px">「仕入れ品」＝売る商品（経費にしない・在庫台帳のまま）。「私物（事業外）」＝物販と関係ない日用品など（経費にも仕入れにも入れない）。経費にした行はメモが「[Amazon] 在庫No 商品名」。注文に紐付いた在庫は自動で仕入れ品。判断は全PCで共有されます。</div></div>`;
   }
   async function amzRefresh(host, ym) {   // 🛒カードだけ読み直して差し替える（全画面の描き直しは数秒かかる）
@@ -26576,19 +26576,30 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   function amzWire(host, ym, data, expRows) {
     const on = host.querySelector('#amz-auto-on'); if (on) on.addEventListener('change', async () => { const cfg = (await plCfg()) || planCfgDefault(); cfg.amzAuto = on.checked; plan.cfg = cfg; pl.tpl = cfg; await planSave(); });
+    host.querySelectorAll('.amz-done-dt').forEach(d => d.addEventListener('toggle', () => { try { localStorage.setItem('smdAmzDoneOpen', d.open ? '1' : '0'); } catch (_) {} }));   /* ★11/16 開いた・畳んだを覚える */
     host.querySelectorAll('.amz-act').forEach(b => b.addEventListener('click', async () => {
       if (!settings.sbSecret) { alert('この端末は書き込みキー未設定です（⚙️設定）'); return; }
       if (!data.clsOk) { alert('分類の記録を読めていないので、いまは変えられません'); return; }
-      const it = data.rows.find(x => x.item_id === b.dataset.id); if (!it) return; const cat = b.dataset.cat; b.disabled = true;
-      try { const cell = b.closest('tr').children[3]; if (cell) cell.innerHTML = '<span class="smd-spin"></span>保存中…'; } catch (_) {}
+      const it = data.rows.find(x => x.item_id === b.dataset.id); if (!it) return; const cat = b.dataset.cat;
+      /* ★2026-11-16 本人「梱包資材とか初期投資とかのボタンを押していくでしょ？それを1個押すたびに閉じよるの、それがマジ鬱陶しい。こっちは連続してやりたいな」
+         → 押した行だけ「いまの扱い」を書き換える。一覧は描き直さない・閉じない・位置を動かさない（次の行を続けて押せる） */
+      const trEl = b.closest('tr'), cell = trEl && trEl.children[4], btns = trEl ? [...trEl.querySelectorAll('.amz-act')] : [b];
+      btns.forEach(x => { x.disabled = true; }); const prevHtml = cell ? cell.innerHTML : '';
+      try { if (cell) cell.innerHTML = '<span class="smd-spin"></span>保存中…'; } catch (_) {}
       try {
         if (cat === '仕入れ品') { await amzRemoveExpense(it, expRows); await amzSetClass(it.item_id, 'goods', ''); }
         else if (cat === '私物（事業外）') { await amzRemoveExpense(it, expRows); await amzSetClass(it.item_id, 'personal', ''); }
         else if (cat === '取消') { await amzRemoveExpense(it, expRows); const kv = await sbGetAll('app_kv', 'select=v&k=eq.amz_class').catch(() => undefined); const cur = baKvMust(kv === undefined ? undefined : ((kv && kv[0] && kv[0].v) || {}), 'Amazonの分類'); delete cur[it.item_id]; await sbUpsert('app_kv', [{ k: 'amz_class', v: cur, updated_at: new Date().toISOString() }], 'k'); }
         else { await amzPostExpense(it, cat, expRows); await amzSetClass(it.item_id, 'supply', cat); }
+        /* 経費の行と分類の控えを、描き直さずにその場で新しくする（同じ行を続けて押しても二重に入れない） */
+        try { const fresh = await sbGetAll('expenses', `select=id,ymd,category,amount,memo&ymd=gte.${ym}-01&ymd=lt.${plNextYm(ym)}-01`); if (Array.isArray(fresh) && Array.isArray(expRows)) expRows.splice(0, expRows.length, ...fresh); } catch (_) {}
+        if (cat === '取消') delete data.cls[it.item_id]; else data.cls[it.item_id] = { k: cat === '仕入れ品' ? 'goods' : cat === '私物（事業外）' ? 'personal' : 'supply', cat: /^(仕入れ品|私物（事業外）)$/.test(cat) ? '' : cat };
+        if (cell) { const lab = cat === '取消' ? '未分類（取り消した）' : cat === '仕入れ品' ? '仕入れ品' : cat === '私物（事業外）' ? '私物（事業外）' : '経費 ' + cat; cell.innerHTML = `<b>${esc(lab)}</b> <span class="smd-dim" style="font-size:10px">✓ いま決めた</span>`; cell.style.color = cat === '取消' ? '#8a4b00' : cat === '仕入れ品' ? '#1565c0' : cat === '私物（事業外）' ? '#6b7280' : '#1a7f37'; }
+        if (trEl) trEl.style.background = cat === '取消' ? '' : '#f1f8f3';
+        try { exp._allRows = null; } catch (_) {}
         try { toast(cat === '取消' ? '取り消しました' : (cat === '仕入れ品' ? '仕入れ品にしました（経費から外しました）' : cat === '私物（事業外）' ? '私物にしました（経費にも仕入れにも入れません）' : `経費「${cat}」に入れました`)); } catch (_) {}
-        await amzRefresh(host, ym);
-      } catch (e) { alert('保存できませんでした: ' + ((e && e.message) || e)); b.disabled = false; }
+        btns.forEach(x => { x.disabled = false; });   /* 描き直さない＝開いたまま・位置そのまま */
+      } catch (e) { if (cell) cell.innerHTML = prevHtml; btns.forEach(x => { x.disabled = false; }); alert('保存できませんでした: ' + ((e && e.message) || e)); }
     }));
   }
   // ---- ⏳ 待ち時間の演出（本人 2026-09-23「ローディング中に何かアニメーション。モンハンでよくあるような」）：0.7秒以上かかる読み込みに、荷物が走る帯とヒントを1つ添える ----
@@ -26823,40 +26834,47 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     return ['その他'];
   }
   function expHistTableHtml() {
+    /* ★2026-11-16 本人「やっぱりなんかツメツメで見にくいな、特に…絵面が書いてあるところ」「結局、初期投資の全部の合計額とかさ、そういうのはどこで見れるわけ？」
+       → 月のマスは金額だけ（印は出さない・出どころは1件ずつの行に文字で・マスにかざすと内訳）・行と列の間を広く・¥0 は「—」・
+         「ツール代」と「ツール代（その他）」、「人件費」と「人件費（その他）」は表の上で1行に（データの分類名は変えない）・分類名の右に「全期間の合計」 */
     const all = (exp._allRows || []).filter(x => String(x.ymd || '').length >= 7);
     const yen0 = n => '¥' + Math.round(n || 0).toLocaleString('en-US');
     const ymsAll = [...new Set(all.map(x => String(x.ymd).slice(0, 7)))].sort().reverse();
     const yms = ymsAll.filter(y => exp.hist2025 || y >= '2026-01'), old = ymsAll.filter(y => y < '2026-01');
     const isFix = c => /^(人件費|家賃|地代家賃|倉庫代|倉庫|倉庫代・家賃|倉庫費|保管料|ツール|ツール代|サブスク|固定費|通信費|通信|外注費|外注|オフィス|水道光熱費|什器・棚)/.test(String(c || ''));
+    const catKey = c => String(c || '').trim().replace(/（その他）$/, '');   /* 表の上だけで1行にまとめる */
     const open = exp.histOpen = exp.histOpen || {};
-    const sumBy = rows => { const o = {}; rows.forEach(r => { const y = String(r.ymd).slice(0, 7); o[y] = (o[y] || 0) + (Number(r.amount) || 0); }); return o; };
-    const srcOfRows = rows => { const ic = new Set(), lb = new Set(); let auto = true, any = false; rows.forEach(r => { if (!(Number(r.amount) || 0)) return; any = true; const sr = expSrcOf(r); [...sr.icon].forEach(ch => ic.add(ch)); lb.add(sr.label); if (!sr.auto) auto = false; }); return { ic: [...ic].join(''), lb: [...lb].join('・'), auto: any && auto }; };
-    const cells = (rows, o) => { o = o || {}; const by = sumBy(rows); return yms.map(y => { const yr = rows.filter(r => String(r.ymd).slice(0, 7) === y), v = by[y] || 0, sr = srcOfRows(yr);
-      const col = !yr.length ? '#c9c9c9' : (o.col || (sr.auto ? '#b26a00' : '#333'));
-      return `<td style="text-align:right;padding:3px 10px;color:${col};font-variant-numeric:tabular-nums;${sr.auto && v ? 'font-style:italic;' : ''}${o.bold ? 'font-weight:700;' : ''}" title="${yr.length ? esc(y + '：' + yr.length + '件' + (sr.lb ? '\n出どころ：' + sr.lb : '') + (sr.auto ? '\n（自動で入った見込みの数字）' : '')) : esc(y + '：この月に1件も無い')}">${o.icons !== false ? `<span style="display:inline-block;width:2.6em;overflow:hidden;text-align:left;vertical-align:bottom;font-size:9.5px;font-style:normal;letter-spacing:-1px">${yr.length ? sr.ic : ''}</span>` : ''}${yr.length ? yen0(v) : '—'}</td>`; }).join(''); };
-    const lbl = (txt, depth, k, o) => { o = o || {}; const tg = k != null; return `<td ${tg ? `data-tg="${av(k)}"` : ''} style="padding:3px 8px 3px ${8 + depth * 16}px;position:sticky;left:0;background:${o.bg || '#fff'};white-space:nowrap;${tg ? 'cursor:pointer;' : ''}color:${o.col || '#333'};font-weight:${o.bold ? 700 : 400};max-width:420px;overflow:hidden;text-overflow:ellipsis" title="${esc(o.title || (tg ? '押すと1段下が開く／もう一度押すと畳む' : ''))}">${tg ? `<span style="display:inline-block;width:12px;color:#888">${open[k] ? '▾' : '▸'}</span>` : '<span style="display:inline-block;width:12px"></span>'}${txt}</td>`; };
+    const P = 'padding:5px 14px', PL = 'padding:5px 10px 5px ';
+    const isMain = r => String(r.ymd).slice(0, 7) >= '2026-01';
+    const totCells = rows => { const m = rows.filter(isMain).reduce((t, r) => t + (Number(r.amount) || 0), 0), a2 = rows.reduce((t, r) => t + (Number(r.amount) || 0), 0);
+      return `<td style="text-align:right;${P};font-weight:700;background:#f7f9fc;border-right:1px solid #e6e9ef" title="2026-01 から今月までの合計">${m ? yen0(m) : '—'}</td>` + (exp.hist2025 ? `<td style="text-align:right;${P};font-weight:700;background:#f7f9fc;color:#666;border-right:1px solid #e6e9ef" title="2025年以前も足した合計">${a2 ? yen0(a2) : '—'}</td>` : ''); };
+    const srcOfRows = rows => { const lb = {}; let auto = true, any = false; rows.forEach(r => { const v = Number(r.amount) || 0; if (!v) return; any = true; const sr = expSrcOf(r); lb[sr.label] = (lb[sr.label] || 0) + v; if (!sr.auto) auto = false; }); return { lb: Object.keys(lb).sort((x, y) => lb[y] - lb[x]).map(k => k + ' ' + yen0(lb[k])).join('\n'), auto: any && auto }; };
+    const cells = (rows, o) => { o = o || {}; return yms.map(y => { const yr = rows.filter(r => String(r.ymd).slice(0, 7) === y), v = yr.reduce((t, r) => t + (Number(r.amount) || 0), 0), sr = srcOfRows(yr);
+      const col = !v ? '#c9c9c9' : (o.col || (sr.auto ? '#b26a00' : '#333'));
+      return `<td style="text-align:right;${P};color:${col};${sr.auto && v ? 'font-style:italic;' : ''}${o.bold ? 'font-weight:700;' : ''}" title="${v ? esc(y + '：' + yr.length + '件' + (sr.lb ? '\n出どころ：\n' + sr.lb : '') + (sr.auto ? '\n（自動で入った見込みの数字）' : '')) : esc(y + '：' + (yr.length ? '0円の行だけ' : 'この月に1件も無い'))}">${v ? yen0(v) : '—'}</td>`; }).join(''); };
+    const lbl = (txt, depth, k, o) => { o = o || {}; const tg = k != null; return `<td ${tg ? `data-tg="${av(k)}"` : ''} style="${PL}${10 + depth * 18}px;position:sticky;left:0;background:${o.bg || '#fff'};white-space:nowrap;${tg ? 'cursor:pointer;' : ''}color:${o.col || '#333'};font-weight:${o.bold ? 700 : 400};max-width:460px;overflow:hidden;text-overflow:ellipsis" title="${esc(o.title || (tg ? '押すと1段下が開く／もう一度押すと畳む' : ''))}">${tg ? `<span style="display:inline-block;width:14px;color:#888">${open[k] ? '▾' : '▸'}</span>` : '<span style="display:inline-block;width:14px"></span>'}${txt}</td>`; };
     const itemRows = (rows, depth) => rows.slice().sort((a, b) => String(b.ymd).localeCompare(String(a.ymd)) || (Number(b.amount) || 0) - (Number(a.amount) || 0)).map(r => { const sr = expSrcOf(r), y = String(r.ymd).slice(0, 7);
       if (!yms.includes(y)) return '';
-      return `<tr style="background:#fbfcfe">${lbl(`<span style="color:#666">${esc(String(r.ymd).slice(0, 10))}</span> <b style="font-weight:600;color:${sr.keys[0] === 'unknown' || sr.keys[0] === 'manual' ? '#9a6700' : '#1565c0'}">${sr.icon} ${esc(sr.label)}</b> <span style="color:#555">${esc(String(r.memo || '（メモなし）').slice(0, 60))}</span>`, depth, null, { bg: '#fbfcfe', title: (r.memo || '') + '\n出どころ：' + sr.label })}${yms.map(yy => `<td style="text-align:right;padding:3px 10px;font-size:11px;font-variant-numeric:tabular-nums;color:${yy === y ? '#333' : '#e0e0e0'}">${yy === y ? yen0(r.amount) : ''}</td>`).join('')}</tr>`; }).join('');
+      return `<tr style="background:#fbfcfe">${lbl(`<span style="color:#666;display:inline-block;width:78px">${esc(String(r.ymd).slice(0, 10))}</span><span style="display:inline-block;min-width:150px;color:${sr.keys[0] === 'unknown' || sr.keys[0] === 'manual' ? '#9a6700' : '#1565c0'}">${esc(sr.label)}</span><span style="color:#555">${esc(String(r.memo || '（メモなし）').slice(0, 56))}</span>`, depth, null, { bg: '#fbfcfe', title: (r.memo || '') + '\n出どころ：' + sr.label })}<td style="text-align:right;${P};background:#f7f9fc;border-right:1px solid #e6e9ef;color:#555">${Number(r.amount) ? yen0(r.amount) : '—'}</td>${exp.hist2025 ? `<td style="background:#f7f9fc;border-right:1px solid #e6e9ef"></td>` : ''}${yms.map(yy => `<td style="text-align:right;${P};font-size:11px;color:#333">${yy === y ? (Number(r.amount) ? yen0(r.amount) : '—') : ''}</td>`).join('')}</tr>`; }).join('');
     const subTree = (rows, depth, keyBase, lv) => { lv = lv || 0; const subs = {}; rows.forEach(r => { const l = expSubOf(r)[lv] || 'その他'; (subs[l] = subs[l] || []).push(r); });
       const tot = rr => rr.reduce((t, r) => t + (Number(r.amount) || 0), 0);
       const names = Object.keys(subs).sort((a, b) => (a === 'その他') - (b === 'その他') || tot(subs[b]) - tot(subs[a]));
       return names.map(n => { const k = keyBase + '>' + n, rr = subs[n], deeper = rr.filter(r => expSubOf(r).length > lv + 1), shallow = rr.filter(r => expSubOf(r).length <= lv + 1);
-        return `<tr>${lbl(esc(n) + ` <span class="smd-dim" style="font-size:10.5px">${rr.length}件</span>`, depth, k, { col: lv ? '#2d4f7c' : '#1f3b63' })}${cells(rr)}</tr>` + (open[k] ? (deeper.length ? subTree(deeper, depth + 1, k, lv + 1) : '') + itemRows(shallow, depth + 1) : ''); }).join(''); };
+        return `<tr>${lbl(esc(n) + ` <span class="smd-dim" style="font-size:10.5px">${rr.length}件</span>`, depth, k, { col: lv ? '#2d4f7c' : '#1f3b63' })}${totCells(rr)}${cells(rr)}</tr>` + (open[k] ? (deeper.length ? subTree(deeper, depth + 1, k, lv + 1) : '') + itemRows(shallow, depth + 1) : ''); }).join(''); };
     const run = all.filter(r => !plIsInvest(r.category)), inv = all.filter(r => plIsInvest(r.category));
-    const cats = [...new Set(run.map(r => String(r.category || '').trim()))].sort((a, b) => (isFix(b) - isFix(a)) || a.localeCompare(b, 'ja'));
-    const sumRow = (label, rows, col, title) => `<tr style="font-weight:700">${lbl(label, 0, null, { bold: true, col, title })}${cells(rows, { col, bold: true, icons: false })}</tr>`;
-    const head = `<tr style="background:#f4f6fa"><th style="text-align:left;padding:4px 8px;position:sticky;left:0;background:#f4f6fa">分類（▸ で中身 → 1件ずつ）</th>${yms.map(y => `<th class="exp-ymh" data-ym="${y}" style="text-align:right;padding:4px 10px;cursor:pointer;color:${y === exp.ym ? '#ee4d2d' : y < '2026-01' ? '#999' : '#333'}" title="この月に切り替える">${y.slice(2)}</th>`).join('')}</tr>`;
-    const body = cats.map(c => { const rows = run.filter(r => String(r.category || '').trim() === c), k = 'c:' + c; return `<tr style="border-top:1px solid #f0f0f0">${lbl(esc(c), 0, k, { col: isFix(c) ? '#1565c0' : '#333', bold: isFix(c) })}${cells(rows)}</tr>` + (open[k] ? subTree(rows, 1, k) : ''); }).join('')
+    const cats = [...new Set(run.map(r => catKey(r.category)))].sort((a, b) => (isFix(b) - isFix(a)) || a.localeCompare(b, 'ja'));
+    const sumRow = (label, rows, col, title) => `<tr style="font-weight:700">${lbl(label, 0, null, { bold: true, col, title })}${totCells(rows)}${cells(rows, { col, bold: true })}</tr>`;
+    const head = `<tr style="background:#f4f6fa"><th style="text-align:left;${PL}10px;position:sticky;left:0;background:#f4f6fa">分類（▸ で中身 → 1件ずつ）</th><th style="text-align:right;${P};background:#eef2f8;border-right:1px solid #e6e9ef" title="2026-01 から今月までの合計">全期間の合計<div class="smd-dim" style="font-weight:400;font-size:10px">2026-01〜</div></th>${exp.hist2025 ? `<th style="text-align:right;${P};background:#eef2f8;border-right:1px solid #e6e9ef;color:#666">2025年以前も足した合計</th>` : ''}${yms.map(y => `<th class="exp-ymh" data-ym="${y}" style="text-align:right;${P};cursor:pointer;color:${y === exp.ym ? '#ee4d2d' : y < '2026-01' ? '#999' : '#333'}" title="この月に切り替える">${y.slice(2)}</th>`).join('')}</tr>`;
+    const body = cats.map(c => { const rows = run.filter(r => catKey(r.category) === c), k = 'c:' + c, names = [...new Set(rows.map(r => String(r.category || '').trim()))]; return `<tr style="border-top:1px solid #f0f0f0">${lbl(esc(c), 0, k, { col: isFix(c) ? '#1565c0' : '#333', bold: isFix(c), title: '押すと中身が開く' + (names.length > 1 ? '\n（データの分類：' + names.join('・') + ' をまとめて出しています）' : '') })}${totCells(rows)}${cells(rows)}</tr>` + (open[k] ? subTree(rows, 1, k) : ''); }).join('')
       + `<tr style="border-top:2px solid #e6e9ef"></tr>` + sumRow('固定費 計', run.filter(r => isFix(r.category)), '#1565c0')
       + sumRow('経費 合計（運転の分・初期投資を含めない）', run, '#222')
-      + (inv.length ? `<tr style="border-top:2px solid #e6e9ef">${lbl('初期投資 <span class="smd-dim" style="font-weight:400;font-size:10.5px">（別枠・純利益に入れない）</span>', 0, 'inv', { col: '#7b52c4', bold: true })}${cells(inv, { col: '#7b52c4' })}</tr>` + (open.inv ? subTree(inv, 1, 'inv') : '')
+      + (inv.length ? `<tr style="border-top:2px solid #e6e9ef">${lbl('初期投資 <span class="smd-dim" style="font-weight:400;font-size:10.5px">（別枠・純利益に入れない）</span>', 0, 'inv', { col: '#7b52c4', bold: true })}${totCells(inv)}${cells(inv, { col: '#7b52c4' })}</tr>` + (open.inv ? subTree(inv, 1, 'inv') : '')
         + sumRow('初期投資 合計', inv, '#7b52c4') : '');
-    return `<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px"><b style="font-size:14px">📆 月ごとの経費（過去の遍歴）</b><span class="smd-dim" style="font-size:11px">分類の行を押すと、その下に中身が1段下がって開く → さらに押すと1件ずつ（日付・出どころ・メモ）／月の見出し＝その月へ切替／<b>青字＝固定費</b></span>
+    return `<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px"><b style="font-size:14px">📆 月ごとの経費（過去の遍歴）</b><span class="smd-dim" style="font-size:11px">分類の行を押すと中身が1段下がって開く → さらに押すと1件ずつ（日付・出どころ・メモ）／マスにかざすと出どころの内訳／月の見出し＝その月へ切替／<b>青字＝固定費</b></span>
       ${old.length ? `<button class="smd-btn" data-h25="1" style="font-size:11px;padding:2px 8px;margin-left:auto">${exp.hist2025 ? '▾ 2025年以前（参考）を畳む' : '▸ 2025年以前（参考・' + old.length + 'か月）を開く'}</button>` : ''}</div>
-      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;white-space:nowrap"><thead>${head}</thead><tbody>${body}</tbody></table></div>
-      <div class="smd-dim" style="font-size:10.5px;margin-top:6px;line-height:1.6"><b>見方</b>：「—」＝その月に1件も無い／<span style="color:#b26a00;font-style:italic">茶色の斜体</span>＝自動で入った見込みの数字（固定費の内訳から）／印＝出どころ：🅿 PayPay・🏦 銀行・💳 カード・📄 契約金計算書・🛒 Amazon・楽天の注文・🚚 ヤマトの運賃・✉ メールの領収書・⚙ 自動・📒 MF の明細・✍ 手入力（元が分からない）・❓ 分からない（マスにかざすと名前が出る）<br>
-      <b>数え方</b>：損益と純利益の累計は <b>2026-01 から</b>（本人「ちゃんと数え始めたのは2026年から」）。2025年以前の行は消さずに残し、ここでは参考として畳んで出す。投資の回収には ShopeeKing 永久メンバー ¥180,000（2025-08）だけを初期投資として数える（Frontier の入会金と同じく今も使っている物への投資）。2025年の ShopeeKing の月額は、2026年の損益にも投資にも入れない。</div>`;
+      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums"><thead>${head}</thead><tbody>${body}</tbody></table></div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:6px;line-height:1.6"><b>見方</b>：「—」＝その月に無い（0円の行だけの時も）／<span style="color:#b26a00;font-style:italic">茶色の斜体</span>＝自動で入った見込みの数字／出どころは1件ずつの行に文字で出る。マスにかざすと出どころ別の内訳。<br>
+      <b>数え方</b>：全期間の合計・損益・純利益の累計は <b>2026-01 から</b>（本人「ちゃんと数え始めたのは2026年から」）。2025年以前の行は消さずに残し、参考として畳んで出す。投資の回収には ShopeeKing 永久メンバー ¥180,000（2025-08）だけを初期投資として数える（Frontier の入会金と同じく今も使っている物への投資）。2025年の ShopeeKing の月額は、2026年の損益にも投資にも入れない。</div>`;
   }
   /* 📆 月ごとの経費の明細（本人 2026-10-11「これの詳細を見たいってこと」）：pick={cat, ym}。ym が空＝その分類の全部の月 */
   function expHistDetailHtml(pick) {
@@ -29852,6 +29870,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-16', items: [
+      '🧼 <b>月ごとの経費の表をすっきりさせ、全期間の合計を足しました・🛒 Amazon の分類を続けて押せるように</b>（本人「ツメツメで見にくいな、特に…絵面が書いてあるところ」「初期投資の全部の合計額とかさ、どこで見れるわけ？」「1個押すたびに閉じよるの、それがマジ鬱陶しい。こっちは連続してやりたい」）。月のマスは金額だけ（出どころは1件ずつの行に文字で・マスにかざすと内訳）・行と列の間を広く・¥0 は「—」・ツール代とツール代（その他）、人件費と人件費（その他）は表の上で1行に・分類名の右に「全期間の合計（2026-01〜）」（2025年以前を開くと、それも足した列）。🛒 Amazon で買ったもの：分類のボタンを押しても一覧を閉じず描き直さない（押した行だけ「いまの扱い」が変わる・位置そのまま）・「扱いが決まった」の開閉を覚える。',
       '🧹 <b>💴入出金・経費の重なりを外して並べ直しました</b>（本人「同じようなことが書いてあるところは多分重複してると思うから削っていいんじゃない？あんまごちゃごちゃしてても見にくい」）。外した物＝②の「分類ごとの合計」のカード（→③ 月ごとの経費の表のその月の列）・AI 利用料のカードの「購入（経費の行）」の一覧（→③の表の ツール代（その他）▸ Claude ▸ Claude API）。並び＝① この月の結論 → ② 経費を入れる（手で足す・ヤマトの取り込み）→ ③ 月ごとの経費の表 → ④ この月の経費を直す・消す・CSV → ⑤ 取り込み・自動登録（AI・固定費の内訳・Amazon・削減メモ）。経費のデータは1行も消していません。',
       '🔢 <b>月ごとの経費：サービスでくくってもう1段下げました・金額の1の位をそろえました</b>（本人「Claude は Claude でくくって、その中の階層をもう1個下げて」「金額書いてある時はさ、1の位を右寄せしてね」）。ツール代（その他）▸ Claude ▸ Claude 月額／Claude API、送料 ▸ ヤマト ▸ 運賃の取り込み／月の請求／窓口。出どころの印は金額の左の決まった幅の箱に置き、印の数で1の位が動かないように。ポータル全体の表の数字は幅をそろえる（tabular-nums）。',
       '🗂 <b>月ごとの経費の表を、表の中で1段ずつ開く形にしました</b>（本人「この中で全部細かく見たいんだけど」「サブディレクトリも」「『ツール［その他］』を押したら、その下に階層が1個下がって入るっていうイメージ」「初期投資も…全部くくれるでしょ？」）。分類の行を押すと、すぐ下に中身（ツール代＝Frontier・Claude 月額・Claude API・Photoroom・Supabase、送料＝ヤマト・佐川・窓口、梱包資材・備品＝段ボール・プチプチ・OPP 袋・テープ…、初期投資＝倉庫の契約・Frontier 入会金・ShopeeKing 永久メンバー・設備・什器・会社設立）が1段下がって同じ月の列に並び、さらに押すと1件ずつ（日付・出どころ・メモ）。どの段も合計はすぐ下の段と1円まで同じ。初期投資は一番上の段で1行・合計の行は運転の分と初期投資で別々。2025年以前の列は「▸ 2025年以前（参考）」で畳んだまま（損益と純利益の累計は 2026-01 から）。後から足した経費が開いたままの画面に出なかったのは、全部の経費を開いた時に1回だけ読んでいたため＝2分で読み直すようにしました。',
