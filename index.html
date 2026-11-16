@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-0022';
+  const APP_BUILD = '20261117-0029';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -10005,7 +10005,7 @@
     /* ★2026-11-15 月を比べる（日ごと・週ごと） */
     [/^(\d+)日までの累計$/, 'Cumulative to day $1'], [/^（その日 (.+)）$/, '(that day $1)'],
     [/^1日平均（(\d+)日まで）$/, 'Daily average (to day $1)'], [/^(\d+)日の値$/, 'Day $1'], [/^（金額が読めない注文 (\d+)件）$/, '($1 orders with unknown amount)'], [/^(\d+\.\d)件$/, '$1 items'], [/^1日平均（1〜(\d+)日） 今月 (.+)$/, 'Daily average (days 1-$1) this month $2'], [/^(\d+\.\d)点$/, '$1 items'],
-    [/^（うち第3・Amazon (\d+)）$/, '(incl. Shop 3 · Amazon $1)'], [/^🤖 第3・Amazon：今日 (\d+)件$/, '🤖 Shop 3 · Amazon: $1 today'], [/^（最後 (\d\d:\d\d)）$/, '(last $1)'],
+    [/^（うち第3・Amazon (\d+)）$/, '(incl. Shop 3 · Amazon $1)'], [/^分類待ち（自動で入った・本人が未確認：今は経費 (.+)）$/, 'Needs a decision (auto-posted, not confirmed by you: now expense $1)'], [/^⚠ 売れた仕入れ品なのに経費に入っています（次の読み込みで自動で外します）$/, '⚠ Sold stock item is also in expenses (removed automatically on next load)'], [/^🤖 第3・Amazon：今日 (\d+)件$/, '🤖 Shop 3 · Amazon: $1 today'], [/^（最後 (\d\d:\d\d)）$/, '(last $1)'],
     /* ★2026-11-13 値付けの見直しのカード */
     [/^✅ ☑した (\d+)件の値段を書き込む$/, '✅ Write the prices of $1 checked items'], [/^赤字 (\d+)・基準より下 (\d+)(.*)。上から順に、カードのボタンで決めてください。$/, 'Loss $1 · below the profit line $2$3. Decide from the top with the buttons on each card.'],
     [/^🔀 移し先を探す（(.+)）$/, '🔀 Find a catalog to move to ($1)'], [/^このカタログでは断られる値段（値段の差が上限 (\d+)倍を超える）$/, 'Price rejected in this catalog (price gap over the $1x limit)'], [/^🗑 (この明細を消す|カタログごと消す)（(.+) の上限超え）$/, '🗑 Delete ($2 price cap)'], [/^理由：(.+)$/, 'Reason: $1'],
@@ -26607,8 +26607,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   async function amzAutoPost(ym, data, expRows) {
     let n = 0;
     for (const it of data.rows) {
+      /* ★2026-11-17 05（00・本人「仕入れ品目がこのその他とかに入ってくるのおかしくないか？」）：Shopee で売れた（在庫台帳に shopee_sn が付いた）品が経費に入っていたら、
+         🛒 の「仕入れ品」ボタンと同じ扱いで経費から外す（仕入れは注文の仕入額で数える＝経費にも入ると二重）。外した行は操作ログに残す */
+      if (it.shopee_sn) { const pz = (expRows || []).find(r => String(r.memo || '') === amzMemo(it));
+        if (pz && data.clsOk) { try { await amzRemoveExpense(it, expRows); await amzSetClass(it.item_id, 'goods', ''); data.cls[it.item_id] = { k: 'goods', cat: '' }; logAct('入出金・経費', '売れた仕入れ品を経費から外した', it.item_id, 'id ' + pz.id + '・' + pz.category + '・¥' + (Number(pz.amount) || 0) + '・注文 ' + it.shopee_sn); n++; } catch (_) {} }
+        continue; }
       const c = data.cls[it.item_id]; if (c) continue;                 // 本人が決めたものは動かさない
-      if (it.shopee_sn) continue;                                      // 注文に紐付いた＝仕入れ品
       const sg = amzSuggest(it.name_supplier || it.name); if (!sg.sure) continue;
       if ((expRows || []).some(r => String(r.memo || '') === amzMemo(it))) continue;
       if (!(Number(it.price) > 0)) continue;   /* ★2026-10-11 本人「0円ってありえない」＝金額が無い行を ¥0 の経費にしない（金額は取込GASが注文メールから後で埋める） */
@@ -26620,9 +26624,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function amzCardHtml(ym, data, expRows, autoOn) {
     const rows = data.rows;
     const st = it => { const c = data.cls[it.item_id]; const posted = (expRows || []).find(r => String(r.memo || '') === amzMemo(it)); const sg = amzSuggest(it.name_supplier || it.name);
-      if (it.shopee_sn) return { lab: '仕入れ品（注文に紐付き）', col: '#1565c0', done: true };
+      if (it.shopee_sn) return posted ? { lab: '⚠ 売れた仕入れ品なのに経費に入っています（次の読み込みで自動で外します）', col: '#b5341a', done: false } : { lab: '仕入れ品（注文に紐付き）', col: '#1565c0', done: true };
       if (c && c.k === 'goods') return { lab: '仕入れ品', col: '#1565c0', done: true };
       if (c && c.k === 'personal') return { lab: '私物（事業外）', col: '#6b7280', done: true };
+      /* ★2026-11-17 05（00・本人「だからそれ仕分けてないっけ？」）：本人の仕分け（amz_class）も名前の自動（sure）も通らずに経費に入った行は「決まった扱い」に見せず、分類待ちに出す */
+      if (posted && !c && !sg.sure) return { lab: `分類待ち（自動で入った・本人が未確認：今は経費 ${esc(posted.category)}）`, col: '#b5341a', done: false };
       if (posted) return { lab: `経費 ${esc(posted.category)}`, col: '#1a7f37', done: true };
       if (c && c.k === 'supply') return { lab: `備品（${esc(c.cat || '')}・未登録）`, col: '#8a4b00', done: false };
       if (sg.k === 'supply') return { lab: `候補：${sg.cat}${sg.sure ? '（自動対象）' : ''}`, col: '#8a4b00', done: false };
@@ -26942,11 +26948,17 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const it = expItemName(r.memo), fcR = expIsFc(r), supR = sup.has(r.id), st = supR ? 'opacity:.45;text-decoration:line-through;' : '';
       const what = it ? `<b style="font-weight:600;color:#222">${esc(it.name.slice(0, 46))}${it.name.length > 46 ? '…' : ''}</b>` : `<span style="color:#555">${esc(String(r.memo || '（メモなし）').replace(/^\s*\[見込み\]\s*/, '').slice(0, 56))}</span>`;
       return `<tr style="background:#fbfcfe;${st}">${lbl(`<span style="color:#666;display:inline-block;width:78px">${esc(String(r.ymd).slice(0, 10))}</span>${fcR ? `<span style="display:inline-block;font-size:10px;color:#fff;background:${supR ? '#9aa0a6' : '#2f6fdb'};border-radius:3px;padding:0 4px;margin-right:4px">${supR ? '見込み→確定済み' : '見込み'}</span>` : ''}${what} <span style="font-size:10.5px;color:${sr.keys[0] === 'unknown' || sr.keys[0] === 'manual' ? '#9a6700' : '#1565c0'}">${esc(sr.label)}</span>`, depth, null, { bg: '#fbfcfe', title: (it ? it.name + (it.code ? '\n番号：' + it.code : '') + '\n' : '') + (r.memo || '') + '\n出どころ：' + sr.label + (supR ? '\n（同じ中身の確定が入ったので数えていない）' : '') })}<td style="text-align:right;${P};background:#f7f9fc;border-right:1px solid #e6e9ef;color:${fcR && !supR ? '#2f6fdb' : '#555'}">${Number(r.amount) ? yen0(r.amount) : '—'}</td>${exp.hist2025 ? `<td style="background:#f7f9fc;border-right:1px solid #e6e9ef"></td>` : ''}${yms.map(yy => `<td style="text-align:right;${P};font-size:11px;color:${fcR && !supR ? '#2f6fdb' : '#333'}">${yy === y ? (Number(r.amount) ? yen0(r.amount) : '—') : ''}</td>`).join('')}</tr>`; }).join('');
+    /* ★2026-11-17 05（本人「ここも11月分とか8月分とか10月分とか、1個上の階層をつけた方がいいかも」）：中身の1件ずつが6件以上の時は、間に「月」の段を挟む（新しい月が上）。
+       月の段の金額はその月の列に出る（ほかの段と同じ並び）。5件以下は今までどおり直に並べる。開いた状態は同じく覚える（鍵＝中身の鍵＋@月） */
+    const itemOrMonth = (rows, depth, keyBase) => { const vis = rows.filter(r => yms.includes(String(r.ymd).slice(0, 7))); if (vis.length < 6) return itemRows(rows, depth);
+      const by = {}; vis.forEach(r => { const y = String(r.ymd).slice(0, 7); (by[y] = by[y] || []).push(r); });
+      return Object.keys(by).sort().reverse().map(y => { const k = keyBase + '@' + y, rr = by[y];
+        return `<tr style="background:#fdfdfe">${lbl(esc(y) + ` <span class="smd-dim" style="font-size:10.5px">${rr.length}件</span>`, depth, k, { col: '#4a5568' })}${totCells(rr)}${cells(rr)}</tr>` + (open[k] ? itemRows(rr, depth + 1) : ''); }).join(''); };
     const subTree = (rows, depth, keyBase, lv) => { lv = lv || 0; const subs = {}; rows.forEach(r => { const l = expSubOf(r)[lv] || 'その他'; (subs[l] = subs[l] || []).push(r); });
       const tot = rr => rr.reduce((t, r) => t + amt(r), 0);
       const names = Object.keys(subs).sort((a, b) => (a === 'その他') - (b === 'その他') || tot(subs[b]) - tot(subs[a]));
       return names.map(n => { const k = keyBase + '>' + n, rr = subs[n], deeper = rr.filter(r => expSubOf(r).length > lv + 1), shallow = rr.filter(r => expSubOf(r).length <= lv + 1);
-        return `<tr>${lbl(esc(n) + ` <span class="smd-dim" style="font-size:10.5px">${rr.length}件</span>`, depth, k, { col: lv ? '#2d4f7c' : '#1f3b63' })}${totCells(rr)}${cells(rr)}</tr>` + (open[k] ? (deeper.length ? subTree(deeper, depth + 1, k, lv + 1) : '') + itemRows(shallow, depth + 1) : ''); }).join(''); };
+        return `<tr>${lbl(esc(n) + ` <span class="smd-dim" style="font-size:10.5px">${rr.length}件</span>`, depth, k, { col: lv ? '#2d4f7c' : '#1f3b63' })}${totCells(rr)}${cells(rr)}</tr>` + (open[k] ? (deeper.length ? subTree(deeper, depth + 1, k, lv + 1) : '') + itemOrMonth(shallow, depth + 1, k) : ''); }).join(''); };
     const run = all.filter(r => !plIsInvest(r.category)), inv = all.filter(r => plIsInvest(r.category));
     const cats = [...new Set(run.map(r => catKey(r.category)))].sort((a, b) => (isFix(b) - isFix(a)) || a.localeCompare(b, 'ja'));
     const sumRow = (label, rows, col, title) => `<tr style="font-weight:700">${lbl(label, 0, null, { bold: true, col, title })}${totCells(rows)}${cells(rows, { col, bold: true })}</tr>`;
@@ -29967,6 +29979,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '🗂 <b>経費の表：中身の1件ずつが6件以上の時は「月」の段を挟みました</b>（本人「ここも11月分とか8月分とか10月分とか、1個上の階層をつけた方がいいかも」）。例：備品費 ▸ その他 ▸ 2026-11 4件 → 開くと1件ずつ。月の段の金額はその月の列に出ます',
+      '🛒 <b>Amazon で買ったもの：仕分けを通らずに経費に入った行を「分類待ち」に出すようにしました</b>（本人「だからそれ仕分けてないっけ？」）。また、Shopee で売れた品（在庫台帳で注文に紐付いた品）が経費にも入っていたら、「仕入れ品」ボタンと同じ扱いで自動で経費から外します（二重に数えない・外した行は操作ログに残す）',
       '🔢 <b>損益・計画の金額を1の位で右寄せにそろえました</b>（本人「何桁かわからなくなるし」）。4つのタブを1つずつ画面で測り、ずれていた所を直しました：📈 計画の「月次の収支・結果」の表（左寄せだった）／💰 投資の回収の「回収」の欄／💴 経費の「毎月かかる経費」の表の「この月に入る額」と、梱包資材の値段の比べの表。💹 損益の表はそろっていました',
       '🧮 <b>損益のカードと、グラフ・事業計画の月の粗利が同じ数字になるようにしました</b>（11月が ¥2,098 ずれていた）。ずれていたのは PH の注文1件（Switch のソフト3本）でした。在庫台帳に紐付いていたのは2本（¥4,500）だけで、事業計画は2本ぶん、カードは利益管理表の注文全体（¥6,598）で数えていました。仕入額を決める計算を1つにまとめ、どの画面も同じ数え方（①手入力 → ②在庫台帳。個数より紐付きが少ない時は利益管理表の注文全体 → ③利益管理表）にしました',
       '🤖 <b>第3の店の Amazon からの出品が、公開してすぐ出品ログと「🤖 第3・Amazon：今日 N件（最後 hh:mm）」に出るようにしました</b>（本人「出品進んでるのかこれ？」）。前は公開した明細が出品ログに入るのが、ポータルの1時間ごとの取り込み待ちで、最大1時間ほど遅れていました。今は公開した時に GAS が出品ログに書きます（6台とも版 20261116-2345）',
