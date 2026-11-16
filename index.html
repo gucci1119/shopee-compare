@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-045605';
+  const APP_BUILD = '20261117-045907';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -30109,6 +30109,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '🔄 <b>🏆 の写真を開いた時と10分おきに新しくする</b>（本人「なんで画像 Tested&Working とかじゃないん？original もない」）：画面を開いた時に読んだ出品の控えの画像のままだった。出ている行の出品だけ画像の列を軽く読み直し、変わった出品だけ明細を読み直して描き直す（全件は読まない）',
       '🖼 <b>🏆 の写真：出品番号の無い古い注文も今の出品の画像に</b>（本人「画像差し変わってるのと、差し変わってないのとある？」）：BR の1〜6月の注文などは出品番号が無く名前も前の書き方（Usado …）＝前の写真のままだった。国＋そろえた名前でも今の出品を探す（同じ名前で画像が違う物は使わない）・同じ行の中で今の出品につながった国の画像を、つながらなかった名前にも使う',
       '✏️ <b>編集ページ（✏️）のリンクに店の番号（cnsc_shop_id）を付けた</b>：Seller Center は今選んでいる店で開くので、2店舗目・第3の出品は「商品が見つからない」になっていた。明細の店の番号を付ける（本店にも）＝🏆 商品別の利益・出品ログ・出品一覧・在庫の自動復活など ✏️ を出す所すべて',
       '🔗 <b>🏆 商品別の利益の各行から、売れた出品の販売ページ（🛒）と編集ページ（✏️）へ飛べるように</b>（本人「ここから、そのカタログページとか各国の商品ページ、商品編集ページにも飛べるようにしてください」）：行の下に国ごと・出品ごとに最初から小さく出す。2店舗目・第3の出品はその店の番号で',
@@ -61436,6 +61437,33 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       '<span>注文紐付け済み（仕分け要確認）</span> <b>' + linked.units.toLocaleString() + '</b><span>点</span>　' +
       '<span>仕入額</span> <b>' + fmtJpy(linked.yen) + '</b>' + missingCost(linked) + '</div>';
   }
+  /* ★2026-11-17 05（00・本人「なんで画像 Tested&Working とかじゃないん？original もない」）：🏆 は画面を開いた時に読んだ出品の控えの画像を出していた＝その後に差し替えた絵が出ない。
+     → 開いた時と表示中10分おきに、出ている行（と上位300行）の出品だけ「画像の列と row_updated_at」を軽く読み（明細は読まない）、変わった出品だけ明細（models）を読み直して控えに写し、描き直す。全件は読まない */
+  async function prImgRefresh(R, shown) {
+    if (PR._imgBusy || (PR._imgAt && Date.now() - PR._imgAt < 5 * 60000)) return;
+    if (!(typeof lst !== 'undefined' && lst && lst.loaded && lst.byCc)) return;
+    const ids = new Map(); [].concat(shown || [], (R.rows || []).slice(0, 300)).forEach(r => { (r && r.its ? [...r.its.values()] : []).forEach(x => { if (/^\d+$/.test(String(x.item))) ids.set(x.cc + '|' + x.item, x); }); });
+    if (!ids.size) return;
+    PR._imgBusy = true; PR._imgAt = Date.now(); PR._imgR = R; PR._imgShown = shown;
+    try {
+      const list = [...ids.values()].slice(0, 800), byKey = new Map();
+      Object.keys(lst.byCc).forEach(cc => (lst.byCc[cc] || []).forEach(row => byKey.set(cc + '|' + row.item_id, row)));
+      const changed = [];
+      for (let i = 0; i < list.length; i += 150) {
+        const part = list.slice(i, i + 150).map(x => x.item);
+        const rows = await sbGetAll('listings', 'select=cc,item_id,image,row_updated_at&item_id=in.(' + part.join(',') + ')');
+        (rows || []).forEach(b => { const c = byKey.get(b.cc + '|' + b.item_id); if (!c) return; if (String(c.row_updated_at || '') !== String(b.row_updated_at || '') || String(c.image || '') !== String(b.image || '')) changed.push(b); });
+      }
+      for (let i = 0; i < changed.length; i += 50) {
+        const part = changed.slice(i, i + 50).map(b => b.item_id);
+        const full = await sbGetAll('listings', 'select=cc,item_id,image,models,row_updated_at&item_id=in.(' + part.join(',') + ')');
+        (full || []).forEach(f => { const c = byKey.get(f.cc + '|' + f.item_id); if (c) { c.image = f.image; if (Array.isArray(f.models)) c.models = f.models; c.row_updated_at = f.row_updated_at; } });
+      }
+      PR._imgLast = { at: Date.now(), checked: list.length, changed: changed.length };
+      if (changed.length) { const b = document.getElementById('prank-body'); if (b && b.offsetParent) { PR._imgBusy = false; renderProfitRank(); } }
+    } catch (e) { PR._imgLast = { at: Date.now(), err: String((e && e.message) || e).slice(0, 80) }; }
+    finally { PR._imgBusy = false; clearTimeout(PR._imgT); PR._imgT = setTimeout(() => { const b = document.getElementById('prank-body'); if (b && b.offsetParent) { PR._imgAt = 0; prImgRefresh(PR._imgR, PR._imgShown); } }, 10 * 60000); }   /* 変わった時だけ描き直す */
+  }
   async function renderProfitRank(force) {
     const body = document.getElementById('prank-body'); if (!body) return;
     const heldReady = stockHeldLoad(force);
@@ -61464,6 +61492,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       chkTxt = ok ? (Math.abs(pf.grossTotal - gReal) < 1 ? ` <span style="color:#1a7f37;font-weight:700">＝ 実際の値の分 ${yen(gReal)} が 💹利益明細の今月の粗利 ${yen(pf.grossTotal)} と一致</span>` : ` <span style="color:#d93025;font-weight:700">⚠ 実際の値の分 ${yen(gReal)} が 💹利益明細の今月の粗利 ${yen(pf.grossTotal)} と ${yen(gReal - pf.grossTotal)} 違う</span>`) : ' <span class="smd-dim">（💹利益明細で今月を開くと、ここに突き合わせが出ます）</span>';
     }
     const shown = PR.more ? R.rows : R.rows.slice(0, 100);
+    try { prImgRefresh(R, shown); } catch (_) {}   /* ★11/17 出ている行の出品の画像だけ軽く読み直す */
     /* ★11/5 本人「横幅あってない」：国の札は列の中で折り返す（1行に2つまで）・金額は切らない */
     const ccChips = (o) => '<div style="display:flex;flex-direction:column;align-items:flex-start;gap:2px">' + Object.keys(o).sort((a, b) => o[b] - o[a]).map(c => `<span style="padding:0 4px;border-radius:4px;background:${(regionByCc(c) || {}).color || '#888'};color:#fff;font-size:10.5px;white-space:nowrap">${c} ${yen(o[c])}</span>`).join('') + '</div>';
     const ccTag = (c) => `<span style="display:inline-block;padding:0 3px;margin-right:2px;border-radius:3px;background:${(regionByCc(c) || {}).color || '#888'};color:#fff;font-size:9.5px;line-height:1.4">${esc(c)}</span>`;
