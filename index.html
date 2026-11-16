@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-0033';
+  const APP_BUILD = '20261117-0042';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -21259,18 +21259,34 @@
     }
     let Chart; try { Chart = await loadChartJs(); } catch (e) { box.innerHTML = '<div class="smd-dim" style="font-size:11px;margin:0 0 10px">グラフの部品を読めませんでした（通信を確かめてください）</div>'; return; }
     const title = { pl: '📊 月ごとの売上・粗利・経費・純利益（2026-01〜）', exp: '📊 月ごとの経費（分類ごとの積み上げ・2026-01〜・棒を押すとその月へ）', payback: '📊 純利益の累計と初期投資の合計（線に届いた月が回収）', plan: '📊 目標と実績（月の純利益・2026-01〜）' }[kind];
-    box.innerHTML = `<div class="tool-card" style="margin:0 0 12px;max-width:none;padding:10px 14px"><div style="font-weight:700;font-size:13px;margin-bottom:6px">${title}</div><div style="position:relative;height:250px"><canvas></canvas></div></div>`;
-    const cv = box.querySelector('canvas'); try { if (window.__finCharts[boxId]) window.__finCharts[boxId].destroy(); } catch (_) {}
-    const axes = (stack) => ({ x: { stacked: !!stack, ticks: { color: txt }, grid: { color: grid } }, y: { stacked: !!stack, ticks: { color: txt, callback: v => yen(v) }, grid: { color: grid } } });
-    const opt = (stack, extra) => Object.assign({ responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { labels: { color: txt, boxWidth: 12 } }, tooltip: { callbacks: { label: c => (c.dataset.label || '') + '：' + (c.parsed.y == null ? '—' : yen(c.parsed.y)) } } }, scales: axes(stack) }, extra || {});
+    /* ★2026-11-17 05（本人「これもうちょっとメモリあった方がいいんじゃね？」「数値も、棒グラフにしても折れ線にしても書いてあった方がいい」）：
+       縦を高く（前の約2倍）・目盛りを細かく・損益は「売上」と「粗利・経費・純利益」の2つに分ける（数十万円が数百万円に潰れない）・値は棒の上／点の上に万円で常に書く（重なる所は少しずらす）・かざすと1円まで */
+    const H = { pl: [210, 330], exp: [420], payback: [400], plan: [400] }[kind] || [400];
+    box.innerHTML = `<div class="tool-card" style="margin:0 0 12px;max-width:none;padding:10px 14px"><div style="font-weight:700;font-size:13px;margin-bottom:6px">${title}</div>${H.map((h, k) => `${kind === 'pl' ? `<div class="smd-dim" style="font-size:11px;margin:${k ? '8px' : '0'} 0 2px">${k ? '粗利・経費（棒）と純利益（線）' : '売上'}</div>` : ''}<div style="position:relative;height:${h}px"><canvas data-k="${k}"></canvas></div>`).join('')}</div>`;
+    const cv = box.querySelector('canvas[data-k="0"]'), cv2 = box.querySelector('canvas[data-k="1"]');
+    try { if (window.__finCharts[boxId]) window.__finCharts[boxId].destroy(); } catch (_) {} try { if (window.__finCharts[boxId + '2']) window.__finCharts[boxId + '2'].destroy(); } catch (_) {}
+    const man = v => { if (v == null || !isFinite(v) || !v) return ''; const a = Math.abs(v), sg = v < 0 ? '▲' : ''; return sg + (a >= 100000 ? String(Math.round(a / 10000)) : a >= 10000 ? (a / 10000).toFixed(1).replace(/\.0$/, '') : (a / 10000).toFixed(2).replace(/0+$/, '').replace(/\.$/, '')) + '万'; };
+    const niceStep = (span, n) => { const raw = Math.max(1, span) / (n || 10), p10 = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / p10; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p10; };
+    const stepOf = (vals, n) => { const v = vals.filter(x => x != null && isFinite(x)); if (!v.length) return undefined; return niceStep(Math.max(0, ...v) - Math.min(0, ...v), n); };
+    const valLbl = { id: 'smdVal', afterDatasetsDraw(ch) { const c = ch.ctx, stacked = !!(ch.options.scales && ch.options.scales.x && ch.options.scales.x.stacked), used = {}; c.save(); c.font = '600 10.5px -apple-system,BlinkMacSystemFont,sans-serif'; c.textAlign = 'center';
+      const put = (t, x, y, col) => { const k = Math.round(x / 6); const u = used[k] = used[k] || []; let n = 0; while (u.some(z => Math.abs(z - y) < 11) && n < 6) { y -= 11; n++; } u.push(y); c.fillStyle = col; c.fillText(t, x, y); };
+      ch.data.datasets.forEach((ds, di) => { const meta = ch.getDatasetMeta(di); if (meta.hidden || ds.noVal) return; meta.data.forEach((el, i) => { const v = ds.data[i]; if (v == null || !v) return; if (ds.valLast && i !== ds.data.length - 1) return; if (ds.valFrom != null && i < ds.valFrom) return;
+        if (meta.type === 'bar') { const top = Math.min(el.y, el.base), h = Math.abs(el.base - el.y); if (stacked) { if (h >= 13) { c.fillStyle = '#fff'; c.fillText(man(v), el.x, top + h / 2 + 4); } return; } put(man(v), el.x, v >= 0 ? el.y - 4 : el.y + 12, txt); }
+        else put(man(v), el.x, el.y - 8, ds.borderColor || txt); }); });
+      if (stacked) { const n = (ch.data.labels || []).length; for (let i = 0; i < n; i++) { let tot = 0, topY = Infinity, x = null; ch.data.datasets.forEach((ds, di) => { const meta = ch.getDatasetMeta(di); if (meta.hidden) return; const v = Number(ds.data[i]) || 0; if (!v) return; tot += v; const el = meta.data[i]; if (el) { topY = Math.min(topY, el.y); x = el.x; } }); if (tot && x != null) { c.font = '700 11px -apple-system,BlinkMacSystemFont,sans-serif'; c.fillStyle = txt; c.fillText(man(tot), x, topY - 5); } } }
+      c.restore(); } };
+    const axes = (stack, step) => ({ x: { stacked: !!stack, ticks: { color: txt }, grid: { color: grid } }, y: { stacked: !!stack, grace: '8%', ticks: { color: txt, callback: v => yen(v), stepSize: step, maxTicksLimit: 16 }, grid: { color: grid } } });
+    const opt = (stack, extra, step) => Object.assign({ responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { labels: { color: txt, boxWidth: 12 } }, tooltip: { callbacks: { label: c => (c.dataset.label || '') + '：' + (c.parsed.y == null ? '—' : yen(c.parsed.y)) } } }, scales: axes(stack, step) }, extra || {});
     let cfg = null;
     if (kind === 'pl') {
       const L = mr.map(r => r.ym.slice(2));
       cfg = { type: 'bar', data: { labels: L, datasets: [
-        { label: '売上', data: mr.map(r => r.gmv), backgroundColor: finColOf('売上') + 'aa' },
+        { label: '売上', data: mr.map(r => r.gmv), backgroundColor: finColOf('売上') + 'aa' }] }, options: opt(false, null, stepOf(mr.map(r => r.gmv), 8)), plugins: [valLbl] };
+      const lo = [].concat(mr.map(r => r.gross), mr.map(r => r.cost), mr.map(r => r.net));
+      if (cv2) window.__finCharts[boxId + '2'] = new Chart(cv2, { type: 'bar', data: { labels: L, datasets: [
         { label: '粗利', data: mr.map(r => r.gross), backgroundColor: finColOf('粗利') + 'cc' },
         { label: '経費', data: mr.map(r => r.cost), backgroundColor: finColOf('経費') + 'cc' },
-        { label: '純利益', type: 'line', data: mr.map(r => r.net), borderColor: finColOf('純利益'), backgroundColor: finColOf('純利益'), tension: .2, spanGaps: true, pointRadius: 3 }] }, options: opt(false) };
+        { label: '純利益', type: 'line', data: mr.map(r => r.net), borderColor: finColOf('純利益'), backgroundColor: finColOf('純利益'), tension: .2, spanGaps: true, pointRadius: 3 }] }, options: opt(false, null, stepOf(lo, 10)), plugins: [valLbl] });
     } else if (kind === 'exp') {
       const all = (exp._allRows || []).filter(r => String(r.ymd || '').slice(0, 7) >= '2026-01' && !plIsInvest(r.category));
       const yms = [...new Set(all.map(r => String(r.ymd).slice(0, 7)))].sort();
@@ -21278,7 +21294,7 @@
       const cats = [...new Set(all.map(r => key(r.category)))]; const sum = (c, y) => all.filter(r => key(r.category) === c && String(r.ymd).slice(0, 7) === y).reduce((t, r) => t + (Number(r.amount) || 0), 0);
       cats.sort((a, b) => yms.reduce((t, y) => t + sum(b, y), 0) - yms.reduce((t, y) => t + sum(a, y), 0));
       cfg = { type: 'bar', data: { labels: yms.map(y => y.slice(2)), datasets: cats.map(c => ({ label: c, data: yms.map(y => sum(c, y) || null), backgroundColor: finColOf(c) })) },
-        options: opt(true, { onClick: (e, els) => { if (!els || !els.length) return; const y = yms[els[0].index]; if (y) { finPickYm(y); renderExpenses(); } } }) };
+        options: opt(true, { onClick: (e, els) => { if (!els || !els.length) return; const y = yms[els[0].index]; if (y) { finPickYm(y); renderExpenses(); } } }, stepOf(yms.map(y => cats.reduce((t, c) => t + sum(c, y), 0)), 10)), plugins: [valLbl] };
     } else if (kind === 'payback') {
       const pi = window.__payInfo || {}; let c2 = 0; const known = mr.filter(r => r.net != null);
       const L = known.map(r => r.ym.slice(2)), cumD = known.map(r => (c2 += r.net));
@@ -21286,12 +21302,12 @@
       const projData = cumD.map((v, i) => i === cumD.length - 1 ? v : null).concat(proj);
       cfg = { type: 'line', data: { labels: L, datasets: [
         { label: '純利益の累計', data: cumD, borderColor: finColOf('純利益'), backgroundColor: finColOf('純利益'), tension: .2, pointRadius: 3 },
-        { label: '見込み（直近3か月の平均で）', data: projData, borderColor: finColOf('純利益'), borderDash: [5, 4], pointRadius: 0, spanGaps: true },
-        { label: '初期投資の合計', data: L.map(() => pi.invTotal || 0), borderColor: finColOf('初期投資'), borderWidth: 2, pointRadius: 0 }] }, options: opt(false) };
+        { label: '見込み（直近3か月の平均で）', data: projData, valFrom: cumD.length, borderColor: finColOf('純利益'), borderDash: [5, 4], pointRadius: 2, spanGaps: true },
+        { label: '初期投資の合計', data: L.map(() => pi.invTotal || 0), borderColor: finColOf('初期投資'), borderWidth: 2, pointRadius: 0, valLast: true }] }, options: opt(false, null, stepOf([].concat(cumD, proj, [pi.invTotal || 0]), 10)), plugins: [valLbl] };
     } else if (kind === 'plan') {
       cfg = { type: 'bar', data: { labels: mr.map(r => r.ym.slice(2)), datasets: [
         { label: '純利益（実績）', data: mr.map(r => r.net), backgroundColor: finColOf('純利益') + 'cc' },
-        { label: '目標', type: 'line', data: mr.map(r => r.tgt), borderColor: finColOf('目標'), borderDash: [6, 4], pointRadius: 2, spanGaps: true }] }, options: opt(false) };
+        { label: '目標', type: 'line', data: mr.map(r => r.tgt), borderColor: finColOf('目標'), borderDash: [6, 4], pointRadius: 2, spanGaps: true }] }, options: opt(false, null, stepOf([].concat(mr.map(r => r.net), mr.map(r => r.tgt)), 10)), plugins: [valLbl] };
     }
     if (cfg) window.__finCharts[boxId] = new Chart(cv, cfg);
   }
@@ -26923,6 +26939,20 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const conf = new Set((rows || []).filter(r => !expIsFc(r)).map(k)); return new Set((rows || []).filter(r => expIsFc(r) && conf.has(k(r))).map(r => r.id)); }
   /* 取り込みの行（[Amazon] ITM-… 品名）は品名を先に出す（番号はかざすと出す） */
   function expItemName(memo) { const m = String(memo || ''); const mm = m.match(/^\s*\[(Amazon|メルカリ|楽天|Yahoo[^\]]*|ヤフオク|駿河屋)\]\s*(ITM-\d{8}-\d+)?\s*(.*)$/); return mm ? { name: (mm[3] || '').trim() || '品名が分からない', code: mm[2] || '', from: mm[1] } : null; }
+  /* ★2026-11-17 05（本人「ここ画像があると良いですね」）：経費の1件ずつの行の写真。開いて見えている行の在庫番号だけ、在庫台帳から写真を読む（最初に全部は読まない＝通信を増やさない）。
+     読んだ物は exp._img に覚える（写真が無い番号は '' で覚えて読み直さない）。かざすと大きく出す */
+  async function expImgFill() {
+    const hw = document.getElementById('exp-hist-wrap'); if (!hw) return; exp._img = exp._img || {};
+    const want = [...new Set([...hw.querySelectorAll('.exp-img[data-itm]')].map(e => e.dataset.itm).filter(k => k && !(k in exp._img)))];
+    for (let i = 0; i < want.length; i += 40) { const part = want.slice(i, i + 40);
+      try { const rows = await sbGetAll('inventory', 'select=item_id,image&item_id=in.(' + part.map(encodeURIComponent).join(',') + ')'); const m = {}; (rows || []).forEach(x => { m[x.item_id] = x.image || ''; }); part.forEach(k => { exp._img[k] = hrefOk(m[k] || '') !== '#' ? (m[k] || '') : ''; }); } catch (_) { return; } }
+    hw.querySelectorAll('.exp-img[data-itm]').forEach(sp => { const u = exp._img[sp.dataset.itm]; if (u && !sp.querySelector('img')) sp.innerHTML = `<img class="exp-img-i" src="${av(u)}" referrerpolicy="no-referrer" loading="lazy" onerror="this.style.opacity=.15" style="width:30px;height:30px;object-fit:contain">`; });
+    if (!window.__expImgPopOn) { window.__expImgPopOn = 1; let pop = null;
+      document.addEventListener('mouseover', ev => { const im = ev.target && ev.target.closest && ev.target.closest('img.exp-img-i'); if (!im) { if (pop) pop.style.display = 'none'; return; }
+        if (!pop) { pop = document.createElement('div'); pop.style.cssText = 'position:fixed;z-index:2147483000;background:#fff;border:1px solid #d0d7e2;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.18);padding:6px;pointer-events:none'; document.body.appendChild(pop); }
+        pop.innerHTML = `<img src="${av(im.src)}" referrerpolicy="no-referrer" style="width:220px;height:220px;object-fit:contain;display:block">`; const r = im.getBoundingClientRect(); pop.style.left = Math.min(window.innerWidth - 240, r.right + 8) + 'px'; pop.style.top = Math.max(8, Math.min(window.innerHeight - 240, r.top - 90)) + 'px'; pop.style.display = 'block'; });
+    }
+  }
   function expHistTableHtml() {
     /* ★2026-11-16 本人「やっぱりなんかツメツメで見にくいな、特に…絵面が書いてあるところ」「結局、初期投資の全部の合計額とかさ、そういうのはどこで見れるわけ？」
        → 月のマスは金額だけ（印は出さない・出どころは1件ずつの行に文字で・マスにかざすと内訳）・行と列の間を広く・¥0 は「—」・
@@ -26949,10 +26979,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!yms.includes(y)) return '';
       const it = expItemName(r.memo), fcR = expIsFc(r), supR = sup.has(r.id), st = supR ? 'opacity:.45;text-decoration:line-through;' : '';
       const what = it ? `<b style="font-weight:600;color:#222">${esc(it.name.slice(0, 46))}${it.name.length > 46 ? '…' : ''}</b>` : `<span style="color:#555">${esc(String(r.memo || '（メモなし）').replace(/^\s*\[見込み\]\s*/, '').slice(0, 56))}</span>`;
-      return `<tr style="background:#fbfcfe;${st}">${lbl(`<span style="color:#666;display:inline-block;width:78px">${esc(String(r.ymd).slice(0, 10))}</span>${fcR ? `<span style="display:inline-block;font-size:10px;color:#fff;background:${supR ? '#9aa0a6' : '#2f6fdb'};border-radius:3px;padding:0 4px;margin-right:4px">${supR ? '見込み→確定済み' : '見込み'}</span>` : ''}${what} <span style="font-size:10.5px;color:${sr.keys[0] === 'unknown' || sr.keys[0] === 'manual' ? '#9a6700' : '#1565c0'}">${esc(sr.label)}</span>`, depth, null, { bg: '#fbfcfe', title: (it ? it.name + (it.code ? '\n番号：' + it.code : '') + '\n' : '') + (r.memo || '') + '\n出どころ：' + sr.label + (supR ? '\n（同じ中身の確定が入ったので数えていない）' : '') })}<td style="text-align:right;${P};background:#f7f9fc;border-right:1px solid #e6e9ef;color:${fcR && !supR ? '#2f6fdb' : '#555'}">${Number(r.amount) ? yen0(r.amount) : '—'}</td>${exp.hist2025 ? `<td style="background:#f7f9fc;border-right:1px solid #e6e9ef"></td>` : ''}${yms.map(yy => `<td style="text-align:right;${P};font-size:11px;color:${fcR && !supR ? '#2f6fdb' : '#333'}">${yy === y ? (Number(r.amount) ? yen0(r.amount) : '—') : ''}</td>`).join('')}</tr>`; }).join('');
-    /* ★2026-11-17 05（本人「ここも11月分とか8月分とか10月分とか、1個上の階層をつけた方がいいかも」）：中身の1件ずつが6件以上の時は、間に「月」の段を挟む（新しい月が上）。
-       月の段の金額はその月の列に出る（ほかの段と同じ並び）。5件以下は今までどおり直に並べる。開いた状態は同じく覚える（鍵＝中身の鍵＋@月） */
-    const itemOrMonth = (rows, depth, keyBase) => { const vis = rows.filter(r => yms.includes(String(r.ymd).slice(0, 7))); if (vis.length < 6) return itemRows(rows, depth);
+      const itm = (it && it.code) || ((String(r.memo || '').match(/ITM-\d{8}-\d{3}/) || [''])[0]), iu = itm ? (exp._img || {})[itm] : '';
+      const ph = `<span class="exp-img"${itm ? ` data-itm="${av(itm)}"` : ''} style="display:inline-block;width:30px;height:30px;vertical-align:middle;margin-right:6px;border-radius:4px;background:${itm ? '#f4f6fa' : 'transparent'};overflow:hidden">${iu ? `<img class="exp-img-i" src="${av(iu)}" referrerpolicy="no-referrer" loading="lazy" onerror="this.style.opacity=.15" style="width:30px;height:30px;object-fit:contain">` : ''}</span>`;   /* ★11/17 本人「ここ画像があると良いですね」：品の写真（在庫台帳の写真＝🛒 と同じ）。無い行も場所を空けて字の位置をそろえる */
+      return `<tr style="background:#fbfcfe;${st}">${lbl(`${ph}<span style="color:#666;display:inline-block;width:78px">${esc(String(r.ymd).slice(0, 10))}</span>${fcR ? `<span style="display:inline-block;font-size:10px;color:#fff;background:${supR ? '#9aa0a6' : '#2f6fdb'};border-radius:3px;padding:0 4px;margin-right:4px">${supR ? '見込み→確定済み' : '見込み'}</span>` : ''}${what} <span style="font-size:10.5px;color:${sr.keys[0] === 'unknown' || sr.keys[0] === 'manual' ? '#9a6700' : '#1565c0'}">${esc(sr.label)}</span>`, depth, null, { bg: '#fbfcfe', title: (it ? it.name + (it.code ? '\n番号：' + it.code : '') + '\n' : '') + (r.memo || '') + '\n出どころ：' + sr.label + (supR ? '\n（同じ中身の確定が入ったので数えていない）' : '') })}<td style="text-align:right;${P};background:#f7f9fc;border-right:1px solid #e6e9ef;color:${fcR && !supR ? '#2f6fdb' : '#555'}">${Number(r.amount) ? yen0(r.amount) : '—'}</td>${exp.hist2025 ? `<td style="background:#f7f9fc;border-right:1px solid #e6e9ef"></td>` : ''}${yms.map(yy => `<td style="text-align:right;${P};font-size:11px;color:${fcR && !supR ? '#2f6fdb' : '#333'}">${yy === y ? (Number(r.amount) ? yen0(r.amount) : '—') : ''}</td>`).join('')}</tr>`; }).join('');
+    /* ★2026-11-17 05（本人「ここも11月分とか8月分とか10月分とか、1個上の階層をつけた方がいいかも」）：中身の1件ずつの上に、必ず「月」の段を挟む（新しい月が上・件数に関係なく）。
+       月の段の金額はその月の列に出る（ほかの段と同じ並び）。開いた状態は同じく覚える（鍵＝中身の鍵＋@月） */
+    const itemOrMonth = (rows, depth, keyBase) => { const vis = rows.filter(r => yms.includes(String(r.ymd).slice(0, 7))); if (!vis.length) return itemRows(rows, depth);   /* ★11/17 本人「月の階層も入れてって言ってたやん」＝件数に関係なく必ず月の段（1件でも） */
       const by = {}; vis.forEach(r => { const y = String(r.ymd).slice(0, 7); (by[y] = by[y] || []).push(r); });
       return Object.keys(by).sort().reverse().map(y => { const k = keyBase + '@' + y, rr = by[y];
         return `<tr style="background:#fdfdfe">${lbl(esc(y) + ` <span class="smd-dim" style="font-size:10.5px">${rr.length}件</span>`, depth, k, { col: '#4a5568' })}${totCells(rr)}${cells(rr)}</tr>` + (open[k] ? itemRows(rr, depth + 1) : ''); }).join(''); };
@@ -26961,6 +26993,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const names = Object.keys(subs).sort((a, b) => (a === 'その他') - (b === 'その他') || tot(subs[b]) - tot(subs[a]));
       return names.map(n => { const k = keyBase + '>' + n, rr = subs[n], deeper = rr.filter(r => expSubOf(r).length > lv + 1), shallow = rr.filter(r => expSubOf(r).length <= lv + 1);
         return `<tr>${lbl(esc(n) + ` <span class="smd-dim" style="font-size:10.5px">${rr.length}件</span>`, depth, k, { col: lv ? '#2d4f7c' : '#1f3b63' })}${totCells(rr)}${cells(rr)}</tr>` + (open[k] ? (deeper.length ? subTree(deeper, depth + 1, k, lv + 1) : '') + itemOrMonth(shallow, depth + 1, k) : ''); }).join(''); };
+    setTimeout(() => { try { expImgFill(); } catch (_) {} }, 0);   /* ★11/17 開いた行の写真だけ、描いた後に読む */
     const run = all.filter(r => !plIsInvest(r.category)), inv = all.filter(r => plIsInvest(r.category));
     const cats = [...new Set(run.map(r => catKey(r.category)))].sort((a, b) => (isFix(b) - isFix(a)) || a.localeCompare(b, 'ja'));
     const sumRow = (label, rows, col, title) => `<tr style="font-weight:700">${lbl(label, 0, null, { bold: true, col, title })}${totCells(rows)}${cells(rows, { col, bold: true })}</tr>`;
@@ -29981,6 +30014,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '📊 <b>損益・計画のグラフを見やすくしました</b>（本人「これもうちょっとメモリあった方がいいんじゃね？」「数値も…書いてあった方がいいんじゃない？」）。縦を高く・目盛りを細かく・💹 損益は「売上」と「粗利・経費（棒）と純利益（線）」の2つに分けました（数十万円が数百万円に潰れない）。4つのグラフとも、棒の上・点の上に値を万円で書きます（かざすと1円まで）',
+      '🖼 <b>経費の表：1件ずつの行に品の写真</b>（本人「ここ画像があると良いですね」）。在庫台帳の写真（🛒 と同じ）を、開いた行の分だけ読みます。かざすと大きく出ます。月の段は件数に関係なく必ず挟むようにしました（本人「月の階層も入れてって言ってたやん」）',
       '🗂 <b>経費の表：中身の1件ずつが6件以上の時は「月」の段を挟みました</b>（本人「ここも11月分とか8月分とか10月分とか、1個上の階層をつけた方がいいかも」）。例：備品費 ▸ その他 ▸ 2026-11 4件 → 開くと1件ずつ。月の段の金額はその月の列に出ます',
       '🛒 <b>Amazon で買ったもの：経費の行を在庫番号（ITM-…）で同じ物と見るようにしました</b>。品名の書き方が違う行（手で初期投資に移した倉庫の家具・家電22行など）が「未登録」の分類待ちに出て、押すともう一度入って二重になるところでした',
       '🛒 <b>Amazon で買ったもの：仕分けを通らずに経費に入った行を「分類待ち」に出すようにしました</b>（本人「だからそれ仕分けてないっけ？」）。また、Shopee で売れた品（在庫台帳で注文に紐付いた品）が経費にも入っていたら、「仕入れ品」ボタンと同じ扱いで自動で経費から外します（二重に数えない・外した行は操作ログに残す）',
