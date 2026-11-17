@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-2030'
+var SRC_VER = '20261117-2115'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -764,7 +764,7 @@ function doGetInner_(e) {
         var cshop = parseInt(p.shop_id, 10); if (!getToken_(cshop)) throw new Error('未認可 shop_id=' + p.shop_id);
         cout = cloneItem_(cshop, p.item_id, String(p.name || ''), p.publish === '1' || p.publish === 1);
         if (cout && cout.item_id) { try { baCatalogMadeRec_(String(p.hw || ''), baCcOfShop_(cshop), cout.item_id, String(p.name || ''), cshop, String(p.sku || ''), null, 0); } catch (eRc) {} }   /* ★2026-09-25 手動の複製も控える（次の巡回が同期を待たずに見つける） */
-      } catch (cerr) { cout = { ok: false, error: String((cerr && cerr.message) || cerr) }; }
+      } catch (cerr) { cout = { ok: false, error: String((cerr && cerr.message) || cerr) }; if (cerr && cerr.item_id) cout.item_id = cerr.item_id; }   /* ★11/17 review 中3 */
       return ContentService.createTextOutput(ccb + '(' + JSON.stringify(cout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 仕入れ検索の辞書を作り直す（英語の明細名 → 実際に仕入れたときの日本語タイトル）
@@ -8903,8 +8903,9 @@ function cloneItem_(shopId, itemId, newName, publish, hw) {
        その時のカタログはバリエの無い単品（非公開・在庫1）のまま残り、🤖は次の回に「非公開・バリエなしの入れ先を除外」して また複製した
        （BR ⑤〜⑨ が 11/12〜13 の2日で5つ・全部で14件）。→ 1回やり直し、だめなら【この呼び出しで作ったばかりの】出品を消して失敗を返す */
     var _tierErr = '';
-    for (var _ti = 0; _ti < 2; _ti++) {
-      if (_ti) Utilities.sleep(3000);
+    for (var _ti = 0; _ti < 4; _ti++) {
+      if (_ti) Utilities.sleep(/still being created|wait 5 seconds/i.test(_tierErr) ? 6000 : 3000);   /* review 中2：作成直後の断りは addItem_ と同じく6秒×最大3回 */
+      if (_ti >= 2 && !/still being created|wait 5 seconds/i.test(_tierErr)) break;   /* それ以外の断りは1回だけやり直す */
       try {
         var _tj = callShop_(shopId, '/api/v2/product/init_tier_variation', null, 'post', {
           item_id: out.item_id,
@@ -8916,10 +8917,16 @@ function cloneItem_(shopId, itemId, newName, publish, hw) {
       } catch (e) { _tierErr = String((e && e.message) || e); }
     }
     if (_tierErr) {
+      /* review 中2：返事だけ落ちて Shopee 側では置き場ができていることがある＝消す前に読み直し、tier と test があれば成功として続ける */
+      try { var _gm = callShop_(shopId, '/api/v2/product/get_model_list', { item_id: parseInt(out.item_id, 10) }, 'get'); var _gr = (_gm && _gm.response) || {}; if (!(_gm && _gm.error) && (_gr.tier_variation || []).length && (_gr.model || []).length) { _tierErr = ''; out.tier_name = tierName; } } catch (eGm) {}
+    }
+    if (_tierErr) {
       var _delErr = '';
       try { var _dj = callShop_(shopId, '/api/v2/product/delete_item', null, 'post', { item_id: parseInt(out.item_id, 10) }); if (_dj && _dj.error) _delErr = String(_dj.error) + ' ' + String(_dj.message || '').slice(0, 80); }
       catch (eD) { _delErr = String((eD && eD.message) || eD); }
-      throw new Error('バリエの置き場（test）を作れませんでした（' + _tierErr.slice(0, 120) + '）' + (_delErr ? '・⚠ 作った出品 ' + out.item_id + ' を消せませんでした（非公開のまま残っています：' + _delErr.slice(0, 80) + '）' : '＝作った出品は消しました'));
+      var _ce = new Error('バリエの置き場（test）を作れませんでした（' + _tierErr.slice(0, 120) + '）' + (_delErr ? '・⚠ 作った出品 ' + out.item_id + ' を消せませんでした（非公開のまま残っています：' + _delErr.slice(0, 80) + '）' : '＝作った出品は消しました'));
+      if (_delErr) _ce.item_id = out.item_id;   /* review 中3：消せずに残った時は番号を呼び出し側へ渡す（ポータルが「作られたが途中で止まった」として扱い、押し直しで2冊目を作らない） */
+      throw _ce;
     }
   }
   // ★商品動画も引き継ぐ（Shopeeは1本まで）。add_item では送れないので作成後に付ける
@@ -14054,7 +14061,8 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
     /* ★2026-11-17 05（00・本人「05 に調べて直させて」＝題名に Variation・明細1つ以下のカタログ 158件）：VN の上限（909,090 VND）を超える値付けの作品は、
        下の値付けで必ず見送り（skip:vncap）になる。前は見送りが【カタログを作った後】だったので、その作品のために「価格帯用に複製」したカタログが
        仮の明細 test（在庫1・非公開）だけで残った（VN 17件・11/14〜17 にも6件）。→ 作る前に見送る（作らない・数えない・6時間外しにも入れない） */
-    if (ceil && _hp > Math.floor(ceil / unit) * unit) {
+    var _hpV = _hp || estP(todo[i]);   /* review 低5：bandRoute が OFF でも見送りの判断はする */
+    if (ceil && _hpV > Math.floor(ceil / unit) * unit) {
       baSet_(ledger, todo[i].key, cc, 'skip:vncap'); res.skipped++; baSkipRec_(st, hw, cc, todo[i], 'vncap');
       todo.splice(i, 1); guard--; continue;
     }
