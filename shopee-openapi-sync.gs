@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-2230'
+var SRC_VER = '20261118-0445'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -10253,13 +10253,18 @@ function hbWatchRun_(me, heal) {
     /* ★2026-11-15 23時 05（03-22・03 の頼み）：SR は5分ごと・WA は page_awake を足して送る＝止まっている最中は送れない。SR・WA は40分で赤（Zalo・Viber は今までどおり90分） */
     var stMax = /^(sr|wa)$/i.test(String(v.tool || '')) ? 40 : 90;
     if (now - at > stMax * 60000) { add({ id: r.k, name: tag + ' の道具', last: r.updated_at, maxMin: stMax, state: 'red', why: '状態が ' + Math.round((now - at) / 60000) + '分 届いていない（Mac の眠りか、画面の裏で止まっている見込み・タブが閉じた見込みも・推測）' }); return; }
+    /* ★2026-11-18 05（00・03 の注意）：Viber は同じ名前 settings_sync が2つある（①列のクラウドの写し ②本体〈shim〉のポータルの設定の控え）。
+       前は知らせの名前も id も同じで、どちらが赤か見分けられず、知らせの重なりで片方が隠れる筋もあった。道具の側の名前は替えない（03）＝同じ名前の2つ目以降に「（2つ目）」と id に #2 を付ける（並びの順）。 */
+    var _fnSeen = {}, _fnDup = {}; (Array.isArray(v.items) ? v.items : []).forEach(function (f0) { if (f0 && f0.fn) { _fnDup[f0.fn] = (_fnDup[f0.fn] || 0) + 1; } });
     (Array.isArray(v.items) ? v.items : []).forEach(function (f) {
       if (!f || !f.fn) return;
+      _fnSeen[f.fn] = (_fnSeen[f.fn] || 0) + 1;
+      var _fnN = _fnDup[f.fn] > 1 ? _fnSeen[f.fn] : 0, _fnId = f.fn + (_fnN > 1 ? '#' + _fnN : ''), _fnNm = f.fn + (_fnN ? '（' + _fnN + 'つ目）' : '');
       var mx = Number(f.maxMin) || 60, ok = Number(f.okAt) || 0, fail = Number(f.failAt) || 0, pend = Number(f.pending) || 0;
       /* ★2026-11-15 05（03 の頼み・SR 6.19.350〜）：道具の窓が画面の裏（document.hidden）にある間は、注文メッセージ・📮が動かない（21:17 に Chrome の全タブが hidden）。
          道具は fn＝webchat_visible（WA も同じ形の予定）・failAt＝hidden の始まり（3分以上続いた時だけ）・maxMin 10 を送る。成否の印（okAt と failAt の大小）では見ず、failAt からの長さで見る。枠の断りの黄色にもしない */
       if (/_visible$|^page_awake$/.test(f.fn)) {
-        if (fail && (now - fail) / 60000 >= mx) add({ id: r.k + ':' + f.fn, name: tag + ' の窓（画面の裏で止まっている）', last: new Date(fail).toISOString(), maxMin: mx, state: 'red', why: '窓が画面の裏（hidden）のまま ' + Math.round((now - fail) / 60000) + '分（' + Utilities.formatDate(new Date(fail), 'Asia/Tokyo', 'HH:mm') + '〜）＝注文メッセージ・📮などが動かない。窓を少しでも見える所に出す' + (f.why ? '：' + String(f.why).slice(0, 80) : '') });
+        if (fail && (now - fail) / 60000 >= mx) add({ id: r.k + ':' + _fnId, name: tag + ' の窓（画面の裏で止まっている）', last: new Date(fail).toISOString(), maxMin: mx, state: 'red', why: '窓が画面の裏（hidden）のまま ' + Math.round((now - fail) / 60000) + '分（' + Utilities.formatDate(new Date(fail), 'Asia/Tokyo', 'HH:mm') + '〜）＝注文メッセージ・📮などが動かない。窓を少しでも見える所に出す' + (f.why ? '：' + String(f.why).slice(0, 80) : '') });
         return;
       }
       /* ★2026-11-15 05（03-42 の知らせ）：health_put の okAt は1つ前の回の物（送る中身を作った後に成功の印が付く）＝届いた時刻（置いた時刻 at／updated_at）を成功として数える。1回だけ届かなかった後に、届いているのに赤になるのを止める */
@@ -10271,17 +10276,20 @@ function hbWatchRun_(me, heal) {
       var fr = Number(f.failRun) || 0, failAge = fail ? (now - fail) / 60000 : Infinity, sev = '';
       if (pend > 0 && (!ok || (now - ok) / 60000 > mx)) sev = 'red';
       else if (fail && fail > ok) {
-        if (ok) sev = failAge <= mx ? 'red' : 'warn';
+        /* ★2026-11-18 05（00：bad token が1回だけ出て次の送りで通る型が 11/15〜18 に16件）：成功の記録がある物は、1回の失敗の後しばらく（線の3/4・最大90分＝1時間ごとのやり直しと30分ごとの知らせの遅れを待つ）は黄色。
+           その間に成功が来なければ赤。続けての失敗（failRun 2以上）はすぐ赤 */
+        var _grace = Math.min(90, mx * 0.75);
+        if (ok) sev = (fr < 2 && failAge < _grace) ? 'warn' : (failAge <= mx ? 'red' : 'warn');   /* 線を越えた古い失敗は今までどおり黄色 */
         else sev = (fr >= 3 || failAge <= 30) ? 'red' : (failAge <= 1440 ? 'warn' : '');
       }
       if (!sev) return;
       /* ★2026-11-15 05（00 の見張り 07:29）：本体アカウント（取込GAS と同じ Google アカウント）が1日の枠に断られている間の、取込GAS を呼ぶ口の失敗・時間切れは、止まりと分けて黄色で出す（17:00 に戻る） */
       var qWhy = String(f.why || '');
       if (HB_MAIN_BLOCKED_ || /回数が多すぎ|urlfetch|too many times/i.test(qWhy)) {   /* ★11/15 09 05（00 の見張り 08:29）：道具の項目は全部が取込GAS（本体アカウント）を呼ぶ＝名前で絞らない（postbox_sync が漏れていた） */
-        add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: 'warn', why: '本体アカウントの1日の枠の断りの間（' + ufResetJstStr_() + ' に戻る）の見込み：' + qWhy.slice(0, 80) });
+        add({ id: r.k + ':' + _fnId, name: tag + ' ' + _fnNm, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: 'warn', why: '本体アカウントの1日の枠の断りの間（' + ufResetJstStr_() + ' に戻る）の見込み：' + qWhy.slice(0, 80) });
         return;
       }
-      add({ id: r.k + ':' + f.fn, name: tag + ' ' + f.fn, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: sev, why: (fr >= 3 ? '続けて ' + fr + '回失敗：' : '') + (f.why ? String(f.why).slice(0, 120) : (pend ? '待ち ' + pend + '件があるのに' : '失敗の後') + ' ' + mx + '分 成功が無い') });
+      add({ id: r.k + ':' + _fnId, name: tag + ' ' + _fnNm, last: ok ? new Date(ok).toISOString() : null, maxMin: mx, state: sev, why: (fr >= 3 ? '続けて ' + fr + '回失敗：' : '') + (f.why ? String(f.why).slice(0, 120) : (pend ? '待ち ' + pend + '件があるのに' : '失敗の後') + ' ' + mx + '分 成功が無い') });
     });
   });
   /* ⑥ 注文メッセージの送り漏れ（★2026-11-15 05・03／00 の頼み：10:06 の BR の注文が 11:02 に失敗したのに 11:28 の見張りで赤にならず、本人が先に見つけた。
