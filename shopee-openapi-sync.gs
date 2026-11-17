@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-1545'
+var SRC_VER = '20261117-2030'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -8899,14 +8899,28 @@ function cloneItem_(shopId, itemId, newName, publish, hw) {
   //   これが無いと tier が存在せず「まとめて追加」が通らない。
   if (out && out.item_id) {
     var tierName = (((full.model || {}).tier_variation || [])[0] || {}).name || 'Title';
-    try {
-      callShop_(shopId, '/api/v2/product/init_tier_variation', null, 'post', {
-        item_id: out.item_id,
-        tier_variation: [{ name: String(tierName).slice(0, 20), option_list: [{ option: 'test' }] }],
-        model: [{ tier_index: [0], original_price: price, seller_stock: [{ stock: 1 }], model_sku: '' }]
-      });
-      out.tier_name = tierName;
-    } catch (e) { out.tier_warn = String((e && e.message) || e); }
+    /* ★2026-11-17 05（00・題名に Variation・明細1つ以下 158件の調べ）：置き場（test）を作るのに失敗しても「作れた」と返していた。
+       その時のカタログはバリエの無い単品（非公開・在庫1）のまま残り、🤖は次の回に「非公開・バリエなしの入れ先を除外」して また複製した
+       （BR ⑤〜⑨ が 11/12〜13 の2日で5つ・全部で14件）。→ 1回やり直し、だめなら【この呼び出しで作ったばかりの】出品を消して失敗を返す */
+    var _tierErr = '';
+    for (var _ti = 0; _ti < 2; _ti++) {
+      if (_ti) Utilities.sleep(3000);
+      try {
+        var _tj = callShop_(shopId, '/api/v2/product/init_tier_variation', null, 'post', {
+          item_id: out.item_id,
+          tier_variation: [{ name: String(tierName).slice(0, 20), option_list: [{ option: 'test' }] }],
+          model: [{ tier_index: [0], original_price: price, seller_stock: [{ stock: 1 }], model_sku: '' }]
+        });
+        if (_tj && _tj.error) throw new Error(String(_tj.error) + ' ' + String(_tj.message || '').slice(0, 120));
+        _tierErr = ''; out.tier_name = tierName; break;
+      } catch (e) { _tierErr = String((e && e.message) || e); }
+    }
+    if (_tierErr) {
+      var _delErr = '';
+      try { var _dj = callShop_(shopId, '/api/v2/product/delete_item', null, 'post', { item_id: parseInt(out.item_id, 10) }); if (_dj && _dj.error) _delErr = String(_dj.error) + ' ' + String(_dj.message || '').slice(0, 80); }
+      catch (eD) { _delErr = String((eD && eD.message) || eD); }
+      throw new Error('バリエの置き場（test）を作れませんでした（' + _tierErr.slice(0, 120) + '）' + (_delErr ? '・⚠ 作った出品 ' + out.item_id + ' を消せませんでした（非公開のまま残っています：' + _delErr.slice(0, 80) + '）' : '＝作った出品は消しました'));
+    }
   }
   // ★商品動画も引き継ぐ（Shopeeは1本まで）。add_item では送れないので作成後に付ける
   var vsrc = ((base.video_info || [])[0] || {});
@@ -14037,6 +14051,13 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
   while (i < todo.length && guard++ < 4) {
     var tgt = null;
     var _hp = bandOn ? estP(todo[i]) : 0; bandHp = 0; bandForce = false;
+    /* ★2026-11-17 05（00・本人「05 に調べて直させて」＝題名に Variation・明細1つ以下のカタログ 158件）：VN の上限（909,090 VND）を超える値付けの作品は、
+       下の値付けで必ず見送り（skip:vncap）になる。前は見送りが【カタログを作った後】だったので、その作品のために「価格帯用に複製」したカタログが
+       仮の明細 test（在庫1・非公開）だけで残った（VN 17件・11/14〜17 にも6件）。→ 作る前に見送る（作らない・数えない・6時間外しにも入れない） */
+    if (ceil && _hp > Math.floor(ceil / unit) * unit) {
+      baSet_(ledger, todo[i].key, cc, 'skip:vncap'); res.skipped++; baSkipRec_(st, hw, cc, todo[i], 'vncap');
+      todo.splice(i, 1); guard--; continue;
+    }
     /* ★2026-10-12 作ったばかりのカタログ（baEnsureFam_ の戻り・status 0・isNew）は非公開でも入れ先にする。前は外していたので、作った回に1枚も入らず、そのシリーズの次の順番（9シリーズで約4.5時間後）まで空のままだった（10/12 03〜08時に32件作って明細は1件） */
     for (var r = 0; r < rows.length; r++) { var free = capOf(rows[r]) - (rows[r].models || []).length; if (free > 0 && (rows[r].status !== 0 || rows[r].isNew) && (!_hp || bandFits(rows[r], _hp))) { tgt = rows[r]; break; } }
     if (!tgt && _hp) {
@@ -14214,7 +14235,12 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       lo = lo ? Math.min(lo, price) : price; hi = hi ? Math.max(hi, price) : price;
       items.push({ option: p.en, price: price, stock: p.stock, sku: p.sku || baSkuOf_(hw, p.en), image_id: p.imageId, _p: p });   /* 🃏 トレカは 区分_弾記号_番号_レアリティ（2026-10-10） */   /* ★2026-09-20 明細SKU＝機種_作品名（7か国共通・本人OK） */
     });
-    if (!items.length) { i += batch.length; continue; }
+    if (!items.length) {
+      /* ★2026-11-17 05（同上）：この回に作ったカタログ（newItem）に1件も入らなかった時も、締め（test だけなら消す・消せなければ test の在庫0）を通す。
+         前はここだけ締めを通らず、作ったばかりのカタログが test（在庫1）のまま残った。消した後は同じ回でもう使わない（満杯扱い） */
+      if (newItem) { res.shop_id = tgt.shop_id; baFinishClone_(cfg, cc, tgt, newItem, 0, st); tgt.models = new Array(100); }
+      i += batch.length; continue;
+    }
     /* ♻️ 複製したカタログに【仮の明細(test)】が残っていたら、まず1件ぶんをそこへ上書きして枠を取り戻す。
        消さずに上書き＝位置が1つも動かない（[[shopee_variation_delete_tail_only]]）。
        ★手元の `tgt.models` に test がある時だけ見に行く＝普通のカタログでは通信を1回も増やさない。
@@ -14273,11 +14299,11 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         tgt.models = new Array(100);   /* これで満杯＝同じ回の残りは新しいカタログへ */
       } else {
         // ★「100件まで」＝手元の明細数が古かっただけ。候補は捨てず、このカタログを満杯扱いにして次へ
-        if (/100件|上限/.test(em)) { tgt.models = new Array(100); continue; }
-        if (/枠だけの明細/.test(em)) { baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：⚠ ' + em.slice(0, 120) + '＝このカタログには足さず別のカタログへ（明細の位置は動かさない・人が確かめる）'); tgt.models = new Array(100); continue; }
+        if (/100件|上限/.test(em)) { if (newItem) { res.shop_id = tgt.shop_id; baFinishClone_(cfg, cc, tgt, newItem, 0, st); } tgt.models = new Array(100); continue; }   /* ★2026-11-17 05：作った回のカタログは締めを通す（test だけで残さない） */
+        if (/枠だけの明細/.test(em)) { if (newItem) { res.shop_id = tgt.shop_id; baFinishClone_(cfg, cc, tgt, newItem, 0, st); } baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：⚠ ' + em.slice(0, 120) + '＝このカタログには足さず別のカタログへ（明細の位置は動かさない・人が確かめる）'); tgt.models = new Array(100); continue; }
         /* ★2026-10-20 全体レビュー 中③：販促（まとめ買い割引・値下げ）に入っているカタログには明細を足せない（product.error_cannt_init_tier_in_promotion）。
            見送り印（skip:err）・6時間除外・エラー回数・当日停止のどれにも数えない＝そのカタログを販促から外せば次の回にそのまま入る。原因が分かる文言で残す */
-        if (/in_promotion|has promotion/i.test(em)) { baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：🧺 販促（まとめ買い割引・値下げ）に入っているので明細を足せません＝このカタログを販促から外すと次の回で入ります（見送りにはしない）'); res.note = (res.note ? res.note + '／' : '') + '販促中で足せない'; i += batch.length; continue; }
+        if (/in_promotion|has promotion/i.test(em)) { baLog_(st, cc + ' ' + String(tgt.name).slice(-12) + '：🧺 販促（まとめ買い割引・値下げ）に入っているので明細を足せません＝このカタログを販促から外すと次の回で入ります（見送りにはしない）'); res.note = (res.note ? res.note + '／' : '') + '販促中で足せない'; if (newItem) { res.shop_id = tgt.shop_id; baFinishClone_(cfg, cc, tgt, newItem, 0, st); }   /* ★2026-11-17 05：作った回のカタログは締めを通す */ i += batch.length; continue; }
       items.forEach(function (x) { baSet_(ledger, x._p.key, cc, 'skip:err'); baSkipRec_(st, hw, cc, x._p, 'err:' + em.slice(0, 60)); });
       res.note = (res.note ? res.note + '／' : '') + '失敗: ' + em.slice(0, 60);
       /* ★上書きで1件だけ入っている場合がある。ここで締めないとカタログが非公開のまま公開待ちにも載らない（Codex指摘） */
@@ -14367,7 +14393,9 @@ function baFinishClone_(cfg, cc, tgt, newItem, addedHere, st) {
     try {
       var g = getModels_(tgt.shop_id, tgt.item_id) || {}; var ms = g.models || [], tm = null;
       var onlyTest = ms.length > 0 && ms.every(function (m) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String((m && m.name) || '')); });
-      if (onlyTest) {
+      /* ★2026-11-17 05（同上）：この回に作ってバリエの置き場が無いまま（明細の無い単品の形）残ったカタログも、test だけと同じく消す（作って数秒の空き箱） */
+      var noVar = ms.length === 1 && !ms[0].model_id && !((g.tier_variation || []).length);
+      if (onlyTest || noVar) {
         var dj = callShop_(parseInt(tgt.shop_id, 10), '/api/v2/product/delete_item', null, 'post', { item_id: parseInt(tgt.item_id, 10) });
         if (dj && dj.error && dj.error !== '') throw new Error(dj.error + ' ' + (dj.message || ''));
         try { var fm = baKvFresh_('boshu_fam_made'); if (fm && typeof fm === 'object') { Object.keys(fm).forEach(function (k) { if (fm[k] && String(fm[k].item_id) === String(tgt.item_id)) delete fm[k]; }); baKvSet_('boshu_fam_made', fm); } } catch (eF) {}   /* ★Codex指摘：読めなかった時（null）に {} で書くと控えが丸ごと消える→読めた時だけ書く */
