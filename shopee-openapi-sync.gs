@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-1300'
+var SRC_VER = '20261117-1310'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -5905,6 +5905,7 @@ function slsAwbParameter_(body, readOnce) {
 // 既発行の状態照会に使う読取だけ。送信先を外から受け取らず、応答本文も返さない。
 function shipDocProbe_(shopId, orderSn, wantType, mk) {
   if (!shopId || !orderSn) throw new Error('shop_id と order_sn が要ります');
+  var callShop_ = function (a, b, c, d, e) { try { return callShopRaw_(a, b, c, d, e); } catch (er) { var m = String((er && er.message) || er); var mm = /error=([\w.]+)\s*(.*)$/.exec(m); return { error: mm ? mm[1] : 'exception', message: redactSecrets_(mm ? mm[2] : m).slice(0, 200) }; } };   /* 断りの文を返事に入れる（途中で止めない） */
   if (!getToken_(shopId)) throw new Error('未認可 shop_id=' + shopId);
   if (ufDead_() || ufTotal_() + 10 > UF_STOP) return { ok: false, error: 'quota_reserved' };
   var out = { ok: true, steps: [] };
@@ -5939,6 +5940,7 @@ function shipDocProbe_(shopId, orderSn, wantType, mk) {
   }
   return out;
 }
+function callShopRaw_(a, b, c, d, e) { return callShop_(a, b, c, d, e); }
 function slsAwbHasWarning_(warning) {
   return warning != null && warning !== '' && (!Array.isArray(warning) || warning.length > 0);
 }
