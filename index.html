@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-130648';
+  const APP_BUILD = '20261117-134649';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -5722,6 +5722,9 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "この注文の送り状はまだ残していません": "The shipping label for this order has not been saved yet",
+    "送り状を残したかを読めませんでした": "Could not read whether the shipping label was saved",
+    "送り状はまだ残していません。印刷した後、1時間以内に自動で残します（倉庫で読み取られた後は取れません）": "The shipping label has not been saved yet. It is saved automatically within an hour after printing (it cannot be fetched once scanned at the warehouse)",
     "📱 返信": "📱 Reply",
     "（スマホ用・読むだけ）": "(for phones · read only)",
     "この画面：返していないお客さんと、送る英文をスマホで見ます。": "This page: see customers you haven't replied to and the English text to send, on your phone.",
@@ -15467,6 +15470,7 @@
         `<div class="ord-links">` +
         `<span class="ol-slot ol-detail"><a href="https://${region.host}/portal/sale/order#smdsn=${encodeURIComponent(r.sn)}" class="ord-godetail" data-sn="${esc(r.sn)}" target="_blank" title="Shopeeでこの注文の明細を開く。userscript『Shopee注文をSNで直接開く』を入れると自動検索→その注文の詳細へ直行。未導入でも一覧が開き注文番号は自動コピー→「Input order ID」に貼付でOK" style="text-decoration:none;font-size:11px;font-weight:700;color:#2673dd;white-space:nowrap">📄明細↗</a></span>` +
         `<span class="ol-slot ol-print">${r.tab === 300 && ordArranged(r) ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>` : `<span class="smd-dim" title="倉庫スキャン後は伝票印刷不可">—</span>`}</span>` +
+        (r.tab === 300 && ordArranged(r) ? `<span class="ol-slot ol-awb"></span>` : '') +
         `<span class="ol-slot ol-split">${(r.tab === 300 && r.items.length > 1 && r.shopId && settings.openapiUrl && settings.writeToken) ? `<a href="#" class="ord-split" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="この注文を複数梱包に分割（VNで別便にする時）。公式APIのsplit_orderで分割→梱包ごとに発送手配＋伝票印刷" style="text-decoration:none;font-size:10.5px;color:#7b52c4;font-weight:700;white-space:nowrap">✂️分割</a>` : ''}</span>` +
         `</div>` +
         `<div class="ord-item">${itemsHtml}</div>` +
@@ -15475,6 +15479,7 @@
       row.title = r.items.map(it => `${it.name}${it.variation ? ' [' + it.variation + ']' : ''} ×${it.qty}`).join('\n');
       // 行クリックでの自動オープンは廃止（Shopee注文詳細は内部ID必須で直リンク不可＝404の元。注文一覧は右の📄から、注文番号は📋でコピー）
       row.querySelectorAll('a').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
+      if (r.tab === 300) awbMarkRow_(row, r);   /* ★11/17 送り状を残したかの印 */
       const slsButton = row.querySelector('.ord-sls-awb');
       if (slsButton) slsButton.addEventListener('click', e => { e.stopPropagation(); if (e.isTrusted) showSlsAwbTypes(r, slsShop, slsButton); });
       // 📄注文一覧を開くと同時に注文番号を自動コピー（一覧の「Input order ID」欄に貼るだけで検索できる＝詳細直リンク不可の代替）
@@ -28183,6 +28188,53 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       .catch(e => { _slsPdfLib = null; throw e; });
     return _slsPdfLib;
   }
+  /* ★2026-11-17 05（00・本人「SLSラベルか」「それを自動で保存できるようにできる？」）：GAS（5台目・6台目・1時間ごと）が印刷済みの送り状を
+     Supabase の非公開の置き場 awb/<国>/<注文番号>.pdf に残す。控えは app_kv awb_keep.items[注文番号]＝{f:[path], at} か {w:待ちの理由}。
+     読むのは鍵（設定の Supabase の鍵）を持つ画面だけ（買い手の住所が載るので公開の URL にしない） */
+  let _awbKeep = null;
+  function awbKeepLoad_(force) {
+    if (!force && _awbKeep && Date.now() - _awbKeep.at < 300000) return _awbKeep.p;
+    const p = sbGet('app_kv', 'select=v&k=eq.awb_keep').then(rows => ((rows && rows[0] && rows[0].v) || {}).items || {});
+    _awbKeep = { at: Date.now(), p }; p.catch(() => { if (_awbKeep && _awbKeep.p === p) _awbKeep = null; }); return p;
+  }
+  let _pdfjsLib = null;
+  function awbPdfjs_() {
+    if (_pdfjsLib) return _pdfjsLib;
+    _pdfjsLib = new Promise((ok, ng) => { if (window.pdfjsLib) return ok(window.pdfjsLib); const sc = document.createElement('script'); sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'; sc.onload = () => { try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; ok(window.pdfjsLib); } catch (e) { ng(e); } }; sc.onerror = () => ng(new Error('pdf.js を読み込めませんでした')); document.head.appendChild(sc); })
+      .catch(e => { _pdfjsLib = null; throw e; });
+    return _pdfjsLib;
+  }
+  async function awbPdfBlob_(path) {
+    if (!settings.sbSecret) throw new Error('Supabase の鍵が設定に無い');
+    const res = await fetch(SB_URL + '/storage/v1/object/authenticated/awb/' + path.split('/').map(encodeURIComponent).join('/'), { headers: { apikey: settings.sbSecret, authorization: 'Bearer ' + settings.sbSecret } });
+    if (!res.ok) throw new Error('送り状を読めませんでした ' + res.status);
+    return await res.blob();
+  }
+  /* 送り状の1ページ目を画像（data URL）にして返す。残していなければ null */
+  async function awbImgs_(sn) {
+    const items = await awbKeepLoad_(); const it = items[sn]; if (!it || !it.f || !it.f.length) return null;
+    const lib = await awbPdfjs_(), out = [];
+    for (const path of it.f.slice(0, 3)) {
+      const buf = await (await awbPdfBlob_(path)).arrayBuffer();
+      const pdf = await lib.getDocument({ data: buf }).promise; const pg = await pdf.getPage(1); const vp = pg.getViewport({ scale: 2 });
+      const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height; await pg.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+      out.push(cv.toDataURL('image/jpeg', 0.85));
+    }
+    return { imgs: out, at: it.at || '' };
+  }
+  async function awbOpen_(sn) {
+    try { const items = await awbKeepLoad_(); const it = items[sn]; if (!it || !it.f) { toast('この注文の送り状はまだ残していません'); return; }
+      const w = window.open('', '_blank'); const b = await awbPdfBlob_(it.f[0]); const u = URL.createObjectURL(b); if (w) w.location.href = u; else window.open(u, '_blank'); }
+    catch (e) { toast('⚠ 送り状を開けませんでした：' + ((e && e.message) || e)); }
+  }
+  function awbMarkRow_(row, r) {
+    const sp = row.querySelector('.ol-awb'); if (!sp) return;
+    awbKeepLoad_().then(items => { const it = items[r.sn];
+      if (it && it.f) { sp.innerHTML = '<a href="#" class="awb-open" title="送り状（SLS の伝票）を残しました（' + esc(String(it.at || '').slice(0, 16).replace('T', ' ')) + ' UTC）。押すと開きます" style="text-decoration:none;font-size:11px;color:#1a7f37;font-weight:700;white-space:nowrap">🏷️✓</a>';
+        const a = sp.querySelector('.awb-open'); a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); awbOpen_(r.sn); }); }
+      else sp.innerHTML = '<span title="送り状はまだ残していません。印刷した後、1時間以内に自動で残します（倉庫で読み取られた後は取れません）' + (it && it.w ? '・今の状態：' + esc(String(it.w)) : '') + '" style="font-size:11px;color:#b45309;white-space:nowrap">🏷️…</span>';
+    }).catch(() => { sp.innerHTML = '<span title="送り状を残したかを読めませんでした" style="font-size:11px;color:#999">🏷️?</span>'; });
+  }
   async function slsDspGas_(params) {   /* ★11/17 5台目と6台目に同時に聞き、先に答えた方を使う（1台が混んでいると60秒待った）。両方だめな時だけ本体（業務の台）。1回25秒まで */
     const kids = [settings.boshuUrl4, settings.boshuUrl5].filter(Boolean);
     if (kids.length) { try { return await Promise.any(kids.map(u => gasCall(Object.assign({}, params, { _url: u }), 25000).then(j => { if (j && j.ok !== false) return j; throw new Error((j && j.error) || '答えが空'); }))); } catch (_) {} }
@@ -28203,6 +28255,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const SLS_CLAIM_RE = /n[aã]o (?:recebi|chegou|veio)|not (?:received|arrived|delivered)|didn'?t (?:receive|arrive)|haven'?t received|missing|faltando|faltou|vazi[oa]|empty|roubad|stolen|chegou (?:sem|vazio|aberto)|open(?:ed)? box|wrong item|item errado|damaged|danificad|quebrad/i;
   async function slsDspEvidenceHtml_(r) {
     const tsJ = t => { const n = Number(t); return n > 0 ? new Date((n < 1e12 ? n * 1000 : n) + 9 * 3600000).toISOString().slice(0, 16).replace('T', ' ') + ' JST' : ''; };
+    const awbP = awbImgs_(r.sn).catch(() => null);   /* ★11/17 残した送り状（無ければ何も出さない） */
     const [det, trk0, chat, inv] = await Promise.all([
       r.shop ? slsDspGas_({ action: 'get_order_detail', shop_id: r.shop, order_sn: r.sn }).catch(e => ({ err: String((e && e.message) || e) })) : Promise.resolve({ err: 'Shop ID が無い' }),
       r.shop ? slsDspGas_({ action: 'api_probe', token: settings.writeToken, path: '/api/v2/logistics/get_tracking_info', shop_id: r.shop, q: JSON.stringify({ order_sn: r.sn }) }).catch(e => ({ err: String((e && e.message) || e) })) : Promise.resolve({ err: 'Shop ID が無い' }),
@@ -28237,8 +28290,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const evHtml = evs.length ? `<h3>Tracking history / 追跡の記録</h3><table>${evs.slice(0, 40).map(e => `<tr><td style="width:26%;white-space:nowrap">${E(tsJ(e.update_time))}</td><td style="width:22%">${E(e.logistics_status)}</td><td>${E(e.description)}</td></tr>`).join('')}</table>` : '';
     const inqs = slsInqFor_(r);
     const inqHtml = inqs.map(q => `<table>${T('Date / 日付', E(q.date))}${T('Subject / 件名', E(q.subject))}${T('Summary / 要旨', E(q.summary))}${q.shot && proofOk(q.shot) ? T('Copy / メールの写し', `<img src="${E(q.shot)}" crossorigin="anonymous" style="width:100%;max-width:700px;border:1px solid #ccc">`) : ''}</table>`).join('<div style="height:6px"></div>');
+    const awb = await awbP;
+    const awbHtml = awb && awb.imgs.length ? `<h3>Shipping label (SLS) / 送り状</h3>${awb.imgs.map(u => `<img src="${u}" style="width:380px;max-width:100%;border:1px solid #ddd;border-radius:4px;margin:2px 0 8px">`).join('')}` : '';
     const chs = [
-      { t: '1. Order & Shipping Record / 注文と発送の記録', h: `${slsShot_(r, 'order', 'Order detail (Seller Centre) / 注文の詳細の画面')}<table>${T('Order ID', E(r.sn))}${T('Order date / 注文日', E(r.od) + (od && od.create_time ? '（' + E(tsJ(od.create_time)) + '）' : ''))}${T('Buyer', E(r.buyer || '?'))}${T('Order status', od ? E(od.order_status) : '')}${T('Paid / 支払い', od && od.pay_time ? E(tsJ(od.pay_time)) : '—')}</table>
+      { t: '1. Order & Shipping Record / 注文と発送の記録', h: `${slsShot_(r, 'order', 'Order detail (Seller Centre) / 注文の詳細の画面')}${awbHtml}<table>${T('Order ID', E(r.sn))}${T('Order date / 注文日', E(r.od) + (od && od.create_time ? '（' + E(tsJ(od.create_time)) + '）' : ''))}${T('Buyer', E(r.buyer || '?'))}${T('Order status', od ? E(od.order_status) : '')}${T('Paid / 支払い', od && od.pay_time ? E(tsJ(od.pay_time)) : '—')}</table>
           <table style="margin-top:6px"><tr><th style="width:auto">Item</th><th style="width:10%">Qty</th><th style="width:16%">Price</th></tr>${it || '<tr><td colspan="3">（記録なし）</td></tr>'}</table>
           <h3>Shipping record / 発送の記録</h3><table>${T('Tracking No. / 追跡番号', E(r.trk) || (pk && pk.tracking_number ? E(pk.tracking_number) : ''))}${T('Carrier / 配送会社', pk ? E(pk.shipping_carrier) : '')}${T('Logistics status / 配送の状態', pk ? E(pk.logistics_status) : '')}${T('First scan in Japan / 日本での最初の記録（倉庫・仕分け）', scanEv ? E(tsJ(scanEv.update_time)) + '：' + E(scanEv.description) : '')}${T('Export customs / 輸出通関', expEv ? E(tsJ(expEv.update_time)) + '：' + E(expEv.description) : '')}</table>
           ${evHtml}` },
@@ -30402,6 +30457,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '🏷️ <b>送り状（SLS の伝票）を発送前に自動で残す</b>（本人「SLSラベルか」「それを自動で保存できるようにできる？」）：倉庫で読み取られた後は Shopee から取れないため、5台目・6台目が1時間ごとに、未発送で印刷済みの注文の送り状を非公開の置き場へ1部残します（印刷の操作には何もしない）。📦注文管理の未発送の行に「🏷️✓」（残した・押すと開く）／「🏷️…」（まだ）。SLS+ の根拠資料の「注文と発送の記録」にも送り状を載せます。',
       '🧾 <b>SLS+ の根拠資料（👁・PDF）とフォームの文から、こちらの道具や取り方の言葉を消した</b>（本人「Shopee OS とか Shopee API とか別に書かんでいいやん。こっちの事情やし」）：見出しは事実の名前だけ（注文と発送の記録・仕入れの記録・チャットと買い手の主張・Shopee への問い合わせ）。値の無い項目は「分からない」と書かず行ごと出さない・中身の無い章は出さない。',
       '↔️ <b>SLS+ の申し立ての表の横スクロールをやめた</b>（本人「横スクロールがなんか死んでます。ザザざっとなる」）：上の棒（上下を合わせる作り）を外し、操作のボタンを短い名前で縦に積み、理由は4行まで・商品の欄を狭く。行の高さをそろえた。',
       '📦 <b>SLS+ の申し立て：1注文1つの PDF（目次＋章）・まとめて申請（最大10件）</b>（本人「1オーダーで１括りにしてPDF連結させたら？」「それを10個作って１回の申請で出すイメージ？」「10MBまで（少し下がるくらいで）」）：PDF は目次→①Shopee の注文と発送（注文の詳細の写し・追跡の記録）→②仕入れ（取引画面の写しと記録・本人「別にええやろ」）→③チャットと買い手の主張（こちらからの発送の知らせを先頭に・買い手の「届かない」などの文・返品の判定）→④Shopee への問い合わせ（ある時だけ）。9.5MB を超える時だけ縮める。申し立てのタブに「📦 まとめて申請」＝同じ国・同じ店で最大10件（期限内は期限の近い順・期限切れは別のまとめ・⚠ は1件ずつ）を1回で：Order ID をカンマで入れたフォームを開き、PDF をまとめて保存。✅ はまとめの単位でも付けられる。',
