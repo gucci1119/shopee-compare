@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-150458';
+  const APP_BUILD = '20261117-150735';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -28488,6 +28488,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const SYS_RE = /Failed Delivery|parcel has been lost/i;
     /* ★2026-11-07：返品は品物（items）・買い手の文と写真も読む（同じ returns の行に列が増えただけ・数百行）。order_issues は手で入れた段階（stage）も読む＝スキャン前のキャンセルを外す。
        income は SLS+ の補償（adj の seller_lost_compensation）がある行だけ＝小さい読み1本（11/7 時点で0行） */
+    const autoSentP = sbGet('app_kv', 'select=v&k=eq.sls_sent_auto').then(x => ((x && x[0] && x[0].v) || {}).items || {}).catch(() => ({}));   /* ★11/17 本人「自動で、このまとめを送ったにチェックが入るようにしてね」＝フォームの送信が通った時に userscript が書く印 */
     const [rets, cxl, adj, iss, kv, incL] = await Promise.all([
       sbGetAll('returns', 'select=cc,order_sn,return_sn,status,reason,create_time,update_time,refund_amount,text_reason,buyer_images,buyer_videos,items&or=(status.eq.ACCEPTED,status.eq.CLOSED)'),
       sbGetAll('orders', 'select=cc,sn,shop_id,buyer,status,order_date,order_ts,cancel_reason,items,total,tracking&tab=eq.600&or=(cancel_reason.ilike.*Failed%20Delivery*,cancel_reason.ilike.*parcel%20has%20been%20lost*)'),
@@ -28496,7 +28497,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       sbGet('app_kv', 'select=v,updated_at&k=eq.sls_claim'),
       sbGetAll('income', 'select=cc,sn,adj&adj=not.is.null').catch(() => null),   /* ★11/7 02 の95件：補償は入金の調整（total_adjustment_amount）にも入る＝adj のある行（返品・キャンセルの注文・数百行）を読む */
     ]);
-    const kvV = (kv && kv[0] && kv[0].v) || {}, claims = kvV.items || {}, daysCfg = kvV.days || {};
+    const kvV = (kv && kv[0] && kv[0].v) || {}, claims = kvV.items || {}, daysCfg = kvV.days || {}, autoSent = await autoSentP;
     const compK = new Map(), compPay = new Map(); (adj || []).forEach(a => { const k = a.cc + ':' + a.order_sn; if (Number(a.amount) > 0) { compK.set(k, (compK.get(k) || 0) + Number(a.amount)); const pt = Number(a.payout_time) || 0; if (pt > (compPay.get(k) || 0)) compPay.set(k, pt); } });
     const manK = new Map(); (iss || []).forEach(x => { if (Number(x.comp_amount) > 0) manK.set(x.cc + ':' + x.sn, x.comp_date || ''); });
     const stageK = new Map(); (iss || []).forEach(x => { if (x.stage) stageK.set(x.cc + ':' + x.sn, x.stage); });
@@ -28531,7 +28532,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const lastB = [od, rd].filter(Boolean).sort().pop() || '', dlMax = lastB ? jstDate(toMs(lastB) + lim * dayMs) : '';   /* 申請の区分（A・B）は、注文日と返金日の遅い方（どちらかの数え方で間に合う物）で見る */
       rows.push({ k, cc, sn, kind, reason: String(reason || ''), od, rd, start, lim, dl, left, st, at: (cl && cl.at) || '', nm: nm || '', rsn: rsn || '', limGuess: !(Number(daysCfg[cc]) > 0) && cc !== 'BR', dlMax, amt: Number(amt) || 0, trk: String(trk || ''),
         items: ex.items || [], ret: ex.ret || null, cxr: ex.cxr || '', scan: sc.st, scanWhy: sc.why, gotBy, gotAt, incWhy: incWhy.get(k) || '',
-        shop: String((ex.o && ex.o.shop_id) || ''), buyer: String((ex.o && ex.o.buyer) || ''), shots: (cl && cl.shots) || null, refunded: refundK.has(k) ? refundK.get(k) : null, denied: (cl && cl.denied) || '', dsp: (cl && cl.dispute) || null, dl1y: slsPlus1y_(od), left1y: od ? Math.round((toMs(slsPlus1y_(od)) - toMs(today)) / dayMs) : null });
+        shop: String((ex.o && ex.o.shop_id) || ''), buyer: String((ex.o && ex.o.buyer) || ''), shots: (cl && cl.shots) || null, refunded: refundK.has(k) ? refundK.get(k) : null, denied: (cl && cl.denied) || '', dsp: (cl && cl.dispute && cl.dispute.sent) ? cl.dispute : (autoSent[k] ? Object.assign({}, (cl && cl.dispute) || {}, { sent: autoSent[k].sent, grp: autoSent[k].grp || ((cl && cl.dispute && cl.dispute.grp) || ''), auto: 1 }) : ((cl && cl.dispute) || null)), dl1y: slsPlus1y_(od), left1y: od ? Math.round((toMs(slsPlus1y_(od)) - toMs(today)) / dayMs) : null });
     };
     const seen = new Set();
     (rets || []).forEach(r => { const o = odOf.get(r.cc + ':' + r.order_sn) || {}; const k = r.cc + ':' + r.order_sn; if (seen.has(k)) return; seen.add(k);
