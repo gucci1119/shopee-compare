@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261118-0445'
+var SRC_VER = '20261118-0630'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -10177,7 +10177,8 @@ function hbWatchRun_(me, heal) {
   var cfg = null; try { var c0 = hbSel_('select=on:v->on,runners:v->runners,tcgOn:v->tcg->on,tcgRunner:v->tcg->>runner,tcgRunners:v->tcg->runners,rvOn:v->revalue->on,rvRunner:v->revalue->>runner,runner:v->>runner,dupPause:v->dupPause&k=eq.boshu_auto_cfg'); cfg = c0 && c0[0]; } catch (eC) { cfg = null; }
   var kvList = HB_KV_.slice();
   /* ★11/15 レビュー3：本体でキャンセルの見回りを off にしている（基準に無い）時は見ない */
-  if (bases && bases.hb_trig_main && Array.isArray(bases.hb_trig_main.fns) && bases.hb_trig_main.fns.indexOf('cancelWatchTick') < 0) kvList = kvList.filter(function (x) { return x[0] !== 'cancel_watch_state'; });
+  /* ★2026-11-18 05：見回りは本体でなく5台目で動く（本体の枠を食っていたので本体のトリガーを外した）＝どの台の基準にも無い時だけ見ない */
+  if (bases && Object.keys(bases).length && !Object.keys(bases).some(function (bk) { var b = bases[bk]; return b && Array.isArray(b.fns) && b.fns.indexOf('cancelWatchTick') >= 0; })) kvList = kvList.filter(function (x) { return x[0] !== 'cancel_watch_state'; });
   if (!cfg) add({ id: 'cfg_read', name: '🤖・トレカの設定の読み', state: 'blind', why: '読めなかった＝この回は🤖・トレカ・相場の見直しを見ていない' + (HB_LAST_ERR ? '（' + HB_LAST_ERR + '）' : ''), last: null });
   else {
     var busy = function (o) { return o && typeof o === 'object' ? Object.keys(o).filter(function (r) { return o[r] && o[r].length; }) : []; };
