@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-1310'
+var SRC_VER = '20261117-1320'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -5903,30 +5903,30 @@ function slsAwbParameter_(body, readOnce) {
   }
 }
 // 既発行の状態照会に使う読取だけ。送信先を外から受け取らず、応答本文も返さない。
+function shipDocCall_(a, b, c, d, e) { try { return callShop_(a, b, c, d, e); } catch (er) { var m = String((er && er.message) || er); var mm = /error=([\w.]+)\s*([\s\S]*)$/.exec(m); return { error: mm ? mm[1] : 'exception', message: redactSecrets_(mm ? mm[2] : m).slice(0, 200) }; } }   /* ★11/17 断りの文を返事に入れる（途中で止めない） */
 function shipDocProbe_(shopId, orderSn, wantType, mk) {
   if (!shopId || !orderSn) throw new Error('shop_id と order_sn が要ります');
-  var callShop_ = function (a, b, c, d, e) { try { return callShopRaw_(a, b, c, d, e); } catch (er) { var m = String((er && er.message) || er); var mm = /error=([\w.]+)\s*(.*)$/.exec(m); return { error: mm ? mm[1] : 'exception', message: redactSecrets_(mm ? mm[2] : m).slice(0, 200) }; } };   /* 断りの文を返事に入れる（途中で止めない） */
   if (!getToken_(shopId)) throw new Error('未認可 shop_id=' + shopId);
   if (ufDead_() || ufTotal_() + 10 > UF_STOP) return { ok: false, error: 'quota_reserved' };
   var out = { ok: true, steps: [] };
-  var det = callShop_(shopId, '/api/v2/order/get_order_detail', { order_sn_list: orderSn, response_optional_fields: 'package_list' }, 'get');
+  var det = shipDocCall_(shopId, '/api/v2/order/get_order_detail', { order_sn_list: orderSn, response_optional_fields: 'package_list' }, 'get');
   var od = det && det.response && (det.response.order_list || [])[0];
   if (!od) return { ok: false, error: '注文が読めない', raw: det && det.error };
   var pk = (od.package_list || [])[0] || {}; out.order_status = od.order_status; out.package_number = pk.package_number || ''; out.logistics_status = pk.logistics_status || '';
   var ol = [{ order_sn: orderSn, package_number: pk.package_number || undefined }];
-  var par = callShop_(shopId, '/api/v2/logistics/get_shipping_document_parameter', null, 'post', { order_list: ol });
+  var par = shipDocCall_(shopId, '/api/v2/logistics/get_shipping_document_parameter', null, 'post', { order_list: ol });
   out.steps.push({ step: 'parameter', error: par && par.error, message: par && par.message, resp: par && par.response });
   var row = par && par.response && (par.response.result_list || [])[0] || {};
   var types = (row.selectable_shipping_document_type || []).slice(); out.types = types; out.suggest = row.suggest_shipping_document_type || '';
   var type = wantType || row.suggest_shipping_document_type || types[0] || 'THERMAL_AIR_WAYBILL';
   var ol2 = [{ order_sn: orderSn, package_number: pk.package_number || undefined, shipping_document_type: type }];
-  var res = callShop_(shopId, '/api/v2/logistics/get_shipping_document_result', null, 'post', { order_list: ol2 });
+  var res = shipDocCall_(shopId, '/api/v2/logistics/get_shipping_document_result', null, 'post', { order_list: ol2 });
   var rr = res && res.response && (res.response.result_list || [])[0] || {};
   out.steps.push({ step: 'result', type: type, error: res && res.error, message: res && res.message, status: rr.status, fail: rr.fail_error || rr.fail_message || '' });
   if (rr.status !== 'READY' && mk) {
-    var cr = callShop_(shopId, '/api/v2/logistics/create_shipping_document', null, 'post', { order_list: ol2 });
+    var cr = shipDocCall_(shopId, '/api/v2/logistics/create_shipping_document', null, 'post', { order_list: ol2 });
     out.steps.push({ step: 'create', error: cr && cr.error, message: cr && cr.message, resp: cr && cr.response });
-    for (var i = 0; i < 3; i++) { Utilities.sleep(2500); res = callShop_(shopId, '/api/v2/logistics/get_shipping_document_result', null, 'post', { order_list: ol2 }); rr = res && res.response && (res.response.result_list || [])[0] || {}; out.steps.push({ step: 'result' + (i + 2), status: rr.status, error: res && res.error, fail: rr.fail_error || rr.fail_message || '' }); if (rr.status === 'READY' || rr.status === 'FAILED') break; }
+    for (var i = 0; i < 3; i++) { Utilities.sleep(2500); res = shipDocCall_(shopId, '/api/v2/logistics/get_shipping_document_result', null, 'post', { order_list: ol2 }); rr = res && res.response && (res.response.result_list || [])[0] || {}; out.steps.push({ step: 'result' + (i + 2), status: rr.status, error: res && res.error, fail: rr.fail_error || rr.fail_message || '' }); if (rr.status === 'READY' || rr.status === 'FAILED') break; }
   }
   if (rr.status === 'READY') {
     var tok = getToken_(shopId), path = '/api/v2/logistics/download_shipping_document', ts = now_();
@@ -5940,7 +5940,6 @@ function shipDocProbe_(shopId, orderSn, wantType, mk) {
   }
   return out;
 }
-function callShopRaw_(a, b, c, d, e) { return callShop_(a, b, c, d, e); }
 function slsAwbHasWarning_(warning) {
   return warning != null && warning !== '' && (!Array.isArray(warning) || warning.length > 0);
 }
