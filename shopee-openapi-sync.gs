@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-1215'
+var SRC_VER = '20261117-1240'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -1872,6 +1872,17 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(uscb + '(' + JSON.stringify(usout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★注文明細取得：get_order_detail（分割UI用に item_id/model_id/order_item_id/promotion_group_id/model_quantity と既存 package_list を取る）
+    /* ★2026-11-17 05（00・SLS+ の申し立ての根拠資料に「倉庫スキャンの日時・SLS の状態」）：追跡の記録（読むだけ・1件1回） */
+    if (p.action === 'tracking_info') {
+      var ticb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), tiout;
+      try {
+        var tishop = parseInt(p.shop_id, 10); if (!getToken_(tishop)) throw new Error('未認可 shop_id=' + p.shop_id);
+        var tisn = String(p.order_sn || '').replace(/[^\w]/g, ''); if (!tisn) throw new Error('order_sn が要ります');
+        var tij = callShop_(tishop, '/api/v2/logistics/get_tracking_info', { order_sn: tisn }, 'get', null);
+        tiout = tij && tij.error ? { ok: false, error: String(tij.error) + ' ' + String(tij.message || '').slice(0, 120) } : { ok: true, response: (tij && tij.response) || tij };
+      } catch (err) { tiout = { ok: false, error: String((err && err.message) || err).slice(0, 200) }; }
+      return ContentService.createTextOutput(ticb + '(' + JSON.stringify(tiout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'get_order_detail') {
       var odcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var odout;
