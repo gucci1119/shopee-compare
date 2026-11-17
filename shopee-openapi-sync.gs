@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-1240'
+var SRC_VER = '20261117-1300'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -1872,6 +1872,17 @@ function doGetInner_(e) {
       return ContentService.createTextOutput(uscb + '(' + JSON.stringify(usout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // ★注文明細取得：get_order_detail（分割UI用に item_id/model_id/order_item_id/promotion_group_id/model_quantity と既存 package_list を取る）
+    /* ★2026-11-17 05（00・本人「今やってくれや」）：SLS+ の申し立ての根拠資料に Shopee の公式の書類（送り状など）。出荷済みの注文でも取れるかを試す口（WRITE_TOKEN）。
+       ①get_order_detail で梱包番号 ②get_shipping_document_parameter で選べる形式 ③get_shipping_document_result で発行の状態 ④READY なら download_shipping_document（PDF）を base64 で返す。
+       create（新しく発行）は mk=1 の時だけ（出荷済みで断られるかを見るため）。1回の枠は最大約10回 */
+    if (p.action === 'ship_doc') {
+      var sdcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), sdout;
+      try {
+        var sdwt = P_().getProperty('WRITE_TOKEN'); if (!sdwt || p.token !== sdwt) throw new Error('WRITE_TOKEN不正');
+        sdout = shipDocProbe_(parseInt(p.shop_id, 10), String(p.order_sn || '').replace(/[^\w]/g, ''), String(p.type || ''), p.mk === '1');
+      } catch (err) { sdout = { ok: false, error: redactSecrets_(String((err && err.message) || err)).slice(0, 300) }; }
+      return ContentService.createTextOutput(sdcb + '(' + JSON.stringify(sdout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     /* ★2026-11-17 05（00・SLS+ の申し立ての根拠資料に「倉庫スキャンの日時・SLS の状態」）：追跡の記録（読むだけ・1件1回） */
     if (p.action === 'tracking_info') {
       var ticb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), tiout;
@@ -5892,6 +5903,42 @@ function slsAwbParameter_(body, readOnce) {
   }
 }
 // 既発行の状態照会に使う読取だけ。送信先を外から受け取らず、応答本文も返さない。
+function shipDocProbe_(shopId, orderSn, wantType, mk) {
+  if (!shopId || !orderSn) throw new Error('shop_id と order_sn が要ります');
+  if (!getToken_(shopId)) throw new Error('未認可 shop_id=' + shopId);
+  if (ufDead_() || ufTotal_() + 10 > UF_STOP) return { ok: false, error: 'quota_reserved' };
+  var out = { ok: true, steps: [] };
+  var det = callShop_(shopId, '/api/v2/order/get_order_detail', { order_sn_list: orderSn, response_optional_fields: 'package_list' }, 'get');
+  var od = det && det.response && (det.response.order_list || [])[0];
+  if (!od) return { ok: false, error: '注文が読めない', raw: det && det.error };
+  var pk = (od.package_list || [])[0] || {}; out.order_status = od.order_status; out.package_number = pk.package_number || ''; out.logistics_status = pk.logistics_status || '';
+  var ol = [{ order_sn: orderSn, package_number: pk.package_number || undefined }];
+  var par = callShop_(shopId, '/api/v2/logistics/get_shipping_document_parameter', null, 'post', { order_list: ol });
+  out.steps.push({ step: 'parameter', error: par && par.error, message: par && par.message, resp: par && par.response });
+  var row = par && par.response && (par.response.result_list || [])[0] || {};
+  var types = (row.selectable_shipping_document_type || []).slice(); out.types = types; out.suggest = row.suggest_shipping_document_type || '';
+  var type = wantType || row.suggest_shipping_document_type || types[0] || 'THERMAL_AIR_WAYBILL';
+  var ol2 = [{ order_sn: orderSn, package_number: pk.package_number || undefined, shipping_document_type: type }];
+  var res = callShop_(shopId, '/api/v2/logistics/get_shipping_document_result', null, 'post', { order_list: ol2 });
+  var rr = res && res.response && (res.response.result_list || [])[0] || {};
+  out.steps.push({ step: 'result', type: type, error: res && res.error, message: res && res.message, status: rr.status, fail: rr.fail_error || rr.fail_message || '' });
+  if (rr.status !== 'READY' && mk) {
+    var cr = callShop_(shopId, '/api/v2/logistics/create_shipping_document', null, 'post', { order_list: ol2 });
+    out.steps.push({ step: 'create', error: cr && cr.error, message: cr && cr.message, resp: cr && cr.response });
+    for (var i = 0; i < 3; i++) { Utilities.sleep(2500); res = callShop_(shopId, '/api/v2/logistics/get_shipping_document_result', null, 'post', { order_list: ol2 }); rr = res && res.response && (res.response.result_list || [])[0] || {}; out.steps.push({ step: 'result' + (i + 2), status: rr.status, error: res && res.error, fail: rr.fail_error || rr.fail_message || '' }); if (rr.status === 'READY' || rr.status === 'FAILED') break; }
+  }
+  if (rr.status === 'READY') {
+    var tok = getToken_(shopId), path = '/api/v2/logistics/download_shipping_document', ts = now_();
+    var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&access_token=' + tok.access_token + '&shop_id=' + shopId + '&sign=' + signShop_(path, ts, tok.access_token, shopId);
+    ufBump_(1, path);
+    var rsp = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', payload: JSON.stringify({ shipping_document_type: type, order_list: [{ order_sn: orderSn, package_number: pk.package_number || undefined }] }), muteHttpExceptions: true });
+    var ct = String(rsp.getHeaders()['Content-Type'] || rsp.getHeaders()['content-type'] || ''), bytes = rsp.getContent();
+    out.download = { code: rsp.getResponseCode(), type: ct, size: bytes.length };
+    if (/pdf/i.test(ct) && bytes.length < 4500000) out.pdf_b64 = Utilities.base64Encode(bytes);
+    else if (!/pdf/i.test(ct)) out.download.body = redactSecrets_(rsp.getContentText()).slice(0, 300);
+  }
+  return out;
+}
 function slsAwbHasWarning_(warning) {
   return warning != null && warning !== '' && (!Array.isArray(warning) || warning.length > 0);
 }
