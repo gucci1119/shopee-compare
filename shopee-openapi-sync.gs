@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-1320'
+var SRC_VER = '20261117-1400'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -1650,6 +1650,18 @@ function doGetInner_(e) {
         else pjout = { ok: true, job: baKv_('promo_job') || {}, triggers: ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }) };
       } catch (err) { pjout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(pjcb + '(' + JSON.stringify(pjout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'awb_keep_on' || p.action === 'awb_keep_off' || p.action === 'awb_keep_status' || p.action === 'awb_keep_run') {   /* ★2026-11-17 送り状を発送前に残す（5台目・6台目で1時間ごと） */
+      var akcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), ako;
+      try {
+        var akwt = P_().getProperty('WRITE_TOKEN'); if (!akwt || p.token !== akwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        if (p.action === 'awb_keep_on') { awbKeepTriggerOff_(); ScriptApp.newTrigger('awbKeepTick').timeBased().everyHours(1).create(); ako = { ok: true, on: true, base: hbBaseEdit_('awbKeepTick', true) }; }
+        else if (p.action === 'awb_keep_off') { awbKeepTriggerOff_(); ako = { ok: true, on: false, base: hbBaseEdit_('awbKeepTick', false) }; }
+        else if (p.action === 'awb_keep_run') { ako = { ok: true, out: (function () { try { return awbKeepRun_(parseInt(p.max, 10) || 0); } finally { try { ufPersist_(); } catch (_) {} } })() }; }
+        else { var aks = baKv_(AWB_KEY) || {}; var akn = { saved: 0, wait: 0 }; Object.keys(aks.items || {}).forEach(function (k) { if (aks.items[k].f) akn.saved++; else akn.wait++; }); ako = { ok: true, lastAt: aks.lastAt || '', lastOut: aks.lastOut || null, counts: akn, triggers: ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'awbKeepTick'; }).length }; }
+        ako.src = SRC_VER;
+      } catch (err) { ako = { ok: false, error: String((err && err.message) || err).slice(0, 300) }; }
+      return ContentService.createTextOutput(akcb + '(' + JSON.stringify(ako) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'cancel_watch_on' || p.action === 'cancel_watch_off' || p.action === 'cancel_watch_status' || p.action === 'cancel_watch_run') {   /* ★2026-11-07 キャンセルの15分おきの巡回（本体で回す） */
       var cwcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), cwo;
@@ -5940,6 +5952,104 @@ function shipDocProbe_(shopId, orderSn, wantType, mk) {
   }
   return out;
 }
+/* ★2026-11-17 05（00・本人「SLSラベルか」「それを自動で保存できるようにできる？」）：SLS+ の申し立ての根拠に、送り状（SLS の伝票 PDF）を発送前のうちに残す。
+   出荷（倉庫スキャン）の後は Shopee から取れない（11/17 に試した）。印刷の流れ（Seller Center の印刷・ポータルの🖨️・一括印刷）には一切さわらず、
+   1時間ごとに「未発送（tab=300）で追跡番号がある注文」を見て、Shopee 側で送り状が発行済み（印刷済み＝READY）の物だけを download して、
+   Supabase の非公開の置き場 awb/<国>/<注文番号>.pdf に1部残す（買い手の住所と名前が載るので公開の置き場には置かない）。
+   送り状を作る操作（create_shipping_document）はしない＝本人の印刷の状態を変えない。まだ印刷していない物は「印刷待ち」にして次の回にまた見る。
+   枠：店ごとに get_order_detail と get_shipping_document_result を各1回（50件まで）＋残す1件ごとに download 1回・Supabase 書き1回。5台目・6台目で回す */
+var AWB_KEY = 'awb_keep', AWB_BUCKET = 'awb', AWB_TYPE = 'THERMAL_AIR_WAYBILL';
+function awbKeepTick() {
+  try { return awbKeepRun_(0); } finally { try { ufPersist_(); } catch (_) {} }
+}
+function awbKeepRun_(maxSave) {
+  if (!coreAllowed_()) return { skip: 'uf_budget' };
+  if (ufDead_() || ufTotal_() + 40 > ufStopLine_()) return { skip: 'uf_line' };
+  if (!syncGate_('awbKeep', 900)) return { skip: 'gate' };
+  var st = baKvFresh_(AWB_KEY); if (BA_KV_FAIL[AWB_KEY]) return { skip: '控えが読めない' };
+  st = (st && typeof st === 'object' && !Array.isArray(st)) ? st : {}; st.items = st.items || {};
+  var nowIso = new Date().toISOString(), out = { cand: 0, saved: 0, wait: 0, already: 0, errors: [] };
+  var rows = sbSelect_('orders', 'select=cc,sn,shop_id,tracking&tab=eq.300&tracking=neq.&limit=400');
+  var byShop = {};
+  (rows || []).forEach(function (r) {
+    if (!r || !r.sn || !r.shop_id) return; out.cand++;
+    var it = st.items[r.sn]; if (it && it.f) { out.already++; return; }
+    (byShop[r.shop_id] = byShop[r.shop_id] || []).push(r);
+  });
+  var budget = maxSave || 60;
+  Object.keys(byShop).forEach(function (sid) {
+    var list = byShop[sid], shopId = parseInt(sid, 10);
+    if (!getToken_(shopId)) { out.errors.push(sid + ' 未認可'); return; }
+    for (var i = 0; i < list.length; i += 50) {
+      if (ufTotal_() + 20 > ufStopLine_()) { out.errors.push('枠の線で止めた'); return; }
+      var part = list.slice(i, i + 50), pk = {};
+      try {
+        var det = shipDocCall_(shopId, '/api/v2/order/get_order_detail', { order_sn_list: part.map(function (r) { return r.sn; }).join(','), response_optional_fields: 'package_list' }, 'get');
+        if (det && det.error) throw new Error('detail ' + det.error + ' ' + String(det.message || '').slice(0, 80));
+        ((det.response || {}).order_list || []).forEach(function (od) { pk[od.order_sn] = { st: od.order_status, pkgs: (od.package_list || []).map(function (p) { return p.package_number; }).filter(Boolean) }; });
+      } catch (e) { out.errors.push(sid + ' ' + String((e && e.message) || e).slice(0, 120)); continue; }
+      var ol = [];
+      part.forEach(function (r) { var d = pk[r.sn]; if (!d || d.st !== 'PROCESSED' || !d.pkgs.length) return; d.pkgs.forEach(function (p) { ol.push({ order_sn: r.sn, package_number: p, shipping_document_type: AWB_TYPE }); }); });
+      var ready = [];
+      for (var round = 0; round < 3 && ol.length; round++) {
+        var res = shipDocCall_(shopId, '/api/v2/logistics/get_shipping_document_result', null, 'post', { order_list: ol });
+        if (res && res.error) {
+          var m = String(res.message || ''), mm = /these orders:\s*([\w,\s]+?)\s*should print/i.exec(m);
+          if (String(res.error) === 'logistics.shipping_document_should_print_first' && mm) {
+            var notYet = mm[1].split(/[\s,]+/).filter(Boolean);
+            notYet.forEach(function (sn) { var p0 = st.items[sn] || {}; st.items[sn] = { w: 'print', n: (p0.n || 0) + 1, at: nowIso, cc: (part.filter(function (r) { return r.sn === sn; })[0] || {}).cc || '' }; out.wait++; });
+            ol = ol.filter(function (o) { return notYet.indexOf(o.order_sn) < 0; }); continue;
+          }
+          if (String(res.error) === 'logistics.shipping_document_should_print_first' && ol.length > 1) {   /* 名前が読めない時は1件ずつ聞き直す */
+            var one = []; ol.forEach(function (o) { var r1 = shipDocCall_(shopId, '/api/v2/logistics/get_shipping_document_result', null, 'post', { order_list: [o] }); var x1 = r1 && r1.response && (r1.response.result_list || [])[0];
+              if (x1 && x1.status === 'READY') one.push({ order_sn: o.order_sn, package_number: o.package_number }); else { var p3 = st.items[o.order_sn] || {}; st.items[o.order_sn] = { w: (r1 && r1.error) ? 'print' : String((x1 && x1.status) || 'not_ready').slice(0, 40), n: (p3.n || 0) + 1, at: nowIso }; out.wait++; } });
+            ready = ready.concat(one); ol = []; break;
+          }
+          out.errors.push(sid + ' result ' + res.error + ' ' + m.slice(0, 100)); ol = []; break;
+        }
+        ((res.response || {}).result_list || []).forEach(function (x) {
+          if (x.status === 'READY') ready.push({ order_sn: x.order_sn, package_number: x.package_number });
+          else { var p1 = st.items[x.order_sn] || {}; st.items[x.order_sn] = { w: String(x.status || x.fail_error || 'not_ready').slice(0, 40), n: (p1.n || 0) + 1, at: nowIso }; out.wait++; }
+        });
+        break;
+      }
+      ready.forEach(function (x) {
+        if (budget <= 0) return;
+        var r = part.filter(function (q) { return q.sn === x.order_sn; })[0] || {}; var cc = String(r.cc || 'XX').replace(/[^A-Z]/g, '');
+        try {
+          var bytes = awbDownload_(shopId, x.order_sn, x.package_number);
+          var multi = (pk[x.order_sn] && pk[x.order_sn].pkgs.length > 1);
+          var path = cc + '/' + x.order_sn + (multi ? '_' + x.package_number : '') + '.pdf';
+          awbUpload_(path, bytes);
+          var prev = st.items[x.order_sn] && st.items[x.order_sn].f ? st.items[x.order_sn].f : [];
+          st.items[x.order_sn] = { f: prev.filter(function (p) { return p !== path; }).concat([path]), at: nowIso, cc: cc, kb: Math.round(bytes.length / 1024) };
+          out.saved++; budget--;
+        } catch (e2) { var p2 = st.items[x.order_sn] || {}; st.items[x.order_sn] = { w: 'err', e: String((e2 && e2.message) || e2).slice(0, 120), n: (p2.n || 0) + 1, at: nowIso }; out.errors.push(x.order_sn + ' ' + String((e2 && e2.message) || e2).slice(0, 100)); }
+      });
+    }
+  });
+  var cutoff = Date.now() - 200 * 86400000;
+  Object.keys(st.items).forEach(function (k) { var e = st.items[k] || {}, t = Date.parse(e.at || ''); if (t && t < cutoff) delete st.items[k]; if (!e.f && t && t < Date.now() - 30 * 86400000) delete st.items[k]; });
+  st.lastAt = nowIso; st.lastOut = out; st.by = baRunnerId_ ? baRunnerId_() : '';
+  baKvSet_(AWB_KEY, st);
+  return out;
+}
+function awbDownload_(shopId, orderSn, pkg) {
+  var tok = getToken_(shopId), path = '/api/v2/logistics/download_shipping_document', ts = now_();
+  var url = HOST + path + '?partner_id=' + partnerId_() + '&timestamp=' + ts + '&access_token=' + tok.access_token + '&shop_id=' + shopId + '&sign=' + signShop_(path, ts, tok.access_token, shopId);
+  ufBump_(1, path);
+  var rsp = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', payload: JSON.stringify({ shipping_document_type: AWB_TYPE, order_list: [{ order_sn: orderSn, package_number: pkg || undefined }] }), muteHttpExceptions: true });
+  var ct = String(rsp.getHeaders()['Content-Type'] || rsp.getHeaders()['content-type'] || ''), bytes = rsp.getContent();
+  if (rsp.getResponseCode() !== 200 || !/pdf/i.test(ct) || bytes.length < 500) throw new Error('download ' + rsp.getResponseCode() + ' ' + ct + ' ' + redactSecrets_(rsp.getContentText()).slice(0, 100));
+  return bytes;
+}
+function awbUpload_(path, bytes) {
+  var sbKey = cfg_('SB_SERVICE_KEY');
+  ufBump_(1, 'Supabase書き(awb)');
+  var up = UrlFetchApp.fetch(cfg_('SB_URL') + '/storage/v1/object/' + AWB_BUCKET + '/' + path, { method: 'post', contentType: 'application/pdf', payload: bytes, muteHttpExceptions: true, headers: { apikey: sbKey, Authorization: 'Bearer ' + sbKey, 'x-upsert': 'true' } });
+  if (up.getResponseCode() >= 300) throw new Error('保存に失敗 ' + up.getResponseCode() + ': ' + up.getContentText().slice(0, 120));
+}
+function awbKeepTriggerOff_() { ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'awbKeepTick') ScriptApp.deleteTrigger(t); }); }
 function slsAwbHasWarning_(warning) {
   return warning != null && warning !== '' && (!Array.isArray(warning) || warning.length > 0);
 }
@@ -9942,6 +10052,7 @@ function hbMakeTrigger_(fn) {
     case 'syncListingsRoundRobin': case 'boostTick': T(fn).everyMinutes(30).create(); return true;
     case 'condIndexTick': T(fn).everyMinutes(10).create(); return true;
     case 'cancelWatchTick': T(fn).everyMinutes(15).create(); return true;
+    case 'awbKeepTick': T(fn).everyHours(1).create(); return true;
     case 'boshuRevalueTick': case 'hbWatchTick': T(fn).everyHours(1).create(); return true;
     case 'boshuAutoTick': setupBoshuAutoTrigger(); return true;
     default: return false;
