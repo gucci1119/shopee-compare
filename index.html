@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-135901';
+  const APP_BUILD = '20261117-140603';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -15469,7 +15469,7 @@
         `<div class="ord-no"><a href="https://${region.host}/portal/sale/order#smdsn=${encodeURIComponent(r.sn)}" class="ord-godetail" data-sn="${esc(r.sn)}" target="_blank" title="この注文の明細を開く" style="color:#2673dd;text-decoration:none">${esc(r.sn)}</a> <span class="smd-copy" data-copy="${esc(r.sn)}" title="注文番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span> <button class="ord-linkinv" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" title="この注文に使った在庫を割り当てる（在庫台帳から選ぶ）" style="border:none;background:none;cursor:pointer;font-size:11px;padding:0;line-height:1">🔗</button></div><div class="ord-buyer"><span class="buyer"></span></div><div class="ord-track" title="追跡番号（発送手配済以降にShopeeが採番）">${r.tracking ? `<span style="color:#e65100;font-weight:600">${esc(r.tracking)}</span> <span class="smd-copy" data-copy="${esc(r.tracking)}" title="追跡番号をコピー" style="color:#b0b0b0;font-size:11px">📋</span>` : '<span class="smd-dim" style="font-size:10px">追跡なし</span>'}</div>` +
         `<div class="ord-links">` +
         `<span class="ol-slot ol-detail"><a href="https://${region.host}/portal/sale/order#smdsn=${encodeURIComponent(r.sn)}" class="ord-godetail" data-sn="${esc(r.sn)}" target="_blank" title="Shopeeでこの注文の明細を開く。userscript『Shopee注文をSNで直接開く』を入れると自動検索→その注文の詳細へ直行。未導入でも一覧が開き注文番号は自動コピー→「Input order ID」に貼付でOK" style="text-decoration:none;font-size:11px;font-weight:700;color:#2673dd;white-space:nowrap">📄明細↗</a></span>` +
-        `<span class="ol-slot ol-print">${r.tab === 300 && ordArranged(r) ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" title="伝票印刷（Waybill Printer連携）">🖨️</a>` : `<span class="smd-dim" title="倉庫スキャン後は伝票印刷不可">—</span>`}</span>` +
+        `<span class="ol-slot ol-print">${r.tab === 300 && ordArranged(r) ? `<a href="https://${region.host}/portal/sale?sls_print=${encodeURIComponent(r.sn)}" target="_blank" class="ord-wbprint" title="伝票印刷（Waybill Printer連携）">🖨️</a>` : `<span class="smd-dim" title="倉庫スキャン後は伝票印刷不可">—</span>`}</span>` +
         (r.tab === 300 && ordArranged(r) ? `<span class="ol-slot ol-awb"></span>` : '') +
         `<span class="ol-slot ol-split">${(r.tab === 300 && r.items.length > 1 && r.shopId && settings.openapiUrl && settings.writeToken) ? `<a href="#" class="ord-split" data-cc="${esc(r.cc)}" data-sn="${esc(r.sn)}" data-shop="${esc(String(r.shopId))}" data-host="${esc(region.host)}" title="この注文を複数梱包に分割（VNで別便にする時）。公式APIのsplit_orderで分割→梱包ごとに発送手配＋伝票印刷" style="text-decoration:none;font-size:10.5px;color:#7b52c4;font-weight:700;white-space:nowrap">✂️分割</a>` : ''}</span>` +
         `</div>` +
@@ -15480,6 +15480,7 @@
       // 行クリックでの自動オープンは廃止（Shopee注文詳細は内部ID必須で直リンク不可＝404の元。注文一覧は右の📄から、注文番号は📋でコピー）
       row.querySelectorAll('a').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
       if (r.tab === 300) awbMarkRow_(row, r);   /* ★11/17 送り状を残したかの印 */
+      row.querySelectorAll('.ord-wbprint').forEach(a => a.addEventListener('click', () => awbScLater_(r.cc, r.sn, 90000, 'print')));   /* ★11/17 印刷の90秒後に同じ送り状を残す */
       const slsButton = row.querySelector('.ord-sls-awb');
       if (slsButton) slsButton.addEventListener('click', e => { e.stopPropagation(); if (e.isTrusted) showSlsAwbTypes(r, slsShop, slsButton); });
       // 📄注文一覧を開くと同時に注文番号を自動コピー（一覧の「Input order ID」欄に貼るだけで検索できる＝詳細直リンク不可の代替）
@@ -15506,6 +15507,7 @@
         if (!state.orders.selfTransit) state.orders.selfTransit = new Map();
         if (turnOn) state.orders.selfTransit.set(key, val); else state.orders.selfTransit.delete(key);
         logAct('注文管理', turnOn ? '倉庫へ発送(未スキャン)' : '倉庫輸送を解除', sn, cc);
+        if (turnOn) awbScLater_(cc, sn, 3000, 'transit');   /* ★11/17 印刷済みの印＝送り状を残す */
       } catch (err) { alert('保存失敗: ' + err.message); }
       finally { busy.delete(key); renderOrders(); }
     }));
@@ -28194,7 +28196,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   let _awbKeep = null;
   function awbKeepLoad_(force) {
     if (!force && _awbKeep && Date.now() - _awbKeep.at < 300000) return _awbKeep.p;
-    const p = sbGet('app_kv', 'select=v&k=eq.awb_keep').then(rows => ((rows && rows[0] && rows[0].v) || {}).items || {});
+    /* awb_keep＝GAS（Open API）／awb_keep_sc＝ポータルが Seller Center の印刷の口から残した物。2つを合わせて見る（別の鍵＝書き手が違うので上書きし合わない） */
+    const p = sbGet('app_kv', 'select=k,v&k=in.(awb_keep,awb_keep_sc)').then(rows => { const a = {}, b = {}; (rows || []).forEach(x => { if (x.k === 'awb_keep') Object.assign(a, (x.v || {}).items || {}); else Object.assign(b, (x.v || {}).items || {}); }); Object.keys(b).forEach(k => { if (b[k] && b[k].f) a[k] = b[k]; }); return a; });
     _awbKeep = { at: Date.now(), p }; p.catch(() => { if (_awbKeep && _awbKeep.p === p) _awbKeep = null; }); return p;
   }
   let _pdfjsLib = null;
@@ -28235,6 +28238,58 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       else sp.innerHTML = '<span title="送り状はまだ残していません。印刷した後、1時間以内に自動で残します（倉庫で読み取られた後は取れません）' + (it && it.w ? '・今の状態：' + esc(String(it.w)) : '') + '" style="font-size:11px;color:#b45309;white-space:nowrap">🏷️…</span>';
     }).catch(() => { sp.innerHTML = '<span title="送り状を残したかを読めませんでした" style="font-size:11px;color:#999">🏷️?</span>'; });
   }
+  /* ★2026-11-17 05（00・02 の数え：Open API では「未印刷」のまま、実際は印刷して貼っていた＝8件）：ポータルの🖨️も Seller Center の画面も、
+     印刷は Seller Center の内部の口（create_sd_jobs → download_sd_job）で作られ、Open API の発行の状態には出ない。
+     → 印刷した後に、同じ Seller Center の口から同じ送り状を取り出して残す（bridge 経由・本人の Chrome のログインで動く）。
+     いつ取るか：①ポータルの🖨️を押して90秒後 ②「🚚倉庫へ発送」の印を付けた時 ③30分ごとの見回り（未発送で、印か🖨️の記録がある物＝印刷済みの物だけ）。
+     印刷前の物には触らない（create_sd_jobs は印刷と同じ扱いになりうるため）。is_first_time=1（初めての印刷）が返ったら記録に残す */
+  const _awbScBusy = new Set();
+  async function awbScSave_(cc, sn, why) {
+    const key = cc + ':' + sn; if (_awbScBusy.has(key)) return { skip: 'busy' };
+    const rg = REGIONS.find(x => x.cc === cc); if (!rg || !bridgeAvailable || !settings.sbSecret) return { skip: 'no bridge/key' };
+    _awbScBusy.add(key);
+    const base = 'https://' + rg.host, Q = '?SPC_CDS_VER=2';
+    const rec = async (v) => { try { const rows = await sbGet('app_kv', 'select=v&k=eq.awb_keep_sc'); const cur = (rows && rows[0] && rows[0].v) || {}; cur.items = cur.items || {}; const old = cur.items[sn] || {}; if (old.f && !v.f) return; cur.items[sn] = Object.assign({ cc, at: new Date().toISOString(), why }, v); const cut = Date.now() - 200 * 86400000; Object.keys(cur.items).forEach(k => { const t = Date.parse(cur.items[k].at || ''); if (t && t < cut) delete cur.items[k]; }); cur.at = new Date().toISOString(); await sbUpsert('app_kv', [{ k: 'awb_keep_sc', v: cur, updated_at: cur.at }]); _awbKeep = null; } catch (_) {} };
+    try {
+      const s1 = await bridgePostJson(base + '/api/v3/order/search_order_list_index' + Q, { order_list_tab: 100, entity_type: 1, pagination: { from_page_number: 1, page_number: 1, page_size: 1 }, filter: { fulfillment_type: 0, is_drop_off: 0, fulfillment_source: 0, action_filter: 0 }, search_param: { keyword: sn, category: 1 }, sort: { sort_type: 3, ascending: false } });
+      const idx = s1 && s1.data && (s1.data.index_list || [])[0]; if (!idx) { await rec({ w: 'sc_not_found' }); return { err: 'not_found' }; }
+      const pg = await bridgeGetJson(base + '/api/v3/order/get_package' + Q + '&order_id=' + idx.order_id);
+      const pkgs = ((pg && pg.data && pg.data.order_info) || {}).package_list || []; if (!pkgs.length) { await rec({ w: 'sc_no_package' }); return { err: 'no_package' }; }
+      const files = [], firsts = [];
+      for (const p0 of pkgs.slice(0, 3)) {
+        const jr = await bridgePostJson(base + '/api/v3/logistics/create_sd_jobs' + Q + '&async_sd_version=0.2', { group_list: [{ primary_package_number: p0.package_number, group_shipment_id: 0, package_list: [{ order_id: idx.order_id, package_number: p0.package_number }] }], region_id: idx.region_id, shop_id: idx.shop_id, channel_id: p0.channel_id, generate_file_details: [{ file_type: 'THERMAL_PDF', file_name: 'Air Waybill', file_contents: [3] }], record_generate_schema: false });
+        const j = jr && jr.data && (jr.data.list || [])[0]; if (!j) { await rec({ w: 'sc_job ' + ((jr && jr.code) || '') }); return { err: 'job' }; }
+        if (j.is_first_time) firsts.push(p0.package_number);
+        let st = 0; for (let i = 0; i < 15; i++) { const g = await bridgeGetJson(base + '/api/v3/logistics/get_sd_job' + Q + '&async_sd_version=0.2&job_id=' + encodeURIComponent(j.job_id)); st = g && g.data && g.data.job_status; if (st === 5 || st === 4 || st === 6) break; await new Promise(ok => setTimeout(ok, 1500)); }
+        if (st !== 5) { await rec({ w: 'sc_job_status ' + st }); return { err: 'status ' + st }; }
+        const b64 = await bridgeRequest('GET', base + '/api/v3/logistics/download_sd_job' + Q + '&async_sd_version=0.2&job_id=' + encodeURIComponent(j.job_id), undefined, { binary: true, timeout: 30000 });
+        const bin = atob(b64), u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        if (String.fromCharCode.apply(null, u8.subarray(0, 5)) !== '%PDF-') { await rec({ w: 'sc_not_pdf' }); return { err: 'not pdf' }; }
+        const path = cc + '/' + sn + (pkgs.length > 1 ? '_' + p0.package_number : '') + '.pdf';
+        const up = await fetch(SB_URL + '/storage/v1/object/awb/' + path, { method: 'POST', headers: { apikey: settings.sbSecret, authorization: 'Bearer ' + settings.sbSecret, 'content-type': 'application/pdf', 'x-upsert': 'true' }, body: u8 });
+        if (!up.ok) { await rec({ w: 'save ' + up.status }); return { err: 'save ' + up.status }; }
+        files.push(path);
+      }
+      await rec({ f: files, w: undefined, first: firsts.length ? firsts : undefined });
+      return { ok: true, files };
+    } catch (e) { await rec({ w: 'sc_err ' + String((e && e.message) || e).slice(0, 80) }); return { err: String((e && e.message) || e) }; }
+    finally { _awbScBusy.delete(key); }
+  }
+  function awbScLater_(cc, sn, ms, why) { setTimeout(() => { awbScSave_(cc, sn, why).catch(() => {}); }, ms || 0); }
+  /* 30分ごとの見回り（担当の PC だけ）：未発送で「🚚倉庫へ発送」の印か🖨️の記録がある＝印刷済みの物のうち、まだ残していない物 */
+  async function awbScSweep_() {
+    if (!pcIsOwner() || !bridgeAvailable || !settings.sbSecret) return;
+    try {
+      const items = await awbKeepLoad_(true); let rows = [];
+      REGIONS.forEach(region => { const oc = state.orders.perCountry && state.orders.perCountry.get(region.cc); if (oc && oc.rows) rows = rows.concat(oc.rows); });
+      const st = state.orders.selfTransit || new Map();
+      let wb = new Set(); try { const c = await sbGet('costs', 'select=cc,sn&wb_count=gt.0&wb_last_at=gte.' + new Date(Date.now() - 20 * 86400000).toISOString()); (c || []).forEach(x => wb.add(x.cc + ':' + x.sn)); } catch (_) {}
+      const todo = rows.filter(r => r.tab === 300 && !(items[r.sn] && items[r.sn].f) && (st.has(r.cc + ':' + r.sn) || wb.has(r.cc + ':' + r.sn))).slice(0, 15);
+      for (const r of todo) { await awbScSave_(r.cc, r.sn, 'sweep'); await new Promise(ok => setTimeout(ok, 1500)); }
+    } catch (_) {}
+  }
+  setTimeout(() => { awbScSweep_(); setInterval(awbScSweep_, 30 * 60000); }, 3 * 60000);
+  window.__awbScSave = (cc, sn) => awbScSave_(cc, sn, 'manual');   /* 確かめ用（印刷済みの注文だけに使う） */
   async function slsDspGas_(params) {   /* ★11/17 5台目と6台目に同時に聞き、先に答えた方を使う（1台が混んでいると60秒待った）。両方だめな時だけ本体（業務の台）。1回25秒まで */
     const kids = [settings.boshuUrl4, settings.boshuUrl5].filter(Boolean);
     if (kids.length) { try { return await Promise.any(kids.map(u => gasCall(Object.assign({}, params, { _url: u }), 25000).then(j => { if (j && j.ok !== false) return j; throw new Error((j && j.error) || '答えが空'); }))); } catch (_) {} }
@@ -30460,6 +30515,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '🏷️ <b>送り状を印刷した時に残す</b>（02 の数え：Shopee の API では未印刷のまま実際は印刷済みだった）：ポータルの🖨️の90秒後・「🚚倉庫へ発送」の印を付けた時・30分ごとの見回りで、Seller Center の印刷と同じ送り状を取り出して残します（印刷前の物には触らない）。',
       '🔍 <b>SLS+ の根拠資料の注文の詳細の写しを鮮明に</b>（本人「スクリーンショットの画質荒いよね？」）：画面を縮めて撮るのをやめ、Seller Center のページそのものを2倍の絵にして高い画質で保存。大きな余白は詰め、Order History は別の1枚で日時が読める大きさに。',
       '🏷️ <b>送り状（SLS の伝票）を発送前に自動で残す</b>（本人「SLSラベルか」「それを自動で保存できるようにできる？」）：倉庫で読み取られた後は Shopee から取れないため、5台目・6台目が1時間ごとに、未発送で印刷済みの注文の送り状を非公開の置き場へ1部残します（印刷の操作には何もしない）。📦注文管理の未発送の行に「🏷️✓」（残した・押すと開く）／「🏷️…」（まだ）。SLS+ の根拠資料の「注文と発送の記録」にも送り状を載せます。',
       '🧾 <b>SLS+ の根拠資料（👁・PDF）とフォームの文から、こちらの道具や取り方の言葉を消した</b>（本人「Shopee OS とか Shopee API とか別に書かんでいいやん。こっちの事情やし」）：見出しは事実の名前だけ（注文と発送の記録・仕入れの記録・チャットと買い手の主張・Shopee への問い合わせ）。値の無い項目は「分からない」と書かず行ごと出さない・中身の無い章は出さない。',
@@ -62876,6 +62932,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     body.querySelectorAll('.pf-wb').forEach(a => a.addEventListener('click', async () => {
       if (!settings.sbSecret) return; // キー未設定なら記録せず印刷だけ
       const cc = a.dataset.cc, sn = a.dataset.sn, key = cc + ':' + sn, nowIso = new Date().toISOString();
+      awbScLater_(cc, sn, 90000, 'print');   /* ★11/17 印刷の90秒後に同じ送り状を残す */
       const cm = pf.costMap.get(key) || { cc, sn, wb_count: 0 };
       cm.wb_count = (cm.wb_count || 0) + 1; cm.wb_last_at = nowIso; if (!cm.wb_first_at) cm.wb_first_at = nowIso;
       pf.costMap.set(key, cm);
