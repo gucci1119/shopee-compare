@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-1100'
+var SRC_VER = '20261117-1200'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2098,11 +2098,11 @@ function doGetInner_(e) {
       var s3cb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), s3o;
       try {
         var s3wt = P_().getProperty('WRITE_TOKEN'); if (!s3wt || p.token !== s3wt) throw new Error('WRITE_TOKEN不正');
-        if (p.action === 'shop3_pub_handoff') s3o = shop3PubHandoff_(p.to, s3wt);
+        if (p.action === 'shop3_pub_handoff') s3o = shop3PubHandoff_(p.to, s3wt, p.dense);
         else if (p.action === 'shop3_pub_gave_clear') s3o = shop3PubGaveClear_(p.to);   /* ★2026-11-17 05（中20）：受けた側が渡し元の印を片付ける */
         else if (p.action === 'shop3_pub_take') s3o = shop3PubTake_(p.src, s3wt);
         else if (p.action === 'shop3_pub_clear') s3o = shop3PubClear_(p.shop_id, p.asins, String(p.dry || '') !== '0');
-        else { var s3h = shop3PubHome_(), s3s = shop3PubShards_(), s3n = 0; Object.keys(s3s).forEach(function (k) { try { s3n += Object.keys(JSON.parse(s3s[k] || '{}')).length; } catch (e) {} }); var s3pr = P_(), s3mx = 0, s3mk = ''; Object.keys(s3s).forEach(function (k) { var L = String(s3s[k] || '').length; if (L > s3mx) { s3mx = L; s3mk = k; } }); s3o = { ok: true, runner: baRunnerId_(), here: s3h.here, why: s3h.why || '', asins: s3n, shardMax: s3mx, shardMaxKey: s3mk, shardLimit: SHOP3_PUB_SHARD_MAX, propsBytes: shop3PropsBytes_({}), propsLimit: SHOP3_PUB_STORE_MAX, gave: shop3PubGaveParse_(s3pr.getProperty('SHOP3_PUB_GAVE')).who || '', ackPending: !!s3pr.getProperty('SHOP3_PUB_ACK_PENDING') }; }   /* ★2026-11-17 中20：渡した印・片付け待ちも見せる */
+        else { var s3h = shop3PubHome_(), s3s = shop3PubShards_(), s3n = shop3PubCount_(s3s), s3d = shop3PubCount_(s3s, true); var s3pr = P_(), s3mx = 0, s3mk = ''; Object.keys(s3s).forEach(function (k) { if (!SHOP3_PUB_KEY_RE.test(k)) return; var L = String(s3s[k] || '').length; if (L > s3mx) { s3mx = L; s3mk = k; } }); s3o = { ok: true, runner: baRunnerId_(), here: s3h.here, why: s3h.why || '', asins: s3n, doneDense: s3d, shardMax: s3mx, shardMaxKey: s3mk, shardLimit: SHOP3_PUB_SHARD_MAX, propsBytes: shop3PropsBytes_({}), propsLimit: SHOP3_PUB_STORE_MAX, gave: shop3PubGaveParse_(s3pr.getProperty('SHOP3_PUB_GAVE')).who || '', ackPending: !!s3pr.getProperty('SHOP3_PUB_ACK_PENDING') }; }   /* ★2026-11-17 中20：渡した印・片付け待ちも見せる */
         s3o.src = SRC_VER;
       } catch (err) { s3o = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(s3cb + '(' + JSON.stringify(s3o) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -6260,16 +6260,16 @@ function shop3PublishReceipt_(claim, phase, itemId) {
   if (!lock.tryLock(10000)) throw new Error('第3店の公開控えが使用中です');
   try {
     if (phase === 'reserve') { var _h3 = shop3PubHome_(); if (!_h3.here) throw new Error(_h3.why); }   /* ★2026-11-15 05（レビュー M1）：受け持ちの確かめと予約の間に引き継ぎが入っても、錠の中でもう一度見る */
-    var props = P_(), shards = {}, changes = {};
+    var props = P_(), shards = {}, changes = {}, dels = [], allP = props.getProperties() || {};   /* ★11/17 05：詰めた控えも見るので1回で全部読む（urlfetch は使わない） */
     var reserved = 'r:' + claim.at + ':' + claim.owner;
     var pending = 'p:' + claim.at + ':' + claim.owner;
     var cutoff = Date.now() - 10 * 60000;
     claim.asins.forEach(function (asin) {
       var hash = 0;
       for (var i = 0; i < asin.length; i++) hash = Math.imul(hash, 31) + asin.charCodeAt(i);
-      var key = 'shop3_pub_' + claim.shopId + '_' + ((hash >>> 0) % 8);
+      var h8 = (hash >>> 0) % 8, key = 'shop3_pub_' + claim.shopId + '_' + h8;
       if (!shards[key]) {
-        var values = JSON.parse(props.getProperty(key) || '{}');
+        var values = JSON.parse(allP[key] || '{}');
         if (!values || typeof values !== 'object' || Array.isArray(values) || Object.keys(values).some(function (k) {
           return !/^[A-Z0-9]{10}$/.test(k) || typeof values[k] !== 'string' ||
             !/^(?:[rp]:\d+:[\w-]+|[isa]:[1-9]\d*)$/.test(values[k]);
@@ -6292,6 +6292,11 @@ function shop3PublishReceipt_(claim, phase, itemId) {
           conflict.shop3Conflict = true;
           throw conflict;
         }
+        if (shop3PubDoneHas_(allP, claim.shopId, h8, asin)) {
+          var conflictD = new Error('第3店の同じ子ASINに公開控えがあります: ' + asin + '（公開済み・詰めた控え）。出品一覧を照合してください。');
+          conflictD.shop3Conflict = true;
+          throw conflictD;
+        }
         shard[asin] = reserved;
       } else if (phase === 'release') {
         if (existing === reserved || existing === pending) delete shard[asin];
@@ -6304,14 +6309,16 @@ function shop3PublishReceipt_(claim, phase, itemId) {
     });
     Object.keys(shards).forEach(function (key) {
       var value = JSON.stringify(shards[key]);
+      if (value.length > SHOP3_PUB_COMPACT_AT && shop3PubCompact_(allP, key, shards[key], changes, dels)) value = JSON.stringify(shards[key]);
       if (value.length > SHOP3_PUB_SHARD_MAX) throw new Error('第3店の共有公開控えが上限に達しました（' + key + ' ' + value.length + '字／' + SHOP3_PUB_SHARD_MAX + '）');
       changes[key] = value;
     });
     /* ★2026-11-17 05：Script Properties は1つの台で合計 500KB まで。超えると setProperties が途中で落ちる＝書く前に自分で止める */
-    var _pb = shop3PropsBytes_(changes);
+    var _pb = shop3PropsBytes_(changes, allP);
     if (_pb > SHOP3_PUB_STORE_MAX) throw new Error('この台の Script Properties が合計の上限に近づきました（' + _pb + '／' + SHOP3_PUB_STORE_MAX + 'バイト）＝公開控えを書けません');
     claim.writeUncertain = true;
     props.setProperties(changes, false);
+    dels.forEach(function (k) { props.deleteProperty(k); });
     claim.writeUncertain = false;
     if (phase === 'reserve') claim.reserved = true;
   } finally { lock.releaseLock(); }
@@ -6360,8 +6367,47 @@ function shop3PubLock_() { return LockService.getUserLock(); }
    1つの値の上限（Google は 9KB）に余裕を残して 8,500字へ。合計（1台 500KB）は書く前に shop3PropsBytes_ で見る。
    ⚠ この上限より前の版（4,500字）の台へ受け持ちを移すと、4,500字を超えた箱に当たる公開が全部断られる＝全部の台をこの版にそろえてから移す */
 var SHOP3_PUB_SHARD_MAX = 8500, SHOP3_PUB_STORE_MAX = 480000;
-function shop3PropsBytes_(over) {
-  var all = P_().getProperties() || {}, n = 0;
+/* ★2026-11-17 05（根本の直し）：出来上がった印（a:<商品ID>・1件約29字）は、箱が SHOP3_PUB_COMPACT_AT 字を超えたら
+   ASIN だけを並べた詰めた控え shop3_pubd_<店>_<0〜7>_<n>（1件10字・1つ SHOP3_PUB_DONE_MAX 字まで）へ移す＝同じ容量に約3倍入る。
+   予約の時は箱と詰めた控えの両方を見る（どちらかにあれば二重公開として断る）。
+   引き継ぎは詰めた控えも運ぶ。この版より前の台は詰めた控えを受け取れない＝受ける側が dense=1 を付けない take には渡さない（渡す前に断る） */
+var SHOP3_PUB_COMPACT_AT = 6000, SHOP3_PUB_DONE_MAX = 8500;
+var SHOP3_PUB_KEY_RE = /^shop3_pub_\d+_[0-7]$/, SHOP3_PUBD_KEY_RE = /^shop3_pubd_\d+_[0-7]_\d+$/;
+function shop3PubHash8_(a) { var hash = 0; for (var i = 0; i < a.length; i++) hash = Math.imul(hash, 31) + a.charCodeAt(i); return (hash >>> 0) % 8; }
+function shop3PubDenseSet_(allP, pre) {
+  var set = {};
+  Object.keys(allP).forEach(function (k) { if (k.indexOf(pre) !== 0 || !SHOP3_PUBD_KEY_RE.test(k)) return; var v = String(allP[k] || ''); for (var i = 0; i + 10 <= v.length; i += 10) set[v.substr(i, 10)] = 1; });
+  return set;
+}
+function shop3PubDoneHas_(allP, sid, h, asin) { return !!shop3PubDenseSet_(allP, 'shop3_pubd_' + sid + '_' + h + '_')[asin]; }
+/* 詰めた控えを pre の鍵に書き直す（set の全部を並べ直す）。changes に入れ、余った古い鍵は dels に入れる */
+function shop3PubDenseWrite_(allP, pre, set, changes, dels) {
+  var list = Object.keys(set).filter(function (a) { return /^[A-Z0-9]{10}$/.test(a); }).sort(), per = Math.floor(SHOP3_PUB_DONE_MAX / 10), n = 0;
+  for (var i = 0; i < list.length; i += per) { changes[pre + n] = list.slice(i, i + per).join(''); allP[pre + n] = changes[pre + n]; n++; }
+  Object.keys(allP).forEach(function (k) { if (k.indexOf(pre) === 0 && SHOP3_PUBD_KEY_RE.test(k) && Number(k.slice(pre.length)) >= n) { if (dels) dels.push(k); delete allP[k]; delete changes[k]; } });
+  return list.length;
+}
+/* 箱 obj（鍵 key）の a: の印を詰めた控えへ移す。動かした件数を返す */
+function shop3PubCompact_(allP, key, obj, changes, dels) {
+  var m = /^shop3_pub_(\d+)_([0-7])$/.exec(key); if (!m) return 0;
+  var moved = Object.keys(obj).filter(function (a) { return /^a:\d+$/.test(String(obj[a] || '')) && /^[A-Z0-9]{10}$/.test(a); });
+  if (!moved.length) return 0;
+  var pre = 'shop3_pubd_' + m[1] + '_' + m[2] + '_', set = shop3PubDenseSet_(allP, pre);
+  moved.forEach(function (a) { set[a] = 1; delete obj[a]; });
+  shop3PubDenseWrite_(allP, pre, set, changes, dels);
+  return moved.length;
+}
+function shop3PubCount_(shards, dense) {
+  var n = 0;
+  Object.keys(shards || {}).forEach(function (k) {
+    if (dense) { if (SHOP3_PUBD_KEY_RE.test(k)) n += Math.floor(String(shards[k] || '').length / 10); return; }
+    if (SHOP3_PUB_KEY_RE.test(k)) { try { n += Object.keys(JSON.parse(shards[k] || '{}')).length; } catch (e) {} }
+  });
+  return n;
+}
+function shop3PropsBytes_(over, base) {
+  var all = {}, src = base || P_().getProperties() || {}, n = 0;
+  Object.keys(src).forEach(function (k) { all[k] = src[k]; });
   Object.keys(over || {}).forEach(function (k) { all[k] = over[k]; });
   Object.keys(all).forEach(function (k) { n += Utilities.newBlob(k + String(all[k] || '')).getBytes().length; });
   return n;
@@ -6403,7 +6449,7 @@ function shop3PubClear_(shopId, asinsCsv, dry) {
       var key = 'shop3_pub_' + sid + '_' + ((hash >>> 0) % 8), v = {}; try { v = JSON.parse(pr.getProperty(key) || '{}'); } catch (e) { v = null; }
       if (!v) { out.kept.push({ asin: a, why: '控えが読めない' }); return; }
       var st = String(v[a] || '');
-      if (!st) { out.kept.push({ asin: a, why: '控えに無い' }); return; }
+      if (!st) { out.kept.push({ asin: a, why: shop3PubDoneHas_(pr.getProperties() || {}, sid, (hash >>> 0) % 8, a) ? '商品ができている印（詰めた控え）' : '控えに無い' }); return; }
       if (!/^[rp]:/.test(st)) { out.kept.push({ asin: a, why: '商品ができている印（' + st + '）' }); return; }
       if (found[a]) { out.kept.push({ asin: a, why: found[a] }); return; }
       if (modelWhy) { out.kept.push({ asin: a, why: modelWhy }); return; }
@@ -6417,7 +6463,7 @@ function shop3PubClear_(shopId, asinsCsv, dry) {
 }
 function shop3PubShards_() {
   var all = P_().getProperties(), out = {};
-  Object.keys(all).forEach(function (k) { if (/^shop3_pub_\d+_[0-7]$/.test(k)) out[k] = all[k]; });
+  Object.keys(all).forEach(function (k) { if (SHOP3_PUB_KEY_RE.test(k) || SHOP3_PUBD_KEY_RE.test(k)) out[k] = all[k]; });   /* ★11/17 05：詰めた控えも運ぶ */
   return out;
 }
 /* ★2026-11-17 05（全体レビュー 11/17 中20）：渡した側の SHOP3_PUB_GAVE が残り、後で誤った take（古い渡し元から）を受けると、古い控えで2台目の受け持ちができた。
@@ -6449,7 +6495,7 @@ function shop3PubAck_(token) {
   return { ok: true, cleared: !!j.cleared };
 }
 /* 今の受け持ちが呼ばれる：自分を止めてから控えを全部返す（何度呼ばれても同じ控えを返す） */
-function shop3PubHandoff_(to, token) {
+function shop3PubHandoff_(to, token, dense) {
   /* ★2026-11-17 05（中20）：前に受けた時の片付けが済んでいなければ、先にやり直す（済まなければ渡さない＝渡し元の古い印を残したまま次へ渡さない） */
   if (P_().getProperty('SHOP3_PUB_ACK_PENDING')) { var _ak = shop3PubAck_(token); if (!_ak.ok) throw new Error('前に受けた時の渡し元の印をまだ片付けられていません（' + (_ak.error || '') + '）＝渡しません'); }
   var lock = shop3PubLock_(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（少し待ってもう一度）');
@@ -6457,12 +6503,13 @@ function shop3PubHandoff_(to, token) {
     var pr = P_(), who = String(to || '').replace(/[^\w-]/g, '').slice(0, 20);
     /* ★2026-11-15 05（レビュー H1）：渡せるのは今の受け持ちだけ。止めた後のやり直しは、前に渡したのと同じ先（SHOP3_PUB_GAVE）の時だけ（古い控えで2台目の受け持ちを作らない） */
     if (!who || who === 'child') throw new Error('渡す先（to＝RUNNER_ID）が分かりません');
+    if (String(dense || '') !== '1' && Object.keys(pr.getProperties() || {}).some(function (k) { return SHOP3_PUBD_KEY_RE.test(k); })) throw new Error('受ける台の GAS が古く、詰めた控え（shop3_pubd_）を受け取れません＝渡しません（受ける台を SRC 20261117-1200 以降にしてから）');   /* ★11/17 05 */
     var gave = shop3PubGaveParse_(pr.getProperty('SHOP3_PUB_GAVE'));
     var _retryOk = !!(gave.who === who && gave.at);   /* ★2026-11-17 中20：同じ先へのやり直しは時刻つきの印（この版で渡した印）の時だけ */
     if (!shop3PubHome_().here && !_retryOk) throw new Error('この台は第3の受け持ちではありません（前に ' + (gave.who || '？') + ' へ渡した' + (gave.who === who ? '・前の版の印なので、やり直しは受けない' : '') + '）');
     pr.setProperty('SHOP3_PUB_GAVE', who + '|' + (_retryOk ? gave.at : Date.now()));
     if (isChild_()) pr.deleteProperty('SHOP3_PUB_ON'); else pr.setProperty('SHOP3_PUB_OFF', who);
-    var sh = shop3PubShards_(), n = 0; Object.keys(sh).forEach(function (k) { try { n += Object.keys(JSON.parse(sh[k] || '{}')).length; } catch (e) {} });
+    var sh = shop3PubShards_(), n = shop3PubCount_(sh) + shop3PubCount_(sh, true);
     return { ok: true, from: baRunnerId_(), stopped: true, shards: sh, asins: n };
   } finally { lock.releaseLock(); }
 }
@@ -6475,14 +6522,14 @@ function shop3PubTake_(src, token) {
   var _pend0 = String(P_().getProperty('SHOP3_PUB_ACK_PENDING') || '');
   if (_pend0) { var _ak0 = null; try { _ak0 = shop3PubAck_(token); } catch (eAk0) { _ak0 = { ok: false, error: String((eAk0 && eAk0.message) || eAk0).slice(0, 120) }; } if (!_ak0.ok && _pend0.split('|')[0] !== url) throw new Error('前に受けた時の渡し元の印をまだ片付けられていません（' + (_ak0.error || '') + '）＝別の台からは受けません'); }
   ufBump_(1, '第3店の公開控えの引き継ぎ');
-  var txt; try { txt = UrlFetchApp.fetch(url + '?action=shop3_pub_handoff&to=' + encodeURIComponent(baRunnerId_()) + '&token=' + encodeURIComponent(token) + '&callback=cb', { muteHttpExceptions: true }).getContentText(); } catch (eT) { throw new Error('今の受け持ちに届きませんでした：' + redactSecrets_(String((eT && eT.message) || eT)).slice(0, 120)); }   /* ★11/16 05（全体レビュー中8）：例外の文に token= 入りの URL が入る＝伏せる */
+  var txt; try { txt = UrlFetchApp.fetch(url + '?action=shop3_pub_handoff&dense=1&to=' + encodeURIComponent(baRunnerId_()) + '&token=' + encodeURIComponent(token) + '&callback=cb', { muteHttpExceptions: true }).getContentText(); } catch (eT) { throw new Error('今の受け持ちに届きませんでした：' + redactSecrets_(String((eT && eT.message) || eT)).slice(0, 120)); }   /* ★11/16 05（全体レビュー中8）：例外の文に token= 入りの URL が入る＝伏せる */
   var j = null; try { j = JSON.parse(String(txt).replace(/^\s*[A-Za-z_$][\w$]*\(/, '').replace(/\)\s*;?\s*$/, '')); } catch (e) { j = null; }
   if (!j || !j.ok || !j.shards || typeof j.shards !== 'object') throw new Error('今の受け持ちから控えを受け取れませんでした（どの台も公開しない状態です・もう一度 take を）：' + redactSecrets_(txt).slice(0, 160));
   var lock = shop3PubLock_(); if (!lock.tryLock(15000)) throw new Error('第3店の公開控えが使用中です（もう一度 take を）');
   try {
     var pr = P_(), rank = function (v) { var c = String(v || '').charAt(0); return { r: 1, p: 2, i: 3, s: 4, a: 5 }[c] || 0; }, add = 0, kept = 0, toP = 0;
     Object.keys(j.shards).forEach(function (k) {
-      if (!/^shop3_pub_\d+_[0-7]$/.test(k)) return;
+      if (!SHOP3_PUB_KEY_RE.test(k)) return;
       var inc = {}; try { inc = JSON.parse(j.shards[k] || '{}'); } catch (e) { throw new Error('受け取った控えが読めません: ' + k); }
       var loc = {}; try { loc = JSON.parse(pr.getProperty(k) || '{}'); } catch (e2) { throw new Error('この台の控えが読めません: ' + k); }
       Object.keys(inc).forEach(function (asin) {
@@ -6492,6 +6539,21 @@ function shop3PubTake_(src, token) {
         loc[asin] = v; add++;
       });
       pr.setProperty(k, JSON.stringify(loc));
+    });
+    /* ★11/17 05：詰めた控え（出来上がった印）を重ねる＝両方の台の和。箱にも同じ ASIN があれば箱から外す（a は一番進んだ印） */
+    var dIn = {};
+    Object.keys(j.shards).forEach(function (k) {
+      if (!SHOP3_PUBD_KEY_RE.test(k)) return; var pre = k.replace(/\d+$/, ''), v = String(j.shards[k] || '');
+      if (v.length % 10) throw new Error('受け取った詰めた控えが読めません: ' + k);
+      dIn[pre] = dIn[pre] || {}; for (var i = 0; i < v.length; i += 10) { var a = v.substr(i, 10); if (/^[A-Z0-9]{10}$/.test(a)) dIn[pre][a] = 1; }
+    });
+    Object.keys(dIn).forEach(function (pre) {
+      var allL = pr.getProperties() || {}, set = shop3PubDenseSet_(allL, pre), dch = {}, ddel = [];
+      Object.keys(dIn[pre]).forEach(function (a) { if (!set[a]) { set[a] = 1; add++; } else kept++; });
+      shop3PubDenseWrite_(allL, pre, set, dch, ddel);
+      var jk = pre.replace(/^shop3_pubd_/, 'shop3_pub_').replace(/_$/, ''), jl = {}; try { jl = JSON.parse(allL[jk] || '{}'); } catch (eJ) { throw new Error('この台の控えが読めません: ' + jk); }
+      var jch = false; Object.keys(jl).forEach(function (a) { if (set[a]) { delete jl[a]; jch = true; } }); if (jch) dch[jk] = JSON.stringify(jl);
+      pr.setProperties(dch, false); ddel.forEach(function (k) { pr.deleteProperty(k); });
     });
     if (isChild_()) pr.setProperty('SHOP3_PUB_ON', '1'); else pr.deleteProperty('SHOP3_PUB_OFF');
     pr.deleteProperty('SHOP3_PUB_GAVE');
