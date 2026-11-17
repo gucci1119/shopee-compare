@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-1400'
+var SRC_VER = '20261117-1415'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -5989,7 +5989,7 @@ function awbKeepRun_(maxSave) {
         ((det.response || {}).order_list || []).forEach(function (od) { pk[od.order_sn] = { st: od.order_status, pkgs: (od.package_list || []).map(function (p) { return p.package_number; }).filter(Boolean) }; });
       } catch (e) { out.errors.push(sid + ' ' + String((e && e.message) || e).slice(0, 120)); continue; }
       var ol = [];
-      part.forEach(function (r) { var d = pk[r.sn]; if (!d || d.st !== 'PROCESSED' || !d.pkgs.length) return; d.pkgs.forEach(function (p) { ol.push({ order_sn: r.sn, package_number: p, shipping_document_type: AWB_TYPE }); }); });
+      part.forEach(function (r) { var d = pk[r.sn]; if (!d || d.st !== 'PROCESSED' || !d.pkgs.length) { var p4 = st.items[r.sn] || {}; if (!p4.f) { st.items[r.sn] = { w: 'st:' + String(d ? (d.pkgs.length ? d.st : 'no_package') : 'not_found').slice(0, 30), n: (p4.n || 0) + 1, at: nowIso, cc: r.cc || '' }; out.skip = (out.skip || 0) + 1; } return; } d.pkgs.forEach(function (p) { ol.push({ order_sn: r.sn, package_number: p, shipping_document_type: AWB_TYPE }); }); });
       var ready = [];
       for (var round = 0; round < 3 && ol.length; round++) {
         var res = shipDocCall_(shopId, '/api/v2/logistics/get_shipping_document_result', null, 'post', { order_list: ol });
