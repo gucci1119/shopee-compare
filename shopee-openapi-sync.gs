@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-2115'
+var SRC_VER = '20261117-2200'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -15705,6 +15705,18 @@ function tcgTick(manual) {
       var _best = '', _bestN = 0;
       for (var _k = 0; _k < hws.length; _k++) { var _h = hws[(cur + _k) % hws.length]; if (_brk(_h) || _zero(_h)) continue; var _n = Number(_okHw[_h]) || 0; if (!_n) { _noOk.push(_h); continue; } if (_n > _bestN) { _best = _h; _bestN = _n; } }
       if (_best) { hw = _best; st.cursor = cur + 1; }
+      /* ★2026-11-17 05（00・止まっている一番くじ4家族の調べ）：一番多いシリーズから回す形だと、出品の時の確かめ（値段・版）で落ちて
+         候補の数が減らないシリーズ（amiibo 54・トレッタ 21 など）が順番を取り続け、候補が1〜4件のシリーズ（一番くじ ラバスト・ラバーチャーム・ワーコレ）に
+         8時間・32回で一度も順番が来なかった。→ 2回に1回は、写真OKの候補があるシリーズのうち【いちばん長く回っていない】ものに回す */
+      if (_best) {
+        st.lastPick = (st.lastPick && typeof st.lastPick === 'object') ? st.lastPick : {}; st.fairN = (Number(st.fairN) || 0) + 1;
+        if (st.fairN % 2 === 0) {
+          var _old = '', _oldT = Infinity;
+          for (var _k3 = 0; _k3 < hws.length; _k3++) { var _h3 = hws[(cur + _k3) % hws.length]; if (_brk(_h3) || _zero(_h3) || !(Number(_okHw[_h3]) > 0)) continue; var _t3 = Number(st.lastPick[_h3]) || 0; if (_t3 < _oldT) { _old = _h3; _oldT = _t3; } }
+          if (_old && _old !== hw) { baLog_(st, '⚖ この回は、長く回っていない ' + _old + '（写真OKの候補 ' + _okHw[_old] + ' 件・前に回ったのは ' + (_oldT ? new Date(_oldT + 9 * 3600000).toISOString().slice(5, 16).replace('T', ' ') : '記録なし') + '）に回す（一番多いのは ' + hw + ' ' + _bestN + ' 件）'); hw = _old; }
+        }
+        st.lastPick[hw] = Date.now();
+      }
       /* ★2026-10-15 20:4x 冷えたシリーズの写真集め：3回に1回（OK候補が1つも無ければ毎回）・同じシリーズは1日1回まで */
       st.coldDone = st.coldDone || {}; var _cold = (st.coldHw || []).filter(function (h) { return !_brk(h) && !_zero(h) && st.coldDone[h] !== todayJ; });
       if (_cold.length) { st.coldN = (Number(st.coldN) || 0) + 1; if (!_best || st.coldN % 3 === 0) { var _ch = _cold[0]; st.coldDone[_ch] = todayJ; hw = _ch; _okHw[hw] = Number(_okHw[hw]) || 0; baLog_(st, '🌱 ' + hw + '：写真を一度も集めていないシリーズなので、この回は写真集めに使う（Claude の判定が付いたら出る）'); } }
