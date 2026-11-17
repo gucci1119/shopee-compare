@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-1200'
+var SRC_VER = '20261117-1215'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -952,6 +952,33 @@ function doGetInner_(e) {
         msout = updateModelSku_(p.shop_id, p.item_id, lst2);
       } catch (mserr) { msout = { ok: false, error: String((mserr && mserr.message) || mserr) }; }
       return ContentService.createTextOutput(mscb + '(' + JSON.stringify(msout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    /* ★2026-11-17 05（00 の決め「🃏の巡回は4台目から外して5台目へ・5台目で 12,000 を超えたら自分で止まる」）：
+       設定 cfg.tcg の受け持ち（runners[from]）と主担当（runner）を to へ移す。stop を付けると cfg.tcg.ufStopAt[to] に入れる。
+       dry=0 の時だけ書く（既定は見るだけ）。書いた後に読み直して返す。to に既に受け持ちがあれば移さない */
+    if (p.action === 'tcg_runner_move') {
+      var trcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), tro;
+      try {
+        var trwt = P_().getProperty('WRITE_TOKEN'); if (!trwt || p.token !== trwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        var trFr = String(p.from || '').replace(/[^\w]/g, ''), trTo = String(p.to || '').replace(/[^\w]/g, '');
+        if (!/^child\d*$/.test(trFr) || !/^child\d*$/.test(trTo) || trFr === trTo) throw new Error('from と to（RUNNER_ID・child〜）が要ります');
+        var trLk = LockService.getScriptLock(); if (!trLk.tryLock(60000)) throw new Error('いま🤖・🃏が走っています（少し待ってもう一度）');
+        try {
+          var trCf = baKvFresh_(BA_CFG); if (BA_KV_FAIL[BA_CFG] || !trCf || typeof trCf !== 'object') throw new Error('設定（' + BA_CFG + '）が読めない＝書きません');
+          var trTc = trCf.tcg || {}, trBefore = JSON.parse(JSON.stringify({ runner: trTc.runner || '', runners: trTc.runners || null, ufStopAt: trTc.ufStopAt || null }));
+          if (trTc.runners && typeof trTc.runners === 'object') {
+            if (trTc.runners[trTo] && trTc.runners[trTo].length) throw new Error(trTo + ' には既に受け持ちがあります＝移しません');
+            if (trTc.runners[trFr]) { trTc.runners[trTo] = trTc.runners[trFr]; delete trTc.runners[trFr]; }
+          }
+          if (String(trTc.runner || '') === trFr) trTc.runner = trTo;
+          if (p.stop) { trTc.ufStopAt = trTc.ufStopAt || {}; trTc.ufStopAt[trTo] = Math.max(1000, Math.min(17000, Number(p.stop) || 12000)); }
+          trCf.tcg = trTc;
+          if (String(p.dry || '') !== '0') tro = { ok: true, dry: true, before: trBefore, after: { runner: trTc.runner, runners: trTc.runners, ufStopAt: trTc.ufStopAt || null } };
+          else { baKvSet_(BA_CFG, trCf); var trChk = (baKvFresh_(BA_CFG) || {}).tcg || {}; tro = { ok: true, wrote: true, before: trBefore, after: { runner: trChk.runner, runners: trChk.runners, ufStopAt: trChk.ufStopAt || null } }; }
+        } finally { trLk.releaseLock(); }
+      } catch (err) { tro = { ok: false, error: String((err && err.message) || err) }; }
+      tro.src = SRC_VER;
+      return ContentService.createTextOutput(trcb + '(' + JSON.stringify(tro) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     // 🤖 母数の空白を自動で明細に足す：手動で1回まわす／時間トリガーの登録（WRITE_TOKEN必須）
     if (p.action === 'pre_h_migrate' || p.action === 'pre_h_check' || p.action === 'pre_h_compare' || p.action === 'limited_fix' || p.action === 'limited_audit' || p.action === 'tcg_tick' || p.action === 'tcg_cron_install' || p.action === 'tcg_preview' || p.action === 'game_judge_cands' || p.action === 'boshu_auto_tick_bg' || p.action === 'mark_models' || p.action === 'boshu_auto_tick' || p.action === 'boshu_auto_setup' || p.action === 'boshu_auto_preview' || p.action === 'boshu_auto_exclude' || p.action === 'boshu_auto_prejudge' || p.action === 'cond_index_tick' || p.action === 'cond_index_setup' || p.action === 'payout_orders_backfill') {
@@ -15406,6 +15433,10 @@ function tcgTick(manual) {
     if (!tc.on && manual !== true) return finish_('OFF（cfg.tcg.on）');
     if (!cfg.on && manual !== true) return finish_('🤖がOFFなので🃏も休み');
     var ufNow = ufTotal_(); if (ufNow > ufStopLine_() - 2000) { baQuotaSkipRec_(st, ufNow, ufStopLine_(), 'tcg'); return finish_(baQuotaSkipMsg_(ufNow, ufStopLine_())); }
+    /* ★2026-11-17 05（00 の決め）：5台目は 01 の書き換えと業務の逃げ先も兼ねる＝🃏はこの台で使った数（ufTotal_＝実際に数えた回数）が線を超えたら止まる。
+       線は cfg.tcg.ufStopAt[台]（無ければ 5台目＝child4 だけ 12,000）。推定では止めない */
+    var _tcgStop = Number((tc.ufStopAt || {})[rid0]) || (rid0 === 'child4' ? 12000 : 0);
+    if (_tcgStop && ufNow >= _tcgStop && manual !== true) { baQuotaSkipRec_(st, ufNow, _tcgStop, 'tcg'); return finish_('🃏はこの台（' + rid0 + '）で接続 ' + ufNow + ' 回＝線 ' + _tcgStop + ' を超えたので、太平洋時間の日替わりまで休み'); }
     /* ★2026-10-12【最重要】トレカは在庫1で7か国に出すのに、売れた時に他国の在庫を0にする処理（ゲームの boshuAutoTick 7530行の baSoldSync_）を呼んでいなかった＝同じ1枚が二重に売れうる。
        baSoldSync_ は渡した状態の added（直近3日の注文と突き合わせ）を見るので、トレカの状態をそのまま渡す */
     try { baSoldSync_(st); } catch (eSold) { baLog_(st, '売れたカードの見直しに失敗: ' + String(eSold).slice(0, 160)); }
