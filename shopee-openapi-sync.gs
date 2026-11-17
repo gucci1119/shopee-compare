@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-0407'
+var SRC_VER = '20261117-1100'
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -2102,7 +2102,7 @@ function doGetInner_(e) {
         else if (p.action === 'shop3_pub_gave_clear') s3o = shop3PubGaveClear_(p.to);   /* ★2026-11-17 05（中20）：受けた側が渡し元の印を片付ける */
         else if (p.action === 'shop3_pub_take') s3o = shop3PubTake_(p.src, s3wt);
         else if (p.action === 'shop3_pub_clear') s3o = shop3PubClear_(p.shop_id, p.asins, String(p.dry || '') !== '0');
-        else { var s3h = shop3PubHome_(), s3s = shop3PubShards_(), s3n = 0; Object.keys(s3s).forEach(function (k) { try { s3n += Object.keys(JSON.parse(s3s[k] || '{}')).length; } catch (e) {} }); var s3pr = P_(); s3o = { ok: true, runner: baRunnerId_(), here: s3h.here, why: s3h.why || '', asins: s3n, gave: shop3PubGaveParse_(s3pr.getProperty('SHOP3_PUB_GAVE')).who || '', ackPending: !!s3pr.getProperty('SHOP3_PUB_ACK_PENDING') }; }   /* ★2026-11-17 中20：渡した印・片付け待ちも見せる */
+        else { var s3h = shop3PubHome_(), s3s = shop3PubShards_(), s3n = 0; Object.keys(s3s).forEach(function (k) { try { s3n += Object.keys(JSON.parse(s3s[k] || '{}')).length; } catch (e) {} }); var s3pr = P_(), s3mx = 0, s3mk = ''; Object.keys(s3s).forEach(function (k) { var L = String(s3s[k] || '').length; if (L > s3mx) { s3mx = L; s3mk = k; } }); s3o = { ok: true, runner: baRunnerId_(), here: s3h.here, why: s3h.why || '', asins: s3n, shardMax: s3mx, shardMaxKey: s3mk, shardLimit: SHOP3_PUB_SHARD_MAX, propsBytes: shop3PropsBytes_({}), propsLimit: SHOP3_PUB_STORE_MAX, gave: shop3PubGaveParse_(s3pr.getProperty('SHOP3_PUB_GAVE')).who || '', ackPending: !!s3pr.getProperty('SHOP3_PUB_ACK_PENDING') }; }   /* ★2026-11-17 中20：渡した印・片付け待ちも見せる */
         s3o.src = SRC_VER;
       } catch (err) { s3o = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(s3cb + '(' + JSON.stringify(s3o) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
@@ -6253,7 +6253,7 @@ function baCondFor_(name, given) {
   if (BA_COND_NEW_RE.test(n)) return 'NEW';
   return (g === 'NEW' || g === 'USED') ? g : 'USED';
 }
-// 店ごとの8区画に分け、5店合計の値を最大180,000バイトに抑える。
+// 店ごとの8区画に分ける。1区画 SHOP3_PUB_SHARD_MAX 字まで・台の合計は SHOP3_PUB_STORE_MAX まで（★11/17 4,500字→8,500字）。
 // 送信前の札だけ10分で失効。送信後の成否が不明なら、期限で再送できるようにしない。
 function shop3PublishReceipt_(claim, phase, itemId) {
   var lock = shop3PubLock_();   /* ★2026-11-15 05：🤖・トレカの巡回が ScriptLock を数分持つので、第3の控えは別の錠（UserLock）にした。子の台で 07:12 から『使用中』で断られていた */
@@ -6304,9 +6304,12 @@ function shop3PublishReceipt_(claim, phase, itemId) {
     });
     Object.keys(shards).forEach(function (key) {
       var value = JSON.stringify(shards[key]);
-      if (value.length > 4500) throw new Error('第3店の共有公開控えが上限に達しました');
+      if (value.length > SHOP3_PUB_SHARD_MAX) throw new Error('第3店の共有公開控えが上限に達しました（' + key + ' ' + value.length + '字／' + SHOP3_PUB_SHARD_MAX + '）');
       changes[key] = value;
     });
+    /* ★2026-11-17 05：Script Properties は1つの台で合計 500KB まで。超えると setProperties が途中で落ちる＝書く前に自分で止める */
+    var _pb = shop3PropsBytes_(changes);
+    if (_pb > SHOP3_PUB_STORE_MAX) throw new Error('この台の Script Properties が合計の上限に近づきました（' + _pb + '／' + SHOP3_PUB_STORE_MAX + 'バイト）＝公開控えを書けません');
     claim.writeUncertain = true;
     props.setProperties(changes, false);
     claim.writeUncertain = false;
@@ -6353,6 +6356,16 @@ function shop3PubHome_() {
 }
 /* 第3の公開控え専用の錠。トリガーも /exec も持ち主（同じ人）として動くので、UserLock はこのプロジェクトの中で ScriptLock と別の1本の錠として働く。ほかに UserLock を使う所は無い */
 function shop3PubLock_() { return LockService.getUserLock(); }
+/* ★2026-11-17 05（01 の数え：SG/MY/PH の0番の箱が154件・4,483字前後で満杯→同じ箱に当たる商品が全部断られた）：
+   1つの値の上限（Google は 9KB）に余裕を残して 8,500字へ。合計（1台 500KB）は書く前に shop3PropsBytes_ で見る。
+   ⚠ この上限より前の版（4,500字）の台へ受け持ちを移すと、4,500字を超えた箱に当たる公開が全部断られる＝全部の台をこの版にそろえてから移す */
+var SHOP3_PUB_SHARD_MAX = 8500, SHOP3_PUB_STORE_MAX = 480000;
+function shop3PropsBytes_(over) {
+  var all = P_().getProperties() || {}, n = 0;
+  Object.keys(over || {}).forEach(function (k) { all[k] = over[k]; });
+  Object.keys(all).forEach(function (k) { n += Utilities.newBlob(k + String(all[k] || '')).getBytes().length; });
+  return n;
+}
 var SHOP3_PUB_VAL_RE = /^(?:[rp]:\d+:[\w-]+|[isa]:[1-9]\d*)$/;
 /* ★2026-11-15 05（01：通信の失敗で Shopee に出来なかった物の控えが残り、出し直しが『公開控えがあります』で断られる）：
    受け持ちの台だけ。途中の印（r: 予約・p: 送信中）の ASIN だけを外す。i/s/a（商品ができている）は外さない。
