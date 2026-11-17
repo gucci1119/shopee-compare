@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-111604';
+  const APP_BUILD = '20261117-112238';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -9384,6 +9384,7 @@
     "買い手にお金を返した日の目安（返品が承認・終了した日）。SLS+ の補償が入った日ではありません": "Approximate date the buyer was refunded (when the return was approved/closed). Not the date the SLS+ compensation arrived",
     "📄📝 PDF を保存してフォームを開く": "📄📝 Save PDF & open form", "発送済み": "Shipped", "発送済み＋物流書類の不備": "Shipped + logistics document issue", "その他（英語の文）": "Other (English text)", "⚠ 追跡番号が DB に無い": "⚠ No tracking No. in DB",
     "申し立て（断られた・未申請・申請済み）": "Dispute (denied / not claimed / claimed)", "期限切れ（出すだけ出す）": "Past deadline (file anyway)", "申請済み（補償なし）": "Claimed (no payout)",
+    "👁 根拠資料を見る": "👁 View evidence", "🛡 申し立てへ": "🛡 Go to disputes",
     "断られた→申し立て": "Denied → dispute", "断られた": "Denied", "📝 フォームを開く": "📝 Open form", "📄 根拠資料": "📄 Evidence", "✅ 送った": "✅ Sent", "送ったを戻す": "Undo sent", "申し立ての期限": "Dispute deadline", "申し立て": "Dispute", "断られた日": "Denied on", "まだ": "Not yet", "送ったかは分からない": "Unknown whether sent", "Shop ID 不明": "Shop ID unknown",
     "SLS+ の補償（半額）が入ったか。入ったら ✓ 入った＋入金日": "Whether the SLS+ compensation (half) has arrived. If so: ✓ Received + payout date",
     "Shopee の理由の区分・買い手が書いた文（原文と訳）・買い手の写真と動画": "Shopee reason category, buyer's text (original and translation), buyer's photos and videos",
@@ -28182,23 +28183,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       .catch(e => { _slsPdfLib = null; throw e; });
     return _slsPdfLib;
   }
-  async function slsDspGas_(params) {   /* 5台目→6台目→本体の順（本体は業務の台） */
+  async function slsDspGas_(params) {   /* 5台目→6台目→本体の順（本体は業務の台）。★11/17 1台25秒まで（前は60秒×3台で「作っています…」が数分続いた） */
     const us = [settings.boshuUrl4, settings.boshuUrl5, settings.openapiUrl].filter(Boolean); let last = null;
-    for (const u of us) { try { const j = await gasCall(Object.assign({}, params, { _url: u }), 60000); if (j && j.ok !== false) return j; last = new Error((j && j.error) || '答えが空'); } catch (e) { last = e; } }
+    for (const u of us) { try { const j = await gasCall(Object.assign({}, params, { _url: u }), 25000); if (j && j.ok !== false) return j; last = new Error((j && j.error) || '答えが空'); if (/WRITE_TOKEN|未認可|order_sn/.test(String(j && j.error))) break; } catch (e) { last = e; } }
     throw last || new Error('読める台がありません');
   }
-  async function slsDspEvidencePdf_(r) {
+  async function slsDspEvidenceHtml_(r) {   /* ★11/17 根拠資料の中身（👁 で見る・📄 で PDF にする の両方がこれを使う） */
     const tsJ = t => { const n = Number(t); return n > 0 ? new Date((n < 1e12 ? n * 1000 : n) + 9 * 3600000).toISOString().slice(0, 16).replace('T', ' ') + ' JST' : ''; };
-    const [libE, det, trk, chat] = await Promise.all([
-      slsPdfLib_().then(() => null).catch(e => e),
+    const [det, trk0, chat, inv] = await Promise.all([
       r.shop ? slsDspGas_({ action: 'get_order_detail', shop_id: r.shop, order_sn: r.sn }).catch(e => ({ err: String((e && e.message) || e) })) : Promise.resolve({ err: 'Shop ID が無い' }),
-      r.shop ? slsDspGas_({ action: 'tracking_info', shop_id: r.shop, order_sn: r.sn }).catch(e => ({ err: String((e && e.message) || e) })) : Promise.resolve({ err: 'Shop ID が無い' }),
+      /* 追跡の記録＝logistics/get_tracking_info（読むだけ）。今ある口 api_probe で読む（新しい口 tracking_info を全部の台に配らなくても動く） */
+      r.shop ? slsDspGas_({ action: 'api_probe', token: settings.writeToken, path: '/api/v2/logistics/get_tracking_info', shop_id: r.shop, q: JSON.stringify({ order_sn: r.sn }) }).catch(e => ({ err: String((e && e.message) || e) })) : Promise.resolve({ err: 'Shop ID が無い' }),
       r.buyer ? sbGetAll('chat_messages', 'select=direction,msg_type,text,msg_time&conversation_id=eq.' + encodeURIComponent(r.cc + ':' + r.buyer) + '&order=msg_time.asc&limit=300').catch(e => ({ err: String((e && e.message) || e) })) : Promise.resolve([]),
+      /* ★11/17 00「仕入れの証明」：在庫の控え（この注文に紐づく仕入れ）。取引の画面の写し（proof）は本人の住所・名前が写るので入れない（文字の記録と商品の写真だけ） */
+      sbGetAll('inventory', 'select=item_id,name_supplier,supplier,supplier_order,price,purchase_date,supplier_url,image,tracking_no,ship_method,delivery_status,delivery_history&shopee_sn=eq.' + encodeURIComponent(r.sn)).catch(e => ({ err: String((e && e.message) || e) })),
     ]);
-    if (libE) throw libE;
+    const trk = trk0 && trk0.data ? (trk0.data.error ? { err: String(trk0.data.error) + ' ' + String(trk0.data.message || '') } : { response: trk0.data.response }) : trk0;
     const od = det && det.response && (det.response.order_list || [])[0] || null, pk = od && (od.package_list || [])[0] || null;
     const ti = trk && trk.response || null, evs = (ti && (ti.tracking_info || [])) || [];
-    const scanEv = evs.slice().reverse().find(e => /warehouse|inbound|received|scan|倉庫|入庫/i.test(String(e.description || '') + ' ' + String(e.logistics_status || ''))) || null;
+    /* 日本での最初の記録＝作られた（ORDER_CREATED 等）の次の、いちばん古い記録（倉庫・仕分けセンターに着いた＝スキャン）。輸出通関も拾う */
+    const evAsc = evs.slice().sort((a, b) => (Number(a.update_time) || 0) - (Number(b.update_time) || 0));
+    const scanEv = evAsc.find(e => !/ORDER_CREATED|INIT|REQUEST_CREATED|READY/i.test(String(e.logistics_status || ''))) || null;
+    const expEv = evAsc.find(e => /export|exporta|輸出|出口/i.test(String(e.description || ''))) || null;
     const T = (k, v) => `<tr><th>${k}</th><td>${v}</td></tr>`, E = v => esc(String(v == null || v === '' ? '' : v));
     const unk = why => `<span style="color:#b45309">取得できなかった（分からない）${why ? '：' + E(String(why).slice(0, 80)) : ''}</span>`;
     const odIt = (od && od.item_list) || [], prOf = (x, i) => { const m = odIt.find(y => String(y.item_id) === String(x.item_id) && (!x.variation || String(y.model_name || '') === String(x.variation))) || odIt[i]; const v = m ? (m.model_discounted_price != null ? m.model_discounted_price : m.model_original_price) : null; return v != null ? v : ''; };   /* 明細の値段は DB に無い＝Shopee の注文の詳細から */
@@ -28208,6 +28214,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const imgT = (u, h) => `<img src="${E(u)}" crossorigin="anonymous" style="max-height:${h || 150}px;max-width:240px;border:1px solid #ddd;border-radius:4px;margin:2px">`;
     const chatHtml = msgs == null ? unk(chat && chat.err) : !msgs.length ? 'チャット無し（No chat with this buyer in our records）' : `<table>${msgs.map(m => `<tr><td style="width:23%;white-space:nowrap">${E(String(m.msg_time || '').slice(0, 16).replace('T', ' '))} JST</td><td style="width:11%">${m.direction === 'out' ? 'Seller' : 'Buyer'}</td><td>${m.msg_type === 'image' && isImg(m.text) ? imgT(m.text, 140) : (m.msg_type && m.msg_type !== 'text' ? '[' + E(m.msg_type) + '] ' : '') + E(String(m.text || '').slice(0, 600))}</td></tr>`).join('')}</table>`;
     const bImgs = ((r.ret && r.ret.buyer_images) || []).filter(isImg).slice(0, 8);
+    const invL = Array.isArray(inv) ? inv : null;
+    const invHtml = invL == null ? unk(inv && inv.err) : !invL.length ? '分からない（在庫の控えにこの注文の仕入れが紐づいていない）' : invL.map(v => { let dh = []; try { dh = JSON.parse(v.delivery_history || '[]') || []; } catch (_) {}
+      return `<table>${T('Supplier / 仕入れ先', E(v.supplier) + (v.supplier_order ? '（取引番号 ' + E(v.supplier_order) + '）' : ''))}${T('Item / 品名', E(v.name_supplier))}${T('Purchase date / 仕入れ日', E(v.purchase_date) || '分からない')}${T('Price / 仕入れ値（この1点分・円）', v.price != null && v.price !== '' ? '¥' + E(Number(v.price).toLocaleString()) : '分からない')}${T('Listing page / 取引の画面', v.supplier_url ? E(v.supplier_url) : '分からない')}${T('Domestic delivery to us / 国内の配送', (v.ship_method ? E(v.ship_method) + ' ' : '') + (v.tracking_no ? '追跡 ' + E(v.tracking_no) + ' ' : '') + E(v.delivery_status || '') + (dh.length ? '<br><span style="color:#555">' + dh.slice(0, 6).map(x => E(x.t) + ' ' + E(x.s) + ' ' + E(x.p || '')).join('<br>') + '</span>' : ''))}${v.image && /^https:\/\/static\.mercdn\.net\//.test(v.image) ? T('Item photo / 商品の写真（仕入れ先）', `<img src="${E(v.image)}" crossorigin="anonymous" style="max-height:140px;max-width:220px;border:1px solid #ddd;border-radius:4px">`) : ''}</table>`; }).join('');
     const evHtml = evs.length ? `<table>${evs.slice(0, 40).map(e => `<tr><td style="width:26%;white-space:nowrap">${E(tsJ(e.update_time))}</td><td style="width:22%">${E(e.logistics_status)}</td><td>${E(e.description)}</td></tr>`).join('')}</table>` : unk(trk && (trk.err || trk.error));
     const host = document.createElement('div'); host.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;background:#fff;color:#111;font:12.5px -apple-system,"Hiragino Sans",sans-serif;padding:28px;box-sizing:border-box';
     host.innerHTML = `<style>.ev h2{font-size:14px;margin:14px 0 4px;border-bottom:2px solid #333}.ev table{border-collapse:collapse;width:100%}.ev th,.ev td{border:1px solid #bbb;padding:4px 7px;text-align:left;vertical-align:top}.ev th{background:#f3f3f3;width:30%}</style><div class="ev">
@@ -28215,11 +28224,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <div style="color:#555;font-size:11.5px">GCS ONLINE STORE（Shop ID ${E(r.shop || '?')}）／ Market ${E(r.cc)} ／ 作成 ${E(jstDate(Date.now()))}（Shopee OS ポータルの記録と Shopee Open API から）</div>
       <h2>1. Order details / 注文の明細</h2><table>${T('Order ID', E(r.sn))}${T('Order date / 注文日', E(r.od) + (od && od.create_time ? '（' + E(tsJ(od.create_time)) + '）' : ''))}${T('Buyer', E(r.buyer || '?'))}${T('Order status (Shopee)', od ? E(od.order_status) : unk(det && (det.err || det.error)))}${T('Paid / 支払い', od && od.pay_time ? E(tsJ(od.pay_time)) : '—')}</table>
       <table style="margin-top:6px"><tr><th style="width:auto">Item</th><th style="width:10%">Qty</th><th style="width:16%">Price</th></tr>${it || '<tr><td colspan="3">（記録なし）</td></tr>'}</table>
-      <h2>2. Shipping record / 発送の記録</h2><table>${T('Tracking No. / 追跡番号', E(r.trk) || (pk && pk.tracking_number ? E(pk.tracking_number) : unk('')))}${T('Carrier', pk ? E(pk.shipping_carrier) : unk(det && (det.err || det.error)))}${T('SLS status / SLS の状態', pk ? E(pk.logistics_status) : unk(det && (det.err || det.error)))}${T('Warehouse scan / 倉庫スキャン', scanEv ? E(tsJ(scanEv.update_time)) + '：' + E(scanEv.description) : evs.length ? '追跡の記録に倉庫スキャンの行が見つからない（下の記録を参照）' : unk(trk && (trk.err || trk.error)))}</table>
+      <h2>2. Shipping record / 発送の記録</h2><table>${T('Tracking No. / 追跡番号', E(r.trk) || (pk && pk.tracking_number ? E(pk.tracking_number) : unk('')))}${T('Carrier', pk ? E(pk.shipping_carrier) : unk(det && (det.err || det.error)))}${T('SLS status / SLS の状態', pk ? E(pk.logistics_status) : unk(det && (det.err || det.error)))}${T('First scan in Japan / 日本での最初の記録（倉庫・仕分け）', scanEv ? E(tsJ(scanEv.update_time)) + '：' + E(scanEv.description) : evs.length ? '追跡の記録に見つからない（下の記録を参照）' : unk(trk && (trk.err || trk.error)))}${T('Export customs / 輸出通関', expEv ? E(tsJ(expEv.update_time)) + '：' + E(expEv.description) : evs.length ? '記録に無い' : unk(''))}</table>
       <div style="margin-top:6px">${evHtml}</div>
       <h2>3. Return / cancellation / 返品・キャンセルの理由と日付</h2><table>${T('Type / 種類', r.kind === '返品' ? 'Return &amp; refund / 返品・返金' : 'Cancelled / キャンセル')}${T('Return ID', E(r.rsn) || '—')}${T('Reason (Shopee record)', E(r.reason || r.cxr) || '—')}${T('Buyer text / 買い手の文', r.ret && r.ret.text_reason ? E(String(r.ret.text_reason).slice(0, 800)) : '—')}${T('Buyer photos / 買い手の写真', bImgs.length ? bImgs.map(u => imgT(u, 150)).join('') : '—')}${T('Refund date / 買い手への返金日', E(r.rd) || '—')}${T('Refund amount / 返金額', r.amt ? E(r.amt) : '—')}</table>
-      <h2>4. Chat with the buyer / 購入者とのチャット</h2>${chatHtml}
+      <h2>4. Purchase record in Japan / 仕入れの記録（この品を日本で買った記録）</h2>${invHtml}
+      <h2>5. Chat with the buyer / 購入者とのチャット</h2>${chatHtml}
       <div style="margin-top:12px;color:#555;font-size:11.5px">This order was sold and shipped normally from Japan. 通常どおり販売・発送した注文です。</div></div>`;
+    return { host, meta: { chat: msgs == null ? null : msgs.length, scan: !!scanEv, sls: !!pk, trkEv: evs.length, inv: invL == null ? null : invL.length } };
+  }
+  async function slsDspEvidencePdf_(r) {
+    const [libE, built] = await Promise.all([slsPdfLib_().then(() => null).catch(e => e), slsDspEvidenceHtml_(r)]);
+    if (libE) throw libE;
+    const host = built.host, msgs = built.meta.chat, scanEv = built.meta.scan, pk = built.meta.sls, evs = { length: built.meta.trkEv };
     document.body.appendChild(host);
     try {
       /* 写真が読み終わるのを待つ（読めない写真は外して描く・最長10秒） */
@@ -28237,8 +28253,26 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       }
       const blob = pdf.output('blob');
       pdf.save(r.sn + '.pdf');
-      return { pages, bytes: blob.size, imgs: imgs.length, imgOk, chat: msgs == null ? null : msgs.length, scan: !!scanEv, sls: !!pk, trkEv: evs.length };
+      return { pages, bytes: blob.size, imgs: imgs.length, imgOk, chat: msgs, scan: !!scanEv, sls: !!pk, trkEv: evs.length, inv: built.meta.inv };
     } finally { host.remove(); }
+  }
+  /* ★11/17 本人「ここで根拠書類見られるように」：👁＝PDF と同じ中身をダウンロードせずに重ねた窓で見る（フォームは開かない） */
+  async function slsDspView_(r) {
+    let ov = document.getElementById('sls-ev-ov'); if (ov) ov.remove();
+    ov = document.createElement('div'); ov.id = 'sls-ev-ov'; ov.style.cssText = 'position:fixed;inset:0;z-index:99990;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 8px';
+    const t0 = Date.now();
+    ov.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:880px;width:100%;box-shadow:0 8px 30px rgba(0,0,0,.3)"><div style="display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid #eee;position:sticky;top:0;background:#fff;border-radius:10px 10px 0 0"><b>👁 根拠資料 ${esc(r.sn)}</b><span class="smd-dim" id="sls-ev-st" style="font-size:12px"><span class="smd-spin"></span>作っています…</span><button class="smd-btn" id="sls-ev-x" style="margin-left:auto">✕ 閉じる</button></div><div id="sls-ev-body" style="padding:6px 8px;overflow-x:auto"></div></div>`;
+    document.body.appendChild(ov);
+    const close = () => { clearInterval(tm); ov.remove(); };
+    ov.addEventListener('click', e => { if (e.target === ov) close(); }); ov.querySelector('#sls-ev-x').onclick = close;
+    const tm = setInterval(() => { const st = document.getElementById('sls-ev-st'); if (st && /作っています/.test(st.textContent)) st.innerHTML = '<span class="smd-spin"></span>作っています… ' + Math.round((Date.now() - t0) / 1000) + '秒'; }, 1000);
+    try {
+      const b = await slsDspEvidenceHtml_(r); clearInterval(tm);
+      if (!document.getElementById('sls-ev-ov')) return;
+      b.host.style.cssText = 'width:794px;max-width:100%;background:#fff;color:#111;font:12.5px -apple-system,"Hiragino Sans",sans-serif;padding:20px;box-sizing:border-box';
+      ov.querySelector('#sls-ev-body').appendChild(b.host);
+      const m = b.meta; ov.querySelector('#sls-ev-st').innerHTML = '✓ ' + Math.round((Date.now() - t0) / 1000) + '秒・追跡の記録 ' + m.trkEv + '行・仕入れ ' + (m.inv == null ? '分からない' : m.inv + '件') + '・チャット ' + (m.chat == null ? '分からない' : m.chat + '件') + '（PDF は 📄 で）';
+    } catch (e) { clearInterval(tm); const st = document.getElementById('sls-ev-st'); if (st) st.innerHTML = '<b style="color:#d93025">⚠ 作れませんでした：' + esc(String((e && e.message) || e).slice(0, 120)) + '</b>'; }
   }
   async function slsDspMark(keys, patch) {   /* items[k].dispute に open/sent を付ける（付ける直前に読み直す＝2台で上書きしない） */
     const r0 = await sbGet('app_kv', 'select=v&k=eq.sls_claim'); const v = (r0 && r0[0] && r0[0].v) || {}; v.items = v.items || {};
@@ -28453,6 +28487,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const SLS_TABS = [['todo', '未申請'], ['applied', '申請済み'], ['denied', '申し立て（断られた・未申請・申請済み）'], ['got', '✓ 入った'], ['na', '対象外']];
     const slsTabOf = r => (r.st === 'na' || r.st === 'pre' || r.st === 'noloss') ? 'na' : r.st;
     let tab = 'todo'; try { tab = localStorage.getItem('smdSlsTab') || 'todo'; } catch (_) {} if (!SLS_TABS.some(t => t[0] === tab)) tab = 'todo';
+    if (!slsClaimRender._picked && (c.dspTodo || 0) > 0) tab = 'denied';   /* ★11/17 00（ui-rules 21）：未送信の申し立てがある間は、開いた時に申し立てのタブ（この画面で自分で選んだ後はその選び） */
     const tabN = { todo: c.todo || 0, applied: c.applied || 0, denied: c.dspAll || 0, got: c.got || 0, na: (c.na || 0) + (c.pre || 0) + (c.noloss || 0) };
     const jToday = jstDate(Date.now()), sinceApplied = r => { const a = Date.parse(String(r.at || '').slice(0, 10)), b = Date.parse(jToday); return isFinite(a) && isFinite(b) ? Math.max(0, Math.round((b - a) / 86400000)) : null; };
     const ord = { todo: 0, applied: 1, denied: 1, got: 2, na: 3, pre: 4, noloss: 5 };
@@ -28476,6 +28511,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <td style="padding:3px 6px;white-space:nowrap;font-size:11px">${dspSt(r)}${r.refunded !== true ? `<div style="color:#d93025;font-weight:700" title="入金の明細で返金が引かれたかが${r.refunded === false ? '見当たりません＝対象外の見込み' : '分かりません（入金の明細が無い）'}。1件の誤りで却下されるので、送る前に確かめてください">⚠ 返金${r.refunded === false ? 'なし？' : 'が分からない'}</div>` : ''}${!r.trk ? '<div style="color:#b45309" title="DB に追跡番号がありません。PDF では Shopee から読み直します">⚠ 追跡番号が DB に無い</div>' : ''}</td>
         <td style="padding:3px 6px;white-space:nowrap">${r.shop ? `<select class="sls-dsp-rs" data-k="${esc(r.k)}" style="font-size:11px;max-width:150px" title="設問5（異議申し立ての理由）。既定は注文のデータから（未着・紛失・配達失敗＝発送済み＋物流書類の不備）。変えると覚えます">${Object.keys(SLS_DSP_CHOICE).map(c => `<option value="${c}"${slsDspChoice_(r) === c ? ' selected' : ''}>${SLS_DSP_CHOICE[c]}${c === slsDspDefault_(r) ? '（既定）' : ''}</option>`).join('')}</select>
           <button class="smd-btn sls-dsp-go" data-k="${esc(r.k)}" style="font-size:11px;padding:1px 8px;border-color:#1565c0;color:#1565c0;font-weight:700" title="①入力済みのフォームを新しいタブで開き ②根拠の PDF（${esc(r.sn)}.pdf）を作って保存します。フォームでその PDF を付けて、送信は本人が押してください">📄📝 PDF を保存してフォームを開く</button>
+          <button class="smd-btn sls-dsp-view" data-k="${esc(r.k)}" style="font-size:11px;padding:1px 8px" title="根拠資料（注文の明細・発送の記録・理由と返金・仕入れの記録・チャットの文と写真）を、ダウンロードせずにこの画面で見ます。フォームは開きません">👁 根拠資料を見る</button>
           <button class="smd-btn sls-dsp-ev" data-k="${esc(r.k)}" style="font-size:11px;padding:1px 6px" title="根拠の PDF だけをもう一度作ります">📄</button>` : '<span style="color:#d93025;font-size:11px" title="注文の記録に店の ID がありません">Shop ID 不明</span>'}
           ${r.dsp && r.dsp.sent ? `<button class="smd-btn sls-dsp-sent" data-k="${esc(r.k)}" data-undo="1" style="font-size:11px;padding:1px 8px">送ったを戻す</button>` : `<button class="smd-btn sls-dsp-sent" data-k="${esc(r.k)}" style="font-size:11px;padding:1px 8px;border-color:#1a7f37;color:#1a7f37;font-weight:700">✅ 送った</button>`}
           ${r.st === 'denied' ? `<button class="smd-btn sls-deny-undo" data-k="${esc(r.k)}" style="font-size:11px;padding:1px 8px" title="断られた印を外して「申請済み」に戻します">戻す</button>` : ''}</td></tr>`;
@@ -28515,12 +28551,12 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ${list.length && tab === 'denied' ? `<div class="pf-scroll" style="max-height:52vh"><table data-smdsort="sls-claim-denied" data-smdauto style="border-collapse:collapse;font-size:11.5px;width:100%"><thead><tr style="border-bottom:1px solid #e3e6ea;text-align:left"><th style="padding:3px 6px">国</th><th style="padding:3px 6px" title="断られた（11/17 の返事）／未申請／申請済み（補償なし）。期限切れ＝注文日から1年を過ぎた物">区分</th><th style="padding:3px 6px">種類</th><th style="padding:3px 6px">商品</th><th style="padding:3px 6px">理由</th><th style="padding:3px 6px">注文番号</th><th style="padding:3px 6px">注文日</th><th style="padding:3px 6px">断られた日</th><th style="padding:3px 6px" title="注文作成日から1年以内">申し立ての期限</th><th style="padding:3px 6px">申し立て</th><th style="padding:3px 6px"></th></tr></thead><tbody>${tr}</tbody></table></div>` : list.length ? `<div class="pf-scroll" style="max-height:46vh"><table data-smdsort="sls-claim-${tab}" data-smdauto style="border-collapse:collapse;font-size:11.5px;width:100%"><thead><tr style="border-bottom:1px solid #e3e6ea;text-align:left"><th style="padding:3px 6px">国</th><th style="padding:3px 6px">種類</th><th style="padding:3px 6px">商品</th><th style="padding:3px 6px" title="Shopee の理由の区分・買い手が書いた文（原文と訳）・買い手の写真と動画">理由</th><th style="padding:3px 6px">注文番号</th><th style="padding:3px 6px">注文日</th><th style="padding:3px 6px" title="買い手にお金を返した日の目安（返品が承認・終了した日）。SLS+ の補償が入った日ではありません">買い手への返金日</th><th style="padding:3px 6px">申請の期限</th>${tab === 'applied' ? '<th style="padding:3px 6px">申請した日</th><th style="padding:3px 6px" title="申請してからの日数（入金を待つ目安）">申請から</th>' : '<th style="padding:3px 6px">あと</th>'}<th style="padding:3px 6px" title="SLS+ の補償（半額）が入ったか。入ったら ✓ 入った＋入金日">補償</th><th style="padding:3px 6px"></th></tr></thead><tbody>${tr}</tbody></table></div>` : (tab === 'todo' ? '<div style="color:#1a7f37;font-size:12px">✓ 申請が要る注文はありません</div>' : '<div class="smd-dim" style="font-size:12px">このタブの注文はありません</div>')}
     </div>`;
     const ap = box.querySelector('#sls-apply-open'); if (ap) ap.addEventListener('click', () => slsClaimApplyOpen());
-    box.querySelectorAll('.sls-tab').forEach(b => b.addEventListener('click', () => { try { localStorage.setItem('smdSlsTab', b.dataset.tab); } catch (_) {} slsClaimRender(); }));
+    box.querySelectorAll('.sls-tab').forEach(b => b.addEventListener('click', () => { slsClaimRender._picked = true; try { localStorage.setItem('smdSlsTab', b.dataset.tab); } catch (_) {} slsClaimRender(); }));
     const byK = new Map(D.rows.map(r => [r.k, r]));
-    const pdfRun = async (b, r) => { const t0 = b.textContent; b.disabled = true; b.textContent = '⏳ PDF を作っています…';
+    const pdfRun = async (b, r) => { const t0 = b.textContent, s0 = Date.now(); b.disabled = true; b.textContent = '⏳ PDF を作っています…'; const tk = setInterval(() => { b.textContent = '⏳ PDF を作っています… ' + Math.round((Date.now() - s0) / 1000) + '秒'; }, 1000); setTimeout(() => clearInterval(tk), 180000);
       try { const o = await slsDspEvidencePdf_(r); toast('📄 ' + r.sn + '.pdf を保存しました（' + o.pages + '枚・' + Math.round(o.bytes / 1024) + 'KB・写真 ' + o.imgOk + '/' + o.imgs + '・チャット ' + (o.chat == null ? '読めず' : o.chat + '件') + '・倉庫スキャン ' + (o.scan ? 'あり' : '見つからず') + '）'); try { document.body.setAttribute('data-sls-pdf', JSON.stringify(Object.assign({ sn: r.sn, at: Date.now() }, o))); } catch (_) {} return true; }
       catch (e) { toast('⚠ PDF を作れませんでした: ' + String((e && e.message) || e).slice(0, 100), true); return false; }
-      finally { b.disabled = false; b.textContent = t0; } };
+      finally { clearInterval(tk); b.disabled = false; b.textContent = t0; } };
     box.querySelectorAll('.sls-dsp-go').forEach(b => b.addEventListener('click', async () => { const r = byK.get(b.dataset.k); if (!r) return;
       const w = window.open(slsDspUrl_(r, D.email), '_blank'); try { if (w) w.opener = null; } catch (_) {}   /* 押した瞬間に開く（後から開くとポップアップで止まる）。noopener を付けると返り値が null になり開けたか分からない */
       if (!w) toast('⚠ フォームのタブを開けませんでした（ポップアップの許可を）。PDF は作ります', true);
@@ -28528,6 +28564,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       try { logAct('SLS+補償の申し立て', 'フォームを開いた', r.k, slsDspChoice_(r)); } catch (_) {}
       await pdfRun(b, r); slsClaimRender(true); }));
     box.querySelectorAll('.sls-dsp-ev').forEach(b => b.addEventListener('click', () => { const r = byK.get(b.dataset.k); if (r) pdfRun(b, r); }));
+    box.querySelectorAll('.sls-dsp-view').forEach(b => b.addEventListener('click', () => { const r = byK.get(b.dataset.k); if (r) slsDspView_(r); }));
     box.querySelectorAll('.sls-dsp-rs').forEach(sel => sel.addEventListener('change', async () => { sel.disabled = true;
       try { await slsDspMark([sel.dataset.k], { reason: sel.value }); toast('設問5の理由を「' + SLS_DSP_CHOICE[sel.value] + '」にしました'); slsClaimRender(true); }
       catch (e) { sel.disabled = false; toast('⚠ 覚えられませんでした: ' + String((e && e.message) || e).slice(0, 80), true); } }));
@@ -29003,6 +29040,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       ${(() => { const g = lostAll.reduce((s2, o) => s2 + (Number(o.refund_jpy || o._refundJpy || (typeof refundOf === 'function' ? refundOf(o) : 0) || 0) || 0), 0);
         return g ? `<b style="font-size:12px;color:#b3261e">返金額 ${fmtJpy(g)} ／ 回収見込み <span style="color:#188038">${fmtJpy(Math.round(g * COMP_RATE))}</span></b>` : ''; })()}
       <span class="smd-dim" style="font-size:11px">荷物未着・中身なしなのに<b>補償が入っていない</b>ものです。実際に補償が入った41件では<b>返金額の中央値57%</b>が戻っています（Non-Receiptが最多）。Shopeeへ申請すれば取り戻せる可能性があります。</span>
+      <button class="smd-btn" id="ret-lost-sls" style="display:none;font-size:11.5px;padding:2px 10px;border-color:#d93025;color:#d93025;font-weight:700" title="SLS+ の補償の申し立て（断られた・未申請・申請済みで補償なし）の一覧へ。ここの「補償の取りこぼし」と同じ注文は、そちらで1件ずつフォームから申し立てます">🛡 申し立てへ</button>
       <button class="smd-btn b-write" id="ret-lostcsv" style="font-size:11px;padding:2px 9px;" title="申請用に、注文番号・返品番号・追跡番号・金額を並べたCSVを書き出します">⬇ 申請用CSV</button>
       <label style="font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;margin-left:auto"><input type="checkbox" id="ret-lostonly" ${renderReturns._lostOnly === true ? 'checked' : ''}>これだけ表示</label>
     </div>` : '';
@@ -29039,7 +29077,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               : (addTool + filterBar + tableBlock));
     { const ib = document.getElementById('inq-body'); if (ib) ib.style.display = rtab === 'inq' ? '' : 'none'; }   /* 問い合わせは ❓ のタブの時だけ */
     if (rtab === 'sls') slsClaimRender(!!force).catch(() => {});
-    slsClaimLoad(!!force).then(D => { const el = document.getElementById('rt-sls-n'); if (el && D && D.cnt) el.innerHTML = (D.cnt.todo ? '<b style="color:#d93025">未申請 ' + D.cnt.todo + '</b>' : '未申請 0') + '・申請済み ' + (D.cnt.applied || 0); }).catch(() => { const el = document.getElementById('rt-sls-n'); if (el) el.textContent = '?'; });
+    slsClaimLoad(!!force).then(D => { const el = document.getElementById('rt-sls-n'); if (el && D && D.cnt) el.innerHTML = (D.cnt.dspTodo ? '<b style="color:#d93025">申し立て ' + D.cnt.dspTodo + '</b>・' : '') + (D.cnt.todo ? '<b style="color:#d93025">未申請 ' + D.cnt.todo + '</b>' : '未申請 0') + '・申請済み ' + (D.cnt.applied || 0); const lg = document.getElementById('ret-lost-sls'); if (lg && D.cnt.dspAll) { lg.style.display = ''; lg.textContent = '🛡 申し立て ' + (D.cnt.dspTodo || 0) + '件へ'; } }).catch(() => { const el = document.getElementById('rt-sls-n'); if (el) el.textContent = '?'; });
     { const pk = [rtab, retPage, JSON.stringify(renderReturns._f || {}), renderReturns._sort || '', !!renderReturns._lostOnly, !!renderReturns._showCxl, !!renderReturns._showCanc].join('|');
       renderReturns._posKey = pk;
       if (_keepPos.key === pk) {
@@ -29106,6 +29144,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { const lo = body.querySelector('#ret-lostonly'); if (lo) lo.addEventListener('change', () => { renderReturns._lostOnly = lo.checked; renderReturns._page = 1; renderReturns(); }); }
     // ⬇ 申請用CSV：Shopeeへ補償を申請するのに要る項目だけを、金額の大きい順に並べて出す。
     //   （実測で補償は返金額の中央値57%。見込み額も入れて、どれから出すか決められるようにする）
+    { const ls = body.querySelector('#ret-lost-sls'); if (ls) ls.addEventListener('click', () => { renderReturns._tab = 'sls'; slsClaimRender._picked = false; renderReturns._page = 1; renderReturns(); }); }   /* ★11/17 00：帯から申し立ての一覧へ */
     { const lc = body.querySelector('#ret-lostcsv'); if (lc) lc.addEventListener('click', () => {
         // ★`refund_jpy` しか見ていなかったため、キャンセル・手動記録由来の行（orders由来の
         //   オブジェクトでそのプロパティを持たない）は**件数は数えるのに金額が空**で出ていた。
@@ -30286,6 +30325,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '👁 <b>SLS+ の申し立て：根拠資料をその場で見る・仕入れの記録・追跡の記録</b>（本人「ここで根拠書類見られるように」「この書類でいけるの？」・00）：行に「👁 根拠資料を見る」（ダウンロードせず重ねた窓で・作っている秒数を出す）。根拠資料に仕入れの記録（在庫の控え＝仕入れ先・取引番号・仕入れ日・値段・取引の画面・国内の配送・商品の写真。取引の画面の写しは本人の住所が写るので入れない）と Shopee の追跡の記録（日本の倉庫・仕分け・輸出通関から）を足した。上のタブの札に「申し立て N」を赤で先頭に、未送信がある間は開いた時に申し立てのタブ、💸 の「補償の取りこぼし」の帯から「🛡 申し立て N件へ」。',
       '📋 <b>SLS+ の申し立てに未申請・申請済み（補償なし）・1年を過ぎた物も</b>（本人「しれっと該当しないものも出そう」）：タブ「申し立て」に断られた物＋未申請＋申請済みで補償の無い物を並べ、区分の列で分かるように。1年を過ぎた物は「期限切れ（出すだけ出す）」で後ろに。外すのは ✓ 入った・損なし・対象外だけ。根拠の PDF に買い手の写真とチャットの写真を入れ、A4 の幅で中身の高さの1枚に（行が途中で切れない）。',
       '📄 <b>SLS+ の申し立て：根拠の PDF とフォームを1回で</b>（00）：「📄📝 PDF を保存してフォームを開く」＝入力済みのフォームを開き、Order ID.pdf（注文の明細・発送の記録〔追跡番号・倉庫スキャンの日時・SLS の状態〕・返品/キャンセルの理由と日付・購入者とのチャット〔無ければ「チャット無し」〕）を保存。設問5の理由は注文から既定（未着・紛失・配達失敗＝発送済み＋物流書類の不備・分からない物＝その他＋英語の文）で、行で変えられる。設問6は英語。返金が分からない・追跡番号が DB に無い行に ⚠。',
       '🚫 <b>SLS+ の補償：断られた→申し立てのタブ</b>（本人「さっきのSLS+の補償のやつ、これの入力が必要らしい」「これもポータルからできるように自動で」）：11/17 の Shopee JP の返事（払いかねる・異議は注文作成日から1年以内にフォームから）を受け、申請済みを「断られた」にしてこのタブへ。注文ごとに申し立ての期限（注文日＋1年）・📝 フォームを開く（メール・Shop ID・Order ID・マーケット・理由・詳細を入力済み）・📄 根拠資料（印刷の画面で PDF に保存＝ファイル名が Order ID）・✅ 送った。送信とファイルの添付は本人。開いた時刻は自動で付き、送ったかは分からない物は「送ったかは分からない」と出す。',
