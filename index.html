@@ -1857,7 +1857,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261117-141959';
+  const APP_BUILD = '20261117-145836';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -28166,16 +28166,34 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   function slsDspDefault_(r) { const t = String(r.reason || '') + ' ' + String(r.cxr || ''); return SLS_LOSTRE.test(t) ? 'ship+log' : SLS_KNOWNRE.test(t) ? 'ship' : 'other'; }
   function slsDspChoice_(r) { const c = r.dsp && r.dsp.reason; return SLS_DSP_CHOICE[c] ? c : slsDspDefault_(r); }
   function slsPlus1y_(d) { const m = String(d || '').match(/^(\d{4})-(\d{2})-(\d{2})/); if (!m) return ''; const t = new Date(Date.UTC(Number(m[1]) + 1, Number(m[2]) - 1, Number(m[3]))); return t.toISOString().slice(0, 10); }
-  function slsDspDetail_(r) {   /* ★11/17 00「迷う物は「その他」にして、設問6の文を英語で」＝設問6は英語で事実を並べる（どの理由でも入れる） */
-    const L = ['Order ' + r.sn + ' (' + r.cc + (r.od ? ', ordered ' + r.od : '') + ').'];   /* 値の無い所は書かない（unknown・not recorded を出さない） */
-    L.push(r.kind === '返品' ? 'Return' + (r.rsn ? ' ' + r.rsn : '') + (r.reason ? ': reason ' + r.reason : '') + '; the buyer was refunded' + (r.rd ? ' on ' + r.rd : '') + '.' : 'Cancelled after shipping' + (r.reason ? ': ' + r.reason : '') + '.');
-    if (r.trk) L.push('Tracking No. ' + r.trk + ' (handed to SLS in Japan and shipped internationally).');
-    L.push('This order was sold and shipped normally from Japan; it is not an unusual transaction. Evidence (order details, shipping record, reason and buyer chat) is attached as ' + r.sn + '.pdf.');
-    return L.join('\n');
+  /* ★11/17 00・本人「ここの入力の仕方は合ってんのか？」：Shopee JP の窓口あて＝日本語で。理由の符号は日本語に。道具や取り方の言葉は入れない */
+  const SLS_RSN_JA = { DAMAGED_OTHERS: '破損', DAMAGED: '破損', ITEM_DAMAGED: '破損', PHYSICAL_DMG: '破損', NOT_RECEIPT: '未着', NON_RECEIPT: '未着', NOT_RECEIVED: '未着', ITEM_MISSING: '中身の不足', MISSING_ITEM: '中身の不足', WRONG_ITEM: '違う商品', DIFFERENT_ITEM: '違う商品', ITEM_WRONGDAMAGED: '違う商品・破損', FUNCTIONAL_DMG: '動作不良', NOT_AS_DESCRIBED: '説明と違う', CHANGE_MIND: '購入者の都合', ITEM_NOT_FIT: '購入者の都合', LOST: '紛失', PARCEL_LOST: '紛失', EXPIRED: '期限切れ', FAKE: '偽物の指摘' };
+  function slsRsnJa_(t) { const c = String(t || '').trim(); if (!c) return ''; if (SLS_RSN_JA[c]) return SLS_RSN_JA[c]; if (/^[A-Z0-9_]+$/.test(c)) return /DAMAG/.test(c) ? '破損' : /RECEI|LOST/.test(c) ? '未着' : /MISS/.test(c) ? '中身の不足' : /WRONG|DIFFER/.test(c) ? '違う商品' : ''; return c.slice(0, 40); }
+  function slsDspLine_(r) {
+    const rj = slsRsnJa_(r.reason);
+    const what = r.kind === '返品' ? '返品' + (r.rsn ? ' ' + r.rsn : '') + (rj ? '（' + rj + '）' : '') : '発送後のキャンセル' + (rj ? '（' + rj + '）' : '');
+    return '・' + r.sn + '：' + what + (r.trk ? '、追跡番号 ' + r.trk : '');
+  }
+  const SLS_DSP_HEAD_MULTI = '以下の注文はいずれも日本から SLS で通常どおり発送しました。未着・破損は配送の途中で起きたもので、不自然な取引ではありません。各注文の根拠資料（注文の詳細・追跡の記録・購入者とのやり取り・仕入れの記録）を「注文番号.pdf」として添付します。';
+  const SLS_DSP_HEAD_ONE = 'この注文は日本から SLS で通常どおり発送しました。未着・破損は配送の途中で起きたもので、不自然な取引ではありません。根拠資料（注文の詳細・追跡の記録・購入者とのやり取り・仕入れの記録）を「注文番号.pdf」として添付します。';
+  function slsDspDetail_(r) { return SLS_DSP_HEAD_ONE + '\n' + slsDspLine_(r); }
+  /* ★11/17 本人「根拠資料の添付までやってください」：開いたフォームのタブ（userscript「SLS+ 申し立てフォームへ根拠資料を自動で添付」）へ PDF を渡して「ファイルを追加」から付けてもらう。送信は本人 */
+  async function slsFormAttach_(w, files) {
+    if (!w || !files.length) return { ok: false, error: 'no window/files' };
+    const FORM = 'https://docs.google.com';
+    const wait = (pred, ms) => new Promise(ok => { const t = setTimeout(() => { window.removeEventListener('message', h); ok(null); }, ms); const h = e => { if (e.origin === FORM && e.data && pred(e.data)) { clearTimeout(t); window.removeEventListener('message', h); ok(e.data); } }; window.addEventListener('message', h); });
+    let pong = null;
+    for (let i = 0; i < 40 && !(pong && pong.ready); i++) { const p = wait(d => d.__slsPong, 1500); try { w.postMessage({ __slsPing: 1 }, FORM); } catch (_) {} pong = await p || pong; }
+    if (!pong) return { ok: false, error: 'フォームの添付の道具（userscript）が応答しません' };
+    const id = Date.now() + ':' + Math.random(), bufs = await Promise.all(files.map(async f => ({ name: f.name, buf: await f.blob.arrayBuffer() })));
+    const pr = wait(d => d.__slsAttachRes && d.id === id, 180000);
+    w.postMessage({ __slsAttach: 1, id, files: bufs }, FORM);
+    return (await pr) || { ok: false, error: '添付の返事が来ません（3分）' };
   }
   function slsDspUrl_(r, email) {
     const q = ['usp=pp_url'], E = SLS_DSP_ENTRY, a = (id, v) => { if (v) q.push('entry.' + id + '=' + encodeURIComponent(v)); };
     const ch = slsDspChoice_(r), rs = ch === 'ship+log' ? [SLS_DSP_REASONS.ship, SLS_DSP_REASONS.log] : ch === 'other' ? [SLS_DSP_REASONS.other] : [SLS_DSP_REASONS.ship];
+    if (rs.indexOf(SLS_DSP_REASONS.other) < 0) rs.push(SLS_DSP_REASONS.other);   /* ★11/17 本人「その他にチェックは入れなくていいの？」＝「その他」の欄に文を入れるので、いつも「その他」にも印 */
     a(E.email, email); a(E.shop, r.shop); a(E.sn, r.sn); a(E.market, r.cc); rs.forEach(v => a(E.reason, v)); a(E.other, slsDspDetail_(r));
     return SLS_DSP_FORM + '?' + q.join('&');
   }
@@ -28444,8 +28462,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   function slsDspUrlMulti_(rows, email) {
     const q = ['usp=pp_url'], E = SLS_DSP_ENTRY, a = (id, v) => { if (v) q.push('entry.' + id + '=' + encodeURIComponent(v)); };
-    const rs = new Set(); rows.forEach(r => { const ch = slsDspChoice_(r); (ch === 'ship+log' ? [SLS_DSP_REASONS.ship, SLS_DSP_REASONS.log] : ch === 'other' ? [SLS_DSP_REASONS.other] : [SLS_DSP_REASONS.ship]).forEach(v => rs.add(v)); });
-    const det = rows.map(r => r.sn + ': ' + (r.kind === '返品' ? 'return' + (r.rsn ? ' ' + r.rsn : '') + (r.reason ? ' (' + r.reason + ')' : '') : 'cancelled' + (r.reason ? ' (' + String(r.reason).slice(0, 60) + ')' : '')) + (r.trk ? ', tracking ' + r.trk : '')).join('\n') + '\nAll orders were sold and shipped normally from Japan via SLS. Evidence for each order is attached as <Order ID>.pdf.';
+    const rs = new Set(); rows.forEach(r => { const ch = slsDspChoice_(r); (ch === 'ship+log' ? [SLS_DSP_REASONS.ship, SLS_DSP_REASONS.log] : ch === 'other' ? [SLS_DSP_REASONS.other] : [SLS_DSP_REASONS.ship]).forEach(v => rs.add(v)); }); rs.add(SLS_DSP_REASONS.other);   /* ★11/17 いつも「その他」にも印 */
+    const det = SLS_DSP_HEAD_MULTI + '\n' + rows.map(slsDspLine_).join('\n');
     a(E.email, email); a(E.shop, rows[0].shop); a(E.sn, rows.map(r => r.sn).join(',')); a(E.market, rows[0].cc); [...rs].forEach(v => a(E.reason, v)); a(E.other, det);
     return SLS_DSP_FORM + '?' + q.join('&');
   }
@@ -28739,7 +28757,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     box.querySelectorAll('.sls-tab').forEach(b => b.addEventListener('click', () => { slsClaimRender._picked = true; try { localStorage.setItem('smdSlsTab', b.dataset.tab); } catch (_) {} slsClaimRender(); }));
     const byK = new Map(D.rows.map(r => [r.k, r]));
     const pdfRun = async (b, r) => { const t0 = b.textContent, s0 = Date.now(); b.disabled = true; b.textContent = '⏳ PDF を作っています…'; const tk = setInterval(() => { b.textContent = '⏳ PDF を作っています… ' + Math.round((Date.now() - s0) / 1000) + '秒'; }, 1000); setTimeout(() => clearInterval(tk), 180000);
-      try { const o = await slsDspEvidencePdf_(r); toast('📄 ' + r.sn + '.pdf を保存しました（目次＋' + o.chapters + '章・' + o.pages + 'ページ・' + Math.round(o.bytes / 1024) + 'KB・写真 ' + o.imgOk + '/' + o.imgs + '・発送の知らせ ' + o.ship + '・チャット ' + (o.chat == null ? '読めず' : o.chat + '件') + '）'); try { document.body.setAttribute('data-sls-pdf', JSON.stringify(Object.assign({ sn: r.sn, at: Date.now() }, o))); } catch (_) {} return true; }
+      try { const o = await slsDspEvidencePdf_(r); toast('📄 ' + r.sn + '.pdf を保存しました（目次＋' + o.chapters + '章・' + o.pages + 'ページ・' + Math.round(o.bytes / 1024) + 'KB・写真 ' + o.imgOk + '/' + o.imgs + '・発送の知らせ ' + o.ship + '・チャット ' + (o.chat == null ? '読めず' : o.chat + '件') + '）'); try { document.body.setAttribute('data-sls-pdf', JSON.stringify(Object.assign({ sn: r.sn, at: Date.now() }, o))); } catch (_) {} return o; }
       catch (e) { toast('⚠ PDF を作れませんでした: ' + String((e && e.message) || e).slice(0, 100), true); return false; }
       finally { clearInterval(tk); b.disabled = false; b.textContent = t0; } };
     box.querySelectorAll('.sls-grp-go').forEach(b => b.addEventListener('click', async () => { const g = (slsClaimRender._groups || {}).groups && slsClaimRender._groups.groups[Number(b.dataset.gi)]; if (!g) return;
@@ -28748,9 +28766,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       slsDspMark(g.rows.map(r => r.k), { open: new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 16), grp: g.rows.map(r => r.sn).join(',') }).catch(() => {});
       try { logAct('SLS+補償の申し立て', 'まとめて開いた', g.cc + ' ' + g.rows.length + '件', g.rows.map(r => r.sn).join(',')); } catch (_) {}
       const t0 = b.textContent; b.disabled = true; let ok = 0, ng = [];
-      for (let i = 0; i < g.rows.length; i++) { b.textContent = '⏳ PDF ' + (i + 1) + '/' + g.rows.length + ' を作っています…'; try { await slsDspEvidencePdf_(g.rows[i]); ok++; } catch (e) { ng.push(g.rows[i].sn + '：' + String((e && e.message) || e).slice(0, 60)); } }
+      const blobs = [];
+      for (let i = 0; i < g.rows.length; i++) { b.textContent = '⏳ PDF ' + (i + 1) + '/' + g.rows.length + ' を作っています…'; try { const o = await slsDspEvidencePdf_(g.rows[i]); if (o && o.blob) blobs.push({ name: g.rows[i].sn + '.pdf', blob: o.blob }); ok++; } catch (e) { ng.push(g.rows[i].sn + '：' + String((e && e.message) || e).slice(0, 60)); } }
+      let at = null; if (w && blobs.length) { b.textContent = '⏳ フォームに添付しています…'; try { at = await slsFormAttach_(w, blobs); } catch (e) { at = { ok: false, error: String((e && e.message) || e) }; } }
       b.disabled = false; b.textContent = t0;
-      toast(ng.length ? '⚠ PDF ' + ok + '/' + g.rows.length + ' 件を保存（作れなかった：' + ng.join('／') + '）' : '📄 PDF ' + ok + '件を保存しました。フォームの「ファイルを追加」から全部付けて、送信は本人が押してください', ng.length ? true : 6000);
+      toast(ng.length ? '⚠ PDF ' + ok + '/' + g.rows.length + ' 件を保存（作れなかった：' + ng.join('／') + '）' : at && at.ok ? '📎 PDF ' + ok + '件をフォームに添付しました（' + (at.names || []).length + '個）。中身を見て、送信は本人が押してください' : '📄 PDF ' + ok + '件を保存しました。' + (at ? '自動の添付はできませんでした（' + String(at.error || '') + '）。' : '') + 'フォームの「ファイルを追加」から付けて、送信は本人が押してください', ng.length || (at && !at.ok) ? true : 8000);
       slsClaimRender(true); }));
     box.querySelectorAll('.sls-grp-sent').forEach(b => b.addEventListener('click', async () => { const g = (slsClaimRender._groups || {}).groups && slsClaimRender._groups.groups[Number(b.dataset.gi)]; if (!g) return; b.disabled = true;
       try { await slsDspMark(g.rows.map(r => r.k), { sent: jstDate(Date.now()), grp: g.rows.map(r => r.sn).join(',') }); try { logAct('SLS+補償の申し立て', 'まとめて送った', g.cc + ' ' + g.rows.length + '件', g.rows.map(r => r.sn).join(',')); } catch (_) {} toast('✅ ' + g.rows.length + '件に送った日を付けました'); slsClaimRender(true); }
@@ -28760,7 +28780,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       if (!w) toast('⚠ フォームのタブを開けませんでした（ポップアップの許可を）。PDF は作ります', true);
       slsDspMark([r.k], { open: new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 16) }).catch(e => toast('⚠ 開いた印を付けられませんでした: ' + String((e && e.message) || e).slice(0, 80), true));
       try { logAct('SLS+補償の申し立て', 'フォームを開いた', r.k, slsDspChoice_(r)); } catch (_) {}
-      await pdfRun(b, r); slsClaimRender(true); }));
+      const o1 = await pdfRun(b, r);
+      if (w && o1 && o1.blob) { const t1 = b.textContent; b.disabled = true; b.textContent = '⏳ フォームに添付しています…'; let at; try { at = await slsFormAttach_(w, [{ name: r.sn + '.pdf', blob: o1.blob }]); } catch (e) { at = { ok: false, error: String((e && e.message) || e) }; } b.disabled = false; b.textContent = t1; toast(at && at.ok ? '📎 ' + r.sn + '.pdf をフォームに添付しました。送信は本人が押してください' : '⚠ 自動の添付はできませんでした（' + String((at && at.error) || '') + '）。「ファイルを追加」から付けてください', !(at && at.ok)); }
+      slsClaimRender(true); }));
     box.querySelectorAll('.sls-dsp-ev').forEach(b => b.addEventListener('click', () => { const r = byK.get(b.dataset.k); if (r) pdfRun(b, r); }));
     box.querySelectorAll('.sls-dsp-view').forEach(b => b.addEventListener('click', () => { const r = byK.get(b.dataset.k); if (r) slsDspView_(r); }));
     box.querySelectorAll('.sls-dsp-rs').forEach(sel => sel.addEventListener('change', async () => { sel.disabled = true;
@@ -30523,6 +30545,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-17', items: [
+      '📎 <b>SLS+ の申し立て：根拠資料の添付まで自動に・「その他」にもいつも印・その他の文を日本語に</b>（本人「あと、根拠資料の添付までやってください」「その他にチェックは入れなくていいの？」）：「📦 まとめて申請」「📝 申請」で開いたフォームに、作った PDF を「ファイルを追加」から付けます（Tampermonkey の「SLS+ 申し立てフォームへ根拠資料を自動で添付」が要る・送信は本人）。その他の文は日本語で、理由は日本語（破損・未着など）。',
       '📐 <b>まとめて申請の組み分け：ボタンをいつも右端にそろえた</b>（本人「表示位置を揃えてください（例えば右端とか）」）：左に国・件数・期限・注文番号（左の中で折り返す）、右に「📦 まとめて申請」「✅ このまとめを送った」を同じ幅・同じ位置で。送った組は同じ位置に「✅ 送った 月/日」。',
       '🏷️ <b>送り状を印刷した時に残す</b>（02 の数え：Shopee の API では未印刷のまま実際は印刷済みだった）：ポータルの🖨️の90秒後・「🚚倉庫へ発送」の印を付けた時・30分ごとの見回りで、Seller Center の印刷と同じ送り状を取り出して残します（印刷前の物には触らない）。',
       '🔍 <b>SLS+ の根拠資料の注文の詳細の写しを鮮明に</b>（本人「スクリーンショットの画質荒いよね？」）：画面を縮めて撮るのをやめ、Seller Center のページそのものを2倍の絵にして高い画質で保存。大きな余白は詰め、Order History は別の1枚で日時が読める大きさに。',
