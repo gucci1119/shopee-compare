@@ -8,7 +8,8 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-1415'
+var SRC_VER = '20261117-1545'
+var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
 function pskuItemIdLike_(s) { return /^\d{9,12}$/.test(String(s == null ? '' : s).trim()); }
@@ -10300,7 +10301,10 @@ function hbWatchRun_(me, heal) {
   try {
     var cutH = now - 3 * 3600000;
     var cs = sbSelect_('costs', 'select=cc,sn,self_transit_at&self_transit_at=gte.' + encodeURIComponent(new Date(now - 3 * 86400000).toISOString()) + '&order=self_transit_at.asc&limit=400') || [];
-    cs = cs.filter(function (c) { return /^\d{6}[A-Z0-9]{8}$/.test(String(c.sn || '')) && (Date.parse(c.self_transit_at) || 0) <= cutH; });
+    /* ★2026-11-17 03 の頼み（VN 2611137RGEP510 は漏れでなく遅れ＝SR は30分に1回・1回3件・12:00 に同時に付いた13件が5回に分かれた）：
+       同じ日（日本時間）に付いた印の数を3で割り（切り上げ）、SHMSG_STEP_MIN 分を掛けた時間を、3時間に足して待つ。SR が「3件ちょうどなら5分後に次」になったら SHMSG_STEP_MIN を 5 に */
+    var dayN = {}; cs.forEach(function (c) { var d = Utilities.formatDate(new Date(Date.parse(c.self_transit_at) || 0), 'Asia/Tokyo', 'yyyy-MM-dd'); dayN[d] = (dayN[d] || 0) + 1; });
+    cs = cs.filter(function (c) { var t = Date.parse(c.self_transit_at) || 0, d = Utilities.formatDate(new Date(t), 'Asia/Tokyo', 'yyyy-MM-dd'); var waitMs = Math.ceil((dayN[d] || 1) / 3) * SHMSG_STEP_MIN * 60000; return /^\d{6}[A-Z0-9]{8}$/.test(String(c.sn || '')) && t + 3 * 3600000 + waitMs <= now; });
     sm = { list: [], led: {}, n: cs.length };
     for (var si = 0; si < cs.length; si += 40) {
       var sp = cs.slice(si, si + 40), ob = {};
@@ -10319,7 +10323,7 @@ function hbWatchRun_(me, heal) {
       if (s0 === 'sent' || s0 === 'skip') return;
       shMiss.push(c.cc + ' ' + c.sn + '（倉庫へ ' + Utilities.formatDate(new Date(Date.parse(c.self_transit_at)), 'Asia/Tokyo', 'MM/dd') + '・' + (s0 ? (shJa[s0] || s0) : '台帳に無い＝SR が拾っていない') + (st && st.note ? '：' + String(st.note).slice(0, 40) : '') + '）');
     });
-    add({ id: 'shmsg_unsent', name: '発送のお知らせ（倉庫へ送って3時間たってもスキャン前で送れていない注文）', state: shMiss.length ? 'red' : 'ok', why: shMiss.length ? shMiss.length + '件：' + shMiss.slice(0, 5).join('／') + (shMiss.length > 5 ? ' ほか ' + (shMiss.length - 5) + '件' : '') : '直近3日に倉庫へ送った ' + sm.n + '件のうちスキャン前 ' + sm.list.length + '件は送付済み（または送らない決め）', last: null });
+    add({ id: 'shmsg_unsent', name: '発送のお知らせ（倉庫へ送って3時間＋順番待ちの時間がたってもスキャン前で送れていない注文）', state: shMiss.length ? 'red' : 'ok', why: shMiss.length ? shMiss.length + '件：' + shMiss.slice(0, 5).join('／') + (shMiss.length > 5 ? ' ほか ' + (shMiss.length - 5) + '件' : '') : '直近3日に倉庫へ送った ' + sm.n + '件のうちスキャン前 ' + sm.list.length + '件は送付済み（または送らない決め）', last: null });
   }
   return fin();
 }
