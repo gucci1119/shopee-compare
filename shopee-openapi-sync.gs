@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261117-2200'
+var SRC_VER = '20261117-2230'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -14164,7 +14164,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       for (var tryNo = 0; tryNo < 5 && !cl && !tgt; tryNo++) {
         if (tryNo) { var _low = []; for (var _lq = 1; _lq <= nextNo; _lq++) _low.push(baWithNo_(base.name, _lq)); var _nx = baFreeNo_(cc, base.name, _low.concat(_triedNames));   /* nextNo 以下は使った扱い＋実際に試した名前＝下の空きへ戻らず、同じ名前を繰り返さない */ var m2 = CIRC[_nx - 1] || ('(' + _nx + ')'); newName = (curMark && nm0.indexOf(curMark) >= 0) ? nm0.replace(curMark, m2) : (nm0.trim() + ' ' + m2); }   /* review-yaku 低4：送る時も国の中の空きを取り直す */
         try { cl = cloneItem_(base.shop_id, base.item_id, newName, false, hw); if (cl && cl.item_id) { BA_FAM_TICK++; if (_bn) st.brNewMade.n++; else st.cloneMade.n++; } }
-        catch (e) { dupErr = String((e && e.message) || e); if (!/duplicate/i.test(dupErr)) break; _triedNames.push(newName); baLog_(st, cc + ' 同じ名前のカタログが既にある→番号を送る: ' + newName); }
+        catch (e) { dupErr = String((e && e.message) || e); if (e && e.item_id) { baLog_(st, cc + '：⚠ 複製で置き場を作れず、作った出品 ' + e.item_id + ' を消せなかった→締めでもう一度消す'); try { baFinishClone_(cfg, cc, { shop_id: base.shop_id, item_id: e.item_id, name: newName, models: [] }, true, 0, st); } catch (eFc) {} } if (!/duplicate/i.test(dupErr)) break;   /* ★2026-11-17 05（review 低1） */ _triedNames.push(newName); baLog_(st, cc + ' 同じ名前のカタログが既にある→番号を送る: ' + newName); }
       }
       if (!tgt) {
         if (!cl) { res.note = '複製失敗: ' + dupErr.slice(0, 160); baLog_(st, cc + ' ' + res.note); if (/duplicate/i.test(dupErr)) baFamFailMark_(st, hw, cc, dupErr, _cfKey);   /* ★2026-11-13 中21：重複で断られ続けた系列×国はその日は試さない */ if (_bn) { var _fn = baBrNewFail_(st, false); baLog_(st, 'BR：新しい総称カタログを作れなかった（今日 続けて ' + _fn + '/' + Math.max(1, Number((cfg.brNewCat || {}).failMax) || 3) + ' 回）'); } break; }
@@ -14792,7 +14792,15 @@ function seedShopCatalog_(p) {
   var r = null;
   try { r = addItem_(body); } catch (e3) { return { ok: false, error: '作れませんでした: ' + String((e3 && e3.message) || e3).slice(0, 160) }; }
   if (!r || !r.item_id) return { ok: false, error: '作れましたが item_id が返りませんでした' };
-  if (!r.tier_init || r.tier_init !== 'ok') return { ok: false, item_id: r.item_id, error: '作れましたが明細の枠（バリエ）を作れませんでした: ' + String(r.tier_init || '未実行').slice(0, 120) };   /* ★2026-09-23 枠の無いカタログを「作れた」と返すと、明細を入れる所で全部失敗する */
+  if (!r.tier_init || r.tier_init !== 'ok') {
+    /* ★2026-11-17 05（review 中3）：別の店へ作る道も、枠（バリエ）を作れなかった時は読み直し、無ければ作ったばかりの出品を消す（控えの無い空き箱を残さない＝158件の型） */
+    var _okT = false; try { var _gs = callShop_(dst, '/api/v2/product/get_model_list', { item_id: parseInt(r.item_id, 10) }, 'get'); var _gsr = (_gs && _gs.response) || {}; _okT = !(_gs && _gs.error) && (_gsr.tier_variation || []).length > 0 && (_gsr.model || []).length > 0; } catch (eGs) {}
+    if (!_okT) {
+      var _dE = ''; try { var _dj2 = callShop_(dst, '/api/v2/product/delete_item', null, 'post', { item_id: parseInt(r.item_id, 10) }); if (_dj2 && _dj2.error) _dE = String(_dj2.error) + ' ' + String(_dj2.message || '').slice(0, 80); } catch (eD2) { _dE = String((eD2 && eD2.message) || eD2); }
+      if (!_dE) return { ok: false, error: '明細の枠（バリエ）を作れなかったので、作った出品は消しました: ' + String(r.tier_init || '未実行').slice(0, 120) };
+      return { ok: false, item_id: r.item_id, error: '作れましたが明細の枠（バリエ）を作れず、消せませんでした（' + _dE.slice(0, 80) + '）: ' + String(r.tier_init || '未実行').slice(0, 100) };
+    }
+  }   /* ★2026-09-23 枠の無いカタログを「作れた」と返すと、明細を入れる所で全部失敗する */
   return { ok: true, item_id: r.item_id, shop_id: dst, name: body.item_name, images: urls.length, tier: tierName || null };
 }
 /* 🤖が出した明細の印を【出したその場で】貯める。
