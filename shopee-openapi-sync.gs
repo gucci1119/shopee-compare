@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261118-0630'
+var SRC_VER = '20261118-1000'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -3343,7 +3343,7 @@ function shop3CandidateRead_(p) {
   var probe = sbSelect_('orders', 'select=sn&limit=1');
   if (!Array.isArray(probe) || Date.now() - started > 2000) throw new Error('DBの応答が遅いため照会を見送ります');
   Utilities.sleep(5000);
-  var accounts = sbSelect_('accounts', 'select=cc,shop_id,status,label&cc=eq.' + market + '&status=in.(main,sub,new)&limit=20');
+  var accounts = acctSelCached_('select=cc,shop_id,status,label&cc=eq.' + market + '&status=in.(main,sub,new)&limit=20');   /* ★11/18 5分覚える */
   if (!Array.isArray(accounts)) throw new Error('第3店の登録を取得できません');
   var target = accounts.filter(function (a) { return String(a.shop_id) === id; });
   var expectedLabel = market === 'TW' ? 'manekineko_japan' : 'maneki_neko_japan.' + market.toLowerCase();
@@ -7235,9 +7235,17 @@ function shopSetReadable_(shopId) {
   if (!getToken_(sid)) throw new Error('この台では未認可 shop_id=' + sid + '（第3は3台目で使う）');
   return sid;
 }
+/* ★2026-11-18 05（00：5台目の Supabase 読み accounts 1,667回/日）：店の登録簿は変わることが少ない＝同じ読みを5分だけ覚える（CacheService・urlfetch を使わない）。
+   読めなかった（配列でない）時は覚えない＝次はまた読む */
+function acctSelCached_(q) {
+  var C = null, k = 'acct5|' + String(q).slice(0, 200); try { C = CacheService.getScriptCache(); var h = C.get(k); if (h) return JSON.parse(h); } catch (eC) { C = null; }
+  var r = sbSelect_('accounts', q);
+  if (Array.isArray(r) && C) { try { C.put(k, JSON.stringify(r), 300); } catch (eP) {} }
+  return r;
+}
 function shopSetGuard_(shopId) {
   var sid = shopSetReadable_(shopId);
-  var r = sbSelect_('accounts', 'select=status,cc,label&shop_id=eq.' + sid + '&limit=1') || [];
+  var r = acctSelCached_('select=status,cc,label&shop_id=eq.' + sid + '&limit=1') || [];
   var a = r[0] || {}, st = String(a.status || '');
   if (st !== 'new') throw new Error('書けるのは第3の店（登録簿の status＝new）だけです（shop_id=' + sid + ' は ' + (st || '登録簿に無い') + '）');
   return { sid: sid, cc: String(a.cc || ''), label: String(a.label || '') };
