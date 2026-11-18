@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261119-0240'
+var SRC_VER = '20261119-0250'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -9496,8 +9496,11 @@ function syncListingsRoundRobin() {
       var _gapH = lc ? ((now_() - lc) / 3600 + 0.5) : 3;
       if (_gapH < 1) _gapH = 1;
       if (_gapH > 12) _gapH = 12;
-      P_().setProperty('listChangedLast', String(now_()));
-      log.push({ changed: syncListingsChangedAll(_gapH), windowH: Math.round(_gapH * 10) / 10 });
+      /* ★2026-11-19 05（全体レビュー 11/19 中6）：前は始める前に印（listChangedLast）を進めていた＝6分で切られた回はその窓の変更を取りこぼす。
+         → 始めた時刻を控え、全店を回し切った時だけ印をその時刻に進める。時間が足りない店は次の回へ（印が古いままなので窓が広がって拾い直す） */
+      var _chgT0 = now_(), _chg = syncListingsChangedAll(_gapH, RUN_T0_ + 270000);
+      if (_chg && !_chg._cut) P_().setProperty('listChangedLast', String(_chgT0));
+      log.push({ changed: _chg, windowH: Math.round(_gapH * 10) / 10, cut: !!(_chg && _chg._cut) });
     }
     else log.push({ changedSkipped: true });
   } catch (eC) { log.push({ changedError: String(eC).slice(0, 140) }); }
@@ -9505,7 +9508,8 @@ function syncListingsRoundRobin() {
   Logger.log('listings同期(RR): ' + JSON.stringify(log)); return log;
 }
 // ★増分同期：全店の「直近hours時間で変更のあった出品」だけを取り込む（頻繁な画像/タイトル/在庫変更の高速反映）。削除照合はしない。
-function syncListingsChangedAll(hours) {
+var RUN_T0_ = Date.now();   /* ★2026-11-19 05：この実行が始まった時刻（GAS は実行ごとにファイルを読み直す＝ここが実行の頭） */
+function syncListingsChangedAll(hours, deadlineMs) {
   var since = now_() - (hours || 2) * 3600;
   var toks = listTokens_(), log = [];
   var dirty = {}, dkeys = {};   /* ★11/16 05：書いた出品の印（ldirty_<店>_<出品>）を読み、その店の増分で必ず取り直す・取り直せた店の印は消す */
@@ -9513,7 +9517,7 @@ function syncListingsChangedAll(hours) {
   /* ★11/16 05（全体レビュー 11/16 中6）：印の消し方を直した＝(a) 店の同期を始める前の時刻より前に書かれた印だけ消す（読んだ後に書かれた印は残す）(b) 明細を取れなかった出品の印は残す
      (c) 消せなかった時は記録に残す（前は catch {} で黙って残り、limit 500 を占め続けた）(d) 100件ずつ送る（URL の長さ） */
   var dirtyDelErr = 0;
-  toks.forEach(function (tok) { var sid = String(tok.shop_id); try { var t0iso = new Date().toISOString(); var res = syncListingsForShop_(tok, since, dirty[sid]); log.push(res);
+  toks.forEach(function (tok) { var sid = String(tok.shop_id); if (deadlineMs && Date.now() > deadlineMs) { log._cut = true; log.push({ cc: tok.cc, shop_id: sid, deferred: 'time' }); return; } try { var t0iso = new Date().toISOString(); var res = syncListingsForShop_(tok, since, dirty[sid]); log.push(res);
       if (dkeys[sid] && dkeys[sid].length) { var failSet = {}; ((res && res._mdlFailAll) || []).forEach(function (x) { failSet[x] = 1; }); if (res) delete res._mdlFailAll;
         var del = dkeys[sid].filter(function (k) { var m = /^ldirty_\d+_(\d+)$/.exec(k); return m && !failSet[m[1]]; });
         for (var di = 0; di < del.length; di += 100) { try { sbDelete_('app_kv', 'k=in.(' + del.slice(di, di + 100).join(',') + ')&v-%3E%3Eat=lt.' + encodeURIComponent(t0iso)); } catch (eDel) { dirtyDelErr++; Logger.log('ldirty の印を消せなかった（' + sid + '）: ' + redactSecrets_(String((eDel && eDel.message) || eDel)).slice(0, 120)); } } }
