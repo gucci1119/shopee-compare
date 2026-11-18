@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261119-0100'
+var SRC_VER = '20261119-0040'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -14536,9 +14536,9 @@ function baGameJanOf_(hw, c) {
 }
 /* ★2026-11-19 05（00 の決め・01 と受け渡しをそろえた）：ゲームの🤖は JAN が無い時、夜の調べ（Claude・¥0）が見つけた【日本版の型番】で出す（本人の決まり「JAN、無ければ型番」）。
    置き場＝jan_sg_cache の "m:"＋鍵（鍵は今と同じ＝駿河屋の番号か g:機種:作品）。値は大文字・ハイフンあり。
-   日本版の型番の頭だけ通す（海外版を出さない）：PSP/PS3 の ULJS・ULJM・NPJH・BLJS・BLJM・BCJS-5桁／任天堂の …-JPN／MD の G-・T- 4〜5桁。01 の auto_push.py と同じ式。
+   日本版の型番の頭だけ通す（海外版を出さない）：PSP/PS3 の ULJS・ULJM・UCJS・UCJM・NPJH・BLJS・BLJM・BCJS-5桁／任天堂の …-JPN／MD の G-・T- 4〜5桁。01 の auto_push.py と同じ式。
    "x:"＋鍵 が "nojp"＝駿河屋か公式で日本版が見つからなかった作品＝候補から外し、夜の調べにも積まない */
-var BA_GAME_MPN_RE = /^(?:(?:ULJS|ULJM|NPJH|BLJS|BLJM|BCJS)-\d{5}|[A-Z]{3}-[A-Z0-9-]+-JPN|(?:G|T)-\d{4,5})$/;
+var BA_GAME_MPN_RE = /^(?:(?:ULJS|ULJM|UCJS|UCJM|NPJH|BLJS|BLJM|BCJS)-\d{5}|[A-Z]{3}-[A-Z0-9-]+-JPN|(?:G|T)-\d{4,5})$/;
 function baGameMpnOk_(m) { return BA_GAME_MPN_RE.test(String(m || '').trim()); }
 function baGameMpnOf_(hw, c) {
   if (BA_GAME_JAN === null) { var v = null; try { v = baKv_(SG_JAN_CACHE); } catch (e) {} BA_GAME_JAN = (v && typeof v === 'object') ? v : {}; }
