@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261119-0215'
+var SRC_VER = '20261119-0240'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -6683,7 +6683,7 @@ function shop3PubGaveClear_(to) {
 function shop3PubAck_(token) {
   var pr = P_(), pend = String(pr.getProperty('SHOP3_PUB_ACK_PENDING') || ''); if (!pend) return { ok: true, none: true };
   var url = pend.split('|')[0];
-  if (!GAS_EXEC_RE_.test(url)) { pr.deleteProperty('SHOP3_PUB_ACK_PENDING'); return { ok: false, error: '片付け先の /exec の形が違う（印だけ外した）' }; }
+  if (!gasExecOk_(url)) { pr.deleteProperty('SHOP3_PUB_ACK_PENDING'); return { ok: false, error: '片付け先の /exec の形が違う（印だけ外した）' }; }
   ufBump_(1, '第3店の受け持ちの片付け');
   var txt = ''; try { txt = UrlFetchApp.fetch(url + '?action=shop3_pub_gave_clear&to=' + encodeURIComponent(baRunnerId_()) + '&token=' + encodeURIComponent(token) + '&callback=cb', { muteHttpExceptions: true }).getContentText(); } catch (eT) { return { ok: false, error: '渡し元に届きませんでした：' + redactSecrets_(String((eT && eT.message) || eT)).slice(0, 120) }; }
   var j = null; try { j = JSON.parse(String(txt).replace(/^\s*[A-Za-z_$][\w$]*\(/, '').replace(/\)\s*;?\s*$/, '')); } catch (e) { j = null; }
@@ -9989,6 +9989,15 @@ var HB_NAME_ = { main: '本体', child: '2台目', child2: '3台目', child3: '4
    URL は script.google.com/macros/s/…/exec の形だけ受ける（ほかの所へ WRITE_TOKEN を送らない）。台の名前は main・child・child<数字> だけ。
    読むのは小さい鍵1本・CacheService で10分覚える（見張りは毎時・営業の鍵の確かめは公開の口なので、そのたびに Supabase を読まない） */
 var GAS_EXEC_RE_ = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
+/* ★2026-11-19 05（全体レビュー 11/19 中8）：見張りは gas_runners の /exec に WRITE_TOKEN を付けて送る＝形だけ見ると、app_kv を書ける人が自分の /exec を入れて鍵を受け取れる。
+   知っている台（6台＋営業）の /exec の ID だけを通す。台を増やす・デプロイを作り直した時は、ここに ID を足してから gas_runners を書く */
+var GAS_EXEC_IDS_OK_ = {
+  'AKfycbwbCbQpW0ZrsnWQ4WMX5FXDinIEd8DkVwikbFSjxbkss2NFl72dhZoiLJt-mqUEBLG7yA': 1, 'AKfycbzmh47e-hl6FvJA6-1CEjvdDSLkON-hQXXA6glvFdXRCQo9k6viM6RcawKLv9XGxlyi': 1,
+  'AKfycbx1QS5CTVC2X04GjI80X88KuJNMlH1iEKwGSD2LakQCnbCbEGSbel9HOrRheXZdOpeO': 1, 'AKfycbxV02tSfDsnAB82XXwZWSALAt2H1g41wZ5uMsn1D-u9TJ4lilLRZeAQWXLOfR-r2Qzasg': 1,
+  'AKfycbyJ1lrC6o0zZuOEaAo8aDp8C7aWtf8VoMwjYTPSRwoJj0PyCAZhaI0vTzP21zufoYe2': 1, 'AKfycbyR7lNjSmLygGNUV831YGuxAMO0c9rxQ1X_fOL6rHeiRY8PsduoMv-Zr-XM7vUJRw-Kmg': 1,
+  'AKfycbyabXXBhsDZmB1X7K_4DNrLsRZ0TXIFax_qnmp2eamrFKan3uVaRxgArD9o6XFage7LTg': 1
+};
+function gasExecOk_(u) { u = String(u || '').trim(); if (!GAS_EXEC_RE_.test(u)) return false; return !!GAS_EXEC_IDS_OK_[u.split('/s/')[1].split('/')[0]]; }
 var _GAS_RUNNERS = null;
 function gasRunners_() {
   if (_GAS_RUNNERS) return _GAS_RUNNERS;
@@ -9998,15 +10007,15 @@ function gasRunners_() {
     try { var r = sbSelect_('app_kv', 'select=v&k=eq.gas_runners'); v = (r && r[0] && r[0].v) || null; try { if (C) C.put('gas_runners10', JSON.stringify(v), 600); } catch (eP) {} }
     catch (eR) { v = null; err = redactSecrets_(String((eR && eR.message) || eR)).slice(0, 100); }
   }
-  var exec = {}, outreach = OUTREACH_API, n = 0;
+  var exec = {}, outreach = OUTREACH_API, n = 0, rej = [];
   Object.keys(HB_EXEC_).forEach(function (id) { exec[id] = HB_EXEC_[id]; });
-  if (v && v.runners && typeof v.runners === 'object') Object.keys(v.runners).forEach(function (id) { var u = String(v.runners[id] || '').trim(); if (/^(main|child\d*)$/.test(id) && GAS_EXEC_RE_.test(u)) { exec[id] = u; n++; } });
-  if (v && GAS_EXEC_RE_.test(String(v.outreach || '').trim())) outreach = String(v.outreach).trim();
+  if (v && v.runners && typeof v.runners === 'object') Object.keys(v.runners).forEach(function (id) { var u = String(v.runners[id] || '').trim(); if (/^(main|child\d*)$/.test(id) && gasExecOk_(u)) { exec[id] = u; n++; } else if (u) rej.push(id); });
+  if (v && gasExecOk_(v.outreach)) outreach = String(v.outreach).trim(); else if (v && v.outreach) rej.push('outreach');
   var ord = function (id) { return id === 'main' ? -1 : (Number(id.replace('child', '')) || 0); };
   var ids = Object.keys(exec).sort(function (a, b) { return ord(a) - ord(b); });
   var watch = (v && Array.isArray(v.watch)) ? ids.filter(function (id) { return v.watch.indexOf(id) >= 0; }) : ids;
   if (!watch.length) watch = ids;
-  _GAS_RUNNERS = { exec: exec, ids: ids, watch: watch, outreach: outreach, src: n ? 'app_kv' : 'code', err: err, unset: !err && !v };
+  _GAS_RUNNERS = { exec: exec, ids: ids, watch: watch, outreach: outreach, src: n ? 'app_kv' : 'code', err: err, rej: rej, unset: !err && !v };
   return _GAS_RUNNERS;
 }
 /* ★2026-11-16 本人「Gmail名ちゃんと表示して」：この GAS が動いている Google アカウントのアドレス（ポータルの接続枠のカードに出す）。
@@ -10162,11 +10171,13 @@ function hbWatchRun_(me, heal) {
   /* ★2026-11-19 05（本人「為替入ってなくない？」・00）：日次の為替（別の GAS「Shopee OS 為替」syncFx・本体のアカウント・朝6〜7時）は、本体が朝に Google に断られると取れない（11/18 が抜けて利益管理表の Rate が空）。
      見張りの台（4台目・毎時）で、8時を過ぎても今日（JST）の行が無ければ、同じ取り方（open.er-api の JPY 基準・JST の日付で積む）で代わりに入れる。入っていれば読むだけ（小さい1行） */
   try { var _fxr = hbFxFill_(); if (_fxr && _fxr.filled) add({ id: 'fx_daily_fill', name: '日次の為替（代わりに取った）', state: 'warn', why: _fxr.ymd + ' の為替が朝の GAS で入っていなかったので、見張りの台で入れた（' + _fxr.ccs + '）', last: new Date().toISOString() });
-    else if (_fxr && _fxr.err) add({ id: 'fx_daily_fill', name: '日次の為替', state: 'red', why: '今日の為替が無く、代わりにも取れなかった：' + _fxr.err, last: null }); } catch (eFx) {}
+    else if (_fxr && _fxr.err) add({ id: 'fx_daily_fill', name: '日次の為替', state: 'red', why: '今日の為替が無く、代わりにも取れなかった：' + _fxr.err, last: null }); }
+  catch (eFx) { add({ id: 'fx_daily_fill', name: '日次の為替（代わりに取る処理）', state: 'red', why: '代わりに取る処理が落ちた：' + String((eFx && eFx.message) || eFx).slice(0, 120), last: null }); }   /* ★11/19 05（全体レビュー 11/19 中7）：前は空の catch＝黙って効かない。v->days->YYYY-MM-DD が PostgREST で読めるのは 11/19 に確かめた（無い日は null） */
   /* ① 基準（4台分）を1回で読む */
   /* ★2026-11-17 05（全体レビュー 11/17 中17・中19）：見張る台は gas_runners（app_kv）から。読めない・無い時は直書きの4台（落ちない）＝その時は1行の警告で知らせる */
   var _GR = gasRunners_(), _W = _GR.watch.slice();
   if (_GR.err) add({ id: 'gas_runners_read', name: '台の一覧（app_kv gas_runners）の読み', state: 'warn', why: '読めなかった＝この回は直書きの台（' + _W.join('・') + '）だけ見ている（' + _GR.err + '）', last: null });
+  if (_GR.rej && _GR.rej.length) add({ id: 'gas_runners_rej', name: '台の一覧（app_kv gas_runners）の知らない /exec', state: 'red', why: '知らない /exec が入っていたので外した（鍵を送らない）：' + _GR.rej.join('・') + '。台を増やした時は GAS_EXEC_IDS_OK_ に足す', last: null });
   else if (_GR.unset) add({ id: 'gas_runners_unset', name: '台の一覧（app_kv gas_runners）', state: 'warn', why: 'まだ入っていない＝直書きの台（' + _W.join('・') + '）だけ見ている（5台目・6台目は見ていない）', last: null });
   var bases = null; try { bases = {}; (hbSel_('select=k,v&k=in.(' + _W.map(function (w) { return 'hb_trig_' + w; }).join(',') + ')') || []).forEach(function (r) { bases[r.k] = r.v; }); } catch (eB) { bases = null; }
   if (!bases) add({ id: 'trigbase_read', name: 'トリガーの基準の読み（Supabase）', state: 'blind', why: '読めなかった＝この回はトリガーの欠けを見ていない' + (HB_LAST_ERR ? '（' + HB_LAST_ERR + '）' : ''), last: null });
@@ -15708,6 +15719,9 @@ function tcgTick(manual) {
     if (BA_KV_ERR) { ufPersist_(); try { lock.releaseLock(); } catch (e0) {} return { ok: false, skipped: 'cfg_unreadable' }; }
     var tc = cfg.tcg || {};
     var rid = rid0;   /* 担当の判定は上（設定だけ読んだ時点）で済ませた */
+    /* ★2026-11-19 05（全体レビュー 11/19 高1）：前は OFF・枠の止め・5台目の線（12,000）の return より後にあった＝止まっている間は「売れたカードの他の国を在庫0」も止まり、在庫1×7か国のカードが二重に売れうる。
+       ゲームの boshuAutoTick と同じく、設定が読めた直後に必ず走らせる（OFF・枠の止めでも動く） */
+    try { baSoldSync_(st); } catch (eSold) { baLog_(st, '売れたカードの見直しに失敗: ' + String(eSold).slice(0, 160)); }
     if (!tc.on && manual !== true) return finish_('OFF（cfg.tcg.on）');
     if (!cfg.on && manual !== true) return finish_('🤖がOFFなので🃏も休み');
     var ufNow = ufTotal_(); if (ufNow > ufStopLine_() - 2000) { baQuotaSkipRec_(st, ufNow, ufStopLine_(), 'tcg'); return finish_(baQuotaSkipMsg_(ufNow, ufStopLine_())); }
@@ -15717,7 +15731,6 @@ function tcgTick(manual) {
     if (_tcgStop && ufNow >= _tcgStop && manual !== true) { baQuotaSkipRec_(st, ufNow, _tcgStop, 'tcg'); return finish_('🃏はこの台（' + rid0 + '）で接続 ' + ufNow + ' 回＝線 ' + _tcgStop + ' を超えたので、太平洋時間の日替わりまで休み'); }
     /* ★2026-10-12【最重要】トレカは在庫1で7か国に出すのに、売れた時に他国の在庫を0にする処理（ゲームの boshuAutoTick 7530行の baSoldSync_）を呼んでいなかった＝同じ1枚が二重に売れうる。
        baSoldSync_ は渡した状態の added（直近3日の注文と突き合わせ）を見るので、トレカの状態をそのまま渡す */
-    try { baSoldSync_(st); } catch (eSold) { baLog_(st, '売れたカードの見直しに失敗: ' + String(eSold).slice(0, 160)); }
     var hasKey = false; try { hasKey = !!(P_().getProperty('CLAUDE_KEY')); } catch (eK) {}
     if (!hasKey) return finish_('🔒 CLAUDE_KEY が無いので出しません（カードは写真の判定なしでは出さない）');
     var aiCap = (cfg.aiYenCap === undefined || cfg.aiYenCap === null || cfg.aiYenCap === '') ? 1000 : Number(cfg.aiYenCap);
