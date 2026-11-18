@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261119-0110'
+var SRC_VER = '20261119-0215'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -10132,6 +10132,26 @@ function hbWatchTick() {
   } finally { try { C.remove('hb_running'); } catch (eC) {} try { ufPersist_(); } catch (eP) {} }
 }
 var HB_MAIN_BLOCKED_ = false;
+var HB_FX_CUR_ = { PH: 'PHP', SG: 'SGD', MY: 'MYR', BR: 'BRL', VN: 'VND', TH: 'THB', TW: 'TWD' };
+function hbFxFill_() {
+  var hrJ = Number(Utilities.formatDate(new Date(), 'Asia/Tokyo', 'H')); if (hrJ < 8) return { early: 1 };
+  var ymd = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  var r0 = hbSel_('select=t:v->days->' + ymd + '&k=eq.fx_daily');
+  if (!r0 || !r0[0]) return { err: 'fx_daily を読めない' };
+  if (r0[0].t) return { ok: 1 };
+  ufBump_(1, '為替の代わり取り');
+  var res = UrlFetchApp.fetch('https://open.er-api.com/v6/latest/JPY', { muteHttpExceptions: true });
+  var j = null; try { j = JSON.parse(res.getContentText()); } catch (e) { j = null; }
+  if (!j || j.result !== 'success' || !j.rates) return { err: '為替の取得に失敗（HTTP ' + res.getResponseCode() + '）' };
+  var row = {}; Object.keys(HB_FX_CUR_).forEach(function (cc) { var per = j.rates[HB_FX_CUR_[cc]]; if (per > 0) row[cc] = Math.round((1 / per) * 1e6) / 1e6; });
+  if (Object.keys(row).length < 7) return { err: '7か国そろわない' };
+  var v = baKvFresh_('fx_daily'); if (!v || typeof v !== 'object' || !v.days || BA_KV_FAIL['fx_daily']) return { err: 'fx_daily を読み直せない＝書かない' };
+  if (v.days[ymd]) return { ok: 1 };   /* 読み直した間に朝の GAS が入れた */
+  v.days[ymd] = row; v.fillBy = v.fillBy || {}; v.fillBy[ymd] = { at: new Date().toISOString(), by: 'hbWatch', src: 'open.er-api ' + String(j.time_last_update_utc || '') };
+  var ks = Object.keys(v.fillBy).sort(); if (ks.length > 30) ks.slice(0, ks.length - 30).forEach(function (k) { delete v.fillBy[k]; });
+  baKvSet_('fx_daily', v);
+  return { filled: 1, ymd: ymd, ccs: Object.keys(row).map(function (cc) { return cc + '=' + row[cc]; }).join(' ') };
+}
 function hbWatchRun_(me, heal) {
   HB_MAIN_BLOCKED_ = false;
   var now = Date.now(), items = [], P = P_(), tok = encodeURIComponent(P.getProperty('WRITE_TOKEN') || '');
@@ -10139,6 +10159,10 @@ function hbWatchRun_(me, heal) {
   var fin = function () { var red = items.filter(function (x) { return x.state === 'red'; }).length, warn = items.filter(function (x) { return x.state === 'warn'; }).length, blind = items.filter(function (x) { return x.state === 'blind'; }).length; return { at: new Date().toISOString(), by: me, byName: HB_NAME_[me] || me, src: SRC_VER, red: red, warn: warn, blind: blind, items: items };   /* ★11/15 00：見張り自身が読めなかった物は blind（赤の数に混ぜない・本人の画面に出さない・05 と 00 にだけ知らせる） */ };
   /* 見張りの台の枠が切れていたら、1行だけ書いて抜ける（4台とも「答えない」と取り違えない） */
   if (ufIsBlocked_()) { add({ id: 'watcher_quota', name: '見張りの台（' + (HB_NAME_[me] || me) + '）の接続枠', state: 'warn', why: 'Google の1日の枠に断られている＝この回は見ていない（日本時間 ' + ufResetJstStr_() + ' に戻る）', last: null }); return fin(); }
+  /* ★2026-11-19 05（本人「為替入ってなくない？」・00）：日次の為替（別の GAS「Shopee OS 為替」syncFx・本体のアカウント・朝6〜7時）は、本体が朝に Google に断られると取れない（11/18 が抜けて利益管理表の Rate が空）。
+     見張りの台（4台目・毎時）で、8時を過ぎても今日（JST）の行が無ければ、同じ取り方（open.er-api の JPY 基準・JST の日付で積む）で代わりに入れる。入っていれば読むだけ（小さい1行） */
+  try { var _fxr = hbFxFill_(); if (_fxr && _fxr.filled) add({ id: 'fx_daily_fill', name: '日次の為替（代わりに取った）', state: 'warn', why: _fxr.ymd + ' の為替が朝の GAS で入っていなかったので、見張りの台で入れた（' + _fxr.ccs + '）', last: new Date().toISOString() });
+    else if (_fxr && _fxr.err) add({ id: 'fx_daily_fill', name: '日次の為替', state: 'red', why: '今日の為替が無く、代わりにも取れなかった：' + _fxr.err, last: null }); } catch (eFx) {}
   /* ① 基準（4台分）を1回で読む */
   /* ★2026-11-17 05（全体レビュー 11/17 中17・中19）：見張る台は gas_runners（app_kv）から。読めない・無い時は直書きの4台（落ちない）＝その時は1行の警告で知らせる */
   var _GR = gasRunners_(), _W = _GR.watch.slice();
