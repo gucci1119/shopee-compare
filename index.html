@@ -1860,7 +1860,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261119-025809';
+  const APP_BUILD = '20261119-030118';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -28422,14 +28422,32 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     throw last || new Error('読める台がありません');
   }
   /* ★11/17 本人「今やってくれや」：Seller Center の注文の詳細・チャットの画面の写し（Supabase の保存場所・app_kv sls_claim.items[k].shots.order / .chat）。無ければ「写しはまだ」と出す */
-  function slsShot_(r, kind, label) {
-    const u = r.shots && r.shots[kind];
-    if (!u || !/^https:\/\/khjjjouhryigqunxygyg\.supabase\.co\/storage\/v1\/object\/public\/proofs\/sls\//.test(u)) return '';   /* ★11/17 本人「こっちの事情やし」＝外に出す書類に「まだ」「分からない」を書かない */
-    /* ★11/17 本人「スクリーンショットの画質荒いよね？」：注文の詳細はページそのものを2倍の絵に（画面を縮めて撮らない）・Order History は別の1枚で文字が読める大きさに */
-    const okU = x => x && /^https:\/\/khjjjouhryigqunxygyg\.supabase\.co\/storage\/v1\/object\/public\/proofs\/sls\//.test(x);
-    const h = kind === 'order' && okU(r.shots.orderHist) ? `<div style="font-size:11.5px;color:#555;margin-top:2px">Order History</div><img src="${esc(r.shots.orderHist)}" crossorigin="anonymous" style="width:100%;max-width:340px;border:1px solid #ccc;border-radius:4px;display:block;margin-bottom:6px">` : '';
-    return `<div style="margin:4px 0 8px"><div style="font-size:11.5px;color:#555">${esc(label)}</div>${h}<img src="${esc(u)}" crossorigin="anonymous" style="width:100%;max-width:760px;border:1px solid #ccc;border-radius:4px;display:block"></div>`;
+  /* ★2026-11-19 05（全体レビュー 11/19 高2）：写しは鍵なしで読める公開の置き場（proofs/sls/）にあった＝買い手の名前・会話・配送の情報が誰でも読めた。
+     → 非公開の置き場 slsproof/order/<名前> に移した（182枚・中身を照らした）。記録（sls_claim の shots）の URL は前のまま＝その名前で非公開の置き場を鍵付きで読み、
+     絵の中身（data: URL）にして書類に埋める（PDF にもそのまま入る）。読めない絵は出さない（外に出す書類に「まだ」「分からない」を書かない＝11/17 本人） */
+  const SLS_PUB_RE_ = /^https:\/\/khjjjouhryigqunxygyg\.supabase\.co\/storage\/v1\/object\/public\/proofs\/sls\/(order|chat)\/([A-Za-z0-9._-]+\.(?:jpe?g|png))$/;
+  async function slsShotPrep_(r) {
+    r._shotSrc = {};
+    if (!r.shots || !settings.sbSecret) return r._shotSrc;
+    for (const kind of ['order', 'orderHist', 'chat']) {
+      const m = SLS_PUB_RE_.exec(String(r.shots[kind] || '')); if (!m) continue;
+      try {
+        const res = await fetch(SB_URL + '/storage/v1/object/authenticated/slsproof/' + m[1] + '/' + encodeURIComponent(m[2]), { headers: { apikey: settings.sbSecret, authorization: 'Bearer ' + settings.sbSecret } });
+        if (!res.ok) continue;
+        const b = await res.blob();
+        r._shotSrc[kind] = await new Promise((ok, ng) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = ng; fr.readAsDataURL(b); });
+      } catch (_) {}
+    }
+    return r._shotSrc;
   }
+  function slsShot_(r, kind, label) {
+    const S = r._shotSrc || {}, u = S[kind];
+    if (!u) return '';   /* ★11/17 本人「こっちの事情やし」＝外に出す書類に「まだ」「分からない」を書かない */
+    /* ★11/17 本人「スクリーンショットの画質荒いよね？」：注文の詳細はページそのものを2倍の絵に（画面を縮めて撮らない）・Order History は別の1枚で文字が読める大きさに */
+    const h = kind === 'order' && S.orderHist ? `<div style="font-size:11.5px;color:#555;margin-top:2px">Order History</div><img src="${esc(S.orderHist)}" style="width:100%;max-width:340px;border:1px solid #ccc;border-radius:4px;display:block;margin-bottom:6px">` : '';
+    return `<div style="margin:4px 0 8px"><div style="font-size:11.5px;color:#555">${esc(label)}</div>${h}<img src="${esc(u)}" style="width:100%;max-width:760px;border:1px solid #ccc;border-radius:4px;display:block"></div>`;
+  }
+
   /* ★11/17 本人「1オーダーで１括りにしてPDF連結させたら？」「10MBまで（少し下がるくらいで）」「セラーはちゃんと発送業務を履行してるよっていうのが分かればいい」「材料は多い方がいい」：
      1つの注文につき PDF は1つ。先頭に目次・章は ①Shopee の注文と発送 → ②仕入れ（取引画面の写し＋記録）→ ③チャットと買い手の主張（発送の知らせを先頭に）→ ④Shopee への問い合わせ（ある時だけ）。
      倉庫で量った重さは入れない（本人「これはいらんだろ」）。取引画面の写しは入れる（本人「別にええやろ。shopeeにも出てる情報やし」） */
@@ -28437,7 +28455,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const SLS_CLAIM_RE = /n[aã]o (?:recebi|chegou|veio)|not (?:received|arrived|delivered)|didn'?t (?:receive|arrive)|haven'?t received|missing|faltando|faltou|vazi[oa]|empty|roubad|stolen|chegou (?:sem|vazio|aberto)|open(?:ed)? box|wrong item|item errado|damaged|danificad|quebrad/i;
   async function slsDspEvidenceHtml_(r) {
     const tsJ = t => { const n = Number(t); return n > 0 ? new Date((n < 1e12 ? n * 1000 : n) + 9 * 3600000).toISOString().slice(0, 16).replace('T', ' ') + ' JST' : ''; };
-    const awbP = Promise.race([awbImgs_(r.sn), new Promise(ok => setTimeout(() => ok(null), 25000))]).catch(() => null);   /* 25秒で諦める（根拠資料を止めない） */   /* ★11/17 残した送り状（無ければ何も出さない） */
+    const awbP = Promise.race([awbImgs_(r.sn), new Promise(ok => setTimeout(() => ok(null), 25000))]).catch(() => null);
+    const shotP = Promise.race([slsShotPrep_(r), new Promise(ok => setTimeout(() => ok(null), 25000))]).catch(() => null);   /* ★11/19 高2：写しは非公開の置き場から（25秒で諦める） */   /* 25秒で諦める（根拠資料を止めない） */   /* ★11/17 残した送り状（無ければ何も出さない） */
     const [det, trk0, chat, inv] = await Promise.all([
       r.shop ? slsDspGas_({ action: 'get_order_detail', shop_id: r.shop, order_sn: r.sn }).catch(e => ({ err: String((e && e.message) || e) })) : Promise.resolve({ err: 'Shop ID が無い' }),
       r.shop ? slsDspGas_({ action: 'api_probe', token: settings.writeToken, path: '/api/v2/logistics/get_tracking_info', shop_id: r.shop, q: JSON.stringify({ order_sn: r.sn }) }).catch(e => ({ err: String((e && e.message) || e) })) : Promise.resolve({ err: 'Shop ID が無い' }),
@@ -28472,7 +28491,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const evHtml = evs.length ? `<h3>Tracking history / 追跡の記録</h3><table>${evs.slice(0, 40).map(e => `<tr><td style="width:26%;white-space:nowrap">${E(tsJ(e.update_time))}</td><td style="width:22%">${E(e.logistics_status)}</td><td>${E(e.description)}</td></tr>`).join('')}</table>` : '';
     const inqs = slsInqFor_(r);
     const inqHtml = inqs.map(q => `<table>${T('Date / 日付', E(q.date))}${T('Subject / 件名', E(q.subject))}${T('Summary / 要旨', E(q.summary))}${q.shot && proofOk(q.shot) ? T('Copy / メールの写し', `<img src="${E(q.shot)}" crossorigin="anonymous" style="width:100%;max-width:700px;border:1px solid #ccc">`) : ''}</table>`).join('<div style="height:6px"></div>');
-    const awb = await awbP;
+    const awb = await awbP; await shotP;
     const awbHtml = awb && awb.imgs.length ? `<h3>Shipping label (SLS) / 送り状</h3>${awb.imgs.map(u => `<img src="${u}" style="width:380px;max-width:100%;border:1px solid #ddd;border-radius:4px;margin:2px 0 8px">`).join('')}` : '';
     const chs = [
       { t: '1. Order & Shipping Record / 注文と発送の記録', h: `${slsShot_(r, 'order', 'Order detail (Seller Centre) / 注文の詳細の画面')}${awbHtml}<table>${T('Order ID', E(r.sn))}${T('Order date / 注文日', E(r.od) + (od && od.create_time ? '（' + E(tsJ(od.create_time)) + '）' : ''))}${T('Buyer', E(r.buyer || '?'))}${T('Order status', od ? E(od.order_status) : '')}${T('Paid / 支払い', od && od.pay_time ? E(tsJ(od.pay_time)) : '—')}</table>
@@ -30666,6 +30685,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-19', items: [
+      '🔒 <b>SLS+ の申し立ての写し（注文の詳細・チャットの画面）を、鍵が無いと読めない置き場に移しました</b>（全体レビュー高2）：前は誰でも読める置き場にあり、名前が注文番号でした。根拠資料の PDF には今まで通り入ります',
       '🤝 <b>お客さんと決めた金額（合意の額）で Request page に足した時は、粗利・赤字・目標との比べの文を付けないようにしました</b>：前は赤字でも出品はしていたのに「値段を上げてから、もう一度押してください」「目標の粗利より ¥… 少ない」が付き、4つの道具にそのまま出ていました（本人「もう合意してるんだよ」）。止めるのは、掲載額が合意の額と違う時と額が読めない時だけです',
       '🏷 <b>送り状を残すのは「🚚倉庫へ発送」の印を付けた注文だけにしました</b>（全体レビュー中1）：前は🖨️を押しただけで90秒後に、また🖨️を押した記録を「印刷済み」の代わりに見て、印刷していない注文にも Shopee の印刷の口を呼びえた。Shopee から「初めての印刷」と返った時は、注文管理の行の🏷️✓の横に<b>⚠初めての印刷</b>を出し、toast でも知らせます（貼った送り状と同じか確かめる）。',
       '🔁 <b>送り状の30分ごとの見回りを、ポータルのタブ1枚だけで回すようにしました</b>（全体レビュー中2）：前は担当の PC のタブの数だけ同じ注文に作り直し、控えを2か所から上書きしていた。控えを書けなかった時・残せなかった注文は、行に<b>🏷️⚠</b>（理由は吹き出し）を出し、6時間あけてからもう一度試します（前は同じ15件を30分ごとに叩いていた）。',
