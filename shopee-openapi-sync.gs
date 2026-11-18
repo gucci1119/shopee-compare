@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261118-1000'
+var SRC_VER = '20261119-0100'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -12629,8 +12629,10 @@ function boshuAutoTick(manual) {
          夜の JAN 調べに積み（写真の控えがある作品だけ・1回40件まで）、答えは jan_sg_cache（鍵＝駿河屋の番号、無ければ g:機種:作品の鍵）に入る→次の回ここで拾って出る。
          GAS からは駿河屋を読まない（今の SG_JAN_PER_RUN の通信を増やさない） */
       if (BA_GAME_JAN_REQ && !BA_GAME_JAN_EXEMPT.test(String(hw)) && !baJanReal_(String(c.jan || ''))) {
-        var _gj = baGameJanOf_(hw, c);
+        var _gj = baGameJanOf_(hw, c), _gm = _gj ? '' : baGameMpnOf_(hw, c);
         if (_gj) c.jan = _gj;
+        else if (_gm) c.mpn = _gm;   /* ★11/19 JAN が無ければ日本版の型番で出す */
+        else if (baGameNoJp_(hw, c)) { out.skipped++; out.nojp = (out.nojp || 0) + 1; baSkipRec_(st, hw, '', c, 'nojp'); continue; }   /* ★11/19 日本版なし＝外す・積まない */
         else { if ((baPreOf_(pre, c.key, hw) || {}).img) { baGameJanTodo_(hw, c); out.nojanPh = (out.nojanPh || 0) + 1; } out.skipped++; out.nojan = (out.nojan || 0) + 1; baSkipRec_(st, hw, '', c, 'nojan'); continue; }
       }
       var en = baEnName_(c, st, enCache, hw); if (en && /[ぁ-んァ-ヶ一-龠]/.test(en)) en = '';   // 翻訳しきれず日本語が残った名前は出さない
@@ -12711,7 +12713,7 @@ function boshuAutoTick(manual) {
           if (hitsM < minHits) { out.skipped++; baSkipRec_(st, hw, '', c, 'fewsupply', hitsM); continue; }
           var stockM = (hitsM >= minHits && costM > 0 && costM <= maxCost) ? 1 : 0;
           used[pm.img] = baUsedTag_(c.key, hw);
-          picks.push({ key: c.key, ja: c.ja, en: baBestName_(baEnPlatStrip_(en, hw), baBestOf_(c.ja, pm.name)), best: baBestOf_(c.ja, pm.name) || undefined, jan: c.jan || '', img: pm.img, imageId: imageIdM, hits: hitsM, cost: costM, stock: stockM, need: c.need, src: pm.src || '', q: 'https://jp.mercari.com/search?keyword=' + encodeURIComponent(q) + '&status=on_sale', from: 'mercari' });
+          picks.push({ key: c.key, ja: c.ja, en: baBestName_(baEnPlatStrip_(en, hw), baBestOf_(c.ja, pm.name)), best: baBestOf_(c.ja, pm.name) || undefined, jan: c.jan || '', mpn: c.mpn || '', img: pm.img, imageId: imageIdM, hits: hitsM, cost: costM, stock: stockM, need: c.need, src: pm.src || '', q: 'https://jp.mercari.com/search?keyword=' + encodeURIComponent(q) + '&status=on_sale', from: 'mercari' });
           continue;
         }
         baLog_(st, 'メルカリの写真を取れず→ヤフオクで探す: ' + (c.ja || c.en));
@@ -12747,7 +12749,7 @@ function boshuAutoTick(manual) {
       if (!imageId) { out.skipped++; Utilities.sleep(1500); continue; }
       used[img] = baUsedTag_(c.key, hw);
       var _yT = ((hits || []).filter(function (h) { return String(h.img || '').replace(/\?.*$/, '') === String(img || '').replace(/\?.*$/, ''); })[0] || {}).t || '';
-      picks.push({ key: c.key, ja: c.ja, en: baBestName_(baEnPlatStrip_(en, hw), baBestOf_(c.ja, _yT)), best: baBestOf_(c.ja, _yT) || undefined, jan: c.jan || '', img: img, imageId: imageId, hits: hits.length, cost: cost, stock: stock, need: c.need, src: srcUrl || (srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : ''), q: y.url || '', from: (y.src === 'yahoo') ? 'yahoo' : 'paypay' });
+      picks.push({ key: c.key, ja: c.ja, en: baBestName_(baEnPlatStrip_(en, hw), baBestOf_(c.ja, _yT)), best: baBestOf_(c.ja, _yT) || undefined, jan: c.jan || '', mpn: c.mpn || '', img: img, imageId: imageId, hits: hits.length, cost: cost, stock: stock, need: c.need, src: srcUrl || (srcId ? ('https://auctions.yahoo.co.jp/jp/auction/' + srcId) : ''), q: y.url || '', from: (y.src === 'yahoo') ? 'yahoo' : 'paypay' });
       Utilities.sleep(1200 + Math.floor(Math.random() * 1500));   // 叩きすぎない（ゆらぎ付き）
     }
     out.titles = picks.length;
@@ -14287,7 +14289,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
         baSet_(ledger, _x0._p.key, cc, String(tgt.item_id) + '#' + _ru.model_id); res.added++;
         listedSet[baTmKey_(_x0.option)] = 1;
         tgt.models = (tgt.models || []).map(function (m) { return /^\s*(test|dummy|sample)\d*\s*$/i.test(String((m && (m.n || m.name)) || '')) ? { n: _x0.option, price: _x0.price } : m; });
-        if (_x0._p.jan && !BA_LOOSE_HW.test(String(hw))) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan, hw: hw, ja: _x0._p.ja || '', src: _x0._p.src || '' });
+        if ((_x0._p.jan || baGameMpnOk_(_x0._p.mpn)) && !BA_LOOSE_HW.test(String(hw))) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: _ru.model_id, jan: _x0._p.jan || '', mpn: _x0._p.jan ? '' : _x0._p.mpn, hw: hw, ja: _x0._p.ja || '', src: _x0._p.src || '' });   /* ★11/19 型番も */
         /* 記録は【普通に足した時と丸ごと同じ形】。形が違うと売れた時の他国在庫0・写真の見直し・
            出品ログの写真表示がこの明細だけ素通りする（img は URL ではなく **imageId** を入れる） */
         try {
@@ -14355,7 +14357,7 @@ function baAddBatch_(cfg, cc, hw, fam, rows, todo, listedSet, ledger, st, series
       var mid = okNames[okNm_(x.option)];
       if (mid) {
         baSet_(ledger, x._p.key, cc, String(tgt.item_id) + (mid ? '#' + mid : '')); res.added++; _addedHere++; listedSet[baTmKey_(x.option)] = 1; tgt.models.push({ n: x.option, price: x.price });
-        if (mid && x._p.jan && !BA_LOOSE_HW.test(String(hw))) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });
+        if (mid && (x._p.jan || baGameMpnOk_(x._p.mpn)) && !BA_LOOSE_HW.test(String(hw))) BA_JAN_Q.push({ item_id: tgt.item_id, model_id: mid, jan: x._p.jan || '', mpn: x._p.jan ? '' : x._p.mpn, hw: hw, ja: x._p.ja || '', src: x._p.src || '' });   /* ★11/19 型番も */
         try { baLooseMark_(hw, cc, x._p.ja, tgt.item_id); baTodayCc_(st, cc); st.added.unshift({ at: new Date().toISOString(), hw: hw, cc: cc, item_id: tgt.item_id, model_id: mid || null, jan: x._p.jan || '', mpn: x._p.mpn || '', jc: x._p.jc || 0, jw: (mid && x._p.jan) ? 1 : 0, jv: baRuleVerFor_(hw), shop_id: tgt.shop_id, key: x._p.key, cat: String(tgt.name || '').slice(0, 70), series: series || '', src: x._p.src || '', srcTitle: String(x._p.srcTitle || '').slice(0, 60), srcPrice: Number(x._p.srcPrice) || 0, q: x._p.q || '', from: x._p.from || 'yahoo', en: x.option, ja: String(x._p.ja || '').slice(0, 80), price: x.price, stock: x.stock, img: x._p.imageId || '', cost: x._p.cost || 0, hits: x._p.hits || 0 }); } catch (e) {}
       }
       else { baSet_(ledger, x._p.key, cc, 'skip:notadded'); res.skipped++; baSkipRec_(st, hw, cc, x._p, 'notadded'); }
@@ -14531,6 +14533,23 @@ function baGameJanOf_(hw, c) {
   var j = String(BA_GAME_JAN[baGameJanKey_(hw, c)] || ''); if (baJanReal_(j)) return j;
   var j2 = String(BA_GAME_JAN[('g:' + String(hw || '') + ':' + String((c && c.key) || '')).slice(0, 90)] || ''); if (baJanReal_(j2)) return j2;   /* 駿河屋の番号がある作品でも、夜の調べが作品の鍵で書いた答えを拾う */
   return '';
+}
+/* ★2026-11-19 05（00 の決め・01 と受け渡しをそろえた）：ゲームの🤖は JAN が無い時、夜の調べ（Claude・¥0）が見つけた【日本版の型番】で出す（本人の決まり「JAN、無ければ型番」）。
+   置き場＝jan_sg_cache の "m:"＋鍵（鍵は今と同じ＝駿河屋の番号か g:機種:作品）。値は大文字・ハイフンあり。
+   日本版の型番の頭だけ通す（海外版を出さない）：PSP/PS3 の ULJS・ULJM・NPJH・BLJS・BLJM・BCJS-5桁／任天堂の …-JPN／MD の G-・T- 4〜5桁。01 の auto_push.py と同じ式。
+   "x:"＋鍵 が "nojp"＝駿河屋か公式で日本版が見つからなかった作品＝候補から外し、夜の調べにも積まない */
+var BA_GAME_MPN_RE = /^(?:(?:ULJS|ULJM|NPJH|BLJS|BLJM|BCJS)-\d{5}|[A-Z]{3}-[A-Z0-9-]+-JPN|(?:G|T)-\d{4,5})$/;
+function baGameMpnOk_(m) { return BA_GAME_MPN_RE.test(String(m || '').trim()); }
+function baGameMpnOf_(hw, c) {
+  if (BA_GAME_JAN === null) { var v = null; try { v = baKv_(SG_JAN_CACHE); } catch (e) {} BA_GAME_JAN = (v && typeof v === 'object') ? v : {}; }
+  var k1 = baGameJanKey_(hw, c), k2 = ('g:' + String(hw || '') + ':' + String((c && c.key) || '')).slice(0, 90);
+  var m = String(BA_GAME_JAN['m:' + k1] || BA_GAME_JAN['m:' + k2] || '').trim();
+  return baGameMpnOk_(m) ? m : '';
+}
+function baGameNoJp_(hw, c) {
+  if (BA_GAME_JAN === null) { var v = null; try { v = baKv_(SG_JAN_CACHE); } catch (e) {} BA_GAME_JAN = (v && typeof v === 'object') ? v : {}; }
+  var k1 = baGameJanKey_(hw, c), k2 = ('g:' + String(hw || '') + ':' + String((c && c.key) || '')).slice(0, 90);
+  return String(BA_GAME_JAN['x:' + k1] || BA_GAME_JAN['x:' + k2] || '') === 'nojp';
 }
 function baGameJanTodo_(hw, c) {
   if (BA_JAN_TODO_LOOSE.test(String(hw || ''))) return;
