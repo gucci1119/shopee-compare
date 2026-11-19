@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261119-0250'
+var SRC_VER = '20261120-0050'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -10362,14 +10362,17 @@ function hbWatchRun_(me, heal) {
   } catch (eO) { om = null; omErr = String((eO && eO.message) || eO).slice(0, 120); }
   if (!om) add({ id: 'omsg_read', name: '注文メッセージの突き合わせの読み', state: 'blind', why: '読めなかった＝この回は注文メッセージの送り漏れを見ていない（0件ではない）' + (omErr ? '（' + omErr + '）' : ''), last: null });
   else {
-    var omJa = { failed: '失敗', claimed: '送っている途中のまま', unknown: '送れたか分からない', retry: 'やり直し待ち' }, omMiss = [];
+    var omJa = { failed: '失敗', claimed: '送っている途中のまま', unknown: '送れたか分からない', retry: 'やり直し待ち' }, omMiss = [], omWait = [];
     om.orders.forEach(function (o) {
       if (om.since && Number(o.order_ts) < om.since) return;
       var st = om.led[o.sn], s0 = st && st.s;
       if (s0 === 'sent' || s0 === 'skip') return;
+      /* ★2026-11-20 05（00）：failed は開き直しを止めて本人が📦で送る形にした物＝直す物ではなく本人待ち。赤から外し、黄の「本人待ち」に分ける（📦に出ているので知らせ直さない）。unknown 等は今までどおり赤 */
+      if (s0 === 'failed') { omWait.push(o.cc + ' ' + o.sn + (st && st.note ? '（' + String(st.note).slice(0, 30) + '）' : '')); return; }
       omMiss.push(o.cc + ' ' + o.sn + '（' + Utilities.formatDate(new Date(Number(o.order_ts) * 1000), 'Asia/Tokyo', 'MM/dd HH:mm') + ' の注文・' + (s0 ? (omJa[s0] || s0) : '台帳に無い＝道具が拾っていない') + (st && st.note ? '：' + String(st.note).slice(0, 40) : '') + '）');
     });
     add({ id: 'omsg_unsent', name: '注文メッセージ（支払い済みで30分たっても送れていない注文）', state: omMiss.length ? 'red' : 'ok', why: omMiss.length ? omMiss.length + '件：' + omMiss.slice(0, 5).join('／') + (omMiss.length > 5 ? ' ほか ' + (omMiss.length - 5) + '件' : '') : '直近48時間の ' + om.orders.length + '件は送付済み（または送らない決め）', last: null });
+    if (omWait.length) add({ id: 'omsg_wait_user', name: '注文メッセージ（本人が📦で送るのを待っている＝直す物ではない）', state: 'warn', why: omWait.length + '件：' + omWait.slice(0, 5).join('／') + (omWait.length > 5 ? ' ほか ' + (omWait.length - 5) + '件' : ''), last: null });
   }
   /* ⑥-2 発送のお知らせの送り漏れ（★2026-11-15 05・00 の頼み：11/13 に窓口を本体へ移した時に発送のお知らせの作りが抜け、11/13〜15 に1通も出ていなかったのを見張りで拾えなかった）。
      倉庫へ送った印（costs.self_transit_at・直近3日）から3時間たち、まだスキャン前（orders.tab 300）なのに、台帳 order_msg_state.sh が sent でも skip（同じお客さんに24時間以内・自動 OFF の国など）でもない注文が1件でもあれば赤。
