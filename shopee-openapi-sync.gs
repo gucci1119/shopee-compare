@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261120-0432'
+var SRC_VER = '20261120-0732'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -10349,6 +10349,7 @@ function hbWatchRun_(me, heal) {
      注文（orders）と台帳（app_kv order_msg_state）を突き合わせる。直近48時間・支払い済み（キャンセル・未払いでない）・お客さんの名前あり・注文から30分たった注文で、
      台帳が sent でも skip（同じお客さんに7日以内に送った＝送らない決め・取込GAS omsgPull_ と同じ線）でもない物が1件でもあれば赤。
      読みは小さく：注文は5列だけ、台帳はその注文の鍵だけ（40件ずつ）。画面が変わっても窓が変わっても、送れていなければここで拾う */
+  var hbUserWait = [];   /* ★2026-11-20 05（00）：本人が📦で送る物（台帳 failed）＝注文メッセージ・発送のお知らせの両方をここに集め、黄の omsg_wait_user 1行で出す */
   var om = null, omErr = '';
   try {
     var nowS = Math.floor(now / 1000);
@@ -10376,7 +10377,7 @@ function hbWatchRun_(me, heal) {
       omMiss.push(o.cc + ' ' + o.sn + '（' + Utilities.formatDate(new Date(Number(o.order_ts) * 1000), 'Asia/Tokyo', 'MM/dd HH:mm') + ' の注文・' + (s0 ? (omJa[s0] || s0) : '台帳に無い＝道具が拾っていない') + (st && st.note ? '：' + String(st.note).slice(0, 40) : '') + '）');
     });
     add({ id: 'omsg_unsent', name: '注文メッセージ（支払い済みで30分たっても送れていない注文）', state: omMiss.length ? 'red' : 'ok', why: omMiss.length ? omMiss.length + '件：' + omMiss.slice(0, 5).join('／') + (omMiss.length > 5 ? ' ほか ' + (omMiss.length - 5) + '件' : '') : '直近48時間の ' + om.orders.length + '件は送付済み（または送らない決め）', last: null });
-    if (omWait.length) add({ id: 'omsg_wait_user', name: '注文メッセージ（本人が📦で送るのを待っている＝直す物ではない）', state: 'warn', why: omWait.length + '件：' + omWait.slice(0, 5).join('／') + (omWait.length > 5 ? ' ほか ' + (omWait.length - 5) + '件' : ''), last: null });
+    omWait.forEach(function (x) { hbUserWait.push('注文 ' + x); });   /* 黄の「本人待ち」は ⑥-2 の後に発送のお知らせと1行にまとめて出す */
   }
   /* ⑥-1b 🤖・🃏の写真集め（ポータルのタブ）の止まり（★2026-11-20 05・00 の頼み／01 の案1）：写真集めは担当の PC のポータルのタブの中で回る＝窓が閉じると写真が増えず🤖が止まる。
      ★レビュー高1：写真の控えの時刻だけで見ると、休み（枠・仕入れ画面・設定で切った）や集め終わりでも赤になる＆トレカの控えは GAS も書く。
@@ -10424,14 +10425,17 @@ function hbWatchRun_(me, heal) {
   } catch (eS) { sm = null; smErr = String((eS && eS.message) || eS).slice(0, 120); }
   if (!sm) add({ id: 'shmsg_read', name: '発送のお知らせの突き合わせの読み', state: 'blind', why: '読めなかった＝この回は発送のお知らせの送り漏れを見ていない（0件ではない）' + (smErr ? '（' + smErr + '）' : ''), last: null });
   else {
-    var shJa = { failed: '失敗', claimed: '送っている途中のまま', unknown: '送れたか分からない', retry: 'やり直し待ち' }, shMiss = [];
+    var shJa = { failed: '失敗', claimed: '送っている途中のまま', unknown: '送れたか分からない', retry: 'やり直し待ち' }, shMiss = [], shWaitN = 0;
     sm.list.forEach(function (c) {
       var st = sm.led[c.sn], s0 = st && st.s;
       if (s0 === 'sent' || s0 === 'skip') return;
+      /* ★2026-11-20 05（00：07:28 の見張りが failed の BR・PH の2件を赤で知らせ直した）：注文メッセージ（0050）と同じに、failed は本人が📦で送る物＝赤から外し、黄の「本人待ち」へ。unknown・claimed・retry・台帳に無いは赤のまま */
+      if (s0 === 'failed') { shWaitN++; hbUserWait.push('発送 ' + c.cc + ' ' + c.sn + (st && st.note ? '（' + String(st.note).slice(0, 30) + '）' : '')); return; }
       shMiss.push(c.cc + ' ' + c.sn + '（倉庫へ ' + Utilities.formatDate(new Date(Date.parse(c.self_transit_at)), 'Asia/Tokyo', 'MM/dd') + '・' + (s0 ? (shJa[s0] || s0) : '台帳に無い＝SR が拾っていない') + (st && st.note ? '：' + String(st.note).slice(0, 40) : '') + '）');
     });
-    add({ id: 'shmsg_unsent', name: '発送のお知らせ（倉庫へ送って3時間＋順番待ちの時間がたってもスキャン前で送れていない注文）', state: shMiss.length ? 'red' : 'ok', why: shMiss.length ? shMiss.length + '件：' + shMiss.slice(0, 5).join('／') + (shMiss.length > 5 ? ' ほか ' + (shMiss.length - 5) + '件' : '') : '直近3日に倉庫へ送った ' + sm.n + '件のうちスキャン前 ' + sm.list.length + '件は送付済み（または送らない決め）', last: null });
+    add({ id: 'shmsg_unsent', name: '発送のお知らせ（倉庫へ送って3時間＋順番待ちの時間がたってもスキャン前で送れていない注文）', state: shMiss.length ? 'red' : 'ok', why: shMiss.length ? shMiss.length + '件：' + shMiss.slice(0, 5).join('／') + (shMiss.length > 5 ? ' ほか ' + (shMiss.length - 5) + '件' : '') : '直近3日に倉庫へ送った ' + sm.n + '件のうちスキャン前 ' + sm.list.length + '件は送付済み（または送らない決め' + (shWaitN ? '・' + shWaitN + '件は本人が📦で送る待ち' : '') + '）', last: null });
   }
+  if (hbUserWait.length) add({ id: 'omsg_wait_user', name: '注文メッセージ・発送のお知らせ（本人が📦で送るのを待っている＝直す物ではない）', state: 'warn', why: hbUserWait.length + '件：' + hbUserWait.slice(0, 6).join('／') + (hbUserWait.length > 6 ? ' ほか ' + (hbUserWait.length - 6) + '件' : ''), last: null });
   return fin();
 }
 
