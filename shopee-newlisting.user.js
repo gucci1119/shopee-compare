@@ -1,7 +1,10 @@
 // ==UserScript==
 // @name         Shopee New-Listing Auto (Composer)
+// @name:ja      【Shopee出品】🆕 新規出品を自動入力（ポータルの下書きから）
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.7.1
+// @version      0.7.3
+// @updateURL    http://127.0.0.1:8765/shopee-newlisting.meta.js
+// @downloadURL  http://127.0.0.1:8765/shopee-newlisting.user.js
 // @description  ポータルのコンポーザーが作った出品ジョブ(#smdjob=)を新規出品ページで受け取り、①画像を先行アップロード(image_id化) ②雛形(その国で一度手動作成したcreate_product_info)＋ジョブから create_product_info を組み立て ③パネルの「🚀作成（非公開）／🚀作成＋公開」で公式APIにより実際に作成、まで行う。雛形が無い国はパネルが「雛形なし」表示（先に手動で1件作成→💾保存で登録）。🚀を押すまでは発行しない。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*
