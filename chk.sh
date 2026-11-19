@@ -271,4 +271,18 @@ for f in sys.argv[1:]:
     for i,l in enumerate(open(f,encoding="utf-8"),1):
         if rx.search(l) or rx2.search(l) or rx3.search(l): print(f+":"+str(i)+": "+l.strip()[:120])' index.html shopee-openapi-sync.gs | head -5)
 if [ -n "$B13" ]; then echo "NG  宣言の右側で同じ名前を読んでいる（実行時に Cannot access … before initialization で止まる）"; echo "$B13"; NG=1; else echo "OK  宣言の右側で同じ名前を読む形は無い"; fi
+# 7-14 ★2026-11-20 05（00・本人「出たり入ったり何してんの？」）：取込GAS の注文メッセージの再確認の回数 rc を減らす行が戻ったら止める。
+#     9/19 v27 から「期限切れ・札を返された時に rc を1つ戻す」作りで、unknown が20分ごとに際限なく渡り直し、同じ会話を約40分ごとに開き直していた（v111 で外した）。
+#     見るのは _gas_private の一番新しい取込GAS 本体（注文メッセージの口は 11/13 から本体）。コメントを除いたコードに rc を減らす形があれば NG。
+#     4台目窓口の控え（使っていない口）にも同じ行が残っている＝口を4台目へ戻す時は先に直す。
+B14=$(python3 - $(ls -t ../_gas_private/取込GAS_本体_本番_*.gs 2>/dev/null | head -1) <<'PY'
+import re,sys
+rx=re.compile(r"\brc--|--\s*[\w.]*\brc\b|\brc\s*-=\s*1|\.rc\s*-\s*1\b")
+for f in sys.argv[1:]:
+    for n,l in enumerate(open(f,encoding="utf-8"),1):
+        code=re.sub(r"/\*.*?\*/","",l); code=re.sub(r"(^|[^:])//.*$",r"\1",code)
+        if rx.search(code): print(f.split("/")[-1]+":"+str(n)+": "+code.strip()[:100])
+PY
+)
+if [ -n "$B14" ]; then echo "NG  取込GAS が注文メッセージの再確認の回数 rc を減らしている（際限なく渡し直す元・11/19）:"; echo "$B14" | head -3; NG=1; else echo "OK  取込GAS 本体は rc を減らしていない（注文メッセージの渡し直しは72時間に2回まで）"; fi
 exit $NG
