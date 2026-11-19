@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261120-0130'
+var SRC_VER = '20261120-0432'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -10312,6 +10312,10 @@ function hbWatchRun_(me, heal) {
       /* ★2026-11-15 05（03 の頼み・SR 6.19.350〜）：道具の窓が画面の裏（document.hidden）にある間は、注文メッセージ・📮が動かない（21:17 に Chrome の全タブが hidden）。
          道具は fn＝webchat_visible（WA も同じ形の予定）・failAt＝hidden の始まり（3分以上続いた時だけ）・maxMin 10 を送る。成否の印（okAt と failAt の大小）では見ず、failAt からの長さで見る。枠の断りの黄色にもしない */
       if (/_visible$|^page_awake$/.test(f.fn)) {
+        /* ★2026-11-20 05（00：04:31 に WA wasn79muus を「画面の裏 691分」と赤にした読み違い。実物は okAt 04:17＞failAt 11/19 16:57＝もう戻っていた）。
+           決まり「止まりは失敗が成功より新しい時か待ちがある時だけ」に合わせ、成功（okAt）が失敗より新しければ戻ったとして赤にしない。
+           SR の webchat_visible は hidden の間 okAt＝failAt（hidden の始まり）を送る＝大小が同じなので今までどおり赤になる。WA は hidden の間 failAt が毎回新しくなる */
+        if (ok && ok > fail) return;
         if (fail && (now - fail) / 60000 >= mx) add({ id: r.k + ':' + _fnId, name: tag + ' の窓（画面の裏で止まっている）', last: new Date(fail).toISOString(), maxMin: mx, state: 'red', why: '窓が画面の裏（hidden）のまま ' + Math.round((now - fail) / 60000) + '分（' + Utilities.formatDate(new Date(fail), 'Asia/Tokyo', 'HH:mm') + '〜）＝注文メッセージ・📮などが動かない。窓を少しでも見える所に出す' + (f.why ? '：' + String(f.why).slice(0, 80) : '') });
         return;
       }
