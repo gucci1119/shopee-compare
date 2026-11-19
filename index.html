@@ -1860,7 +1860,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261119-171238';
+  const APP_BUILD = '20261120-011704';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -23233,7 +23233,7 @@
       custom: async (kwRaw) => {
         const html = await bridgeRequest('GET', `https://paypayfleamarket.yahoo.co.jp/search/${encodeURIComponent(kwRaw)}?open=1`);   /* ★2026-10-04 安い順をやめて関連順（メルカリと同じ理由） */
         const m = String(html).match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-        if (!m) return [];
+        if (!m) { if (String(html || '').length > 200) { try { localStorage.setItem('smdYfmBlockedAt', String(Date.now())); } catch (_) {} } return []; }   /* ★2026-11-20 レビュー中2：200 で返る遮断ページも弾かれた扱い（トレカの yfmSearch と同じ） */
         let j = null; try { j = JSON.parse(m[1]); } catch (_) { return []; }
         const out = [], seen = new Set();
         // 深さを制限して走査（青天井の再帰は重いだけで、商品は浅い階層にしかない）
@@ -30679,6 +30679,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-20', items: [
+      '🎮 <b>ゲームの写真集めで Yahoo!フリマを探すのを、1時間6回まで・弾かれたら6時間休むにしました</b>（01 の案・00 の決め）：メルカリで写真が見つからなかった作品は前から Yahoo!フリマ→ヤフオクも探していましたが、回数の上限と「弾かれたら休む」が無く、トレカの探しと同じ休みの印も見ていませんでした。トレカ・相場の見直しと同じ休みの印を共有するので、どれか（仕入れ画面の手動の検索を含む）が弾かれたら3つとも6時間休みます。回数の上限や休みで探さなかった作品は「どこにも無かった」にせず、6時間後に探し直します',
+    ] },
     { date: '2026-11-19', items: [
       '🔢 <b>損益の明細の表で、数量の「×2」が右で切れていたのを直しました</b>（本人「数量の✖️2見切れてる」）：数量の列を少し広げ（42→52px）、表を画面の幅に縮めた時も50pxより細くならないようにしました。橙の札も少し小さくして、列の中央に置きました',
       '🔕 <b>送り状の「初めての印刷」の赤い知らせと、注文の行の「⚠初めての印刷」の印を出さないようにしました</b>（本人「これ消えねえ」・00 の数え）：ポータルが残した送り状25件が全部「初めての印刷」と返っていて、見分けになっていませんでした。30分ごとの見回りで1件ごとに赤い知らせが12秒ずつ延び、数分間出っぱなしになっていました。控えの記録はそのまま残します。「送り状を残せませんでした」（本当の失敗）の知らせと🏷️⚠の印は今のままです',
@@ -42878,18 +42881,25 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         /* ★2026-09-23 本人「効く順に」②：メルカリの写真が【全部NGだった作品】（prerej）も Yahoo!フリマ・ヤフオクを探す。
            前は「メルカリで1枚も無かった時」だけだったので、554作品が救われずにいた。写真がある時は【候補に足す】（置き換えない） */
         const _needOthers = (!pick || isRejNow(r.key)) && opts.others !== false;
+        let yfmSkipped = false;   /* ★2026-11-20 レビュー高2：上限・休みで Yahoo!フリマを飛ばした作品は「どこにも無かった」にしない */
         if (_needOthers) {
           for (const k of ['paypay', 'yahuoku']) {
             const site = (typeof DEAL_SITES !== 'undefined' ? DEAL_SITES : []).find(x => x.k === k); if (!site || !site.custom) continue;
+            /* ★2026-11-20 05（00・01 の案3）：ゲームの Yahoo!フリマは 1時間6回まで・弾かれたら6時間休む（トレカの yfmSearch と同じ印 smdYfmBlockedAt を共有＝[[dont-get-ip-blocked]]） */
+            if (k === 'paypay') {
+              let _yb = 0, _yh = []; try { _yb = Number(localStorage.getItem('smdYfmBlockedAt') || 0); _yh = (JSON.parse(localStorage.getItem('smdYfmGameHits') || '[]') || []).filter(t => Date.now() - t < 3600000); } catch (_) {}
+              if (Date.now() - _yb < 6 * 3600000 || _yh.length >= 6) { yfmSkipped = true; continue; }
+              _yh.push(Date.now()); try { localStorage.setItem('smdYfmGameHits', JSON.stringify(_yh)); } catch (_) {}
+            }
             await new Promise(rs => setTimeout(rs, 2500 + Math.random() * 1000));
-            let its = []; try { its = (await site.custom(kw)) || []; } catch (_) { its = []; }
+            let its = []; try { its = (await site.custom(kw)) || []; } catch (eY) { its = []; if (k === 'paypay' && /\b(403|429|5\d\d)\b/.test(String((eY && eY.message) || eY))) { try { localStorage.setItem('smdYfmBlockedAt', String(Date.now())); } catch (_) {} } }
             const h2 = its.filter(x => x && x.img && x.url && matchOk(x.name, core, r.ja, r.en)).sort((a, b) => (String(a.name).length - qLen) - (String(b.name).length - qLen));
             const p2 = h2.find(x => !usedImg.has(x.img) && !usedImg.has(stripQ(x.img))) || null;
             if (p2 && pick) { photoPool = photoPool.concat(h2.map(x => Object.assign({}, x, { _site: k }))); continue; }
             if (p2) { hits = h2; photoPool = h2; pick = p2; fromSite = k; break; }
           }
         }
-        if (!pick) { miss++; const _pk = baPreKeyFor(pre, r.key, hwKey); pre[_pk] = Object.assign({}, pre[_pk] || {}, { miss: (Number((pre[_pk] || {}).miss) || 0) + 1, missAt: new Date().toISOString(), missSrc: 'all', hw: hwKey }); changed[_pk] = 1; await new Promise(rs => setTimeout(rs, 1200)); continue; }   // 見つからなかった印（自動収集が同じ作品を毎回引かないように）
+        if (!pick) { miss++; const _pk = baPreKeyFor(pre, r.key, hwKey); pre[_pk] = Object.assign({}, pre[_pk] || {}, { miss: (Number((pre[_pk] || {}).miss) || 0) + 1, missAt: yfmSkipped ? new Date(Math.max(Date.now() - 3 * 86400000 + 6 * 3600000, (Date.parse((preRej[r.key] || {}).at || '') || 0) + 1000)).toISOString() : new Date().toISOString(),   /* ★再レビュー高：NG の記録の後の時刻にする（でないと isRejNow が毎回真＝10分ごとに探し直す） */ missSrc: yfmSkipped ? 'noyfm' : 'all', hw: hwKey }); changed[_pk] = 1; await new Promise(rs => setTimeout(rs, 1200)); continue; }   // 見つからなかった印（自動収集が同じ作品を毎回引かないように）
         // 相場：作品名に近い方の半分・【中古だけ】（新品／未使用に近いは数えない＝本人「新品の金額を取ってこないように」）・【外れ値を除いて】上側75%（本人「2,000〜3,000 の中に 1万円があったら外れ値」）。GAS baCostEst_ と同じ規則
         let usedHits = hits.filter(x => condRank(x) >= 0);
         /* ★2026-10-03 出品名に機種が書いてある出品が3件以上あれば、それだけで相場を出す（機種の語が無い出品＝別機種かもしれない） */

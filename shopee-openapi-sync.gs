@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261120-0050'
+var SRC_VER = '20261120-0130'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -10374,6 +10374,29 @@ function hbWatchRun_(me, heal) {
     add({ id: 'omsg_unsent', name: '注文メッセージ（支払い済みで30分たっても送れていない注文）', state: omMiss.length ? 'red' : 'ok', why: omMiss.length ? omMiss.length + '件：' + omMiss.slice(0, 5).join('／') + (omMiss.length > 5 ? ' ほか ' + (omMiss.length - 5) + '件' : '') : '直近48時間の ' + om.orders.length + '件は送付済み（または送らない決め）', last: null });
     if (omWait.length) add({ id: 'omsg_wait_user', name: '注文メッセージ（本人が📦で送るのを待っている＝直す物ではない）', state: 'warn', why: omWait.length + '件：' + omWait.slice(0, 5).join('／') + (omWait.length > 5 ? ' ほか ' + (omWait.length - 5) + '件' : ''), last: null });
   }
+  /* ⑥-1b 🤖・🃏の写真集め（ポータルのタブ）の止まり（★2026-11-20 05・00 の頼み／01 の案1）：写真集めは担当の PC のポータルのタブの中で回る＝窓が閉じると写真が増えず🤖が止まる。
+     ★レビュー高1：写真の控えの時刻だけで見ると、休み（枠・仕入れ画面・設定で切った）や集め終わりでも赤になる＆トレカの控えは GAS も書く。
+     → タブが生きているかは、ポータルが2分ごとに書く在席の印 pc_presence_<担当の id>（担当は pc_owner）で見る。
+       担当の在席が2時間より古い＝赤（平日9〜19時 JST は黄＝本人が重い日にタブを閉じるのは普通・知らせない）。
+       在席は新しいのにゲームの写真の控え（boshu_auto_pre_s0〜7）が12時間更新なし＝黄（タブは開いているが集めていない：休み・集め終わり・保存の失敗のどれか）。
+     読みは小さく：k と at だけ（中身の v は読まない）・hbSel_（1回やり直す） */
+  try {
+    var pcs = hbSel_('select=k,id:v->>id,at:v->>at&k=like.pc_*') || [];
+    var own = null, presBy = {}; pcs.forEach(function (r) { if (r.k === 'pc_owner') own = r; else if (/^pc_presence_/.test(r.k) && r.id) presBy[r.id] = Date.parse(r.at || '') || 0; });
+    if (!own || !own.id) add({ id: 'photo_tab_read', name: '写真集めのタブ（担当の PC）の読み', state: 'blind', why: '担当の PC（pc_owner）が読めなかった＝この回は写真集めの止まりを見ていない', last: null });
+    else {
+      var jst = new Date(now + 9 * 3600000), dow = jst.getUTCDay(), hh = jst.getUTCHours(), dayTime = dow >= 1 && dow <= 5 && hh >= 9 && hh < 19;   /* ★レビュー低2：'u' でなく日本時間にずらして読む（祝日は平日扱い） */
+      var pAt = presBy[own.id] || 0, pAgeH = pAt ? (now - pAt) / 3600000 : 999;
+      if (pAgeH >= 2) add({ id: 'photo_tab_closed', name: '🤖・🃏の写真集め（担当の PC のポータルのタブ）', state: dayTime ? 'warn' : 'red', why: '担当の PC（' + own.id + '）のポータルが ' + (pAt ? Math.round(pAgeH * 10) / 10 + '時間' : '一度も') + '居場所を書いていない＝タブか窓が閉じている見込み＝写真が増えず🤖が止まる' + (dayTime ? '（平日の日中＝本人がタブを閉じていることが多いので黄）' : ''), last: pAt ? new Date(pAt).toISOString() : null });
+      else {
+        var pk = []; for (var ps = 0; ps < 8; ps++) pk.push('boshu_auto_pre_s' + ps);
+        var prs = hbSel_('select=k,updated_at&k=in.(' + pk.join(',') + ')') || [], preLast = 0;
+        prs.forEach(function (r) { var t = Date.parse(r.updated_at || '') || 0; if (t > preLast) preLast = t; });
+        var preAgeH = preLast ? (now - preLast) / 3600000 : 999;
+        add({ id: 'photo_tab_closed', name: '🤖・🃏の写真集め（担当の PC のポータルのタブ）', state: preAgeH < 12 ? 'ok' : 'warn', why: preAgeH < 12 ? 'タブは開いている（' + Math.round((now - pAt) / 60000) + '分前）・ゲームの写真の控えは ' + Math.round(preAgeH * 10) / 10 + '時間前に更新' : 'タブは開いているが、ゲームの写真の控えが ' + (preLast ? Math.round(preAgeH) + '時間' : '一度も') + '更新されていない（休み・集め終わり・保存の失敗のどれか＝ポータルの🤖の画面で確かめる）', last: pAt ? new Date(pAt).toISOString() : null });
+      }
+    }
+  } catch (ePre) { add({ id: 'photo_tab_read', name: '写真集めのタブ（担当の PC）の読み', state: 'blind', why: '読めなかった（' + String((ePre && ePre.message) || ePre).slice(0, 80) + '）', last: null }); }
   /* ⑥-2 発送のお知らせの送り漏れ（★2026-11-15 05・00 の頼み：11/13 に窓口を本体へ移した時に発送のお知らせの作りが抜け、11/13〜15 に1通も出ていなかったのを見張りで拾えなかった）。
      倉庫へ送った印（costs.self_transit_at・直近3日）から3時間たち、まだスキャン前（orders.tab 300）なのに、台帳 order_msg_state.sh が sent でも skip（同じお客さんに24時間以内・自動 OFF の国など）でもない注文が1件でもあれば赤。
      読みは小さく：costs 3列・orders 3列・台帳はその注文の鍵だけ（40件ずつ） */
