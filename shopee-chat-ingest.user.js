@@ -2,7 +2,7 @@
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @name:ja      【Shopeeチャット】📥 会話ログを取り込む（→ポータル）
 // @namespace    gucci-shopee-chat
-// @version      3.45.0
+// @version      3.45.1
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -465,8 +465,9 @@
        → お客さんからの束は「中身が読めない新しい会話」として、お客さんの発言（in）を1行入れる（本文は会話を開いた時の FAQ 履歴で入る）。会話は開かない・切り替えない */
     else if (ty === 'bundle_message' && !fromMe) {
       const n = Array.isArray(c.messages) ? c.messages.length : 0;
-      text = '❓FAQ（AI アシスタントに' + (n ? n + '件' : '') + '質問・中身は会話を開くと読めます）';
-      if (!mc.created_time && mc.created_timestamp) mc.created_time = Number(mc.created_timestamp) * 1000;
+      text = '❓FAQ（AI アシスタントと' + (n ? n + '件の' : '') + 'やり取り・中身は会話を開くと読めます）';   /* ★3.45.1 レビュー低②：束の番号には AI の返事も入りうる＝「質問」と言い切らない */
+      /* ★3.45.1 レビュー中①：秒→ミリ秒は下の「ms < 1e12 なら ×1000」に任せる（ここで×1000 するとミリ秒で来た時に5万年台になる） */
+      if (!mc.created_time && mc.created_timestamp) mc.created_time = Number(mc.created_timestamp);
     }
     else { why('未対応の型:' + ty, JSON.stringify(mc)); return; }   // 未知の型は取り込まない（実物を残す）
     if (!text) { why('本文が空:' + ty, JSON.stringify(mc)); return; }
@@ -474,6 +475,7 @@
     let ms = Number(mc.created_time || mc.create_time || mc.timestamp || pay.receiveTime || o.receiveTime || Date.now());
     if (!isFinite(ms) || ms <= 0) ms = Date.now();
     if (ms < 1e12) ms *= 1000;                     // 秒単位なら補正
+    if (ms > Date.now() + 86400000) ms = Date.now();   /* ★3.45.1 レビュー中①：今より1日以上先の時刻は受け取った時刻に（未来の行が📮の待ち時間を壊さない） */
     const d = new Date(ms);
     const mt = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
     const id = 'sp|' + String(mc.id);
@@ -491,7 +493,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.45.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.45.1';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
