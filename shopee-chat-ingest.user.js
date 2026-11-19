@@ -2,7 +2,7 @@
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @name:ja      【Shopeeチャット】📥 会話ログを取り込む（→ポータル）
 // @namespace    gucci-shopee-chat
-// @version      3.44.9
+// @version      3.45.0
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -459,6 +459,15 @@
     const c = mc.content || {};
     if (ty === 'text') text = String(c.text || '');
     else if (ty === 'image' || ty === 'sticker') { text = String(c.url || c.image_url || c.file_url || ''); msgType = 'image'; }
+    /* ★3.45.0 2026-11-19 05（00・本人「これ、未返信に検知されてなかった」PH rennenleoncito28）：お客さんが商品ページの AI アシスタント（FAQ）に聞いてから
+       「Chat with Seller」で店に回ってくると、通信には bundle_message（中身はお客さんの発言の番号の一覧だけ・本文なし）が1つ来る。前は「未対応の型」で落としていた
+       ＝会話を開くまで FAQ 履歴の行が入らず、店の不在自動返信が最後のまま📮に載らなかった（7日で6件・遅れ15分〜12時間）。
+       → お客さんからの束は「中身が読めない新しい会話」として、お客さんの発言（in）を1行入れる（本文は会話を開いた時の FAQ 履歴で入る）。会話は開かない・切り替えない */
+    else if (ty === 'bundle_message' && !fromMe) {
+      const n = Array.isArray(c.messages) ? c.messages.length : 0;
+      text = '❓FAQ（AI アシスタントに' + (n ? n + '件' : '') + '質問・中身は会話を開くと読めます）';
+      if (!mc.created_time && mc.created_timestamp) mc.created_time = Number(mc.created_timestamp) * 1000;
+    }
     else { why('未対応の型:' + ty, JSON.stringify(mc)); return; }   // 未知の型は取り込まない（実物を残す）
     if (!text) { why('本文が空:' + ty, JSON.stringify(mc)); return; }
     // 時刻：メッセージ自身が持つものを優先し、無ければ受信時刻
@@ -482,7 +491,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.44.9';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.45.0';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
