@@ -1870,7 +1870,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-023009';
+  const APP_BUILD = '20261121-023109';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -31077,6 +31077,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '📅 <b>商品別の利益の期間を、利益明細・経費の月とつなぐ</b>：表の上に「利益明細・経費の月／この表の期間」を並べ、違う時は「利益明細・経費の月に合わせる」ボタン。この表で「今月」「先月」を選ぶと、利益明細・経費の月も同じ月になります',
       '🧾 <b>利益明細：国を押すたびに足す・外す（いくつでも）</b>（前は1つだけ選ぶ欄でした）',
       '🔑 <b>出品一覧：アカウントを複数選べる</b>（選択欄で選ぶたびに足し、選んだ物は紫の札で並べて ✕ で外す・「✕ アカウントの絞り込みを外す」で全部外す）。国をまたいでもよい',
       '📅 <b>出品ログ：店を押すたびに足す・外す（いくつでも・国をまたいでよい）</b>。第1と第3を両方、PH の店と SG の店を同時、のように選べます（「すべて」で外れる）',
@@ -62187,6 +62188,19 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       default: return { start: '', end: '' };
     }
   }
+  /* ★2026-11-21 05（00 の OK・本人 11/15「入出金・経費だけ月が下にあり意味が分からん」の型）：商品別の利益の期間を、利益明細・経費の月（smdPfMonth）とつなぐ。
+     利益明細・経費の月 → この表の期間は「合わせる」ボタン1つ（勝手に変えない）／この表で「今月」「先月」を選んだら、利益明細・経費の月も同じ月にする */
+  function prPfMonthNow() { let v = ''; try { v = localStorage.getItem('smdPfMonth') || ''; } catch (_) {} return v; }
+  function prPfMonthLabel(v) { return v === 'past30' ? '過去30日' : v === 'past7' ? '過去7日' : v === 'thismonth' ? '今月' : /^\d{4}-\d{2}$/.test(v) ? v.replace('-', '年') + '月' : '（未選択）'; }
+  function prFromPfMonth(v) {
+    const jst = new Date(Date.now() + 9 * 3600000), y = jst.getUTCFullYear(), m = jst.getUTCMonth(), ym = (Y, M) => new Date(Date.UTC(Y, M, 1)).toISOString().slice(0, 7), today = jst.toISOString().slice(0, 10);
+    if (v === 'thismonth' || v === ym(y, m)) return { period: 'thismonth' };
+    if (v === ym(y, m - 1)) return { period: 'lastmonth' };
+    if (v === 'past30') return { period: '1m' };
+    if (v === 'past7') return { period: 'custom', from: new Date(Date.parse(today + 'T00:00:00Z') - 6 * 86400000).toISOString().slice(0, 10), to: today };
+    if (/^\d{4}-\d{2}$/.test(v)) { const Y = Number(v.slice(0, 4)), M = Number(v.slice(5, 7)) - 1; return { period: 'custom', from: v + '-01', to: new Date(Date.UTC(Y, M + 1, 0)).toISOString().slice(0, 10) }; }
+    return null;
+  }
   const prPeriodLabel = () => { const p = PR_PERIODS.find(x => x[0] === PR.period); if (PR.period === 'custom') return (PR.from || '…') + '〜' + (PR.to || '…'); return p ? p[1] : '全期間'; };
   /* ★04 経営企画部の線（2026-11-05・共有メモ「利益拡大部_商品別の利益の4つの箱の線」）。本人が値段を決めた物は値上げ・値下げの候補に出さない */
   const PR_OWNER_PRICE = [{ cc: 'BR', re: /skyward\s*sword/i, why: '本人が値段を決めた（R$326・11/5）' }];
@@ -62719,6 +62733,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const sth = (k, t, al) => { const on = PR.sort === k; return `<th class="pr-sth${al === 'left' ? ' l' : ''}${on ? ' on' : ''}" data-s="${k}" aria-sort="${on ? (PR.dir === 'asc' ? 'ascending' : 'descending') : 'none'}" title="押すと並べ替え（1回目は大きい順・もう一度で小さい順）">${t}<span class="smd-sarw">${on ? (PR.dir === 'asc' ? '▲' : '▼') : '⇅'}</span></th>`; };
     const neg = (v) => (v < 0 ? ' prk-neg' : '');
     body.innerHTML =
+      (() => { const v = prPfMonthNow(), t = prFromPfMonth(v); if (!t) return ''; const same = t.period === PR.period && (t.period !== 'custom' || (t.from === PR.from && t.to === PR.to));
+        return `<div style="font-size:11.5px;margin:0 0 6px;color:#1f3d7a">📅 利益明細・経費の月：<b>${esc(prPfMonthLabel(v))}</b>　／　この表の期間：<b>${esc(prPeriodLabel())}</b>${same ? '（そろっています）' : ` <button type="button" class="pr-pfsync" data-guide="${av('この表の期間を、利益明細・経費で選んでいる月（' + prPfMonthLabel(v) + '）に合わせます。読むだけです。')}" style="padding:1px 9px;border:1px solid #9fb6e0;border-radius:6px;background:#fff;cursor:pointer;font-size:11.5px">利益明細・経費の月に合わせる</button>`}</div>`; })() +
       `<div class="prk-ctl">
         <span data-guide-name="期間" data-guide="注文日で集計期間を切り替えます。直近30日・90日は日本時間で区切ります。"><span class="lbl">📅 月/期間</span><select class="pr-sel" data-k="period" style="font-size:12.5px">${PR_PERIODS.map(([v, t]) => `<option value="${v}" ${PR.period === v ? 'selected' : ''}>${t}</option>`).join('')}</select>${PR.period === 'custom' ? ` <input type="date" class="pr-date" data-k="from" value="${esc(PR.from || '')}" style="font-size:12px"> 〜 <input type="date" class="pr-date" data-k="to" value="${esc(PR.to || '')}" style="font-size:12px">` : ''}</span>
         <span><button class="smd-btn pr-reload" data-guide-name="🔄 更新" data-guide="全期間の注文・入金・仕入れをもう一度読みます（書き換えはしません）。">🔄 更新</button></span>
@@ -62765,7 +62781,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       const el = body.querySelector('#prank-held');
       if (el) { el.innerHTML = prHeldHtml(); applyI18n(el); }
     });
-    body.querySelectorAll('.pr-seg').forEach(b => b.addEventListener('click', () => { PR[b.dataset.k] = b.dataset.v; PR.more = false; PR.open = null; prSave(); renderProfitRank(); }));
+    body.querySelectorAll('.pr-seg').forEach(b => b.addEventListener('click', () => { PR[b.dataset.k] = b.dataset.v; PR.more = false; PR.open = null;
+      /* ★11/21 「今月」「先月」を選んだら、利益明細・経費の月も同じにする（タブを移っても同じ月） */
+      if (b.dataset.k === 'period' && (b.dataset.v === 'thismonth' || b.dataset.v === 'lastmonth')) { try { const jst = new Date(Date.now() + 9 * 3600000); localStorage.setItem('smdPfMonth', b.dataset.v === 'thismonth' ? 'thismonth' : new Date(Date.UTC(jst.getUTCFullYear(), jst.getUTCMonth() - 1, 1)).toISOString().slice(0, 7)); try { pf.ym = null; } catch (_) {} } catch (_) {} }
+      prSave(); renderProfitRank(); }));
+    { const ps = body.querySelector('.pr-pfsync'); if (ps) ps.addEventListener('click', () => { const t = prFromPfMonth(prPfMonthNow()); if (!t) return; PR.period = t.period; if (t.period === 'custom') { PR.from = t.from; PR.to = t.to; } PR.more = false; PR.open = null; prSave(); renderProfitRank(); }); }
     body.querySelectorAll('.pr-sortb').forEach(b => b.addEventListener('click', () => { PR.sort = b.dataset.s; PR.dir = b.dataset.d; PR.more = false; PR.open = null; prSave(); renderProfitRank(); }));
     body.querySelectorAll('.pr-sth').forEach(h => h.addEventListener('click', () => { const k = h.dataset.s; PR.dir = (PR.sort === k && PR.dir === 'desc') ? 'asc' : 'desc'; PR.sort = k; PR.more = false; PR.open = null; prSave(); renderProfitRank(); }));
     hwTierBind(body, 'pr-hwt', PR.tier, (t) => { PR.tier = t; PR.more = false; PR.open = null; prSave(); renderProfitRank(); });
