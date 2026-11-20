@@ -2,7 +2,7 @@
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @name:ja      【Shopeeチャット】📥 会話ログを取り込む（→ポータル）
 // @namespace    gucci-shopee-chat
-// @version      3.45.2
+// @version      3.45.3
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -498,7 +498,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.45.2';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.45.3';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -1123,7 +1123,13 @@
       const rows = domExtract(ctx);
       lastNoDate = skipNoDate - before;
       let added = 0;
-      rows.forEach(m => { if (!seenMsg.has(m.id)) { seenMsg.add(m.id); msgBuffer.push(m); added++; if (m.msg_type === 'image' && /(^|\n)blob:/i.test(String(m.text || ''))) blobDom++; } });   // ★3.45.2 blob で書いた行の数（心拍）
+      rows.forEach(m => {
+        /* ★3.45.3 2026-11-20 05：通信（WS）が入らないタブ（心拍 ws:0）では通信の上書きが来ない。画面が同じ番号をもう一度読んで、画像が本物の URL（blob でない）になっていたら、
+           「取り込み済み」でも通して上書きする（blob の行は「まだ無い時だけ入れる」なので、この本物の行は merge で入る） */
+        if (seenMsg.has(m.id) && m.msg_type === 'image' && _domBlob.has(m.id) && !/(^|\n)blob:/i.test(String(m.text || '')) && /^https?:\/\//i.test(String(m.text || '').replace(/^\[\[q\]\][^\n]*\n/, '').split('\n')[0])) {   // 1行目（引用の次の行＝本体の画像）が本物の URL の時だけ
+          _domBlob.delete(m.id); blobFixed++; _wsRealImg.add(m.id); let _hit = false; msgBuffer.forEach(x => { if (x && x.id === m.id) { x.text = m.text; _hit = true; } }); if (!_hit) { msgBuffer.push(m); added++; } return;
+        }
+        if (!seenMsg.has(m.id)) { seenMsg.add(m.id); msgBuffer.push(m); added++; if (m.msg_type === 'image' && /(^|\n)blob:/i.test(String(m.text || ''))) blobDom++; } });   // ★3.45.2 blob で書いた行の数（心拍）
       if (seenMsg.size > 3000) seenMsg.clear();
       if (added) { captured += added; updateChip(); }
     } catch (_) {}
