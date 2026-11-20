@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261120-1427'
+var SRC_VER = '20261120-2110'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -2073,6 +2073,10 @@ function doGetInner_(e) {
         var boq = 'select=cc,sn,buyer,order_ts,order_date,total,tab,status,items,tracking,shop_id&buyer=ilike.' + encodeURIComponent(bu) + (bcc ? '&cc=eq.' + bcc : '') + '&order=order_date.desc&limit=50';
         var borows = (sbSelect_('orders', boq) || []).filter(function (o) { return String(o.buyer || '').toLowerCase() === bu; });
         var issues = {};
+        /* ★2026-11-20 05（03・本人「キャンセル、返金されたやつは入ってないよね？」＝声かけの「前に買った物」）：返品・返金が決まった注文に refunded:true（新しい名前・今の項目は変えない）。
+           決まった＝Shopee の返品（returns 表）の状態が ACCEPTED、または注文の状態が TO_RETURN。返金額（refund_amount）は取り下げ（CANCELLED）の行にも入っているので使わない。returnStatus（新しい名前）に返品の状態をそのまま返す */
+        var retSt = {};
+        if (borows.length) { try { (sbSelect_('returns', 'select=cc,order_sn,status,update_time&order_sn=in.(' + borows.map(function (o) { return encodeURIComponent(o.sn); }).join(',') + ')') || []).forEach(function (x) { var k = x.cc + ':' + x.order_sn; if (!retSt[k] || x.status === 'ACCEPTED') retSt[k] = x.status; }); } catch (eR) {} }
         if (borows.length) { try { (sbSelect_('order_issues', 'select=cc,sn,stage&sn=in.(' + borows.map(function (o) { return encodeURIComponent(o.sn); }).join(',') + ')') || []).forEach(function (x) { issues[x.cc + ':' + x.sn] = x.stage; }); } catch (eI) {} }
         /* ★2026-11-05 03-22：WA の ⑦「Shopee で買ってもらった」を SKU（REQ_番号）で照らす＝Request page の明細だけ、出品の控えから model_id→SKU を引く（読むのは Request page の数件だけ） */
         var REQRE = /Request page|Solicitar P[aá]gina|Please send me a message|Envie-me Uma Mensagem/i, skuOf = {};
@@ -2083,7 +2087,7 @@ function doGetInner_(e) {
         } catch (eS) {}
         var IMGD = { PH: 'cf.shopee.ph', SG: 'cf.shopee.sg', MY: 'cf.shopee.com.my', BR: 'cf.shopee.com.br', VN: 'cf.shopee.vn', TH: 'cf.shopee.co.th', TW: 'cf.shopee.tw' };
         boout = { ok: true, buyer: bu, cc: bcc, orders: borows.map(function (o) {
-          return { cc: o.cc, sn: o.sn, date: o.order_date || String(o.order_ts || '').slice(0, 10), total: o.total, tab: o.tab, status: o.status || '', issue: issues[o.cc + ':' + o.sn] || '', tracking: o.tracking || '', shop_id: String(o.shop_id || ''), shop_label: shopLabelOf_(o.shop_id),   /* ★11/16 03-12：店名で照らせるように */
+          return { cc: o.cc, sn: o.sn, date: o.order_date || String(o.order_ts || '').slice(0, 10), total: o.total, tab: o.tab, status: o.status || '', issue: issues[o.cc + ':' + o.sn] || '', refunded: retSt[o.cc + ':' + o.sn] === 'ACCEPTED' || String(o.status || '') === 'TO_RETURN', returnStatus: retSt[o.cc + ':' + o.sn] || '', tracking: o.tracking || '', shop_id: String(o.shop_id || ''), shop_label: shopLabelOf_(o.shop_id),   /* ★11/16 03-12：店名で照らせるように */
             items: (o.items || []).slice(0, 10).map(function (it) { var im = String(it.image || ''); return { name: String(it.name || '').slice(0, 120), variation: String(it.variation || '').slice(0, 80), qty: it.qty || 1, item_id: it.item_id != null ? String(it.item_id) : '', model_id: it.model_id != null ? String(it.model_id) : '', sku: String(it.sku || '') || (it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) || '', skuSrc: it.sku ? 'order' : ((it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) ? 'listing' : ''),   /* ★2026-11-06 03 営業部：注文した時の SKU を先に（詰め直し削除の後は model_id が別の REQ_番号を指す）。注文に SKU が無い古い注文だけ今の出品の表から（skuSrc で分かる） */ img: im ? (/^https?:/.test(im) ? im : 'https://' + (IMGD[o.cc] || 'cf.shopee.sg') + '/file/' + im + '_tn') : '' }; }) }; }) };
       } catch (err) { boout = { ok: false, error: String((err && err.message) || err) }; }
       ufPersist_();
