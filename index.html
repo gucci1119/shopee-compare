@@ -1154,7 +1154,7 @@
         <button data-k="detail" class="on" data-guide="下の表を注文ごとの明細（粗利と ROI）にします。切り替えるだけでは何も書きません。">明細</button>
         <button data-k="sum" data-guide="下の表を国ごとのまとめ（注文数・売上・入金・仕入・配送状態・粗利）にします。切り替えるだけでは何も書きません。">国別サマリー</button>
       </span>
-      <select id="pf-cc"><option value="">すべての国</option></select>
+      <select id="pf-cc" style="display:none"><option value="">すべての国</option></select><span id="pf-ccbox" style="display:inline-flex;gap:4px;flex-wrap:wrap;align-items:center"></span>
       <label style="font-size:12.5px" title="明細を国ごとのブロックに分け、国の切れ目に小計行（件数・入金・仕入・粗利）を挟みます"><input type="checkbox" id="pf-bycc"> 国別に分ける</label>
       <select id="pf-dep" title="入金(Shopeeエスクロー)の状態で絞り込み。確定=入金額が確定済／暫定=リリース前の見込み額(変動しうる)／未取得=入金データをまだ取得できていない">
         <option value="">入金:すべて</option>
@@ -1870,7 +1870,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-022929';
+  const APP_BUILD = '20261121-023009';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -31077,6 +31077,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '🧾 <b>利益明細：国を押すたびに足す・外す（いくつでも）</b>（前は1つだけ選ぶ欄でした）',
       '🔑 <b>出品一覧：アカウントを複数選べる</b>（選択欄で選ぶたびに足し、選んだ物は紫の札で並べて ✕ で外す・「✕ アカウントの絞り込みを外す」で全部外す）。国をまたいでもよい',
       '📅 <b>出品ログ：店を押すたびに足す・外す（いくつでも・国をまたいでよい）</b>。第1と第3を両方、PH の店と SG の店を同時、のように選べます（「すべて」で外れる）',
       '📊 <b>旧ランキングの DB 版</b>：上の期間・検索・国のチェックが効かない表であることを、表の上に出すようにしました（前は「7日間」を押しても30日の表のまま、と見分けられませんでした）',
@@ -61969,7 +61970,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const ccSel = document.getElementById('pf-cc');
     REGIONS.forEach(r => { const o = document.createElement('option'); o.value = r.cc; o.textContent = r.cc; ccSel.appendChild(o); });
     try { const savedCc = localStorage.getItem('smdPfCc'); if (savedCc && [...ccSel.options].some(o => o.value === savedCc)) { ccSel.value = savedCc; pf.cc = savedCc; } } catch (_) {}
-    ccSel.addEventListener('change', () => { pf.cc = ccSel.value; try { localStorage.setItem('smdPfCc', ccSel.value); } catch (_) {} pfRender(); });
+    ccSel.addEventListener('change', () => { pf.cc = ccSel.value; pf.ccs = pf.cc ? [pf.cc] : []; try { localStorage.setItem('smdPfCc', ccSel.value); localStorage.setItem('smdPfCcs', JSON.stringify(pf.ccs)); } catch (_) {} pfCcChipsDraw(); pfRender(); });
+    /* ★2026-11-21 05（00 の OK）：利益明細の国は複数（押すたびに足す・外す）。前の1つだけの国（smdPfCc）は移す */
+    try { const sv = JSON.parse(localStorage.getItem('smdPfCcs') || 'null'); pf.ccs = Array.isArray(sv) ? sv.filter(c => REGIONS.some(r => r.cc === c)) : (pf.cc ? [pf.cc] : []); } catch (_) { pf.ccs = pf.cc ? [pf.cc] : []; }
+    pfCcChipsDraw();
     document.getElementById('pf-view').addEventListener('click', e => {
       const b = e.target.closest('button');
       if (!b) return;
@@ -63062,10 +63066,17 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     });
   }
 
+  function pfCcChipsDraw() {
+    const box = document.getElementById('pf-ccbox'); if (!box) return; const cs = Array.isArray(pf.ccs) ? pf.ccs : [];
+    const b = (v, l, on, col) => `<button type="button" class="smd-btn pf-ccb" data-v="${v}" data-guide="${av((v ? v + ' を選びに足します（もう一度押すと外す・いくつでも選べます）。' : 'すべての国の注文を出します。') + '読むだけです。')}" style="font-size:11.5px;padding:2px 8px;${on ? 'background:' + (col || '#5b3fd6') + ';color:#fff;border-color:' + (col || '#5b3fd6') : (col ? 'border-color:' + col : '')}">${l}</button>`;
+    box.innerHTML = b('', 'すべての国', !cs.length) + REGIONS.map(r => b(r.cc, r.cc, cs.indexOf(r.cc) >= 0, r.color)).join('');
+    box.querySelectorAll('.pf-ccb').forEach(x => x.addEventListener('click', () => { const v = x.dataset.v; let a = Array.isArray(pf.ccs) ? pf.ccs.slice() : []; if (!v) a = []; else { const i = a.indexOf(v); if (i >= 0) a.splice(i, 1); else a.push(v); }
+      pf.ccs = a; pf.cc = a.length === 1 ? a[0] : ''; try { localStorage.setItem('smdPfCcs', JSON.stringify(a)); localStorage.setItem('smdPfCc', pf.cc); } catch (_) {} const cs2 = document.getElementById('pf-cc'); if (cs2) cs2.value = pf.cc; pf.page = 1; pfCcChipsDraw(); pfRender(); }));
+  }
   function pfFiltered() {
     return pf.orders.filter(o => {
       if (!pf.showCancel && (o.tab === 200 || o.tab === 600)) return false; // 純オーダーのみ（既定）
-      if (pf.cc && o.cc !== pf.cc) return false;
+      { const cs = (Array.isArray(pf.ccs) && pf.ccs.length) ? pf.ccs : (pf.cc ? [pf.cc] : []); if (cs.length && cs.indexOf(o.cc) < 0) return false; }   /* ★11/21 国は複数 */
       if (pf.nocost && pfCost(o) != null) return false; // 「仕入額未入力のみ」＝仕入額(手入力/確定 or 在庫連携)がまだ無い注文
       if (pf.depFilter) {
         const d = pfDepInfo(o);
@@ -63283,7 +63294,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       }));
       // 「未入力 n件 ▸」→ その国＋仕入額未入力のみ で明細を開く
       body.querySelectorAll('.pf-nocost').forEach(el => el.addEventListener('click', () => {
-        pf.cc = el.dataset.cc; pf.nocost = true; pf.view = 'detail'; pf.page = 1;
+        pf.cc = el.dataset.cc; pf.ccs = [pf.cc]; try { pfCcChipsDraw(); } catch (_) {} pf.nocost = true; pf.view = 'detail'; pf.page = 1;
         const cs = document.getElementById('pf-cc'); if (cs) cs.value = pf.cc;
         const nc = document.getElementById('pf-nocost'); if (nc) nc.checked = true;
         document.querySelectorAll('#pf-view button').forEach(b => b.classList.toggle('on', b.dataset.k === 'detail'));
