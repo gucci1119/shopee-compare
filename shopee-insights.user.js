@@ -2,7 +2,7 @@
 // @name         【Shopee】📈 アクセス（Business Insights）取り込み
 // @name:ja      【Shopee】📈 アクセス（Business Insights）取り込み
 // @namespace    shopee-os
-// @version      1.5.3
+// @version      1.5.4
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-insights.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-insights.user.js
 // @description  Seller Center の Business Insights（Traffic Overview）が読んだ日別の訪問者・ページビューを横取りしてポータル（app_kv traffic_daily）へ送る。深夜に Shopee 側で見られない時間帯でもポータルで見られるようにする。v1.4.0：転記のタブが1日1回ここへ来て、取り込んだら元の画面へ戻る。v1.3.0：商品パフォーマンス（カタログ・明細ごとのカート追加数など・直近30日）を1日1回読んで app_kv product_perf_<店> へ送る。
@@ -35,16 +35,23 @@
   /* ★v1.1.0（2026-09-26 本人「アカウントごとに見れるようにもしておいて」）：どの店の数字かを一緒に送る（同じ国に店が2つある）。
      /api/selleraccount/shop_info/ はログイン中の店の shop_id と名前を返す（同じ origin・署名不要）。取れなければ店なしで送る＝国には入る */
   let _shop = null;
+  /* ★v1.5.4（2026-11-20 05・00・本人「Chrome のアカウントごとで、第一・第二・第三アカウントって分けてるんですよ。混ざっちゃうから」）：
+     2店舗目の Chrome で MY の店（URL の cnsc_shop_id=1863981586）を開いたのに、Shopee が本店 VN（gcsonlinestore.vn）の画面に戻し、そこで本店 VN の数字を送った。
+     → URL が店を指している時（cnsc_shop_id・このタブで最後に見た物を sessionStorage に覚える）、shop_info の店がそれと違えば、どの口（訪問者・商品・カートの日ごと）も送らない */
+  const URL_SHOP = (function () { let v = ''; try { v = (new URLSearchParams(location.search).get('cnsc_shop_id') || '').replace(/\D/g, ''); if (v) sessionStorage.setItem('si_url_shop', v); else v = sessionStorage.getItem('si_url_shop') || ''; } catch (_) {} return v; })();
+  let SHOP_BAD = '';
   async function shopInfo() {
-    if (_shop) return _shop;
+    if (_shop) { if (SHOP_BAD) { try { badge('⚠ 送りません：' + SHOP_BAD + '（別の店の数字を混ぜないため）'); } catch (_) {} return null; } return _shop; }   /* レビュー低6：待機中の表示に上書きされた警告を出し直す */
     try { const r = await fetch('/api/selleraccount/shop_info/', { credentials: 'include' }); const j = await r.json(); const d = (j && j.data) || {}; if (d.shop_id) _shop = { id: String(d.shop_id), name: String(d.name || '') }; } catch (_) {}
+    if (_shop && URL_SHOP && _shop.id !== URL_SHOP) { SHOP_BAD = '開いている店（' + _shop.name + '）が URL の店（' + URL_SHOP + '）と違う'; log('shop mismatch', SHOP_BAD); try { badge('⚠ 送りません：' + SHOP_BAD + '（別の店の数字を混ぜないため）'); } catch (_) {} return null; }
     return _shop;
   }
   async function send(period, rows) {
     if (!CC || !rows.length) return;
     const sh = await shopInfo();
+    if (SHOP_BAD || (URL_SHOP && !sh)) return;   /* ★v1.5.4 違う店の画面・URL が店を指しているのに店が読めない時は送らない（店なしで送ると国の数字に直接入る＝レビュー中2） */
     const payload = { action: 'traffic_ingest', cc: CC, period: period, rows: rows, shop_id: sh ? sh.id : '', shop_name: sh ? sh.name : '' };
-    fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.2' })) })
+    fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.4' })) })
       .then(r => r.text()).then(t => { log('sent', period, rows.length, t.slice(0, 120)); if (!/"ok"\s*:\s*true/.test(t)) { badge('⚠ 送れませんでした（返事が違う）＝次の回にもう一度'); return; }   /* ★1.4.0 2026-10-07 SG：GAS がログイン画面の HTML を返したのに「送った」と記録して、その日は二度と送らなかった */ try { localStorage.setItem(sentKey, JSON.stringify({ at: Date.now(), period, n: rows.length, res: t.slice(0, 80) })); } catch (_) {} badge('📈 ' + rows.length + '日ぶんを送りました（' + period + '）'); })
       .catch(e => { log('send fail', e); badge('⚠ 送れませんでした ' + String(e).slice(0, 60)); });
   }
@@ -85,8 +92,9 @@
   function localHour() { return new Date(Date.now() + TZ * 3600000).getUTCHours() * 60 + new Date(Date.now() + TZ * 3600000).getUTCMinutes(); }
   setInterval(() => {
     try {
+      if (SHOP_BAD) return;   /* ★v1.5.4 レビュー低5：違う店の画面で読み直しを繰り返さない（止めた理由はバッジとコンソール） */
       const st = JSON.parse(localStorage.getItem(sentKey) || '{}'); const sentDay = st.at ? new Date(st.at + TZ * 3600000).toISOString().slice(0, 10) : '';
-      if (localHour() >= 665 && sentDay !== localYmd() && !/traffic\/overview/.test(location.pathname)) { location.href = location.origin + '/datacenter/traffic/overview'; return; }
+      if (localHour() >= 665 && sentDay !== localYmd() && !/traffic\/overview/.test(location.pathname)) { location.href = location.origin + '/datacenter/traffic/overview' + (URL_SHOP ? '?cnsc_shop_id=' + URL_SHOP : ''); return; }   /* ★v1.5.4 レビュー低4：店の指定を落とさない */
       if (localHour() >= 665 && sentDay !== localYmd() && (!st.at || Date.now() - st.at > 60 * 60000)) { const rl = Number(sessionStorage.getItem('si_reload') || 0); if (Date.now() - rl > 30 * 60000) { sessionStorage.setItem('si_reload', String(Date.now())); location.reload(); } }
     } catch (_) {}
   }, 60000);
@@ -132,7 +140,7 @@
   const sleep = ms => new Promise(res => setTimeout(res, ms));
   async function postGas(payload) {
     try {
-      const t = await (await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.2' })) })).text();
+      const t = await (await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.4' })) })).text();
       let j = null; try { j = JSON.parse(t); } catch (_) {}
       return { t: t, j: j, ok: !!(j && j.ok === true), busy: !!(j && j.error === 'busy'), unknown: /WRITE_TOKEN/.test(t) };
     } catch (e) { return { t: String(e), j: null, ok: false, busy: false, unknown: false }; }
