@@ -2,7 +2,7 @@
 // @name         Shopee OS - チャット取り込み（webchat → chat_messages）
 // @name:ja      【Shopeeチャット】📥 会話ログを取り込む（→ポータル）
 // @namespace    gucci-shopee-chat
-// @version      3.45.1
+// @version      3.45.2
 // @description  Shopee Seller Center のバイヤー会話を取り込み→Supabase(chat_messages)＋ポータルからの返信を自動送信(chat_outbox→入力欄にセット→Enter・閉じた会話はRestart)。本文はprotobuf WS配信のため描画スレッドDOMから抽出。会話を開くと過去履歴も遡って取得。キー設定時は取り込み・返信ともSupabase直＝GAS枠を一切消費せずリアルタイム。左下チップのクリックからSupabaseキーを設定可能。
 // @match        https://seller.shopee.ph/*
 // @match        https://seller.shopee.sg/*
@@ -479,7 +479,12 @@
     const d = new Date(ms);
     const mt = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
     const id = 'sp|' + String(mc.id);
-    if (seenMsg.has(id)) { why('取り込み済み'); return; }
+    const _fixBlob = msgType === 'image' && /^https?:\/\//i.test(text) && _domBlob.has(id);   // ★3.45.2 画面が blob で先に書いた行を本物の URL で上書きする
+    if (seenMsg.has(id) && !_fixBlob) { why('取り込み済み'); return; }
+    if (_fixBlob) { const _db = _domBlob.get(id) || {}, _real = text; text = (_db.body && _db.u && _db.body.indexOf(_db.u) >= 0) ? _db.body.split(_db.u).join(_real) : _real; _domBlob.delete(id); blobFixed++;
+      let _hit = false; msgBuffer.forEach(x => { if (x && x.id === id) { x.text = text; _hit = true; } });   // まだ書く前の行（同じ番号が2行あっても全部）なら、その行の本文を差し替える
+      if (_hit) { seenMsg.add(id); _wsRealImg.add(id); return; } }
+    if (msgType === 'image' && /^https?:\/\//i.test(text)) { _wsRealImg.add(id); if (_wsRealImg.size > 3000) _wsRealImg.clear(); }
     seenMsg.add(id);
     msgBuffer.push({ id: id, source: 'shopee', cc: cc, buyer: buyer, conversation_id: cc + ':' + buyer,
       direction: fromMe ? 'out' : 'in', msg_type: msgType, text: text, msg_time: mt });
@@ -493,7 +498,7 @@
   // 長時間動かすとレンダラーがメモリ不足で落ちるので、この時間を過ぎたら隙を見て自分でリロードする。
   // 短くするほど安全（リロードは1〜2秒・取り込み待ちは書き出してから行うので取りこぼさない）。
   const RELOAD_AFTER_MS = 45 * 60000;   // 45分（実測：2時間ほどでレンダラーが落ちるので、その半分以下で回す）
-  const VER = '3.45.1';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
+  const VER = '3.45.2';   // ★@version と必ず揃える（心拍に載せて「今動いている版」を外から確認できるようにする）
   // ---- 🔬 操作したときに飛ぶリクエストを記録する ----
   // 実測で判明：会話行の「⌄」はDOMに存在せず、本物のホバーでしか描画されない。
   // Shopeeは合成イベントを無視するのでJSからは出せない＝画面操作では未読に戻せない。
@@ -536,10 +541,16 @@
   function _hasRecentReal(conv, type, text, mt) {
     try { const t = Date.parse(mt) || Date.now(); const nt = type === 'text' ? _normTxt(text) : ''; return _recentReal.some(r => r.conv === conv && r.type === type && Math.abs(r.t - t) <= PROV_WIN_MS && (type !== 'text' || r.text === nt)); } catch (_) { return false; }
   }
-  let provDeleted = 0;
+  let provDeleted = 0; const _provDone = new Set();
+  /* ★3.45.2 2026-11-20 05（00・本人「今まで送った写真、本当にこれ Google Drive に登録されてるん？」）：こちらが送った直後の画像は、画面では「blob:」（このタブの中だけの仮の住所）で出る。
+     画面の経路が先に本物の番号（sp|数字）を blob で書くと、後から通信（WS）が持ってくる本物の URL は「取り込み済み」で落ちていた（11月 13行・8/17〜11/19 に blob の行 73）。
+     → 画面の blob の行は今までどおりすぐ書く（📮の「送った」の印を消さない）。番号と本文を _domBlob に覚え、通信が同じ番号の本物の URL を持ってきたら、
+       「取り込み済み」でも通して本物の URL で上書きする（本文の blob の所だけ差し替える＝引用・文はそのまま）。通信が本物で書いた番号は、画面が blob で書き戻さない（_wsRealImg） */
+  const _domBlob = new Map(), _wsRealImg = new Set(), _blobFail = new Map(); let blobDom = 0, blobFixed = 0, blobErr = 0, blobDrop = 0, blobErrTxt = '';
   async function reconcileProvisional_(batch) {
     try {
-      const reals = batch.filter(m => m && m.direction === 'out' && REAL_ID_RE.test(String(m.id || '')));
+      const reals = batch.filter(m => m && m.direction === 'out' && REAL_ID_RE.test(String(m.id || '')) && !_provDone.has(m.id));   // ★3.45.2 レビュー低2：同じ本物の番号の消し込みは1回だけ（blob で1回・上書きでもう1回、を防ぐ）
+      if (_provDone.size > 3000) _provDone.clear();   // 「済み」の印は、その会話の消し込みが終わった時だけ付ける（読み・削除が失敗した・6会話目以降は付けない）
       if (!reals.length) return;
       const byConv = {}; reals.forEach(m => { (byConv[m.conversation_id] = byConv[m.conversation_id] || []).push(m); });
       const convs = Object.keys(byConv).slice(0, 5);
@@ -547,9 +558,9 @@
         const ms = byConv[conv]; const ts = ms.map(m => Date.parse(m.msg_time) || Date.now());
         const a = new Date(Math.min.apply(null, ts) - PROV_WIN_MS).toISOString(), b = new Date(Math.max.apply(null, ts) + PROV_WIN_MS).toISOString();
         const q = 'chat_messages?select=id,msg_type,text,msg_time&conversation_id=eq.' + encodeURIComponent(conv) + '&direction=eq.out&id=like.' + encodeURIComponent('sp|*-*-*') + '&msg_time=gte.' + encodeURIComponent(a) + '&msg_time=lte.' + encodeURIComponent(b) + '&limit=50';
-        const r = await sbReq('GET', q);
+        const r = await sbReq('GET', q); const _getOk = !!(r && r.status >= 200 && r.status < 300);
         const prov = (r && r.json && Array.isArray(r.json)) ? r.json.filter(p => PROV_ID_RE.test(String(p.id || ''))) : [];
-        if (!prov.length) continue;
+        if (!prov.length) { if (_getOk) ms.forEach(m => _provDone.add(m.id)); continue; }
         const used = new Set(); const del = [];
         ms.forEach(m => {
           const t = Date.parse(m.msg_time) || 0; const nt = _normTxt(m.text);
@@ -557,9 +568,9 @@
             .sort((x, y) => Math.abs((Date.parse(x.msg_time) || 0) - t) - Math.abs((Date.parse(y.msg_time) || 0) - t))[0];
           if (c) { used.add(c.id); del.push(c.id); }
         });
-        if (!del.length) continue;
+        if (!del.length) { ms.forEach(m => _provDone.add(m.id)); continue; }
         const d = await sbReq('DELETE', 'chat_messages?id=in.(' + del.map(x => encodeURIComponent('"' + x.replace(/"/g, '') + '"')).join(',') + ')', null, 'return=minimal');
-        if (d && d.status >= 200 && d.status < 300) { provDeleted += del.length; try { updateChip(); } catch (_) {} }
+        if (d && d.status >= 200 && d.status < 300) { ms.forEach(m => _provDone.add(m.id)); provDeleted += del.length; try { updateChip(); } catch (_) {} }
       }
     } catch (_) {}
   }
@@ -1091,6 +1102,10 @@
       const id = isFaq ? ('faq|' + h.cc + '|' + h.buyer + '|' + ymd + '|' + (useTm || '00:00'))
                : (_meta && _meta.mid) ? ('sp|' + _meta.mid)
                : ('dom|' + h.cc + '|' + h.buyer + '|' + useTm + '|' + dir + '|' + hash(body));
+      if (msgType === 'image' && /^blob:/i.test(String(imgUrl || ''))) {   // ★3.45.2（上の _domBlob の説明）
+        if (_wsRealImg.has(id)) return;   // 通信が本物の URL で書いた行を blob で書き戻さない
+        if (!seenMsg.has(id)) { _domBlob.set(id, { body: body, u: String(imgUrl) }); if (_domBlob.size > 500) _domBlob.delete(_domBlob.keys().next().value); }
+      }
       if (dir === 'out' && PROV_ID_RE.test(id) && _hasRecentReal(conv, msgType, body, mt)) return;   // ★3.44.4 本物を先に見ていたら暫定は書かない
       if (dir === 'out' && REAL_ID_RE.test(id)) _noteReal(conv, msgType, body, mt);
       rows.push({ id: id, source: 'shopee', cc: h.cc, buyer: h.buyer, conversation_id: conv, direction: dir, msg_type: msgType, text: body, msg_time: mt });
@@ -1108,7 +1123,7 @@
       const rows = domExtract(ctx);
       lastNoDate = skipNoDate - before;
       let added = 0;
-      rows.forEach(m => { if (!seenMsg.has(m.id)) { seenMsg.add(m.id); msgBuffer.push(m); added++; } });
+      rows.forEach(m => { if (!seenMsg.has(m.id)) { seenMsg.add(m.id); msgBuffer.push(m); added++; if (m.msg_type === 'image' && /(^|\n)blob:/i.test(String(m.text || ''))) blobDom++; } });   // ★3.45.2 blob で書いた行の数（心拍）
       if (seenMsg.size > 3000) seenMsg.clear();
       if (added) { captured += added; updateChip(); }
     } catch (_) {}
@@ -1728,8 +1743,22 @@
     if (flushing) return;
     if (!msgBuffer.length) { if (buffer.length) buffer.length = 0; if (manual) toast('送信するデータがありません'); return; }
     flushing = true;
-    const mbatch = msgBuffer.splice(0, 100);
-    buffer.length = 0; // 生キャプチャは送らない＝溜めずに破棄（GASゼロ）
+    buffer.length = 0; // 生キャプチャは送らない＝溜めずに破棄（GASゼロ）　★3.45.2 レビュー低3：blob だけの組で返る前に消す
+    /* ★3.45.2 同じ番号が1回の書き込みに2行あると Supabase が全部断る（失敗→戻す→また断る）＝1行にする。blob の行と本物の URL の行が並んだら、本物を残す（レビュー中1） */
+    const _isBlobRow = (m) => m && m.msg_type === 'image' && /(^|\n)blob:/i.test(String(m.text || ''));
+    const _mb0 = msgBuffer.splice(0, 100), _mbById = new Map(); _mb0.forEach(m => { if (!m || !m.id) return; const pv = _mbById.get(m.id); if (pv && !_isBlobRow(pv) && _isBlobRow(m)) return; _mbById.set(m.id, m); });
+    const _mbAll = [..._mbById.values()];
+    /* ★3.45.2 レビュー中1：画面の blob の行は「まだ無い時だけ入れる」（ignore-duplicates）。別のタブが通信から本物の URL で書いた行を、通信の入らないタブの blob が上書きしない。
+       失敗した blob の行は、その間に通信の本物を見た番号（_wsRealImg）なら戻さない・同じ番号は5回で打ち切る（レビュー低4） */
+    const mbatch = _mbAll.filter(m => !_isBlobRow(m)), mblob = _mbAll.filter(_isBlobRow);
+    if (mblob.length) {
+      let _okB = false, _rej = false;   // _rej＝行の中身で断られた（4xx）。通信の失敗・5xx・時間切れは打ち切りに数えない（レビュー中1：Supabase が止まっている間に捨てない）
+      try { const rb = await sbReq('POST', 'chat_messages?on_conflict=id', mblob, 'resolution=ignore-duplicates,return=minimal'); _okB = !!(rb && rb.status >= 200 && rb.status < 300); if (!_okB) { blobErrTxt = new Date().toISOString().slice(11, 16) + ' SB ' + ((rb && rb.status) || '?'); _rej = !!(rb && (rb.status === 400 || rb.status === 409 || rb.status === 422));   /* 401/403/429 は鍵・回数の問題＝行のせいではない（レビュー低1） */ } }
+      catch (eB) { blobErrTxt = new Date().toISOString().slice(11, 16) + ' SB通信: ' + String((eB && eB.message) || eB).slice(0, 40); }
+      if (_okB) { sent += mblob.length; blobErrTxt = ''; reconcileProvisional_(mblob); }   // ★レビュー中2：sp|数字 の blob の行でも、対になる仮の行（sp|uuid）を消す
+      else { blobErr++; mblob.forEach(m => { if (_wsRealImg.has(m.id)) return; const nf = (_blobFail.get(m.id) || 0) + (_rej ? 1 : 0); _blobFail.set(m.id, nf); if (nf < 5) msgBuffer.push(m); else blobDrop++; }); }
+    }
+    if (!mbatch.length) { flushing = false; updateChip(); return; }
     try {
       const r = await sbReq('POST', 'chat_messages?on_conflict=id', mbatch, 'resolution=merge-duplicates,return=minimal');
       if (r && r.status >= 200 && r.status < 300) { sent += mbatch.length; lastErr = ''; reconcileProvisional_(mbatch); }   // ★3.44.4 本物を書けたら対になる暫定行を消す
@@ -2304,7 +2333,7 @@
     sbReq('POST', 'app_kv?on_conflict=k',
       // ver＝実際に動いているスクリプトの版。これが無いと「入れ替えたのに古いまま動いている」に気づけない
       //   （Tampermonkeyは差し替えても、開いたままのタブは古いコードで動き続ける）。
-      [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname, ver: VER, noDate: skipNoDate, dated: keptDated, ws: wsGot, own: { n: Object.keys(ownMap()).length, at: (OWN && OWN.at) || 0, err: ownErr || '', skip: ownSkip },   /* ★3.44.9 レビュー中3：店の一覧の状態と、うちの店の判定で取り込まなかった件数を外から見る */
+      [{ k: 'chat_sender_hb', v: { at: new Date().toISOString(), cc: CC, host: location.hostname, ver: VER, noDate: skipNoDate, dated: keptDated, ws: wsGot, blob: { dom: blobDom, fixed: blobFixed, err: blobErr, drop: blobDrop, errTxt: blobErrTxt }, own: { n: Object.keys(ownMap()).length, at: (OWN && OWN.at) || 0, err: ownErr || '', skip: ownSkip },   /* ★3.44.9 レビュー中3：店の一覧の状態と、うちの店の判定で取り込まなかった件数を外から見る */
              vis: _realVis(), spoof: true, hid: document.hidden,
              side: (function(){ try { const l = sideList(); return l ? l.children.length : -1; } catch (_) { return -2; } })(),
              thr: (function(){ try { const h = domHeaderInfo(); return h ? h.thread.children.length : -1; } catch (_) { return -2; } })(),
