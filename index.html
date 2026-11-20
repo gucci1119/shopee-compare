@@ -1870,7 +1870,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-022641';
+  const APP_BUILD = '20261121-022734';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -29481,6 +29481,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     let cxlHidden = 0;
     // ── 列でしぼり込む（種別／段階／再出品／補償／国／文字）。renderReturns._f に保持
     const F = renderReturns._f || (renderReturns._f = { kind: '', stage: '', restock: '', comp: '', cc: '', q: '' });
+    /* ★2026-11-21 05（00 の OK）：国は複数（ccs・押すたびに足す・外す）。前の1つだけの国（cc）は移す */
+    if (!Array.isArray(F.ccs)) F.ccs = F.cc ? [F.cc] : []; F.cc = '';
+    const retCcOk = (cc) => !F.ccs.length || F.ccs.indexOf(cc) >= 0;
     // ★絞り込みも【画面に出ている段階】と同じもので判定する（手動設定＋推定）。
     //   手動設定だけ見ていたため、推定で「発送前」と出ている行が「段階なし」扱いになっていた。
     const stageOfRow = o => effStage(o, issueMap.get(o.cc + ':' + o.sn) || {});
@@ -29493,7 +29496,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       && (!F.stage || (F.stage === '__todo' ? !stageOfRow(o) : F.stage === '__post' ? (stageOfRow(o) === '日本を出た後' && !isRetRow(o)) : F.stage === '__retd' ? isRetRow(o) : stageOfRow(o) === F.stage))
       && (!F.restock || restockOfRow(o) === F.restock)
       && (!F.comp || (F.comp === 'yes' ? isCompRow(o) : !isCompRow(o)))
-      && (!F.cc || o.cc === F.cc)
+      && retCcOk(o.cc)
       && (!F.q || textOfRow(o).indexOf(F.q.toLowerCase()) >= 0));
     // ── 並べ替え（既定＝注文日の新しい順）
     const SORTS = [
@@ -29722,12 +29725,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     })();
     // ↩️ 返品リクエスト一覧（国別サマリー＋テーブル）
     const formalBlock = (() => {
+      const formalReturns0 = formalReturns, formalReturnsF = formalReturns0.filter(r => retCcOk(r.cc));   /* ★11/21 国の絞りを返品リクエストのタブにも */
       if (!formalReturns.length && (renderReturns._failRet || (renderReturns._cache && renderReturns._cache.failRet))) return '<div class="tool-card" style="margin:0 0 12px;max-width:none;border-left:4px solid #d93025"><b>⚠️ 返品リクエストを読み込めませんでした</b><br><span class="smd-dim" style="font-size:12px">「まだ取り込まれていない」のではなく<b>読めていません</b>。通信が戻ってから画面を更新してください。</span></div>';
-      if (!formalReturns.length) return `<div class="tool-card smd-dim" style="margin:0 0 12px;max-width:none;border-left:4px solid #c2185b;padding:11px 14px;font-size:11.5px">Shopeeの正式な返品/返金リクエストはまだ取り込まれていません。6時間ごとに自動同期（<code>syncReturnsAll</code>）します。過去分が必要なら <code>backfillReturns</code> を1回実行してください。</div>`;
-      const byCc = {}; formalReturns.forEach(r => { const b = byCc[r.cc] = byCc[r.cc] || { n: 0, jpy: 0 }; b.n++; b.jpy += retRefundJpy(r); });
+      if (!formalReturns0.length) return `<div class="tool-card smd-dim" style="margin:0 0 12px;max-width:none;border-left:4px solid #c2185b;padding:11px 14px;font-size:11.5px">Shopeeの正式な返品/返金リクエストはまだ取り込まれていません。6時間ごとに自動同期（<code>syncReturnsAll</code>）します。過去分が必要なら <code>backfillReturns</code> を1回実行してください。</div>`;
+      const byCc = {}; formalReturns0.forEach(r => { const b = byCc[r.cc] = byCc[r.cc] || { n: 0, jpy: 0 }; b.n++; b.jpy += retRefundJpy(r); });
       const ccChips = Object.entries(byCc).sort((a, b) => b[1].n - a[1].n).map(([cc, b]) => `<span style="display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid ${(regionByCc(cc) || {}).color || '#e0d0d0'};border-radius:12px;padding:2px 10px;font-size:11.5px;margin:0 4px 4px 0"><b style="color:${(regionByCc(cc) || {}).color || '#333'}">${esc(cc)}</b> ${b.n}件${b.jpy ? ` <span style="color:#d93025">${fmtJpy(b.jpy)}</span>` : ''}</span>`).join('');
       const totJpy = Object.values(byCc).reduce((s, b) => s + b.jpy, 0);
-      const frows = formalReturns.slice((retPage - 1) * retPer, retPage * retPer).map(r => {
+      const frows = formalReturnsF.slice((retPage - 1) * retPer, retPage * retPer).map(r => {
         const od = retOrdMap.get(r.cc + ':' + r.order_sn) || {};
         const it = (od.items || [])[0] || {};
         const rg = regionByCc(r.cc);
@@ -29778,7 +29782,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const tableBlock =
       `<div class="tool-card" style="margin:0;max-width:none"><div class="pf-scroll" style="max-height:60vh"><table data-smdsort="rf-main" data-smdauto class="pf-table" style="min-width:1000px">` +
       `<tr><th>国</th><th>注文番号</th><th title="注文した日（日本時間・注文番号の頭からの日付のこともある）">注文日</th><th title="買い手が返品・返金を申請した日（日本時間）。キャンセル・補償だけの行は —">返品の申請日</th><th>バイヤー</th><th title="写真・カタログ名・明細名（2品以上は全品）">商品</th><th>種別</th><th title="SLS+保証の対象は『日本を出た後』のみ">段階</th><th>理由</th><th>返金¥</th><th>返金日</th><th title="買い手が正式申請した返品/返金リクエストの申請日→承認/更新日と状態">返金<br>リクエスト</th><th title="SLS+半額保証の受取。payout明細から自動検知(✅保証済)＋入金日／手動記入(✍)">補償<br>(入金日)</th><th>再出品</th><th>メモ</th></tr>` +
-      (rowsView.length ? rowHtml : `<tr><td colspan="15" class="smd-dim" style="padding:12px">${(F.cc || F.q || F.kind || F.stage || F.restock || F.comp || (rtab === 'refund' && renderReturns._lostOnly === true)) ? 'ℹ 絞り込み（国・検索・種別・段階など）で0件です。帯の絞り込みを外すと出る場合があります。' : (rtab === 'cancel' ? 'お金が動いていないキャンセルはありません。' : '返金・補償の対象はまだありません（返金額を記録するか、payout補償が入ると出ます）。')}${acctZeroNote()}</td></tr>`) +
+      (rowsView.length ? rowHtml : `<tr><td colspan="15" class="smd-dim" style="padding:12px">${(F.ccs.length || F.q || F.kind || F.stage || F.restock || F.comp || (rtab === 'refund' && renderReturns._lostOnly === true)) ? 'ℹ 絞り込み（国・検索・種別・段階など）で0件です。帯の絞り込みを外すと出る場合があります。' : (rtab === 'cancel' ? 'お金が動いていないキャンセルはありません。' : '返金・補償の対象はまだありません（返金額を記録するか、payout補償が入ると出ます）。')}${acctZeroNote()}</td></tr>`) +
       `</table></div></div>` +
       pageNav(rowsView.length, retPer, retPage);
     const lostToggle = lostAll.length ? `<div style="margin:0 4px 8px;padding:6px 10px;background:#fff6f5;border:1px solid #f3d6d3;border-radius:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -29793,7 +29797,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const cxlToggle = (rtab === 'refund') ? `<div style="margin:0 4px 8px"><label style="font-size:12px;color:#555;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:5px" title="返金リクエストが取消(CANCELLED)された行＝買い手が申請を取り消した＝存在しないリクエスト。既定では隠しています"><input type="checkbox" id="ret-showcxl" ${renderReturns._showCxl === true ? 'checked' : ''}>🚫取消された返金リクエストも表示${cxlHidden ? `<span class="smd-dim">（${cxlHidden}件を非表示中）</span>` : ''}</label>
         <span style="font-size:11px;color:#5a6b8c;margin-left:16px" id="ret-legend">行の色：<span style="display:inline-block;width:11px;height:11px;background:#f2fbf5;border:1px solid #bfe5cc;border-radius:3px;vertical-align:-1px"></span> 補償が入った　<span style="display:inline-block;width:11px;height:11px;background:#fdf3f2;border:1px solid #f0cfcb;border-radius:3px;vertical-align:-1px;margin-left:8px"></span> 返品リクエスト</span></div>` : '';
     // 列でしぼり込むバー（正式リクエストのタブ以外で出す）
-    const ccAll = REGIONS.map(r => r.cc).filter(cc => rowsAll.some(o => o.cc === cc) || F.cc === cc);   /* ★11/21 選んでいる国は0件でも選択肢に残す（欄が「すべて」に見えて絞りだけ効く、を防ぐ） */
+    const ccAll = REGIONS.map(r => r.cc).filter(cc => rowsAll.some(o => o.cc === cc) || formalReturns.some(o => o.cc === cc) || F.ccs.indexOf(cc) >= 0);   /* ★11/21 選んでいる国は0件でも選択肢に残す（欄が「すべて」に見えて絞りだけ効く、を防ぐ） */
     const opt = (v, cur, label) => `<option value="${esc(v)}" ${cur === v ? 'selected' : ''}>${esc(label)}</option>`;
     const filterBar = rtab === 'formal' ? '' : `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 4px 8px;font-size:11.5px">
       <span class="smd-dim">しぼり込み:</span>
@@ -29801,17 +29805,18 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <select id="rf-stage" style="font-size:11.5px;padding:3px 6px">${opt('', F.stage, '段階：すべて')}${opt('__todo', F.stage, '段階：未確定だけ')}${STAGES.filter(Boolean).map(k => opt(k, F.stage, k)).join('')}${opt('__post', F.stage, '段階：スキャン後（日本を出た後）・返品を除く')}${opt('__retd', F.stage, '段階：返品（配達後）')}</select>
       <select id="rf-restock" style="font-size:11.5px;padding:3px 6px">${opt('', F.restock, '再出品：すべて')}${RET_RESTOCK.filter(Boolean).map(k => opt(k, F.restock, k)).join('')}</select>
       <select id="rf-comp" style="font-size:11.5px;padding:3px 6px">${opt('', F.comp, '補償：すべて')}${opt('yes', F.comp, '補償あり')}${opt('no', F.comp, '補償なし')}</select>
-      <select id="rf-cc" style="font-size:11.5px;padding:3px 6px">${opt('', F.cc, '国：すべて')}${ccAll.map(c => opt(c, F.cc, c)).join('')}</select>
       <input id="rf-q" value="${esc(F.q)}" placeholder="商品名・注文番号・バイヤー・理由" style="font-size:11.5px;padding:3px 8px;width:230px">
       <span class="smd-dim" style="margin-left:10px">並べ替え:</span>
       <select id="rf-sort" style="font-size:11.5px;padding:3px 6px">${SORTS.map(x => `<option value="${x[0]}" ${SK === x[0] ? 'selected' : ''}>${esc(x[1])}</option>`).join('')}</select>
-      ${(F.kind || F.stage || F.restock || F.comp || F.cc || F.q) ? `<button class="smd-btn" id="rf-clear" style="font-size:11px;padding:2px 10px">× 解除</button><span class="smd-dim">${filteredN}件を除外中</span>` : ''}
+      ${(F.kind || F.stage || F.restock || F.comp || F.ccs.length || F.q) ? `<button class="smd-btn" id="rf-clear" style="font-size:11px;padding:2px 10px">× 解除</button><span class="smd-dim">${filteredN}件を除外中</span>` : ''}
     </div>`;
     /* ★2026-11-07 本人「ここにあるのって、発送後（スキャン後）にキャンセルされたやつだけよね？」：このタブに何が入っているかを1行で */
     const refundWhat = `<div style="margin:0 4px 10px;padding:6px 10px;background:#f6f8fb;border:1px solid #e3e8f0;border-radius:8px;font-size:12px;line-height:1.6">このタブ＝<b>返品</b>（届いた後の返金・Shopee の返品リクエスト）／<b>補償</b>（SLS+ の補償が入った注文）／<b>手で記入した返金</b>。<span class="smd-dim">倉庫でスキャンされる前のキャンセルは荷物が日本の中で戻る＝損なしなので 🚫 キャンセル にあります${preMovedN ? '（返金額を入れた物も ' + preMovedN + '件 移しています）' : ''}。</span></div>`;
     /* ★11/7 返金・補償のタブの上に積まれていた説明・分析・補償の集計・SN追加は、1つの閉じた箱へ（表をすぐ見られるように）。⚖ 段階未定（やること）・取りこぼし・絞り込みは表のすぐ上に残す */
     const refundMore = `<details class="tool-card" style="max-width:none;margin:0 0 10px;padding:8px 12px"><summary style="cursor:pointer;font-size:12.5px;font-weight:700" data-guide="このタブの説明・分析・補償の集計と、SN を入れて行を足す欄（＋ 追加）を開く・閉じる。開くだけでは何も書きません。">📎 説明・分析・補償の集計・SN指定で追加 ${compSumTxt ? '<b style="color:#1a7f37;margin-left:6px">' + esc(compSumTxt) + '</b>' : ''} <span class="smd-dim" style="font-weight:400">（押すと開く）</span></summary><div style="margin-top:8px">${refundWhat + analysisCard + compCard + adjCard + addTool}</div></details>`;
-    body.innerHTML = tabBar + (rtab === 'sls' || rtab === 'inq' ? '' : summary) +
+    const retCcBar = (rtab === 'sls' || rtab === 'inq') ? '' : `<div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:0 4px 6px;font-size:11.5px"><b style="min-width:40px">国</b>${[['', 'すべて']].concat(ccAll.map(c => [c, c])).map(([c, l]) => { const on = c ? F.ccs.indexOf(c) >= 0 : !F.ccs.length, col = c ? ((regionByCc(c) || {}).color || '#5b3fd6') : '#5b3fd6'; return `<button type="button" class="smd-btn rf-ccb" data-v="${c}" data-guide="${av((c ? c + ' を選びに足します（もう一度押すと外す・いくつでも選べます）。' : 'すべての国を出します。') + '読むだけです。')}" style="font-size:11px;padding:2px 9px;${on ? 'background:' + col + ';color:#fff;border-color:' + col : (c ? 'border-color:' + col : '')}">${l}</button>`; }).join('')}<span class="smd-dim" style="font-size:10.5px">押すたびに足す・外す</span></div>`;
+    /* ★2026-11-21 05：並び＝タブ→絞り込み（国・種別など）→数字→表。前は絞りの帯が数字と説明の下にあった */
+    body.innerHTML = tabBar + retCcBar + (rtab === 'refund' || rtab === 'cancel' ? filterBar : '') + (rtab === 'sls' || rtab === 'inq' ? '' : summary) +
       (rtab === 'sls'
         ? '<div id="sls-claim-box"></div>'
         : rtab === 'inq'
@@ -29819,8 +29824,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           : rtab === 'formal'
             ? formalBlock
             : rtab === 'refund'
-              ? (stageTodo + refundMore + lostToggle + cxlToggle + filterBar + tableBlock)
-              : (addTool + filterBar + tableBlock));
+              ? (stageTodo + refundMore + lostToggle + cxlToggle + tableBlock)
+              : (addTool + tableBlock));
     { const ib = document.getElementById('inq-body'); if (ib) ib.style.display = rtab === 'inq' ? '' : 'none'; }   /* 問い合わせは ❓ のタブの時だけ */
     if (rtab === 'sls') slsClaimRender(!!force).catch(() => {});
     slsClaimLoad(!!force).then(D => { const el = document.getElementById('rt-sls-n'); if (el && D && D.cnt) el.innerHTML = (D.autoOk === false ? '<b style="color:#b45309" title="自動の「送った」の印を読めませんでした">申し立て ?</b>・' : D.cnt.dspTodo ? '<b style="color:#d93025">申し立て ' + D.cnt.dspTodo + '</b>・' : '') + (D.cnt.todo ? '<b style="color:#d93025">未申請 ' + D.cnt.todo + '</b>' : '未申請 0') + '・申請済み ' + (D.cnt.applied || 0); const lg = document.getElementById('ret-lost-sls'); if (lg && D.cnt.dspAll) { lg.style.display = ''; lg.textContent = '🛡 申し立て ' + (D.cnt.dspTodo || 0) + '件へ'; } }).catch(() => { const el = document.getElementById('rt-sls-n'); if (el) el.textContent = '?'; });
@@ -29834,12 +29839,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         el.addEventListener('change', () => { renderReturns._f[key] = el.value; renderReturns._page = 1; renderReturns(); }); };
       { const tb = document.getElementById('rf-stagetodo');
         if (tb) tb.addEventListener('click', () => { F.stage = '__todo'; renderReturns(); }); }
-      bind('rf-kind', 'kind'); bind('rf-stage', 'stage'); bind('rf-restock', 'restock'); bind('rf-comp', 'comp'); bind('rf-cc', 'cc');
+      bind('rf-kind', 'kind'); bind('rf-stage', 'stage'); bind('rf-restock', 'restock'); bind('rf-comp', 'comp');
+      body.querySelectorAll('.rf-ccb').forEach(b => b.addEventListener('click', () => { const v = b.dataset.v; if (!v) F.ccs = []; else { const i = F.ccs.indexOf(v); if (i >= 0) F.ccs.splice(i, 1); else F.ccs.push(v); } renderReturns._page = 1; renderReturns(); }));
       { const so = document.getElementById('rf-sort'); if (so) so.addEventListener('change', () => { renderReturns._sort = so.value; renderReturns._page = 1; renderReturns(); }); }
       const q = document.getElementById('rf-q');
       if (q) wireTypeahead(q, v => { renderReturns._f.q = v; renderReturns._page = 1; renderReturns(); }, 300);
       const cl = document.getElementById('rf-clear');
-      if (cl) cl.addEventListener('click', () => { renderReturns._f = { kind: '', stage: '', restock: '', comp: '', cc: '', q: '' }; renderReturns._page = 1; renderReturns(); });
+      if (cl) cl.addEventListener('click', () => { renderReturns._f = { kind: '', stage: '', restock: '', comp: '', cc: '', ccs: [], q: '' }; renderReturns._page = 1; renderReturns(); });
     }
     body.querySelectorAll('.ret-kind').forEach(function (sel) {
       sel.addEventListener('change', async function () {
@@ -31071,6 +31077,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '↩️ <b>返品・キャンセル：国を押すたびに足す・外す（いくつでも）・タブのすぐ下へ</b>（返品リクエストのタブにも効く）。種別・段階などの絞り込みの帯も、数字や説明の下からタブの下へ移しました',
       '🏷 <b>在庫：数字のタイルを絞り込みの下へ</b>（並び＝タブ→絞り込み→数字→表）・検索が無くても絞り込みで0件の時は「何で0件か・台帳は全部で何件」を出す・棚卸しの0件にも理由。<b>入庫待ち</b>：絞り込みのボタン（本日・要確認・催促・検索）を件数の行より上へ',
       '🏠 <b>ダッシュボード：上で店を絞っている時の「本日まだ0」は、その店の国だけで数える</b>（前は絞った店の無い国まで「本日まだ0」と出ていました）',
       '👤 <b>顧客管理：国を押すたびに足す・外す（いくつでも）</b>・上部の対象アカウントの国に無い国は外す（食い違って0人にしない）・0人の時は理由（注文が無い／絞り込みで0人・全部の注文の数）を表の上に',
