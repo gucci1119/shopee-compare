@@ -2,7 +2,7 @@
 // @name         【Shopee】📈 アクセス（Business Insights）取り込み
 // @name:ja      【Shopee】📈 アクセス（Business Insights）取り込み
 // @namespace    shopee-os
-// @version      1.5.4
+// @version      1.5.5
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-insights.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-insights.user.js
 // @description  Seller Center の Business Insights（Traffic Overview）が読んだ日別の訪問者・ページビューを横取りしてポータル（app_kv traffic_daily）へ送る。深夜に Shopee 側で見られない時間帯でもポータルで見られるようにする。v1.4.0：転記のタブが1日1回ここへ来て、取り込んだら元の画面へ戻る。v1.3.0：商品パフォーマンス（カタログ・明細ごとのカート追加数など・直近30日）を1日1回読んで app_kv product_perf_<店> へ送る。
@@ -38,6 +38,7 @@
   /* ★v1.5.4（2026-11-20 05・00・本人「Chrome のアカウントごとで、第一・第二・第三アカウントって分けてるんですよ。混ざっちゃうから」）：
      2店舗目の Chrome で MY の店（URL の cnsc_shop_id=1863981586）を開いたのに、Shopee が本店 VN（gcsonlinestore.vn）の画面に戻し、そこで本店 VN の数字を送った。
      → URL が店を指している時（cnsc_shop_id・このタブで最後に見た物を sessionStorage に覚える）、shop_info の店がそれと違えば、どの口（訪問者・商品・カートの日ごと）も送らない */
+  try { document.documentElement.setAttribute('data-si-ver', '1.5.5'); } catch (_) {}   /* ★v1.5.5 入っている版を外から確かめる印 */
   const URL_SHOP = (function () { let v = ''; try { v = (new URLSearchParams(location.search).get('cnsc_shop_id') || '').replace(/\D/g, ''); if (v) sessionStorage.setItem('si_url_shop', v); else v = sessionStorage.getItem('si_url_shop') || ''; } catch (_) {} return v; })();
   let SHOP_BAD = '';
   async function shopInfo() {
@@ -51,15 +52,17 @@
     const sh = await shopInfo();
     if (SHOP_BAD || (URL_SHOP && !sh)) return;   /* ★v1.5.4 違う店の画面・URL が店を指しているのに店が読めない時は送らない（店なしで送ると国の数字に直接入る＝レビュー中2） */
     const payload = { action: 'traffic_ingest', cc: CC, period: period, rows: rows, shop_id: sh ? sh.id : '', shop_name: sh ? sh.name : '' };
-    fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.4' })) })
+    fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.5' })) })
       .then(r => r.text()).then(t => { log('sent', period, rows.length, t.slice(0, 120)); if (!/"ok"\s*:\s*true/.test(t)) { badge('⚠ 送れませんでした（返事が違う）＝次の回にもう一度'); return; }   /* ★1.4.0 2026-10-07 SG：GAS がログイン画面の HTML を返したのに「送った」と記録して、その日は二度と送らなかった */ try { localStorage.setItem(sentKey, JSON.stringify({ at: Date.now(), period, n: rows.length, res: t.slice(0, 80) })); } catch (_) {} badge('📈 ' + rows.length + '日ぶんを送りました（' + period + '）'); })
       .catch(e => { log('send fail', e); badge('⚠ 送れませんでした ' + String(e).slice(0, 60)); });
   }
   function handle(url, text) {
     if (!/mydata\/traffic\/dashboard\/trend\//.test(url)) return;
     let j; try { j = JSON.parse(text); } catch (_) { return; }
-    const period = (url.match(/period=([a-z0-9_]+)/) || [])[1] || '';
-    if (((j || {}).result || {}).no_data) { log('no_data', period); return; }   /* ★v1.2.0 店を始める前の月などは全部0で来る＝送らない */
+    const period = (url.match(/[?&]period=([a-z0-9_]+)/) || [])[1] || '';   /* ★v1.5.5 レビュー低3：compare_period などに引っかからない */
+    /* ★v1.5.5（2026-11-20 00 の決め・2店舗目 BR は出品0＝訪問者0は本当の数字）：直近30日（past30days）で Shopee が確定済み（data_ready:true）の no_data を返した時は、0人の日として送る（止まりと見分けるため）。
+       過去の月（period=month）の no_data は今までどおり送らない（店を始める前の月を0で埋めない） */
+    if (((j || {}).result || {}).no_data && !(period === 'past30days' && ((j || {}).result || {}).data_ready === true)) { log('no_data', period); return; }   /* ★v1.2.0 店を始める前の月などは全部0で来る＝送らない */
     const all = (((j || {}).result || {}).data || {}).all || [];
     const rows = all.filter(x => x && x.t).map(x => ({ d: ymdOf(x.t), pv: x.page_views, uv: x.visitors, nv: x.new_visitors, ev: x.existing_visitors, nf: x.new_followers, stay: x.avg_stay_time, bounce: x.bounce_rate }));
     /* 「まだ確定していない日」は 0 で入ってくる（data_ready:false）。確定前の 0 で上書きしない＝直近日が全部0なら落とす */
@@ -140,7 +143,7 @@
   const sleep = ms => new Promise(res => setTimeout(res, ms));
   async function postGas(payload) {
     try {
-      const t = await (await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.4' })) })).text();
+      const t = await (await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.5' })) })).text();
       let j = null; try { j = JSON.parse(t); } catch (_) {}
       return { t: t, j: j, ok: !!(j && j.ok === true), busy: !!(j && j.error === 'busy'), unknown: /WRITE_TOKEN/.test(t) };
     } catch (e) { return { t: String(e), j: null, ok: false, busy: false, unknown: false }; }
