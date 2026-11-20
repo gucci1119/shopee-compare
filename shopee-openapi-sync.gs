@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-0040'
+var SRC_VER = '20261121-0520'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -3746,7 +3746,9 @@ function bdEnsure_(shopId, itemIds, why) {
 }
 /* ②毎日1回：全部の店で「公開中（status=1）・在庫あり」なのに開催中の割引に入っていない物と、控え bundle_pending の物を入れる。dry＝数えるだけ */
 function bundleSweep(dry) {
-  var out = { at: new Date().toISOString(), dry: dry === true, shops: [] }, seen = {}, done = [];   /* done＝控えから消してよい鍵（入った・公開中の在庫ありでなくなった） */
+  var out = { at: new Date().toISOString(), dry: dry === true, shops: [] }, seen = {}, done = [];
+  /* ★2026-11-21 05（11/21 4:30 の回が控えに何も書かず、走ったか分からなかった）：走り始めた時に印（app_kv bundle_sweep_run）を書く＝止まりの見張りが26時間で赤にする */
+  if (dry !== true) { try { sbUpsert_('app_kv', [{ k: 'bundle_sweep_run', v: { at: out.at, by: baRunnerId_(), phase: 'start' }, updated_at: out.at }], 'k'); } catch (eR) {} }   /* done＝控えから消してよい鍵（入った・公開中の在庫ありでなくなった） */
   var pend = {}; try { var fr = baKvFreshMany_(['bundle_pending']); pend = ((fr && fr.bundle_pending) || {}).items || {}; } catch (eP) {}
   listTokens_().forEach(function (t) {
     var sid = String((t && t.shop_id) || ''); if (!sid || seen[sid]) return; seen[sid] = 1;
@@ -10177,6 +10179,7 @@ var HB_KV_ = [
   ['sync_claim_syncAll', '同期（syncAll・在庫の自動復活ほか）の取り札', 90, 'upd'],
   ['sync_claim_syncListingsRoundRobin', '出品の同期', 70, 'upd'],
   ['sync_claim_boostTick', 'Bump', 70, 'upd'],
+  ['bundle_sweep_run', 'まとめ買い割引の見回り（毎日 4:30・本体）', 1560, 'upd'],   /* ★11/21 05 */
   ['sync_claim_condIndexTick', '状態写真の索引', 40, 'upd'],
   ['sync_claim_syncEscrowAll', '入金の同期', 1080, 'upd'],   /* ★2026-11-15 05 レビュー（1）：入金の同期は本体が約12時間おきになった（取り札を通るようになった）＝7時間では誤って赤。18時間 */
   ['sync_claim_syncReturnsAll', '返品の同期', 420, 'upd'],
