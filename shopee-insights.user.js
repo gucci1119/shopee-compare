@@ -2,7 +2,7 @@
 // @name         【Shopee】📈 アクセス（Business Insights）取り込み
 // @name:ja      【Shopee】📈 アクセス（Business Insights）取り込み
 // @namespace    shopee-os
-// @version      1.5.5
+// @version      1.5.6
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-insights.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-insights.user.js
 // @description  Seller Center の Business Insights（Traffic Overview）が読んだ日別の訪問者・ページビューを横取りしてポータル（app_kv traffic_daily）へ送る。深夜に Shopee 側で見られない時間帯でもポータルで見られるようにする。v1.4.0：転記のタブが1日1回ここへ来て、取り込んだら元の画面へ戻る。v1.3.0：商品パフォーマンス（カタログ・明細ごとのカート追加数など・直近30日）を1日1回読んで app_kv product_perf_<店> へ送る。
@@ -38,13 +38,13 @@
   /* ★v1.5.4（2026-11-20 05・00・本人「Chrome のアカウントごとで、第一・第二・第三アカウントって分けてるんですよ。混ざっちゃうから」）：
      2店舗目の Chrome で MY の店（URL の cnsc_shop_id=1863981586）を開いたのに、Shopee が本店 VN（gcsonlinestore.vn）の画面に戻し、そこで本店 VN の数字を送った。
      → URL が店を指している時（cnsc_shop_id・このタブで最後に見た物を sessionStorage に覚える）、shop_info の店がそれと違えば、どの口（訪問者・商品・カートの日ごと）も送らない */
-  try { document.documentElement.setAttribute('data-si-ver', '1.5.5'); } catch (_) {}   /* ★v1.5.5 入っている版を外から確かめる印 */
+  try { document.documentElement.setAttribute('data-si-ver', '1.5.6'); } catch (_) {}   /* ★v1.5.5 入っている版を外から確かめる印 */
   const URL_SHOP = (function () { let v = ''; try { v = (new URLSearchParams(location.search).get('cnsc_shop_id') || '').replace(/\D/g, ''); if (v) sessionStorage.setItem('si_url_shop', v); else v = sessionStorage.getItem('si_url_shop') || ''; } catch (_) {} return v; })();
   let SHOP_BAD = '';
   async function shopInfo() {
-    if (_shop) { if (SHOP_BAD) { try { badge('⚠ 送りません：' + SHOP_BAD + '（別の店の数字を混ぜないため）'); } catch (_) {} return null; } return _shop; }   /* レビュー低6：待機中の表示に上書きされた警告を出し直す */
+    if (_shop) { if (SHOP_BAD) { try { badgeQuiet('店違いのため送りません（見張りが戻します）'); } catch (_) {} return null; } return _shop; }   /* レビュー低6：待機中の表示に上書きされた警告を出し直す */
     try { const r = await fetch('/api/selleraccount/shop_info/', { credentials: 'include' }); const j = await r.json(); const d = (j && j.data) || {}; if (d.shop_id) _shop = { id: String(d.shop_id), name: String(d.name || '') }; } catch (_) {}
-    if (_shop && URL_SHOP && _shop.id !== URL_SHOP) { SHOP_BAD = '開いている店（' + _shop.name + '）が URL の店（' + URL_SHOP + '）と違う'; log('shop mismatch', SHOP_BAD); try { badge('⚠ 送りません：' + SHOP_BAD + '（別の店の数字を混ぜないため）'); } catch (_) {} return null; }
+    if (_shop && URL_SHOP && _shop.id !== URL_SHOP) { SHOP_BAD = '開いている店（' + _shop.name + '）が URL の店（' + URL_SHOP + '）と違う'; log('shop mismatch', SHOP_BAD); try { badgeQuiet('店違いのため送りません（見張りが戻します）'); } catch (_) {} return null; }
     return _shop;
   }
   async function send(period, rows) {
@@ -52,7 +52,7 @@
     const sh = await shopInfo();
     if (SHOP_BAD || (URL_SHOP && !sh)) return;   /* ★v1.5.4 違う店の画面・URL が店を指しているのに店が読めない時は送らない（店なしで送ると国の数字に直接入る＝レビュー中2） */
     const payload = { action: 'traffic_ingest', cc: CC, period: period, rows: rows, shop_id: sh ? sh.id : '', shop_name: sh ? sh.name : '' };
-    fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.5' })) })
+    fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.6' })) })
       .then(r => r.text()).then(t => { log('sent', period, rows.length, t.slice(0, 120)); if (!/"ok"\s*:\s*true/.test(t)) { badge('⚠ 送れませんでした（返事が違う）＝次の回にもう一度'); return; }   /* ★1.4.0 2026-10-07 SG：GAS がログイン画面の HTML を返したのに「送った」と記録して、その日は二度と送らなかった */ try { localStorage.setItem(sentKey, JSON.stringify({ at: Date.now(), period, n: rows.length, res: t.slice(0, 80) })); } catch (_) {} badge('📈 ' + rows.length + '日ぶんを送りました（' + period + '）'); })
       .catch(e => { log('send fail', e); badge('⚠ 送れませんでした ' + String(e).slice(0, 60)); });
   }
@@ -80,7 +80,9 @@
   const of = window.fetch;
   window.fetch = async function (u, o) { const r = await of.apply(this, arguments); try { const us = String(u && u.url || u); if (/mydata\/traffic/.test(us)) { const c = r.clone(); c.text().then(t => handle(us, t)); } } catch (_) {} return r; };
   /* 画面の小さな印 */
-  function badge(t) { try { let b = document.getElementById('si-badge'); if (!b) { b = document.createElement('div'); b.id = 'si-badge'; b.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;font:12px/1.4 sans-serif;background:#fff;border:1px solid #c7d7ee;border-radius:8px;padding:4px 8px;color:#2b6cb0;box-shadow:0 2px 8px rgba(0,0,0,.12)'; document.body.appendChild(b); } b.textContent = t; } catch (_) {} }
+  /* ★v1.5.6（2026-11-20 00・本人のスクショ「⚠ 送りません…」）：店違いは見張り（sc-autologin-watch）が自動で戻すので、本人に見せる帯にしない＝小さな灰色の1行（quiet） */
+  function badgeQuiet(t) { try { badge(t); const b = document.getElementById('si-badge'); if (b) { b.style.color = '#9aa0a6'; b.style.fontSize = '10px'; b.style.padding = '1px 5px'; b.style.boxShadow = 'none'; b.style.borderColor = '#e3e6ea'; b.style.opacity = '0.7'; } } catch (_) {} }
+  function badge(t) { try { let b = document.getElementById('si-badge'); if (b) { b.style.color = '#2b6cb0'; b.style.fontSize = '12px'; b.style.padding = '4px 8px'; b.style.boxShadow = '0 2px 8px rgba(0,0,0,.12)'; b.style.borderColor = '#c7d7ee'; b.style.opacity = '1'; } if (!b) { b = document.createElement('div'); b.id = 'si-badge'; b.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;font:12px/1.4 sans-serif;background:#fff;border:1px solid #c7d7ee;border-radius:8px;padding:4px 8px;color:#2b6cb0;box-shadow:0 2px 8px rgba(0,0,0,.12)'; document.body.appendChild(b); } b.textContent = t; } catch (_) {} }
   /* 「Past 30 Days」を選ぶ（ページの自分の呼び出しを起こすため＝署名付きで読まれる） */
   function pick30() {
     const trg = [...document.querySelectorAll('div,span')].find(e => e.children.length === 0 && /^(Yesterday|Past 7 Days|Past 30 Days|Real-Time)$/.test((e.textContent || '').trim()) && e.closest('[class*="period"],[class*="Period"],[class*="date"],[class*="select"]'));
@@ -143,7 +145,7 @@
   const sleep = ms => new Promise(res => setTimeout(res, ms));
   async function postGas(payload) {
     try {
-      const t = await (await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.5' })) })).text();
+      const t = await (await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.6' })) })).text();
       let j = null; try { j = JSON.parse(t); } catch (_) {}
       return { t: t, j: j, ok: !!(j && j.ok === true), busy: !!(j && j.error === 'busy'), unknown: /WRITE_TOKEN/.test(t) };
     } catch (e) { return { t: String(e), j: null, ok: false, busy: false, unknown: false }; }
