@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261120-2340'
+var SRC_VER = '20261121-0040'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -10387,6 +10387,10 @@ function hbWatchRun_(me, heal) {
   if (!rows) add({ id: 'kv_read', name: '控えの読み（Supabase）', state: 'blind', why: '読めなかった＝この回は時刻を見ていない（0件ではない）' + (HB_LAST_ERR ? '（' + HB_LAST_ERR + '）' : ''), last: null });
   else {
     var byK = {}; rows.forEach(function (r) { byK[r.k] = r; });
+    /* ★2026-11-21 05（00 の見張り 00:30「Bump に記録が無い」・実物は 00:28 に5件×3店を押し上げていた）：取り札 sync_claim_* は baClaimAtomic_ が「古い札を消す→入れる」の2手で取る。
+       その間（1秒弱）に読むと行が無く「記録が無い」の赤になる。無かった取り札だけ3秒あけてもう1回読む（読めなければ今まで通り） */
+    var hbMiss = keys.filter(function (k0) { return !byK[k0] && /^sync_claim_/.test(k0); });
+    if (hbMiss.length) { try { Utilities.sleep(3000); (hbSel_('select=k,updated_at,at:v->>at,lastAt:v->>lastAt&k=in.(' + hbMiss.join(',') + ')') || []).forEach(function (r) { byK[r.k] = r; }); } catch (eM) {} }
     kvList.forEach(function (x) {
       var r = byK[x[0]], last = null, extra = '';
       if (r) {
