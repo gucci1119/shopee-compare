@@ -1870,7 +1870,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-022840';
+  const APP_BUILD = '20261121-022929';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -31077,6 +31077,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '🔑 <b>出品一覧：アカウントを複数選べる</b>（選択欄で選ぶたびに足し、選んだ物は紫の札で並べて ✕ で外す・「✕ アカウントの絞り込みを外す」で全部外す）。国をまたいでもよい',
       '📅 <b>出品ログ：店を押すたびに足す・外す（いくつでも・国をまたいでよい）</b>。第1と第3を両方、PH の店と SG の店を同時、のように選べます（「すべて」で外れる）',
       '📊 <b>旧ランキングの DB 版</b>：上の期間・検索・国のチェックが効かない表であることを、表の上に出すようにしました（前は「7日間」を押しても30日の表のまま、と見分けられませんでした）',
       '↩️ <b>返品・キャンセル：国を押すたびに足す・外す（いくつでも）・タブのすぐ下へ</b>（返品リクエストのタブにも効く）。種別・段階などの絞り込みの帯も、数字や説明の下からタブの下へ移しました',
@@ -36223,7 +36224,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   //   個店指定は登録簿で照合してその店だけ。複数店の指定はDBを読み直す。
   async function pullListingsNow() {
     if (lst.syncing) return;
-    const viewAccount = lst.acct || '', headerAccount = state.acct || 'all';
+    const viewAccount = lstAcctParts(lst.acct).length === 1 ? lst.acct : (lst.acct ? 'multi' : ''), headerAccount = state.acct || 'all';   /* ★11/21 複数の時は1店に決めない（DB を読み直す側へ） */
     const scoped = viewAccount || headerAccount !== 'all';
     if (!scoped && state.mode === 'live' && settings.sbSecret) { await syncListings(); return; }
     if (!settings.openapiUrl || !settings.writeToken) { await reloadListingsFromDb(); return; }
@@ -56039,7 +56040,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   // 🔑 shop_id → 系統。★判定は二重に持たない＝既にある famOfLabel(7986行) と acctLabel(6901行) を使う。
   const acctFamOf = (sid) => famOfLabel(acctLabel(sid));
   const LST_ACCOUNT_RANK_LABELS = Object.freeze({ main:'第1アカウント', sub:'第2アカウント', new:'第3アカウント' });
+  /* ★2026-11-21 05（00 の OK）：出品一覧のアカウントは複数（カンマ区切りの文字・保存の鍵 smdLstState の acct はそのまま）。選択欄は「足す」役、選んだ物は札で並べて ✕ で外す */
+  const lstAcctParts = (v) => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
+  const lstAcctPass = (p, r, rankByShop) => p === 'none' ? !r.shop_id : p.indexOf('fam:') === 0 ? acctFamOf(r.shop_id) === p.slice(4) : p.indexOf('rank:') === 0 ? (rankByShop && rankByShop.get(String(r.shop_id)) === p.slice(5)) : String(r.shop_id || '') === p;
   const acctFilterLabel = (v) => {
+    if (lstAcctParts(v).length > 1) return lstAcctParts(v).map(x => acctFilterLabel(x)).join('・');
     if (!v) return '';
     if (v === 'none') return '（アカウント未判別）';
     if (v.indexOf('fam:') === 0) return v.slice(4) + '（系統ぜんぶ）';
@@ -56346,16 +56351,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     }
     // 🔑 アカウントの所属、店名の系統、国ごとの店で絞る。
     /* ★2026-11-21 05（本人「さっきみたいな、UI修正できるとこはして」）：上部の対象アカウントを切り替えた後に、範囲外の店・系統の選びが残ると、選択欄は「すべて」に見えるのに0件になっていた＝描く時に範囲へ丸める */
-    if (lst.loaded && all.length && lst.acct && lst.acct !== 'none' && !lst.acct.startsWith('rank:')) {   /* ★11/21 レビュー中2：読み直しの途中（空）で選びを消さない */
-      const _f = lst.acct.indexOf('fam:') === 0 ? lst.acct.slice(4) : null;
-      if (!all.some(r => _f ? acctFamOf(r.shop_id) === _f : String(r.shop_id || '') === lst.acct)) lst.acct = '';
+    if (lst.loaded && all.length && lst.acct) {   /* ★11/21 レビュー中2：読み直しの途中（空）で選びを消さない・範囲外の店・系統だけを外す（未判別・第N は残す） */
+      lst.acct = lstAcctParts(lst.acct).filter(p => p === 'none' || p.indexOf('rank:') === 0 || all.some(r => lstAcctPass(p, r))).join(',');
     }
     if (lst.acct) {
-      const isRank = lst.acct.startsWith('rank:');
-      if (lst.acct === 'none') rows = rows.filter(r => !r.shop_id);
-      else if (lst.acct.indexOf('fam:') === 0) { const f = lst.acct.slice(4); rows = rows.filter(r => acctFamOf(r.shop_id) === f); }
-      else if (isRank) { const rank = lst.acct.slice(5); rows = rows.filter(r => rankByShop.get(String(r.shop_id)) === rank); }
-      else rows = rows.filter(r => String(r.shop_id || '') === lst.acct);
+      const _ap = lstAcctParts(lst.acct), isRank = _ap.length === 1 && _ap[0].startsWith('rank:');
+      rows = rows.filter(r => _ap.some(p => lstAcctPass(p, r, rankByShop)));
       T('acct', (isRank ? '' : 'アカウント ') + acctFilterLabel(lst.acct));
     }
     // ⚠ 同名バッジから来た絞り込み＝この国のこのタイトルだけ（部分一致にしない）
@@ -56545,10 +56546,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
             .sort((a, b) => a.cc.localeCompare(b.cc))
             .map(({shop_id, cc, label}) => `<option value="${av(shop_id)}" ${lst.acct === String(shop_id) ? 'selected' : ''}>${esc(cc)} · ${esc(label)}（${byS.get(String(shop_id)) || 0}件）</option>`).join('') + '</optgroup>' : '';
           return `<label style="display:inline-flex;align-items:center;gap:4px;color:#5b6472">🔑<select id="lst-acct" title="第1・第2・第3アカウント、店名の系統、国別の店で絞ります。複数国をまとめて見るには上部を全アカウントにしてください。" style="font-size:11.5px;padding:3px 5px;border:1px solid ${lst.acct ? '#c2401e' : '#dcdfe4'};border-radius:6px;${lst.acct ? 'color:#a83518;font-weight:700;background:#fdece7' : 'color:#5b6472'}">
-            <option value="" ${!lst.acct ? 'selected' : ''}>アカウントすべて（${all.length}件）</option>
+            <option value="" selected>${lst.acct ? '＋ アカウントを足す（いま ' + lstAcctParts(lst.acct).length + 'つ）' : 'アカウントすべて（' + all.length + '件）'}</option>${lst.acct ? '<option value="__clear">✕ アカウントの絞り込みを外す</option>' : ''}
             ${optsRank}${optsFam}${optsThird}${optsShop}
             ${noneN ? `<option value="none" ${lst.acct === 'none' ? 'selected' : ''}>アカウント未判別（${noneN}件）</option>` : ''}
-          </select></label>`;
+          </select></label>` + lstAcctParts(lst.acct).map(p => `<span style="display:inline-flex;align-items:center;gap:3px;background:#5b3fd6;color:#fff;border-radius:10px;padding:1px 4px 1px 9px;font-size:11.5px">${esc(acctFilterLabel(p))}<button type="button" class="lst-acx" data-x="${av(p)}" title="このアカウントを外す" style="border:none;background:none;color:#fff;cursor:pointer;font-size:12px;padding:0 3px">✕</button></span>`).join('');
         })()}
         <span class="smd-seg" id="lst-filter" title="出品の状態で絞ります">
           <button data-k="all" class="${!lst.filter || lst.filter === 'all' ? 'on' : ''}">すべて</button>
@@ -57016,11 +57017,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { let pt; const pmin = document.getElementById('lst-pmin'), pmax = document.getElementById('lst-pmax'); const upd = () => { clearTimeout(pt); pt = setTimeout(() => { lst.priceMin = (pmin.value === '') ? null : Number(pmin.value); lst.priceMax = (pmax.value === '') ? null : Number(pmax.value); lst.page = 1; drawListingStatus(); }, 300); }; if (pmin) pmin.addEventListener('input', upd); if (pmax) pmax.addEventListener('input', upd); }
     { const seg = document.getElementById('lst-cond'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.cond = b.dataset.c; lst.page = 1; drawListingStatus(); }); }
     { const ac = document.getElementById('lst-acct');
-      if (ac) ac.addEventListener('change', () => { lst.acct = ac.value; lst.page = 1;
+      if (ac) ac.addEventListener('change', () => { const _v = ac.value; lst.acct = _v === '__clear' ? '' : (!_v ? lst.acct : (lstAcctParts(lst.acct).indexOf(_v) >= 0 ? lst.acct : lstAcctParts(lst.acct).concat([_v]).join(','))); lst.page = 1;   /* ★11/21 選ぶたびに足す（✕ で外す） */
         /* ★11/21 店を選んだら、国の選びにその店の国を足す（国 PH と台湾の店で0件にならない） */
-        const _r = /^\d+$/.test(lst.acct) ? (lst.byCc ? Object.values(lst.byCc).flat().find(r => String(r.shop_id) === lst.acct) : null) : null;
+        const _r = /^\d+$/.test(_v) ? (lst.byCc ? Object.values(lst.byCc).flat().find(r => String(r.shop_id) === _v) : null) : null;
         if (_r && Array.isArray(lst.ccs) && lst.ccs.length && lst.ccs.indexOf(_r.cc) < 0) { lst.ccs = lst.ccs.concat([_r.cc]); try { localStorage.setItem('smdLstCcs', JSON.stringify(lst.ccs)); } catch (_) {} }
-        drawListingStatus(); }); }
+        drawListingStatus(); });
+      host.querySelectorAll('.lst-acx').forEach(b => b.addEventListener('click', () => { lst.acct = lstAcctParts(lst.acct).filter(p => p !== b.dataset.x).join(','); lst.page = 1; drawListingStatus(); })); }
     { const seg = document.getElementById('lst-vartype'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; lst.varType = b.dataset.v; lst.page = 1; drawListingStatus(); }); }
     { const seg = document.getElementById('lst-statsperiod'); if (seg) seg.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; const np = Number(b.dataset.p) || 0; if (np === (lst.statsPeriod || 0)) return; lst.statsPeriod = np; lst.page = 1; seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); loadStatsDelta(); }); }   // ★2026-09-19 ボタンは data-p なのに data-sp を読んでいて、押しても期間が切り替わっていなかった // 期間切替→差分をRPCで取得後に再描画（loadStatsDelta内でdrawListingStatus）
     { const s = document.getElementById('lst-brand'); if (s) s.addEventListener('change', () => { lst.brand = s.value; lst.page = 1; drawListingStatus(); }); }
@@ -57030,7 +57032,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!cc) lst.ccs = [];
       else { const a = Array.isArray(lst.ccs) ? lst.ccs.slice() : []; const i = a.indexOf(cc); if (i >= 0) a.splice(i, 1); else a.push(cc); lst.ccs = a; }
       /* ★11/21 国を選んだら、選んだ国に無い店の選びを外す */
-      if (lst.ccs.length && /^\d+$/.test(lst.acct || '')) { const _r = lst.byCc ? Object.values(lst.byCc).flat().find(r => String(r.shop_id) === lst.acct) : null; if (_r && lst.ccs.indexOf(_r.cc) < 0) lst.acct = ''; }
+      if (lst.ccs.length && lst.acct) { const _all = lst.byCc ? Object.values(lst.byCc).flat() : []; lst.acct = lstAcctParts(lst.acct).filter(p => { if (!/^\d+$/.test(p)) return true; const _r = _all.find(r => String(r.shop_id) === p); return !_r || lst.ccs.indexOf(_r.cc) >= 0; }).join(','); }
       try { localStorage.setItem('smdLstCcs', JSON.stringify(lst.ccs)); } catch (_) {}
       lst.page = 1; drawListingStatus();
     }));
