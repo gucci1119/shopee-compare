@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261120-0732'
+var SRC_VER = '20261120-1206'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -992,6 +992,13 @@ function doGetInner_(e) {
         baout = p.action === 'pre_h_migrate' ? baPreHMigrate_(p) : p.action === 'pre_h_check' ? baPreHCheck_(p) : p.action === 'pre_h_compare' ? baPreHCompare_(p) : p.action === 'limited_fix' ? baLimitedFix_(p) : p.action === 'limited_audit' ? baLimitedAudit_(p) : p.action === 'tcg_tick' ? tcgTick(p.manual === '1' ? true : 'web') : p.action === 'tcg_cron_install' ? tcgCronInstall_(p) : p.action === 'tcg_preview' ? tcgPreview_(p) : p.action === 'game_judge_cands' ? gameJudgeCands_(p) : p.action === 'boshu_auto_tick_bg' ? boshuAutoTick('web') : p.action === 'mark_models' ? markModels_(parseInt(p.shop_id, 10), parseInt(p.item_id, 10), JSON.parse(p.names || '[]'), String(p.prefix || '× ')) : p.action === 'payout_orders_backfill' ? payoutOrdersBackfill_(parseInt(p.days || '90', 10), String(p.cc || '')) : p.action === 'cond_index_tick' ? condIndexTick(true) : p.action === 'cond_index_setup' ? setupCondIndexTrigger() : p.action === 'boshu_auto_prejudge' ? boshuAutoPrejudge_(String(p.hw || ''), parseInt(p.max || '40', 10)) : p.action === 'boshu_auto_setup' ? setupBoshuAutoTrigger() : (p.action === 'boshu_auto_preview' ? boshuAutoPreview_(String(p.hw || ''), parseInt(p.limit || '50', 10), p.noYahoo === '1', p.needPhoto === '1') : (p.action === 'boshu_auto_exclude' ? boshuAutoExclude_(String(p.hw || ''), String(p.key || ''), p.undo === '1', p.any === '1', String(p.ja || '')) : boshuAutoTick(true)));
       } catch (err) { baout = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(bacb + '(' + JSON.stringify(baout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'cond_audit') {   /* ★2026-11-20 05（00・本人「今まで送った写真、本当にこれ Google Drive に登録されてるん？」）：送った画像→索引→Drive の数え（読むだけ・何も書かない） */
+      var cacb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), cao;
+      try { var cawt = P_().getProperty('WRITE_TOKEN'); if (!cawt || p.token !== cawt) throw new Error('WRITE_TOKEN不正'); cao = condAudit_(p); }
+      catch (eCa) { cao = { ok: false, error: String((eCa && eCa.message) || eCa).slice(0, 200) }; }
+      cao.src = SRC_VER;
+      return ContentService.createTextOutput(cacb + '(' + JSON.stringify(cao) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'llog_watch') {   /* ★2026-11-05 仕入れ目安の控えの照らし合わせ（読むだけ・dry=1 なら記録もしない） */
       var lwcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), lwo;
@@ -13122,6 +13129,62 @@ function condIndexTick(manual) {
     return { ok: true, judged: n, usable: usable, left: left, total: Object.keys(idx.items).length };
   } catch (e) { return { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
   finally { try { ufPersist_(); } catch (e5) {} try { lock.releaseLock(); } catch (e6) {} }
+}
+/* ★2026-11-20 05（00・本人「てかさ、今まで送った写真、本当にこれ Google Drive に登録されてるん？」）：送った画像が索引→Drive のどこまで進んだかを数える（読むだけ・何も書かない）。
+   送った画像＝chat_messages の out:image（取り込まれた会話だけ＝取り込まれていない会話は数えられない）。1枚ずつ次のどれかに分ける（月は送った日・日本時間）：
+   blob＝本文が URL でない（blob: など＝索引にも入れられない）／sticker＝スタンプ／banner＝注文メッセージの前後5分（案内のバナー）／
+   ai_<種類>＝索引で商品の写真ではないと書かれた（バナー・スクショ・伝票・書類・その他）／pi＝商品の写真だが個人情報あり／
+   drive＝索引で使える写真・そのセットが Drive へ書き出し済み／ok_wait＝使える写真だがセットがまだ書き出されていない／
+   fail＝索引で3回読めなかった（画像が取れない）／queue＝一覧に入っていて判定待ち／noqueue＝一覧に入っていない（索引の外）
+   追加で：書き出し済みのセットで、書き出した枚数より使える写真が多い（後から索引に入った・取れなかった）枚数＝partial。
+   q（文字）で索引の品名・題名と送った相手を探す（例 monster ball）。お客さんの名前は返さない（一致した数と月・状態だけ） */
+function condAudit_(p) {
+  var rq = sbSelect_('app_kv', 'select=k,v&k=in.(cond_photo_queue,cond_photo_index,cond_export_done)');
+  if (!Array.isArray(rq)) return { ok: false, error: '控えを読めませんでした' };
+  var q = null, idx = null, dn = null;
+  rq.forEach(function (r) { if (r.k === 'cond_photo_queue') q = r.v || {}; if (r.k === 'cond_photo_index') idx = r.v || {}; if (r.k === 'cond_export_done') dn = r.v || {}; });
+  if (!idx || !idx.items) return { ok: false, error: '索引が読めない・空' };
+  if (!dn || !dn.sets) return { ok: false, error: '書き出しの控えが読めない・空' };
+  var items = idx.items, fail = idx.fail || {}, sets = dn.sets, qset = {};
+  ((q && q.items) || []).forEach(function (x) { if (x && x.u) qset[x.u] = 1; });
+  var imgs = sbSelectAll_('chat_messages', 'select=cc,conversation_id,buyer,msg_time,text&direction=eq.out&msg_type=eq.image&order=msg_time.asc');
+  var txs = sbSelectAll_('chat_messages', 'select=conversation_id,msg_time,text&direction=eq.out&msg_type=eq.text&or=(text.ilike.*thank*you*,text.ilike.*already*shipped*,text.ilike.*glad*your*order*)');
+  if (!Array.isArray(imgs) || !Array.isArray(txs)) return { ok: false, error: '会話を読めませんでした' };
+  var ORDER_TXT = /^\s*(thank you for your (purchase|order)|thank you very much for your purchase|we're so glad your order arrived|🚚 already shipped)/i;
+  var banT = {}; txs.forEach(function (m) { if (ORDER_TXT.test(m.text || '')) (banT[m.conversation_id] = banT[m.conversation_id] || []).push(Date.parse(m.msg_time)); });
+  var jstM = function (iso) { var t = Date.parse(iso); return isNaN(t) ? '不明' : Utilities.formatDate(new Date(t), 'Asia/Tokyo', 'yyyy-MM'); };
+  var by = {}, tot = {}, seenU = {}, dupRows = 0, gOk = {};
+  var bump = function (m, k) { var o = by[m] = by[m] || {}; o[k] = (o[k] || 0) + 1; tot[k] = (tot[k] || 0) + 1; };
+  var qre = p && p.q ? new RegExp(String(p.q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*'), 'i') : null, qhit = [];
+  imgs.forEach(function (m) {
+    var mo = jstM(m.msg_time), raw = String(m.text || ''), u = raw.split(/[\s@]/)[0].trim(), k;
+    if (u && seenU[u]) { dupRows++; return; }
+    if (u) seenU[u] = 1;
+    if (!/^https?:\/\//.test(u)) k = 'blob';
+    else if (/deo\.shopeemobile|\/sticker|\/stamp/i.test(u)) k = 'sticker';
+    else {
+      var t = Date.parse(m.msg_time), bt = banT[m.conversation_id] || [], isB = false;
+      for (var i = 0; i < bt.length && !isB; i++) if (Math.abs(bt[i] - t) <= 5 * 60000) isB = true;
+      var r = items[u];
+      if (r) {
+        if (r.ok) { var g = r.g || ('u:' + u); (gOk[g] = gOk[g] || { n: 0, mo: mo }).n++; k = sets[g] ? 'drive' : 'ok_wait'; }
+        else if (r.ty === 'product_photo' && r.pi) k = 'pi';
+        else k = 'ai_' + String(r.ty || 'other');
+      } else if (isB) k = 'banner';
+      else if ((fail[u] || 0) >= 3) k = 'fail';
+      else if (qset[u]) k = 'queue';
+      else k = 'noqueue';
+    }
+    bump(mo, k);
+    if (qre) { var r2 = items[u] || {}; var hay = [r2.it, r2.ti, r2.gti, r2.md].join(' ');
+      if (qre.test(hay) || qre.test(String(m.buyer || ''))) qhit.push({ mo: mo, at: String(m.msg_time).slice(0, 16), cc: m.cc, byBuyer: qre.test(String(m.buyer || '')) ? 1 : 0, byItem: qre.test(hay) ? 1 : 0, k: k, it: String(r2.it || '').slice(0, 40), ti: String(r2.gti || r2.ti || '').slice(0, 60), g: r2.g ? String(r2.g).slice(-6) : '', f: (r2.g && sets[r2.g]) ? String(sets[r2.g].f || '') : '' }); }
+  });
+  var partial = {}, partialN = 0;
+  Object.keys(gOk).forEach(function (g) { var d = sets[g]; if (!d) return; var miss = gOk[g].n - (Number(d.n) || 0); if (miss > 0) { partial[gOk[g].mo] = (partial[gOk[g].mo] || 0) + miss; partialN += miss; } });
+  /* 書き出しの控えの中身（月ごとのセット数・枚数・未分類） */
+  var exp = {}; Object.keys(sets).forEach(function (g) { var d = sets[g] || {}; var mo = jstM(d.at); var o = exp[mo] = exp[mo] || { sets: 0, imgs: 0 }; o.sets++; o.imgs += Number(d.n) || 0; });
+  return { ok: true, rows: imgs.length, dupRows: dupRows, uniq: Object.keys(seenU).length, idxN: Object.keys(items).length, idxAt: idx.updatedAt || '', queueN: Object.keys(qset).length, queueAt: (q && q.at) || '', doneN: Object.keys(sets).length, doneAt: dn.at || '',
+    total: tot, byMonth: by, partialN: partialN, partialByMonth: partial, exportByMonth: exp, qhit: qhit.slice(0, 40) };
 }
 /* 候補の一覧を作る（ポータルの condQueueBuild と同じ規則）：過去120日に送った画像のうち、注文後メッセージの前後5分に送ったもの（案内バナー）を除く。写真の依頼の48時間以内に送った画像を先頭に。索引済みは外してから1,500件で切る */
 /* ★2026-10-22 本人「保存しておかないと、また調べなあかん」「自動で保存されるようにしておかないと」：一覧の作り直しが1日1回だけ＝送った写真が索引→Drive に入るまで最大1〜2日。
