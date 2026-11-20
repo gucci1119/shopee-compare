@@ -1870,7 +1870,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261120-191538';
+  const APP_BUILD = '20261120-202857';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -10094,7 +10094,7 @@
   });
   /* ★2026-11-15 ダッシュボード「📊 月を比べる」の［日ごと｜週ごと｜累計］・吹き出し・1日平均 */
   Object.assign(I18N, {
-    "⚠ 最後": "⚠ Last", "⚠ まだ一度も取得していません": "⚠ Never imported", "アクセスの最後の取得（日本時間）": "Last traffic import (JST)", "この店のアクセスはまだ一度も取り込まれていません。": "Traffic for this shop has never been imported.",
+    "⚠ 最後": "⚠ Last", "📭 出品0・訪問者0（Shopee の値）": "📭 0 listings, 0 visitors (Shopee's value)", "⚠ まだ一度も取得していません": "⚠ Never imported", "アクセスの最後の取得（日本時間）": "Last traffic import (JST)", "この店のアクセスはまだ一度も取り込まれていません。": "Traffic for this shop has never been imported.",
     "見せ方": "View", "日ごと": "Daily", "週ごと": "Weekly", "累計": "Cumulative", "（今月は途中）": "(this month in progress)",
     "29日〜末": "Day 29-end", "29日〜末の合計": "Day 29-end total",
     "1〜7日": "Days 1-7", "8〜14日": "Days 8-14", "15〜21日": "Days 15-21", "22〜28日": "Days 22-28",
@@ -21648,9 +21648,16 @@
        店ごとに「いつ取ったか（日本時間）」と「いつの分か（対象日）」を分けて出す。36時間より前に取ったきりの店・一度も取れていない店は ⚠ で目立たせる（毎時の見張りと同じ線） */
     const TA_FETCH_STALE_H = 36;
     const taJst = (iso) => { const t = Date.parse(iso || ''); if (!isFinite(t)) return ''; const d = new Date(t + 9 * 3600000), z = (x) => String(x).padStart(2, '0'); return z(d.getUTCMonth() + 1) + '/' + z(d.getUTCDate()) + ' ' + z(d.getUTCHours()) + ':' + z(d.getUTCMinutes()); };
-    const taFetchOf = (id) => { const S = byShop[id] || {}, at = S.at || '', d = Object.keys(S.d || {}).sort().pop() || '', t = Date.parse(at); return { at, d, stale: !isFinite(t) || (Date.now() - t) > TA_FETCH_STALE_H * 3600000 }; };
+    /* ★2026-11-20 05（00 の決め・2店舗目 BR は出品0＝訪問者0は本当の数字）：出品が0件の店は ⚠ にせず「出品0・訪問者0（Shopee の値）」。出品が1件以上になったら普通の扱いに戻る。
+       出品の数は店ごとに件数だけ読む（1店1回・6時間に1回・本文はほぼ空） */
+    if (!TA._lcAt || Date.now() - TA._lcAt > 6 * 3600000) { TA._lcAt = Date.now(); const key0 = settings.sbKey || settings.sbSecret; if (key0) (async () => { const out = {};
+      for (const id of shopIds) { try { const r = await fetch(SB_URL + '/rest/v1/listings?select=item_id&shop_id=eq.' + encodeURIComponent(id), { headers: { apikey: key0, Authorization: 'Bearer ' + key0, Range: '0-0', Prefer: 'count=exact' } }); const n = Number(String(r.headers.get('content-range') || '').split('/')[1]); if (r.ok && isFinite(n)) out[id] = n; } catch (_) {} }
+      const ch = JSON.stringify(out) !== JSON.stringify(TA._lc || {}); TA._lc = out; if (ch) { try { renderTrafficAna(kv); } catch (_) {} } })(); }
+    const taNoList = (id) => !!(TA._lc && TA._lc[id] === 0);
+    const taFetchOf = (id) => { const S = byShop[id] || {}, at = S.at || '', d = Object.keys(S.d || {}).sort().pop() || '', t = Date.parse(at); return { at, d, noList: taNoList(id), stale: !taNoList(id) && (!isFinite(t) || (Date.now() - t) > TA_FETCH_STALE_H * 3600000) }; };
     const taFetchSpan = (id, small) => { const f = taFetchOf(id), dd = f.d ? f.d.slice(5).replace('-', '/') : '';
       const why = f.at ? ('この店のアクセスを最後に取り込んだのは ' + taJst(f.at) + '（日本時間）で、中身は ' + (f.d || '?') + ' の日までの分です。') + (f.stale ? TA_FETCH_STALE_H + '時間より前のままです＝取り込みが止まっています（その店の Chrome で Business Insights のページが開かれていない見込み）。' : '') : 'この店のアクセスはまだ一度も取り込まれていません。';
+      if (f.noList) return `<span data-guide="${av('この店は出品が0件なので、訪問者0は Shopee の値どおりです（止まりではありません）。出品が1件以上になったら、普通の取得時刻の印に戻ります。' + (f.at ? '最後に取り込んだのは ' + taJst(f.at) + '。' : ''))}" style="font-size:${small ? '10.5px' : '11px'};color:#6b7280"><span>📭 出品0・訪問者0（Shopee の値）</span></span>`;
       const body = f.at ? `${f.stale ? '<span>⚠ 最後</span> ' : '<span>📥</span> '}<span>${esc(taJst(f.at))} 取得</span>${dd ? '・<span>' + esc(dd) + ' の分</span>' : ''}` : '<span>⚠ まだ一度も取得していません</span>';
       return `<span data-guide="${av(why)}" style="font-size:${small ? '10.5px' : '11px'};${f.stale ? 'color:#b26a00;font-weight:700' : 'color:#6b7280'}">${body}</span>`; };
     const taFetchHtml = () => {
@@ -21847,7 +21854,7 @@
     const CC_TRF = new Set(['uv', 'pv', 'ppv', 'nv', 'ev', 'nf', 'bounce', 'stay', 'cvr']);   /* アクセスから来る欄だけ（客単価などは注文0で空になる＝止まりと別） */
     const ccLastOf = (id) => Object.keys((byShop[id] || {}).d || {}).sort().pop() || '';
     const ccMxAll = Object.keys(byShop).map(ccLastOf).sort().pop() || '';
-    const ccStaleOf = (ent) => { if (String(ent).indexOf('S:') !== 0 || !ccMxAll) return ''; const d = ccLastOf(String(ent).slice(2)); return (!d || Date.parse(d) < Date.parse(ccMxAll) - 86400000) ? (d || 'none') : ''; };
+    const ccStaleOf = (ent) => { if (String(ent).indexOf('S:') !== 0 || !ccMxAll) return ''; if (TA._lc && TA._lc[String(ent).slice(2)] === 0) return ''; const d = ccLastOf(String(ent).slice(2)); return (!d || Date.parse(d) < Date.parse(ccMxAll) - 86400000) ? (d || 'none') : ''; };
     const ccStaleWhy = (ent, sd) => { const no = famNoOfShop(String(ent).slice(2)) || 0, chr = no === 2 ? '2店舗目の Chrome（GCS ONLINE STORE 2）' : no === 3 ? '第3の Chrome（GCS ONLINE STORE 3）' : 'この店の Chrome';
       return 'この店のアクセス（訪問者など）は、' + chr + 'でこの国の Business Insights のページを開いた時だけ取り込まれます。' + (sd === 'none' ? 'まだ一度も取り込まれていません。' : sd + ' より後の日は、まだ取り込まれていません（ほかの店は ' + ccMxAll + ' まで）。') + 'ページを開くと、直近30日の分はさかのぼって入ります。'; };
     const drawCc = () => {
@@ -30894,6 +30901,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-20', items: [
+      '📭 <b>出品0の店はアクセスの ⚠ にしない</b>（事業本部の決め・2店舗目 BR）：出品が0件の店は訪問者0が本当の数字なので、「⚠ 最後 …」でなく「📭 出品0・訪問者0（Shopee の値）」と出す。出品が1件以上になったら普通の印に戻る',
       '📥 <b>アクセス（各国）に「最後の取得時刻」</b>（本人「アクセス（各国）は、取得の最終時間も欲しい」「それで取れてるか取れてないか検知できる」）：画面の上に、店ごとの「いつ取ったか（日本時間）」と「いつの分か」を分けて出す（例 11/20 12:05 取得・11/19 の分）。36時間より前に取ったきりの店は「⚠ 最後 10/27 12:06 取得」と色を変えて先頭に。アカウントごとの比較の表の各行にも同じ印',
       '💬 <b>見積もりの文に「値段の相談OK」の1段</b>（本人「見積もりを送るときに『価格交渉可能です』みたいなのをつけてほしい…予算を教えてください的な」）：返事のお願いの段の前に「💬 Price is negotiable, so please feel free to ask. Depending on the item, we may be able to adjust it. Just let us know your budget 😊」。払った後・買うと決まった後の案内には入れない',
       '⏸ <b>アクセスの比較で、取り込みが止まった店に「最後に取れた日」</b>（本人「なぜ、下3つは取り込まれてない？」）：アカウントごとの比較で、2店舗目の MY・BR・TW が訪問者〜滞在秒まで全部「—」だった。止まった店は、店の名前の下に「⏸ 最後に取れた日 10/26」、数字の欄に「10/26まで」を出し、かざすと理由（その店の Chrome で Business Insights のページを開いた時だけ取り込まれる・ほかの店はいつまで来ているか）が出る',
