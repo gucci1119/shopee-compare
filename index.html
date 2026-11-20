@@ -1870,7 +1870,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-022440';
+  const APP_BUILD = '20261121-022542';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -17078,7 +17078,8 @@
         // 「今日」はKPI/国別と同じく日本時間基準(tCc)を使う（daily_statsの各国ローカル日付と混ぜない）
         const todayCc = REGIONS.map(rg => { const t = tCc[rg.cc]; return { cc: rg.cc, jpy: t ? t.local * rg.rateJpy : 0, units: t ? t.units : 0 }; });
         const activeToday = todayCc.filter(x => x.units > 0).sort((a, b) => b.jpy - a.jpy);
-        const zeroToday = todayCc.filter(x => x.units === 0).map(x => x.cc);
+        const _tgCc = new Set(accountTargets().map(r => r.cc));   /* ★2026-11-21 05：上部で店を絞っている時は、その店の国だけで「本日まだ0」を数える（ほかの6か国を0と出さない） */
+        const zeroToday = todayCc.filter(x => x.units === 0 && _tgCc.has(x.cc)).map(x => x.cc);
         // 直近7日どの日にもその国のdaily_statsが1行も無い＝データ欠落。※値0でもキーが在れば「同期済で売上0」なので silent 扱いしない（偽「同期漏れ」を防ぐ）
         const silent7 = REGIONS.filter(rg => !seen7.has(rg.cc)).map(rg => rg.cc);
         let bestK = null, bestV = 0; dayKeys.slice(-14).forEach(k => { if (byDay[k].jpy > bestV) { bestV = byDay[k].jpy; bestK = k; } });
@@ -21095,7 +21096,7 @@
   }
 
   // ---------------- 👤 顧客管理 ----------------
-  const cust = { cc: '', repeatOnly: false, inclCancel: false };
+  const cust = { cc: '', ccs: [], repeatOnly: false, inclCancel: false };   /* ★11/21 国は複数（ccs）＝押すたびに足す・外す */
   const ccBadge = (cc) => { const rg = regionByCc(cc); return `<span style="background:${rg ? rg.color : '#999'};color:#fff;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px;margin-right:3px">${esc(cc)}</span>`; };
   const custItemsStr = (o) => ((o.items || []).map(it => `${esc(it.name || it.item_name || '(商品名なし)')}${(it.qty || it.quantity || it.model_quantity_purchased || 1) > 1 ? ` ×${(it.qty || it.quantity || it.model_quantity_purchased)}` : ''}`).join('、') || '（明細なし）');
   const custItemQty = (o) => (o.items || []).reduce((s, it) => s + Number(it.qty || it.quantity || it.model_quantity_purchased || 1), 0);
@@ -21141,7 +21142,9 @@
       if (seq !== cust._seq) return;      // 後から別の描画が始まっている＝そちらに任せる
     }
     const noteMap = {}; (notes || []).forEach(n => { noteMap[n.buyer] = n.note || ''; });
-    const scoped = cust.cc ? orders.filter(o => o.cc === cust.cc) : orders;
+    if (cust.cc && !cust.ccs.length) cust.ccs = [cust.cc]; cust.cc = '';
+    { const _ok = new Set(accountTargets().map(r => r.cc)); cust.ccs = cust.ccs.filter(cc => _ok.has(cc)); }   /* ★11/21 上部の対象アカウントの国に無い国は外す（食い違って0人にしない） */
+    const scoped = cust.ccs.length ? orders.filter(o => cust.ccs.indexOf(o.cc) >= 0) : orders;
     /* ★レビュー#3：未払い（tab 200）はまだ払われていない＝キャンセルと同じく既定では数えない（利益の画面と同じ）。
        未払い1件で「2回目」になりリピーターに数えられていた。チェック「キャンセル・未払いも含める」の時だけ回数に入れる（金額には入れない） */
     const custOut = (o) => o.tab === 600 || o.tab === 200;
@@ -21202,12 +21205,14 @@
       + (notesOk ? '' : '<div style="background:#fff3f0;border:1px solid #ffc4b3;color:#b5341a;border-radius:8px;padding:8px 12px;margin:0 0 10px;font-size:12.5px">⚠️ <b>メモを読めませんでした。</b>📝の印は出ていません。メモ欄は上書きを防ぐため入力できなくしています（画面を開き直すと読み直します）。</div>') +
       `<div class="tool-card" style="margin:0 0 10px;max-width:none"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <span style="font-weight:700">国:</span>
-        <select id="cust-cc" style="padding:5px;font-size:13px"><option value="">すべて</option>${ccOpts}</select>
+        ${(() => { const tg = new Set(accountTargets().map(r => r.cc)), b = (v, label, on, col, tip) => `<button type="button" class="smd-btn cust-ccb" data-v="${v}" data-guide="${av(tip + '選んだ物は画面を開いている間覚えます。読むだけです。')}" style="font-size:11.5px;padding:2px 9px;${on ? 'background:' + (col || '#5b3fd6') + ';color:#fff;border-color:' + (col || '#5b3fd6') + ';' : (col ? 'border-color:' + col + ';' : '')}">${label}</button>`;
+          return b('', 'すべて', !cust.ccs.length, '', 'すべての国のお客さんを出します。') + REGIONS.filter(r => r.enabled !== false && tg.has(r.cc)).map(r => b(r.cc, r.cc, cust.ccs.indexOf(r.cc) >= 0, r.color, r.cc + ' を選びに足します（もう一度押すと外す・いくつでも選べます）。')).join('') + '<span class="smd-dim" style="font-size:10.5px">押すたびに足す・外す</span>'; })()}
         <label style="font-size:12px;cursor:pointer"><input type="checkbox" id="cust-rep" ${cust.repeatOnly ? 'checked' : ''}> リピーターのみ</label>
         <label style="font-size:12px;cursor:pointer" title="キャンセル・未払いの注文を購入回数に含めるか（金額には入れません）"><input type="checkbox" id="cust-cancel" ${cust.inclCancel ? 'checked' : ''}> キャンセル・未払いも含める</label>
         <span class="smd-dim" style="font-size:12px">${list.length}人（リピーター ${repeat}人）・${totalOrders}注文${cust.inclCancel ? '（キャンセル・未払い込み）' : '（キャンセル・未払い除く）'}${list.length > 500 ? '　※画面は上位500人まで表示（CSVは全件）' : ''}</span>${noName ? `<span style="font-size:12px;color:#e8770a" title="名前が空の注文は同じ人とは限らないので、1人にまとめていません">※バイヤー名が空の注文 ${noName}件は一覧に入れていません</span>` : ''}
         <button class="smd-btn" id="cust-csv" style="font-size:11px;margin-left:auto" title="この顧客一覧をCSVで書き出し">⬇ CSV</button></div>
         <div class="smd-dim" style="font-size:11px;margin-top:5px">💡 行をクリックすると<b>購入履歴（商品画像・金額・数量）</b>と<b>メモ</b>がその場で開きます。📝＝メモあり。<b>合計購入額は円換算の合計</b>（下に国ごとの現地通貨）＝国をまたいでも大小を比べられます。</div></div>` +
+      (!list.length ? '<div style="background:#eef4ff;border:1px solid #b6c8f0;color:#1f3d7a;border-radius:8px;padding:6px 12px;margin:0 0 8px;font-size:12px;font-weight:700">ℹ ' + esc(!orders.length ? '注文の記録がありません（読めていないのではなく、数える注文がありません）。' : (cust.ccs.length || cust.repeatOnly) ? '絞り込み（' + [cust.ccs.length ? '国 ' + cust.ccs.join('・') : '', cust.repeatOnly ? 'リピーターのみ' : ''].filter(Boolean).join('・') + '）に当たるお客さんは0人です（注文は全部で ' + orders.length + '件）。絞り込みを外すと出ます。' : 'お客さんの名前が入った注文がありません。') + (plAcctFiltered() ? '（上部の対象アカウントで店を絞っています）' : '') + '</div>' : '') +
       `<div class="tool-card" style="margin:0;max-width:860px"><div class="pf-scroll"><table class="pf-table" data-smdsort="customers" data-smdauto data-smdattach><tr><th></th><th>バイヤー</th><th>購入回数</th><th>合計購入額</th><th>国</th><th>初回購入</th><th>最終購入</th></tr>` +
       list.slice(0, 500).map(x => {
         const b = x.b, v = x.e;
@@ -21216,7 +21221,7 @@
         return `<tr class="cust-row" data-b="${esc(b)}" style="cursor:pointer"><td>${av}</td><td><span class="cust-arrow">▸ </span>${esc(b)}${memoMark}</td><td>${x.n >= 2 ? `<b style="color:#ee4d2d">${x.n}</b>` : x.n}${(v.cancel && cust.inclCancel) ? ` <span class="smd-dim" style="font-size:10px">(❌${v.cancel})</span>` : ''}</td><td style="white-space:nowrap">${spendStr(x)}</td><td style="white-space:nowrap">${[...v.cc].map(ccBadge).join('')}</td><td class="smd-dim" style="font-size:11px;white-space:nowrap">${esc((x.first || '').slice(0, 10) || '—')}</td><td style="white-space:nowrap">${esc((x.last || '').slice(0, 10))}</td></tr>`;
       }).join('') +
       `</table></div></div>`;
-    document.getElementById('cust-cc').addEventListener('change', e => { cust.cc = e.target.value; renderCustomers('filter'); });
+    body.querySelectorAll('.cust-ccb').forEach(b => b.addEventListener('click', () => { const v = b.dataset.v; if (!v) cust.ccs = []; else { const i = cust.ccs.indexOf(v); if (i >= 0) cust.ccs.splice(i, 1); else cust.ccs.push(v); } renderCustomers('filter'); }));
     document.getElementById('cust-rep').addEventListener('change', e => { cust.repeatOnly = e.target.checked; renderCustomers('filter'); });
     document.getElementById('cust-cancel').addEventListener('change', e => { cust.inclCancel = e.target.checked; renderCustomers('filter'); });
     body.querySelectorAll('.cust-row').forEach(r => r.addEventListener('click', () => {
@@ -31063,6 +31068,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '🏠 <b>ダッシュボード：上で店を絞っている時の「本日まだ0」は、その店の国だけで数える</b>（前は絞った店の無い国まで「本日まだ0」と出ていました）',
+      '👤 <b>顧客管理：国を押すたびに足す・外す（いくつでも）</b>・上部の対象アカウントの国に無い国は外す（食い違って0人にしない）・0人の時は理由（注文が無い／絞り込みで0人・全部の注文の数）を表の上に',
       '📦 <b>注文管理：国・店を複数選べる帯をタブの下に</b>（本人「アカウント複数選択とかできないの？国横断して」の型をそろえる）：国・まとめて（第1/第2/第3 全部）・アカウントを押すたびに足す・外す（国をまたいでよい）。選んだ国に無い店は薄く・押すと国も足します。タブの件数（①未手配など）も選んだ国・店の分に合わせました（前は全部の国の数で、表と合いませんでした）。旧ランキングのチェックで外した国がある時は「⚠ 外している国」と「全部の国に戻す」を出します',
       '🔗 <b>アクセス（各国）の上（推移・アカウントごとの比較）と下（商品ごと）の国・店の選びを連動</b>（本人は「国とアカウントが食い違って0件」に困っていた）：上で店や国を変えると下の商品ごとにも効き、下で変えると上のグラフ・比較表も変わります（下で店を選ぶと上は「アカウントごと」になります）。両方に「連動しています」と1行出します',
       '🔎 <b>値付けの見直しの「この明細だけで1つの出品にする（単品）」で、JAN も型番も無い時に止めない</b>（本人のスクショ・TH Pokemon GO Plus +）：押すと、同じ名前の別の明細（どの国・店でも）→ 夜の JAN 調べの控え → ヤマダの検索の順に探して台帳に入れてから単品にします。見つからない時だけ止まり、探した所を出します。押す前から分かるように、JAN も型番も無い明細には「単品を押すと JAN を自動で探します」と出します',
