@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261120-2110'
+var SRC_VER = '20261120-2300'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -1182,6 +1182,14 @@ function doGetInner_(e) {
         }
       } catch (err) { pro = { ok: false, error: String((err && err.message) || err) }; }
       return ContentService.createTextOutput(prcb + '(' + JSON.stringify(pro) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
+    if (p.action === 'bundle_sweep' || p.action === 'bundle_sweep_setup') {   /* ★2026-11-20 まとめ買い割引の拾い直し（dry=1 は数えるだけ）・毎日の時計を作る（本体だけで使う） */
+      var bscb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), bso;
+      try { var bswt = P_().getProperty('WRITE_TOKEN'); if (!bswt || p.token !== bswt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+        bso = p.action === 'bundle_sweep_setup' ? bundleSweepSetup_() : Object.assign({ ok: true }, bundleSweep(String(p.dry || '') === '1')); }
+      catch (err) { bso = { ok: false, error: String((err && err.message) || err) }; }
+      bso.src = SRC_VER;
+      return ContentService.createTextOutput(bscb + '(' + JSON.stringify(bso) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'promo_bundle' || p.action === 'promo_bundle_end' || p.action === 'promo_bundle_delete') {
       var pbcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
@@ -3662,13 +3670,101 @@ function discountItemSnap_(shopId, discountId, itemId) {
   }
   return null;
 }
+/* ★2026-11-20 05（01・00 の決め＝10/22「全カタログを割引に入れてよい」・本人「リクエスト商品も含めて」）：新しく作ったカタログをまとめ買い割引（2点5%・3点10%）に自動で入れる。
+   ①作った直後（addItem_ の終わり＝🤖の複製・Request page・第3の公開も全部ここを通る）②毎日1回の拾い直し（bundleSweep・本体だけ）③外して戻せなかった物（priceRelockPromo_）。
+   入らなかった物（在庫0・回数の制限・割引が無い等）は app_kv bundle_pending に積み、②で入れる。割引が1,000件で満杯なら、同じ条件・同じ期限でもう1本作る */
+var BD_CACHE = {};
+function bdIsOurRule_(d) { var r = (d && d.bundle_deal_rule) || {}, t = r.additional_tiers || []; return Number(r.rule_type) === 2 && Number(r.min_amount) === 2 && Number(r.discount_percentage) === 5 && t.length === 1 && Number(t[0].min_amount) === 3 && Number(t[0].discount_percentage) === 10; }
+function bdCall_(shopId, path, q, method, body) {
+  for (var i = 0; i < 3; i++) { try { return callShop_(shopId, path, q, method, body); } catch (e) { if (i < 2 && /rate_limit|too many requests/i.test(String((e && e.message) || e))) { Utilities.sleep(3000 * (i + 1)); continue; } throw e; } }
+}
+function bdDeals_(shopId) {
+  var k = String(shopId); if (BD_CACHE[k]) return BD_CACHE[k];
+  var now = now_(), out = [];
+  var bl = bdCall_(shopId, '/api/v2/bundle_deal/get_bundle_deal_list', { page_no: 1, page_size: 100 }, 'get');   /* time_status を付けると error_param（10/20 実測） */
+  ((bl.response || {}).bundle_deal_list || []).forEach(function (d) { if (Number(d.start_time) <= now + 86400 && Number(d.end_time) > now + 3600 && bdIsOurRule_(d)) out.push({ id: Number(d.bundle_deal_id), name: String(d.name || ''), start: Number(d.start_time), end: Number(d.end_time), limit: Number(d.purchase_limit) || 10, items: {}, n: 0, full: false }); });
+  out.forEach(function (d) { var gj = bdCall_(shopId, '/api/v2/bundle_deal/get_bundle_deal_item', { bundle_deal_id: d.id }, 'get'); ((gj.response || {}).item_list || []).forEach(function (x) { d.items[String(x.item_id)] = 1; }); d.n = Object.keys(d.items).length; d.full = d.n >= 1000; });
+  BD_CACHE[k] = out; return out;
+}
+function bdNewDeal_(shopId, base, deals) {
+  var nm = String(base.name || 'Bundle 2=5% 3=10%').replace(/\s+[A-Z]$/, '').slice(0, 22) + ' ' + String.fromCharCode(65 + deals.length);
+  var body = { rule_type: 2, discount_percentage: 5, min_amount: 2, additional_tiers: [{ min_amount: 3, discount_percentage: 10 }], start_time: now_() + 600, end_time: base.end, name: nm.slice(0, 25), purchase_limit: base.limit || 10 };
+  var bid = null, bj = null; try { bj = bdCall_(shopId, '/api/v2/bundle_deal/add_bundle_deal', null, 'post', body); bid = (bj.response || {}).bundle_deal_id; } catch (e) { bj = { error: String((e && e.message) || e) }; }
+  if (!bid) { try { Utilities.sleep(2500); var bl = bdCall_(shopId, '/api/v2/bundle_deal/get_bundle_deal_list', { page_no: 1, page_size: 100 }, 'get'); ((bl.response || {}).bundle_deal_list || []).forEach(function (d) { if (!bid && String(d.name || '') === body.name && Number(d.start_time) === Number(body.start_time)) bid = d.bundle_deal_id; }); } catch (e2) {} }   /* 返事が落ちても二重に作らない */
+  if (!bid) throw new Error('まとめ買い割引のもう1本を作れませんでした: ' + JSON.stringify(bj).slice(0, 160));
+  var d = { id: Number(bid), name: body.name, start: body.start_time, end: body.end_time, limit: body.purchase_limit, items: {}, n: 0, full: false, made: true }; deals.push(d);
+  try { baKvSet_('promo_bundle_' + bid, { bundle_deal_id: String(bid), cc: (function () { try { return baCcOfShop_(shopId); } catch (e) { return ''; } })(), shop_id: String(shopId), name: body.name, pct1: 5, min1: 2, pct2: 10, min2: 3, start: body.start_time, end: body.end_time, by: 'bdNewDeal_', at: new Date().toISOString() }); } catch (eK) {}
+  return d;
+}
+function bdPend_(shopId, ids, why) {
+  if (!ids || !ids.length) return; try { var fr = baKvFreshMany_(['bundle_pending']); if (!fr) return; var v = fr.bundle_pending || {}; v.items = v.items || {};
+    ids.forEach(function (id) { var k = String(shopId) + '|' + String(id), o = v.items[k] || { n: 0 }; o.at = new Date().toISOString(); o.why = String(why || '').slice(0, 120); o.n = (o.n || 0) + 1; v.items[k] = o; });
+    var ks = Object.keys(v.items); if (ks.length > 3000) ks.sort(function (a, b) { return String(v.items[a].at).localeCompare(String(v.items[b].at)); }).slice(0, ks.length - 3000).forEach(function (k) { delete v.items[k]; });
+    v.at = new Date().toISOString(); baKvSet_('bundle_pending', v); } catch (e) {}
+}
+/* itemIds をその店の割引に入れる。返事 {added, already, pend, err, made} */
+function bdEnsure_(shopId, itemIds, why) {
+  var res = { added: [], already: [], pend: [], err: [], made: [] }, ids = (itemIds || []).map(function (x) { return String(parseInt(x, 10)); }).filter(function (x) { return x && x !== 'NaN'; });
+  if (!ids.length) return res;
+  var deals = bdDeals_(shopId);
+  if (!deals.length) { res.pend = ids.slice(); bdPend_(shopId, ids, 'この店に開催中の割引（2点5%・3点10%）が無い'); return res; }
+  var todo = ids.filter(function (id) { if (deals.some(function (d) { return d.items[id]; })) { res.already.push(id); return false; } return true; });
+  var guard = 0;
+  while (todo.length && guard++ < 40) {
+    var d = deals.filter(function (x) { return !x.full; }).sort(function (a, b) { return a.n - b.n; })[0];
+    if (!d) { d = bdNewDeal_(shopId, deals[0], deals); res.made.push(String(d.id)); }
+    var room = Math.max(1, 1000 - d.n), chunk = todo.slice(0, Math.min(50, room)), aj;
+    try { aj = bdCall_(shopId, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: d.id, item_list: chunk.map(function (i) { return { item_id: parseInt(i, 10), status: 1 }; }) }); }
+    catch (eA) { var em = String((eA && eA.message) || eA); if (/limit|exceed|max|full/i.test(em) && !/rate_limit|too many/i.test(em)) { d.full = true; continue; } chunk.forEach(function (i) { res.pend.push(i); }); bdPend_(shopId, chunk, '送れなかった: ' + em.slice(0, 80)); todo = todo.slice(chunk.length); continue; }
+    var r = aj.response || {}; (r.success_list || []).forEach(function (x) { var i = String((x && x.item_id) || x); res.added.push(i); d.items[i] = 1; d.n++; });
+    var fullHit = false;
+    (r.failed_list || []).forEach(function (f) { var i = String(f.item_id), fe = String(f.fail_error || '') + ' ' + String(f.fail_message || '');
+      if (/limit|exceed|max|full/i.test(fe) && !/stock/i.test(fe)) { fullHit = true; return; }
+      res.pend.push(i); res.err.push(i + ' ' + fe.slice(0, 80)); bdPend_(shopId, [i], fe.slice(0, 100)); });
+    if (d.n >= 1000) d.full = true;
+    if (fullHit) { d.full = true; todo = todo.filter(function (i) { return res.added.indexOf(i) < 0 && res.pend.indexOf(i) < 0; }); continue; }
+    todo = todo.slice(chunk.length);
+  }
+  if (todo.length) { todo.forEach(function (i) { res.pend.push(i); }); bdPend_(shopId, todo, '入れ切れなかった（回数の上限）'); }
+  try { var fr = baKvFreshMany_(['bundle_auto_log']); if (fr) { var lg = fr.bundle_auto_log || {}, a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), shop: String(shopId), why: String(why || ''), added: res.added.length, already: res.already.length, pend: res.pend.length, made: res.made, err: res.err.slice(0, 3) }); lg.items = a.slice(0, 200); lg.at = new Date().toISOString(); baKvSet_('bundle_auto_log', lg); } } catch (eL) {}
+  return res;
+}
+/* ②毎日1回：全部の店で「公開中（status=1）・在庫あり」なのに開催中の割引に入っていない物と、控え bundle_pending の物を入れる。dry＝数えるだけ */
+function bundleSweep(dry) {
+  var out = { at: new Date().toISOString(), dry: dry === true, shops: [] }, seen = {};
+  var pend = {}; try { var fr = baKvFreshMany_(['bundle_pending']); pend = ((fr && fr.bundle_pending) || {}).items || {}; } catch (eP) {}
+  listTokens_().forEach(function (t) {
+    var sid = String((t && t.shop_id) || ''); if (!sid || seen[sid]) return; seen[sid] = 1;
+    var row = { shop: sid, live: 0, missing: 0, added: 0, pend: 0, made: [], err: '' };
+    try {
+      var rows = sbSelectAll_('listings', 'select=item_id&shop_id=eq.' + sid + '&status=eq.1&stock=gt.0') || [];
+      row.live = rows.length; if (!rows.length) { out.shops.push(row); return; }
+      var deals = bdDeals_(sid); if (!deals.length) { row.err = '開催中の割引が無い'; out.shops.push(row); return; }
+      var miss = rows.map(function (r) { return String(r.item_id); }).filter(function (id) { return !deals.some(function (d) { return d.items[id]; }); });
+      row.missing = miss.length;
+      if (!dry && miss.length) { var r = bdEnsure_(sid, miss, 'sweep'); row.added = r.added.length; row.pend = r.pend.length; row.made = r.made; }
+      /* 入った物・在庫0のまま公開から外れた物は控えから消す（在庫が戻れば次の日にまた拾う） */
+      var liveSet = {}; rows.forEach(function (r) { liveSet[String(r.item_id)] = 1; });
+      Object.keys(pend).forEach(function (k) { if (k.indexOf(sid + '|') !== 0) return; var id = k.split('|')[1]; if (deals.some(function (d) { return d.items[id]; }) || !liveSet[id]) delete pend[k]; });
+    } catch (e) { row.err = String((e && e.message) || e).slice(0, 160); }
+    out.shops.push(row);
+  });
+  if (!dry) { try { var fr2 = baKvFreshMany_(['bundle_pending']); if (fr2) { var v = fr2.bundle_pending || {}; v.items = pend; v.at = new Date().toISOString(); baKvSet_('bundle_pending', v); } } catch (eW) {} try { baKvSet_('bundle_sweep_last', out); } catch (eS) {} }
+  try { ufPersist_(); } catch (eU) {}
+  return out;
+}
+function bundleSweepSetup_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'bundleSweep') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('bundleSweep').timeBased().atHour(4).nearMinute(30).everyDays(1).inTimezone('Asia/Tokyo').create();
+  return { ok: true, trigger: 'bundleSweep 毎日 4:30（日本時間）' };
+}
 /* opt.restoreDiscount＝外した値下げにも、控えた明細だけを元の値段で戻す（🤖・ポータルの明細の追加・値段の書き込みの失敗の時）。
    値段の書き込み（updatePriceList_）は前からの決めどおり値下げを戻さない（控えも取らない）。戻せなかった物は promo_back_skip（🔔）へ */
 function priceRelockPromo_(shopId, itemId, promo, opt) {
   (promo.bundleOut || []).forEach(function (pid) {
-    try { var aj = callShop_(shopId, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: pid, item_list: [{ item_id: parseInt(itemId, 10), status: 1 }] });
-      if (((aj.response || {}).success_list || []).length) promo.bundleBack.push(pid); else promo.bundleBackErr.push(pid + ' ' + JSON.stringify((aj.response || {}).failed_list || aj).slice(0, 100)); }
-    catch (e) { promo.bundleBackErr.push(pid + ' ' + String(e.message || e).slice(0, 100)); }
+    try { var aj = bdCall_(shopId, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: pid, item_list: [{ item_id: parseInt(itemId, 10), status: 1 }] });   /* ★2026-11-20 回数の制限（rate_limit）は待って2回まで送り直す */
+      if (((aj.response || {}).success_list || []).length) promo.bundleBack.push(pid); else { promo.bundleBackErr.push(pid + ' ' + JSON.stringify((aj.response || {}).failed_list || aj).slice(0, 100)); bdPend_(shopId, [itemId], '外して戻せなかった ' + pid); } }
+    catch (e) { promo.bundleBackErr.push(pid + ' ' + String(e.message || e).slice(0, 100)); bdPend_(shopId, [itemId], '外して戻せなかった ' + pid + ' ' + String(e.message || e).slice(0, 60)); }   /* ★2026-11-20 戻せなかった物は控えに積み、毎日の拾い直しで入れる */
   });
   if (opt && opt.restoreDiscount && (promo.discountOut || []).length) {
     promo.discountBack = promo.discountBack || []; promo.discountBackErr = promo.discountBackErr || [];
@@ -7083,6 +7179,8 @@ function addItem_(body, attempt) {
   }
   /* ★2026-09-26 統一動画は作った【後】に update_item で付ける（add_item では送らない＝cloneItem_ の実測に合わせる）。失敗しても作成は成功のまま */
   if (itemId && _promo) { try { promoAfterCreate_(shopId, itemId, _promo, result); } catch (ePa) { result.promo_warn = String((ePa && ePa.message) || ePa).slice(0, 160); } }
+  /* ★2026-11-20 05（01・00 の決め）：作った直後にまとめ買い割引へ入れる（在庫0・まだ明細が無い等で入らなければ控えに積み、毎日の拾い直しで入れる）。失敗しても作成は成功のまま */
+  if (itemId) { try { var bdr = bdEnsure_(shopId, [itemId], 'new'); result.bundle = { added: bdr.added.length, already: bdr.already.length, pend: bdr.pend.length, made: bdr.made }; } catch (eBd) { result.bundle_warn = String((eBd && eBd.message) || eBd).slice(0, 160); try { bdPend_(shopId, [itemId], '作った直後に入れられなかった'); } catch (eBp) {} } }
   return result;
 }
 // 出品編集（公式API・ブリッジ卒業）：タイトル/親SKU/説明を product/update_item で更新。指定shop_id×item_id。
