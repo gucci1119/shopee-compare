@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261120-2310'
+var SRC_VER = '20261120-2340'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -2074,31 +2074,46 @@ function doGetInner_(e) {
     if (p.action === 'buyer_orders') {   /* 📦 2026-10-24 本人「ワッツアップでもその人の購入履歴とかを見れたらいいな」：Shopee のユーザー名（＋国）でその人の注文を返す（読むだけ・新しい順50件）。鍵は営業窓口の OUTREACH_TOKEN */
       var bocb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var boout;
+      var _bt0 = Date.now(), _bms = {}, boHit = false;   /* ★2026-11-20 05（00・本人「これ会話切り替えたあと、めっちゃ遅いんよね」）：手順ごとの秒数（ms・新しい名前）・同じ人は5分控える・3つの読みを同時に */
       try {
         if (!outreachAuth_(p.token)) throw new Error('token');
+        _bms.auth = Date.now() - _bt0;
         var bu = String(p.buyer || '').trim().toLowerCase(); if (!/^[a-z0-9._-]{3,40}$/.test(bu)) throw new Error('buyer は Shopee のユーザー名（英数字 . _ -）');
         var bcc = String(p.cc || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2);
+        var boCk = 'bo2|' + bu + '|' + bcc, boC = CacheService.getScriptCache();
+        if (String(p.fresh || '') !== '1') { try { var boHv = boC.get(boCk); if (boHv) { boout = JSON.parse(boHv); boout.cached = true; boHit = true; } } catch (eC) {} }
+        if (!boHit) {
         var boq = 'select=cc,sn,buyer,order_ts,order_date,total,tab,status,items,tracking,shop_id&buyer=ilike.' + encodeURIComponent(bu) + (bcc ? '&cc=eq.' + bcc : '') + '&order=order_date.desc&limit=50';
         var borows = (sbSelect_('orders', boq) || []).filter(function (o) { return String(o.buyer || '').toLowerCase() === bu; });
+        _bms.orders = Date.now() - _bt0;
+        /* 注文を読んだ後の3つの読み（返品・問題の段階・Request page の明細）は同時に投げる（前は1本ずつ＝待ちが足し算） */
+        var REQRE0 = /Request page|Solicitar P[aá]gina|Please send me a message|Envie-me Uma Mensagem/i, reqIds0 = {};
+        borows.forEach(function (o) { (o.items || []).forEach(function (it) { if (it && it.item_id && REQRE0.test(String(it.name || ''))) reqIds0[String(it.item_id).replace(/\D/g, '')] = 1; }); });
+        var rk0 = Object.keys(reqIds0).filter(Boolean).slice(0, 20), snList = borows.map(function (o) { return encodeURIComponent(o.sn); }).join(','), boMany = [null, null, null];
+        if (borows.length) { try { boMany = sbSelectMany_([['returns', 'select=cc,order_sn,status,update_time&order_sn=in.(' + snList + ')'], ['order_issues', 'select=cc,sn,stage&sn=in.(' + snList + ')'], rk0.length ? ['listings', 'select=item_id,models&item_id=in.(' + rk0.join(',') + ')'] : null]); } catch (eMany) { boMany = [null, null, null]; } }
+        _bms.more = Date.now() - _bt0;
         var issues = {};
         /* ★2026-11-20 05（03・本人「キャンセル、返金されたやつは入ってないよね？」＝声かけの「前に買った物」）：返品・返金が決まった注文に refunded:true（新しい名前・今の項目は変えない）。
            決まった＝Shopee の返品（returns 表）の状態が ACCEPTED、または注文の状態が TO_RETURN。返金額（refund_amount）は取り下げ（CANCELLED）の行にも入っているので使わない。returnStatus（新しい名前）に返品の状態をそのまま返す */
         var retSt = {};
-        if (borows.length) { try { (sbSelect_('returns', 'select=cc,order_sn,status,update_time&order_sn=in.(' + borows.map(function (o) { return encodeURIComponent(o.sn); }).join(',') + ')') || []).forEach(function (x) { var k = x.cc + ':' + x.order_sn; if (!retSt[k] || x.status === 'ACCEPTED') retSt[k] = x.status; }); } catch (eR) {} }
-        if (borows.length) { try { (sbSelect_('order_issues', 'select=cc,sn,stage&sn=in.(' + borows.map(function (o) { return encodeURIComponent(o.sn); }).join(',') + ')') || []).forEach(function (x) { issues[x.cc + ':' + x.sn] = x.stage; }); } catch (eI) {} }
+        (boMany[0] || []).forEach(function (x) { var k = x.cc + ':' + x.order_sn; if (!retSt[k] || x.status === 'ACCEPTED') retSt[k] = x.status; });
+        (boMany[1] || []).forEach(function (x) { issues[x.cc + ':' + x.sn] = x.stage; });
         /* ★2026-11-05 03-22：WA の ⑦「Shopee で買ってもらった」を SKU（REQ_番号）で照らす＝Request page の明細だけ、出品の控えから model_id→SKU を引く（読むのは Request page の数件だけ） */
         var REQRE = /Request page|Solicitar P[aá]gina|Please send me a message|Envie-me Uma Mensagem/i, skuOf = {};
         try {
           var reqIds = {}; borows.forEach(function (o) { (o.items || []).forEach(function (it) { if (it && it.item_id && REQRE.test(String(it.name || ''))) reqIds[String(it.item_id).replace(/\D/g, '')] = 1; }); });
           var rk = Object.keys(reqIds).filter(Boolean).slice(0, 20);
-          if (rk.length) (sbSelect_('listings', 'select=item_id,models&item_id=in.(' + rk.join(',') + ')') || []).forEach(function (l) { var ms = l.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (eJ) { ms = []; } } (ms || []).forEach(function (m) { if (m && m.id != null && m.sku) skuOf[String(l.item_id) + ':' + String(m.id)] = String(m.sku); }); });
+          if (rk.length) (boMany[2] || []).forEach(function (l) { var ms = l.models; if (typeof ms === 'string') { try { ms = JSON.parse(ms); } catch (eJ) { ms = []; } } (ms || []).forEach(function (m) { if (m && m.id != null && m.sku) skuOf[String(l.item_id) + ':' + String(m.id)] = String(m.sku); }); });
         } catch (eS) {}
         var IMGD = { PH: 'cf.shopee.ph', SG: 'cf.shopee.sg', MY: 'cf.shopee.com.my', BR: 'cf.shopee.com.br', VN: 'cf.shopee.vn', TH: 'cf.shopee.co.th', TW: 'cf.shopee.tw' };
         boout = { ok: true, buyer: bu, cc: bcc, orders: borows.map(function (o) {
           return { cc: o.cc, sn: o.sn, date: o.order_date || String(o.order_ts || '').slice(0, 10), total: o.total, tab: o.tab, status: o.status || '', issue: issues[o.cc + ':' + o.sn] || '', refunded: retSt[o.cc + ':' + o.sn] === 'ACCEPTED' || String(o.status || '') === 'TO_RETURN', returnStatus: retSt[o.cc + ':' + o.sn] || '', tracking: o.tracking || '', shop_id: String(o.shop_id || ''), shop_label: shopLabelOf_(o.shop_id),   /* ★11/16 03-12：店名で照らせるように */
             items: (o.items || []).slice(0, 10).map(function (it) { var im = String(it.image || ''); return { name: String(it.name || '').slice(0, 120), variation: String(it.variation || '').slice(0, 80), qty: it.qty || 1, item_id: it.item_id != null ? String(it.item_id) : '', model_id: it.model_id != null ? String(it.model_id) : '', sku: String(it.sku || '') || (it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) || '', skuSrc: it.sku ? 'order' : ((it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) ? 'listing' : ''),   /* ★2026-11-06 03 営業部：注文した時の SKU を先に（詰め直し削除の後は model_id が別の REQ_番号を指す）。注文に SKU が無い古い注文だけ今の出品の表から（skuSrc で分かる） */ img: im ? (/^https?:/.test(im) ? im : 'https://' + (IMGD[o.cc] || 'cf.shopee.sg') + '/file/' + im + '_tn') : '' }; }) }; }) };
+        _bms.total = Date.now() - _bt0;
+        try { var boStr = JSON.stringify(boout); if (boout.ok && boStr.length < 90000) boC.put(boCk, boStr, 300); } catch (ePut) {}
+        }
       } catch (err) { boout = { ok: false, error: String((err && err.message) || err) }; }
-      ufPersist_();
+      var _bp0 = Date.now(); ufPersist_(); _bms.persist = Date.now() - _bp0; if (boout) { _bms.total2 = Date.now() - _bt0; boout.ms = _bms; }
       return ContentService.createTextOutput(bocb + '(' + JSON.stringify(boout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
     if (p.action === 'ai_usage_report') {   // 🧾 Anthropic の実績（Admin API）・WRITE_TOKEN 必須（誰でも叩けると Anthropic を無駄に呼ばれる）・2026-09-16
@@ -9757,6 +9772,15 @@ function jobSet_(key, patch) {
   } catch (e) {}
 }
 function jobCancelled_(key) { if (!key) return false; var v = jobGet_(key); return !!(v && v.status === 'cancel'); }
+/* ★2026-11-20 05：いくつかの Supabase の読みを同時に投げる（fetchAll・枠は本数ぶん数える）。list の null は読まない（結果も null）。断られた読みは null */
+function sbSelectMany_(list) {
+  var key = cfg_('SB_SERVICE_KEY'), idx = [], reqs = [];
+  (list || []).forEach(function (x, i) { if (!x) return; idx.push(i); var _hd = { apikey: key, Authorization: 'Bearer ' + key, 'X-Client-Info': sbClientInfo_() }; if (sbGzipOn_()) _hd['Accept-Encoding'] = 'gzip'; reqs.push({ url: cfg_('SB_URL') + '/rest/v1/' + x[0] + '?' + x[1], method: 'get', muteHttpExceptions: true, headers: _hd }); ufBump_(1, 'Supabase読み(' + x[0] + ')'); });
+  var out = (list || []).map(function () { return null; }); if (!reqs.length) return out;
+  var rs; try { rs = UrlFetchApp.fetchAll(reqs); } catch (e) { ufNoteErr_(e); throw e; }
+  rs.forEach(function (r, k) { if (r.getResponseCode() < 300) { try { out[idx[k]] = JSON.parse(r.getContentText()); } catch (eJ) {} } });
+  return out;
+}
 function sbSelect_(table, query) {
   var key = cfg_('SB_SERVICE_KEY');
   ufBump_(1, 'Supabase読み(' + table + ')');
