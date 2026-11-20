@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261120-2300'
+var SRC_VER = '20261120-2310'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -3731,7 +3731,7 @@ function bdEnsure_(shopId, itemIds, why) {
 }
 /* ②毎日1回：全部の店で「公開中（status=1）・在庫あり」なのに開催中の割引に入っていない物と、控え bundle_pending の物を入れる。dry＝数えるだけ */
 function bundleSweep(dry) {
-  var out = { at: new Date().toISOString(), dry: dry === true, shops: [] }, seen = {};
+  var out = { at: new Date().toISOString(), dry: dry === true, shops: [] }, seen = {}, done = [];   /* done＝控えから消してよい鍵（入った・公開中の在庫ありでなくなった） */
   var pend = {}; try { var fr = baKvFreshMany_(['bundle_pending']); pend = ((fr && fr.bundle_pending) || {}).items || {}; } catch (eP) {}
   listTokens_().forEach(function (t) {
     var sid = String((t && t.shop_id) || ''); if (!sid || seen[sid]) return; seen[sid] = 1;
@@ -3745,11 +3745,11 @@ function bundleSweep(dry) {
       if (!dry && miss.length) { var r = bdEnsure_(sid, miss, 'sweep'); row.added = r.added.length; row.pend = r.pend.length; row.made = r.made; }
       /* 入った物・在庫0のまま公開から外れた物は控えから消す（在庫が戻れば次の日にまた拾う） */
       var liveSet = {}; rows.forEach(function (r) { liveSet[String(r.item_id)] = 1; });
-      Object.keys(pend).forEach(function (k) { if (k.indexOf(sid + '|') !== 0) return; var id = k.split('|')[1]; if (deals.some(function (d) { return d.items[id]; }) || !liveSet[id]) delete pend[k]; });
+      Object.keys(pend).forEach(function (k) { if (k.indexOf(sid + '|') !== 0) return; var id = k.split('|')[1]; if (deals.some(function (d) { return d.items[id]; }) || !liveSet[id]) done.push(k); });
     } catch (e) { row.err = String((e && e.message) || e).slice(0, 160); }
     out.shops.push(row);
   });
-  if (!dry) { try { var fr2 = baKvFreshMany_(['bundle_pending']); if (fr2) { var v = fr2.bundle_pending || {}; v.items = pend; v.at = new Date().toISOString(); baKvSet_('bundle_pending', v); } } catch (eW) {} try { baKvSet_('bundle_sweep_last', out); } catch (eS) {} }
+  if (!dry) { try { var fr2 = baKvFreshMany_(['bundle_pending']); if (fr2) { var v = fr2.bundle_pending || {}; v.items = v.items || {}; done.forEach(function (k) { delete v.items[k]; }); v.at = new Date().toISOString(); baKvSet_('bundle_pending', v); } } catch (eW) {}   /* 読み直した控えから消す（この回に bdEnsure_ が積んだ物を消さない） */ try { baKvSet_('bundle_sweep_last', out); } catch (eS) {} }
   try { ufPersist_(); } catch (eU) {}
   return out;
 }
