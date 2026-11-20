@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261120-1206'
+var SRC_VER = '20261120-1427'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -9994,6 +9994,9 @@ var HB_EXEC_ = {
   child3: 'https://script.google.com/macros/s/AKfycbxV02tSfDsnAB82XXwZWSALAt2H1g41wZ5uMsn1D-u9TJ4lilLRZeAQWXLOfR-r2Qzasg/exec'
 };
 var HB_NAME_ = { main: '本体', child: '2台目', child2: '3台目', child3: '4台目', child4: '5台目', child5: '6台目' };
+/* ★2026-11-20 05（本人「ログインするタイミングでさ、こっちに求めてきてよ」「そういう仕様にしてください」・00）：/exec が答えない＝アカウントのログイン・承認の切れの見込みの赤には、
+   押すだけでその台の GAS の画面（Google のログイン・承認が出る所）が開く URL を付ける（ポータルの🔔に「🔑 ログイン画面を開く」）。5台目・6台目は URL が分からないので付けない */
+var HB_LOGIN_URL_ = { main: 'https://script.google.com/home/projects/1JJdH8xI12fPnwuL2VHMdkdBoBLCaDmHEgkoE97v3wTa6RQxxr2seWldd/edit', child: 'https://script.google.com/u/1/home/projects/1Ao0R6RNpCREWEPjNV9uqLMP66liog4Cjql67yLKPgK2isXfbPiBL_1bK/edit', child2: 'https://script.google.com/u/2/home/projects/11eYVOldG-lsHsMASxYQ4SxwdFkeaW54RipGeQ8S1PrOp6sQPI3pVL0k2/edit', child3: 'https://script.google.com/u/3/home/projects/18EzVcAol7_0CVciPckSbapy1hHMneMwA9nuWGl5OIRPW8idryMFEeqrD/edit' };
 /* ★2026-11-17 05（全体レビュー 11/17 中17・中19）：台の一覧（名前と /exec）を app_kv gas_runners から読む（5台目 child4・6台目 child5 も見張る）。
    形：{ runners: { main: '<本体の /exec>', child: …, child2: …, child3: …, child4: …, child5: … }, watch: ['main', …]（任意・見張る台。無ければ runners の全部）, outreach: '<営業の窓口の /exec>'（任意） }
    上の直書き（HB_EXEC_ の4台・OUTREACH_API）を土台に、app_kv の分で足す・差し替える＝読めない・形が違う・鍵が無い時は今までどおり直書きで動く（落ちない）。
@@ -10201,7 +10204,7 @@ function hbWatchRun_(me, heal) {
     var st = res[who + ':st'] || {};
     if (who === me) { fns = hbTrigNow_(); if (!st.j || st.j.ok === false) add({ id: 'exec_' + who, name: nm + '（見張りの台）の GAS（/exec）', state: 'red', why: '2回続けて答えない：' + (st.err || ('HTTP ' + st.http)) + '＝トリガーは動くが /exec の口が止まっている（承認切れ・配備の誤りの見込み・推測）', last: null }); else if (st.j.src && st.j.src !== SRC_VER) add({ id: 'src_' + who, name: nm + 'の GAS の版', state: 'warn', why: '/exec の版（' + st.j.src + '）がトリガーの版（' + SRC_VER + '）と違う＝配備し直しが要る', last: null }); }
     else {
-      if (!st.j || st.j.ok === false) { add({ id: 'exec_' + who, name: nm + 'の GAS（/exec）', state: 'red', why: '2回続けて答えない：' + (st.err || ('HTTP ' + st.http)) + '＝アカウントのログイン・承認の切れの見込み（推測・人の操作が要るかも）', last: null }); return; }
+      if (!st.j || st.j.ok === false) { add({ id: 'exec_' + who, name: nm + 'の GAS（/exec）', state: 'red', why: '2回続けて答えない：' + (st.err || ('HTTP ' + st.http)) + '＝アカウントのログイン・承認の切れの見込み（推測・人の操作が要るかも）', last: null, open: HB_LOGIN_URL_[who] || '' }); return; }
       if (st.j.src && st.j.src !== SRC_VER) add({ id: 'src_' + who, name: nm + 'の GAS の版', state: 'warn', why: '版が違う（' + st.j.src + '・見張りの台は ' + SRC_VER + '）', last: null });
       if (st.j.blocked && who === 'main') HB_MAIN_BLOCKED_ = true;   /* ★11/15 05（00）：道具の取込GAS の失敗を「本体の枠の断りの間」と分けるため */
       if (st.j.blocked) add({ id: 'quota_' + who, name: nm + 'の接続枠', state: 'warn', why: 'Google の1日の枠に断られて止まっている（日本時間 ' + (st.j.blockedAt ? Utilities.formatDate(new Date(st.j.blockedAt), 'Asia/Tokyo', 'MM/dd HH:mm') : '?') + '〜・' + ufResetJstStr_() + ' に戻る）', last: null });
