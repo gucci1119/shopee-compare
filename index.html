@@ -1870,7 +1870,7 @@
   'use strict';
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261120-232627';
+  const APP_BUILD = '20261121-005735';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -10021,7 +10021,7 @@
     '期間の始まりの記録が無い・統計が止まっている店など': 'No record at the start of the period, or the shop\'s stats have stopped',
     '期間の途中で出した品＝出してからの累計': 'Listed during the period = total since listing',
     /* ★2026-11-07 アクセス（各国）：商品の表の列・明細ごと・🧹 で下げた品・「いま」の帯 */
-    '国・店': 'Country · shop', '±期間': '± period', '見た人': 'Visitors', '🛒 入れた人': '🛒 Buyers', '🛒 個数': '🛒 Units', 'カート→注文': 'Cart → order',
+    '国・店': 'Country · shop', '±期間': '± period', '見た人': 'Visitors', '🛒 入れた人': '🛒 Buyers', '🛒 個数': '🛒 Units', 'カート→注文': 'Cart → order', '❤ いいね（期間の増え）': '❤ Likes (gained in period)', '—（読めない）': '— (could not read)',
     '販売（期間）': 'Sold (period)', '閲覧→販売': 'Views → sold', '🛒 カートに入っているのに売れていない（期間）': '🛒 In carts but not sold (period)',
     '本店': 'Main shop', '2店舗目': '2nd shop', '本店（注文のみ）': 'Main shop (orders only)', '2店舗目（注文のみ）': '2nd shop (orders only)',
     /* ★2026-11-16 05 第3の店（maneki_neko_japan）の抜けの直し */
@@ -21856,15 +21856,32 @@
        ③見出しを押してもその列で並ぶ（もう一度で逆順）。カートの4列は届いてから並べ直す（届くまでは並べる値が無い＝下に寄せる）。値が無い行（—）は向きに関係なく下。
        ④選んだ並びは TA.ccSort（'cc'＝国の順・ほかは列の鍵）・ccDir・ccLastN（多い順に戻す時の列）・ccGrp に入れて taSave＝この端末が覚える（次に開いても同じ） */
     const CART_COLS = [['cartB', '🛒 入れた人', 'ab'], ['cartU', '🛒 個数', 'au'], ['cr', 'カート率', 'cr'], ['c2o', 'カート→注文', 'c2o']];
-    const colName = (k) => k === 'cc' ? '国の順' : ((cols.find(c => c[0] === k) || CART_COLS.find(c => c[0] === k) || [k, k])[1]);
-    if (!TA.ccSort || (TA.ccSort !== 'cc' && !cols.some(c => c[0] === TA.ccSort) && !CART_COLS.some(c => c[0] === TA.ccSort))) TA.ccSort = 'uv';
+    /* ★2026-11-21 05（本人「ここ、『いいね』が付けられた数も欲しいっす」・00 経由）：❤ いいね（期間の増え）。
+       出どころ＝下の商品の表と同じ控え（公式 API の毎日の控え listing_stats_history を RPC listing_stats_delta で「期間の始めの日と今」の差にした d_likes・期間ごと10分）を、出品（listings の shop_id／cc）で店・国ごとに足す＝新しく読みには行かない。
+       外されたいいねは引いた純増（Shopee は「付いた数」だけを出していない）。期間の途中で出した品は出してからの累計（商品の表と同じ）。
+       商品の数字がまだ＝「…」、読めない＝「—（読めない）」、その店に期間の始めの控えが1品も無い＝「—」（0 にしない） */
+    const LK_COL = ['lk', '❤ いいね（期間の増え）'];
+    const LK_TIP = '期間の中で増えたいいねの数です。商品ごとのいいねの累計（Shopee の公式 API で毎日取っている控え）を、期間の始めの日と今で引いて、店で足しています。外されたいいねは引いた数です。期間の途中で出した品は、出してからの累計です。期間の始めの控えが無い店は「—」です。';
+    const taLikeOf = (ent) => { const B = TA._pBase, P = TA._pP; if (!B || !P || P.per !== TA.period) return null; if (!P.dm) return { err: true };
+      const list = Array.isArray(ent) ? ent : [ent], sid = new Set(), ccs = new Set(); list.forEach(e => { if (String(e).indexOf('S:') === 0) sid.add(String(e).slice(2)); else ccs.add(String(e)); });
+      const pStart = Date.now() - P.per * 86400000; let n = 0, k = 0, miss = 0;
+      (B.li || []).forEach(l => { if (!(sid.has(String(l.shop_id || '')) || ccs.has(String(l.cc || '')))) return; const d = P.dm[l.item_id], s0 = B.st[l.item_id] || {}, ct = Number(l.create_time) || 0;
+        if (d && d.likes != null) { n += +d.likes || 0; k++; } else if (ct && ct * 1000 >= pStart && s0.likes != null) { n += +s0.likes || 0; k++; } else if (s0.likes != null) miss++; });
+      return k ? { n: n, k: k, miss: miss } : { none: true }; };
+    const lkTd = (c, x) => { const st = `${x || ''}text-align:right;padding:3px 6px;white-space:nowrap;font-variant-numeric:tabular-nums`;
+      if (!c) return `<td style="${st}" title="${av('商品の数字を読み込み中です。')}">…</td>`;
+      if (c.err) return `<td style="${st};color:#b3261e" title="${av('期間の増え（商品ごとのいいね）を読めませんでした。下の商品の表の注意書きも見てください。')}">—（読めない）</td>`;
+      if (c.none) return `<td style="${st};color:#9aa0a6" title="${av('この店（国）は、期間の始めの日のいいねの控えがありません（取れていない）。0 ではありません。')}">—</td>`;
+      return `<td style="${st}" title="${av('いいねの増え：' + c.n + '（' + c.k + '品で数えた' + (c.miss ? '・期間の始めの控えが無い ' + c.miss + '品は入っていない' : '') + '）。' + LK_TIP)}">${(c.n < 0 ? '−' : '') + Math.abs(c.n).toLocaleString()}</td>`; };
+    const colName = (k) => k === 'cc' ? '国の順' : k === 'lk' ? LK_COL[1] : ((cols.find(c => c[0] === k) || CART_COLS.find(c => c[0] === k) || [k, k])[1]);
+    if (!TA.ccSort || (TA.ccSort !== 'cc' && TA.ccSort !== 'lk' && !cols.some(c => c[0] === TA.ccSort) && !CART_COLS.some(c => c[0] === TA.ccSort))) TA.ccSort = 'uv';
     if (TA.ccDir !== 'asc' && TA.ccDir !== 'desc') TA.ccDir = TA.ccSort === 'cc' ? 'asc' : 'desc';
     if (!TA.ccLastN || TA.ccLastN === 'cc') TA.ccLastN = TA.ccSort === 'cc' ? 'uv' : TA.ccSort;
     const ccEnts = TA.dim === 'acct' ? shopIds.map(id => 'S:' + id) : allCc.slice();
     const ccRows = ccEnts.map((e, i) => ({ ent: e, ord: i, fam: String(e).indexOf('S:') === 0 ? (famNoOfShop(e.slice(2)) || 0) : 0, v: cols.map(([k]) => taTotal([e], days, k)) }));
     const ccSeq = TA._ccSeq = (TA._ccSeq || 0) + 1; let ccSt = null;   /* ccSt＝カートの取り込み状況（null＝まだ・'err'＝読めない） */
     const cartOf = (ent) => ccSt == null ? null : (ccSt === 'err' ? { err: true } : (taCartCols(ent, ccSt) || { err: true }));
-    const sortVal = (r, k) => { const ci = cols.findIndex(c => c[0] === k); if (ci >= 0) return r.v[ci]; const cc = CART_COLS.find(c => c[0] === k); if (cc) { const c = r.cart; return c && !c.none && !c.err ? c[cc[2]] : null; } return null; };
+    const sortVal = (r, k) => { const ci = cols.findIndex(c => c[0] === k); if (ci >= 0) return r.v[ci]; const cc = CART_COLS.find(c => c[0] === k); if (cc) { const c = r.cart; return c && !c.none && !c.err ? c[cc[2]] : null; } if (k === 'lk') { const c = r.lk; return c && !c.none && !c.err ? c.n : null; } return null; };
     const sortRows = (list) => { const dir = TA.ccDir === 'asc' ? 1 : -1;
       if (TA.ccSort === 'cc') return list.slice().sort((a, b) => (a.ord - b.ord) * dir);
       return list.slice().sort((a, b) => { const x = sortVal(a, TA.ccSort), y = sortVal(b, TA.ccSort); if (x == null && y == null) return a.ord - b.ord; if (x == null) return 1; if (y == null) return -1; return ((x - y) * dir) || (a.ord - b.ord); }); };
@@ -21878,7 +21895,7 @@
     const drawCc = () => {
       const host = document.getElementById('ta-cc'), ctl = document.getElementById('ta-ccctl'); if (!host || !ctl || TA._ccSeq !== ccSeq) return;
       const grp = TA.dim === 'acct' && !!TA.ccGrp;
-      ccRows.forEach(r => { r.cart = cartOf(r.ent); });
+      ccRows.forEach(r => { r.cart = cartOf(r.ent); r.lk = taLikeOf(r.ent); });
       const keep = '選んだ並びはこの端末が覚えます。読むだけです。';
       const b = (g, v, on, label, guide) => `<button type="button" class="ta-sb ta-ccb${on ? ' on' : ''}" data-g="${g}" data-v="${esc(v)}" data-guide="${av(guide + keep)}">${label}</button>`;
       const nKey = TA.ccSort === 'cc' ? TA.ccLastN : TA.ccSort;
@@ -21888,15 +21905,16 @@
       const th = (k, label, left) => { const on = TA.ccSort === k; return `<th class="ta-ccsort" data-k="${k}" data-guide="${av('「' + (k === 'cc' ? '国の順' : label) + '」で並べます（もう一度押すと逆順）。' + keep)}" style="cursor:pointer;user-select:none;text-align:${left ? 'left' : 'right'};padding:3px 6px;border-bottom:1px solid #e3e6ea;white-space:nowrap"><span>${label}</span>${on ? (TA.ccDir === 'asc' ? ' ▲' : ' ▼') : ' <span style="color:#c5c9d0">⇅</span>'}</th>`; };
       /* ★2026-11-20 05（本人「なぜ、下3つは取り込まれてない？」・00 経由）：取り込みが止まった店は「—」だけにしない＝最後に取れた日と理由を出す（黙って空にしない） */
       const tdN = (r, x, sd) => r.v.map((v, i) => `<td style="${x || ''}text-align:right;padding:3px 6px;white-space:nowrap;font-variant-numeric:tabular-nums">${(v == null && sd && CC_TRF.has(cols[i][0])) ? `<span style="color:#b26a00;font-size:10.5px;font-weight:700" data-guide="${av(ccStaleWhy(r.ent, sd))}">${esc(sd === 'none' ? '未取り込み' : sd.slice(5).replace('-', '/') + 'まで')}</span>` : taFmt(cols[i][0], v)}</td>`).join('');
-      const rowHtml = (r, ind) => { const sd = ccStaleOf(r.ent); return `<tr data-ent="${av(r.ent)}"><td style="padding:3px 6px${ind ? ' 3px 18px' : ''};white-space:nowrap"><b style="color:${entCol(r.ent)}">${esc(entLabel(r.ent))}</b>${String(r.ent).indexOf('S:') === 0 ? `<div>${taFetchSpan(String(r.ent).slice(2), true)}</div>` : ''}</td>${tdN(r, '', sd)}${taCartTd(r.cart)}</tr>`; };
+      const rowHtml = (r, ind) => { const sd = ccStaleOf(r.ent); return `<tr data-ent="${av(r.ent)}"><td style="padding:3px 6px${ind ? ' 3px 18px' : ''};white-space:nowrap"><b style="color:${entCol(r.ent)}">${esc(entLabel(r.ent))}</b>${String(r.ent).indexOf('S:') === 0 ? `<div>${taFetchSpan(String(r.ent).slice(2), true)}</div>` : ''}</td>${tdN(r, '', sd)}${taCartTd(r.cart)}${lkTd(r.lk)}</tr>`; };
       let body = '';
       if (grp) {
         const nos = [...new Set(ccRows.map(r => r.fam))].sort((a, b) => (a || 9) - (b || 9));
         body = nos.map(no => { const mem = ccRows.filter(r => r.fam === no), ents2 = mem.map(r => r.ent); const F = famInfo(no), fc = F ? F.color : '#6b7280';
           const sub = { ent: ents2, v: cols.map(([k]) => taTotal(ents2, days, k)), cart: ccSt == null ? null : (ccSt === 'err' ? { err: true } : (taCartCols(ents2, ccSt) || { err: true })) };
-          return `<tr class="ta-ccsub" style="background:${fc}14;font-weight:700"><td style="padding:4px 6px;white-space:nowrap;border-top:2px solid ${fc}55" data-guide="${av(famLabel(no) + 'の' + mem.length + '店を足した数です（率と平均は、足してから割っています）。')}"><b style="color:${fc}">${esc(famLabel(no))}</b> <span>小計</span><span class="smd-dim" style="font-weight:400">（${mem.length}店）</span></td>${tdN(sub, 'border-top:2px solid ' + fc + '55;')}${taCartTd(sub.cart)}</tr>` + sortRows(mem).map(r => rowHtml(r, true)).join(''); }).join('');
+          return `<tr class="ta-ccsub" style="background:${fc}14;font-weight:700"><td style="padding:4px 6px;white-space:nowrap;border-top:2px solid ${fc}55" data-guide="${av(famLabel(no) + 'の' + mem.length + '店を足した数です（率と平均は、足してから割っています）。')}"><b style="color:${fc}">${esc(famLabel(no))}</b> <span>小計</span><span class="smd-dim" style="font-weight:400">（${mem.length}店）</span></td>${tdN(sub, 'border-top:2px solid ' + fc + '55;')}${taCartTd(sub.cart)}${lkTd(taLikeOf(ents2), 'border-top:2px solid ' + fc + '55;')}</tr>` + sortRows(mem).map(r => rowHtml(r, true)).join(''); }).join('');
       } else body = sortRows(ccRows).map(r => rowHtml(r, false)).join('');
-      host.innerHTML = `<table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr>${th('cc', TA.dim === 'acct' ? '国・店' : '国', true)}${cols.map(c => th(c[0], c[1])).join('')}${CART_COLS.map(c => th(c[0], c[1])).join('')}</tr>${body}</table>`;
+      host.innerHTML = `<table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr>${th('cc', TA.dim === 'acct' ? '国・店' : '国', true)}${cols.map(c => th(c[0], c[1])).join('')}${CART_COLS.map(c => th(c[0], c[1])).join('')}${th(LK_COL[0], LK_COL[1])}</tr>${body}</table>`;
+      { const h = host.querySelector('th[data-k="lk"]'); if (h) h.setAttribute('data-guide', LK_TIP + ' 押すとこの列で並べます（もう一度で逆順）。'); }
     };
     { const wrap = document.getElementById('ta-ccwrap'); if (wrap) wrap.addEventListener('click', (ev) => {
       const bt = ev.target.closest('.ta-ccb'), hd = ev.target.closest('.ta-ccsort'); if (!bt && !hd) return;
@@ -21905,6 +21923,7 @@
         else if (g === 'grp') TA.ccGrp = v === '1'; }
       else { const k = hd.dataset.k; if (TA.ccSort === k) TA.ccDir = TA.ccDir === 'asc' ? 'desc' : 'asc'; else { TA.ccSort = k; TA.ccDir = k === 'cc' ? 'asc' : 'desc'; } if (k !== 'cc') TA.ccLastN = k; }
       taSave(); drawCc(); }); }
+    TA._ccDraw = drawCc;
     drawCc();
     trafficIngestStatus_().then(st => { ccSt = st || 'err'; drawCc(); }).catch(() => { ccSt = 'err'; drawCc(); });
     // 📅 曜日ごとの平均
@@ -22021,7 +22040,7 @@
         const base = await taProdBase(_stF);
         const P = await taProdPeriod(base, _per);
         if (_seq !== TA._prodSeq) return;   // もっと新しい読み込みが走っている＝そちらが描く
-        TA._deltaErr = P.dErr; TA._pP = P;
+        TA._deltaErr = P.dErr; TA._pP = P; try { if (typeof TA._ccDraw === 'function') TA._ccDraw(); } catch (_) {}   /* ★11/21 比較表の ❤ いいね（期間の増え）は商品の数字から作る＝届いたら描き直す */
         const perf = base.perf, dm = P.dm || {}, pStart = Date.now() - _per * 86400000;
         const shopPerf = (perf && perf.shops) || {};
         TA._prod = base.li.map(l => {
@@ -30918,6 +30937,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-21', items: [
+      '❤ <b>アクセス（各国）の国・アカウントごとの比較に「いいね（期間の増え）」の列</b>（本人「ここ、『いいね』が付けられた数も欲しいっす」）：カートの列の右。期間の始めの日と今の、商品ごとのいいねの累計（Shopee の公式 API で毎日取っている控え）の差を店で足した数です（外されたいいねは引いた数）。見出しを押すと並べ替え、アカウントごとにまとめた時は小計の行にも出ます。控えが無い店は「—」（0 にしません）。第1〜第3の全部の店に出ます',
+    ] },
     { date: '2026-11-20', items: [
       '🎮 <b>英語の品名に機種が無い時は補う</b>（本人「タイトル＆ハードっていう決まりじゃなかったっけ？」）：題名に機種の語が無い見積もりは、題名を機種の表で読み、無ければ仕入れ候補の題名で一番多い機種（2件以上・半分以上の時だけ）を品名の後ろに付ける',
       '🎮 <b>英語の品名に機種が必ず入るように</b>（本人「これ、タイトル＆ハードっていう決まりじゃなかったっけ？Switchって入ってないけど」）：【Switch】（PS4）のように括弧の中にある機種を、括弧ごと消していた（「【Switch】英雄伝説 黎の軌跡」→ Legend of Heroes: Trails Rei）。括弧の中が機種の語なら括弧だけ外して機種を残す。軌跡シリーズは公式の英語名（Trails through Daybreak 等）を辞書に足した',
