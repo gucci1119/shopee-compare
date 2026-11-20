@@ -2,7 +2,7 @@
 // @name         【仕入れ先】🖼 商品ページの画像をダウンロード
 // @name:ja      【仕入れ先】🖼 商品ページの画像をダウンロード
 // @namespace    shopee-os
-// @version      1.1.2
+// @version      1.1.3
 // @updateURL    https://gucci1119.github.io/shopee-compare/supplier-image-download.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/supplier-image-download.user.js
 // @description  メルカリ／メルカリShops／Yahoo!フリマ／ヤフオク／楽天市場／Amazon の商品ページに「🖼 画像を全部保存」と1枚ずつ保存のボタンを付ける。いちばん大きい元の画像を、ダウンロード/仕入れ先の画像/<サイト>_<商品ID>_<題名>/01.jpg… に保存する。読むのと画像を取るだけ（購入・いいね・コメント等には触らない）
@@ -66,7 +66,7 @@
   // ---------- 小物 ----------
   const meta = (doc, prop) => { const e = doc.querySelector('meta[property="' + prop + '"],meta[name="' + prop + '"]'); return e ? e.getAttribute('content') || '' : ''; };
   const safeName = (s) => String(s || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim();
-  const extOf = (u) => { const m = String(u).split('?')[0].match(/\.(jpe?g|png|webp|gif)(?:@\w+)?$/i); return m ? m[1].toLowerCase().replace('jpeg', 'jpg') : 'jpg'; };
+  const extOf = (u) => { if (/@jpg$/i.test(String(u).split('?')[0])) return 'jpg'; const m = String(u).split('?')[0].match(/\.(jpe?g|png|webp|gif)(?:@\w+)?$/i); return m ? m[1].toLowerCase().replace('jpeg', 'jpg') : 'jpg'; };
   const imgSrcs = (el) => {
     const out = [];
     const push = (v) => { if (v && !/^data:/.test(v)) out.push(v); };
@@ -124,12 +124,13 @@
     if (s.key === 'mshops') {
       const re = /mercari-shops-static\.com\/-\/(?:small|medium|large|xlarge)\/plain\/([A-Za-z0-9_-]+)\.(jpe?g|png|webp)/i;
       const names = [];
-      const take = (root) => root && root.querySelectorAll('img').forEach(im => { const m = imgSrcs(im).map(u => u.match(re)).find(Boolean); if (m && names.indexOf(m[1]) < 0) names.push(m[1]); });
+      const exts = {};  /* 2026-11-20 写真は .jpg と .webp の両方がある（.webp を .jpg で取ると 404＝xhr_failed）＝画面の拡張子のまま取る */
+      const take = (root) => root && root.querySelectorAll('img').forEach(im => { const m = imgSrcs(im).map(u => u.match(re)).find(Boolean); if (m && names.indexOf(m[1]) < 0) { names.push(m[1]); exts[m[1]] = m[2].toLowerCase(); } });
       /* 2026-11-12 実物で確かめた：写真の並びは data-testid="carousel" と "horizontal-thumbnails"（ページ全体には別の商品の写真が30枚以上ある） */
       take(document.querySelector('[data-testid="carousel"]')); take(document.querySelector('[data-testid="horizontal-thumbnails"]'));
       const ogm = meta(document, 'og:image').match(re);
-      if (!names.length && ogm) names.push(ogm[1]);
-      return { title: titleClean(meta(document, 'og:title') || document.title, s), imgs: names.map(n => ({ url: 'https://assets.mercari-shops-static.com/-/large/plain/' + n + '.jpg@jpg', keys: ['/plain/' + n + '.'] })) };
+      if (!names.length && ogm) { names.push(ogm[1]); exts[ogm[1]] = ogm[2].toLowerCase(); }
+      return { title: titleClean(meta(document, 'og:title') || document.title, s), imgs: names.map(n => ({ url: 'https://assets.mercari-shops-static.com/-/large/plain/' + n + '.' + (exts[n] || 'jpg') + '@jpg', keys: ['/plain/' + n + '.'] })) };
     }
     if (s.key === 'yfleama' || s.key === 'yauc') {
       const path = s.key === 'yfleama' ? ['props', 'initialState', 'itemsState', 'items', 'item'] : ['props', 'pageProps', 'initialState', 'item', 'detail', 'item'];

@@ -2,7 +2,7 @@
 // @name         【仕入れ先】🖼 商品ページの画像をダウンロード
 // @name:ja      【仕入れ先】🖼 商品ページの画像をダウンロード
 // @namespace    shopee-os
-// @version      1.1.2
+// @version      1.1.3
 // @updateURL    https://gucci1119.github.io/shopee-compare/supplier-image-download.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/supplier-image-download.user.js
 // @description  メルカリ／メルカリShops／Yahoo!フリマ／ヤフオク／楽天市場／Amazon の商品ページに「🖼 画像を全部保存」と1枚ずつ保存のボタンを付ける。いちばん大きい元の画像を、ダウンロード/仕入れ先の画像/<サイト>_<商品ID>_<題名>/01.jpg… に保存する。読むのと画像を取るだけ（購入・いいね・コメント等には触らない）
