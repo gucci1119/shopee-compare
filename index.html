@@ -1950,7 +1950,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-211719';
+  const APP_BUILD = '20261121-220545';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -16285,6 +16285,34 @@
      GASと同じ値をここにも置いて、届かない間はこちらで補う。**同居ツールを外したら両方 20000 に戻す。** */
   const UF_CAP_EFF_FALLBACK = 20000;   // ★2026-09-21 17時 自動Bump停止後は本来の2万に戻した（GAS側と同じ値）
   const SB_URL = 'https://khjjjouhryigqunxygyg.supabase.co';
+  /* ★2026-11-21 05（全体レビュー 中13・00 の決め）：メルカリの取引画面の写しは、取引番号が分かれば誰でも開ける公開の置き場（proofs/mercari/）にあった＝非公開の置き場 slsproof/mercari/ へ移した。
+     在庫の行（inventory.proof）・在庫スプシ・古物台帳の書き出しには、切れない固定リンク「ポータルの URL#proof=mercari/<取引番号>.png」を入れる。
+     開く時は、その場で期限付き（10分）の URL を作って開く（📸 を押した時＝ポータルの中で／固定リンクを直接開いた時＝ポータルが開いてすぐ移る）。前の公開の URL が残っていても同じ写しを開く。
+     鍵（書き込みの鍵 settings.sbSecret）が無いポータルでは開けない（写しは個人の情報が写りうるので、鍵の無い所からは開かない） */
+  const PROOF_LINK_BASE = 'https://gucci1119.github.io/shopee-compare/#proof=';
+  function proofKey_(u) {
+    const s0 = String(u || '').trim(); let m = /^https:\/\/gucci1119\.github\.io\/shopee-compare\/(?:index\.html)?(?:\?[^#]*)?#proof=(mercari\/[A-Za-z0-9_.-]+\.png)$/.exec(s0); if (m) return m[1];
+    m = /^https:\/\/khjjjouhryigqunxygyg\.supabase\.co\/storage\/v1\/object\/public\/proofs\/(mercari\/[A-Za-z0-9_.-]+\.png)(?:\?[^#]*)?$/.exec(s0); return m ? m[1] : '';
+  }
+  async function proofSignedUrl_(key, sec) {
+    if (!settings.sbSecret) throw new Error('このポータルには書き込みの鍵が入っていないので、写しを開けません');
+    const r = await fetch(SB_URL + '/storage/v1/object/sign/slsproof/' + key.split('/').map(encodeURIComponent).join('/'), { method: 'POST', headers: { apikey: settings.sbSecret, authorization: 'Bearer ' + settings.sbSecret, 'content-type': 'application/json' }, body: JSON.stringify({ expiresIn: sec || 600 }) });
+    const j = await r.json().catch(() => ({})); const su = j.signedURL || j.signedUrl;
+    if (!r.ok || !su) throw new Error('写しが見つからないか、読めませんでした（' + r.status + '）');
+    return /^https?:/.test(su) ? su : SB_URL + '/storage/v1' + su;
+  }
+  async function proofDataUrl_(key) {
+    if (!settings.sbSecret || !key) return '';
+    try { const r = await fetch(SB_URL + '/storage/v1/object/authenticated/slsproof/' + key.split('/').map(encodeURIComponent).join('/'), { headers: { apikey: settings.sbSecret, authorization: 'Bearer ' + settings.sbSecret } }); if (!r.ok) return '';
+      const b = await r.blob(); return await new Promise((ok, ng) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = ng; fr.readAsDataURL(b); }); } catch (_) { return ''; }
+  }
+  /* 📸 など、写しのリンクを押した時：ポータルの中で期限付きの URL を作って新しいタブで開く（ポータルをもう1枚開かない） */
+  document.addEventListener('click', ev => { try { const a = ev.target && ev.target.closest && ev.target.closest('a[href]'); if (!a) return; const k = proofKey_(a.getAttribute('href')); if (!k) return;
+    ev.preventDefault(); ev.stopPropagation(); const w = window.open('about:blank', '_blank');
+    proofSignedUrl_(k).then(u => { if (w) w.location.href = u; else window.open(u, '_blank', 'noopener'); }).catch(e => { try { if (w) w.close(); } catch (_) {} toast('⚠ ' + String((e && e.message) || e)); }); } catch (_) {} }, true);
+  /* 固定リンク（#proof=…）で開かれた時：ポータルの中身は読まずに、すぐ写しへ移る */
+  try { const _pm = /^#proof=(mercari\/[A-Za-z0-9_.-]+\.png)$/.exec(String(location.hash || '')); if (_pm) { document.title = '写しを開いています…';
+    proofSignedUrl_(_pm[1], 600).then(u => location.replace(u)).catch(e => { try { alert('写しを開けませんでした：' + String((e && e.message) || e)); } catch (_) {} }); } } catch (_) {}
   /* ★2026-11-21 05（00・本人「他のページも軽くなるような工夫入れて」「ただ、業務が止まらないようにはして」）：大きな控え（app_kv）の共通の読み方。
      ①先に更新時刻だけ読む（select=k,updated_at・1行数十バイト） ②この端末の写し（IndexedDB 'kvc:<鍵>'）と時刻が同じならそれを使う ③違う鍵だけ中身を読む。
      時刻で確かめるので古い写しは出さない（読めなかった時は今まで通り投げる＝空で上書きしない）。同じ読みが重なったら1つにまとめる（10秒）。
@@ -29394,8 +29422,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const bImgs = ((r.ret && r.ret.buyer_images) || []).filter(isImg).slice(0, 8), bVids = ((r.ret && r.ret.buyer_videos) || []).slice(0, 4);
     const invL = Array.isArray(inv) ? inv : null;
     const proofOk = u => /^https:\/\/khjjjouhryigqunxygyg\.supabase\.co\/storage\/v1\/object\/public\//.test(String(u || ''));
+    /* ★2026-11-21 05（中13）：メルカリの取引画面の写しは非公開の置き場へ移した＝鍵付きで読んで絵の中身（data: URL）にして埋める */
+    const proofSrc = {}; for (const v of (Array.isArray(inv) ? inv : []).slice(0, 8)) { const k = proofKey_(v.proof); if (k && !proofSrc[k]) proofSrc[k] = await proofDataUrl_(k); }
+    const proofImg = v => { const k = proofKey_(v.proof); return k ? (proofSrc[k] || '') : (proofOk(v.proof) ? v.proof : ''); };
     const invHtml = !invL || !invL.length ? '' : invL.map(v => { let dh = []; try { dh = JSON.parse(v.delivery_history || '[]') || []; } catch (_) {}
-      return `<table>${T('Supplier / 仕入れ先', E(v.supplier) + (v.supplier_order ? '（取引番号 ' + E(v.supplier_order) + '）' : ''))}${T('Item / 品名', E(v.name_supplier))}${T('Purchase date / 仕入れ日', E(v.purchase_date))}${T('Price / 仕入れ値（円）', v.price != null && v.price !== '' ? '¥' + E(Number(v.price).toLocaleString()) : '')}${T('Listing page / 取引の画面', v.supplier_url ? E(v.supplier_url) : '')}${T('Domestic delivery to us / 国内の配送', (v.ship_method ? E(v.ship_method) + ' ' : '') + (v.tracking_no ? '追跡 ' + E(v.tracking_no) + ' ' : '') + E(v.delivery_status || '') + (dh.length ? '<br><span style="color:#555">' + dh.slice(0, 6).map(x => E(x.t) + ' ' + E(x.s) + ' ' + E(x.p || '')).join('<br>') + '</span>' : ''))}${v.image && /^https:\/\/static\.mercdn\.net\//.test(v.image) ? T('Item photo / 商品の写真（仕入れ先）', `<img src="${E(v.image)}" crossorigin="anonymous" style="max-height:140px;max-width:220px;border:1px solid #ddd;border-radius:4px">`) : ''}${T('Purchase screen / 取引画面', proofOk(v.proof) ? `<img src="${E(v.proof)}" crossorigin="anonymous" style="width:380px;max-width:100%;border:1px solid #ddd;border-radius:4px">` : '')}</table>`; }).join('');
+      return `<table>${T('Supplier / 仕入れ先', E(v.supplier) + (v.supplier_order ? '（取引番号 ' + E(v.supplier_order) + '）' : ''))}${T('Item / 品名', E(v.name_supplier))}${T('Purchase date / 仕入れ日', E(v.purchase_date))}${T('Price / 仕入れ値（円）', v.price != null && v.price !== '' ? '¥' + E(Number(v.price).toLocaleString()) : '')}${T('Listing page / 取引の画面', v.supplier_url ? E(v.supplier_url) : '')}${T('Domestic delivery to us / 国内の配送', (v.ship_method ? E(v.ship_method) + ' ' : '') + (v.tracking_no ? '追跡 ' + E(v.tracking_no) + ' ' : '') + E(v.delivery_status || '') + (dh.length ? '<br><span style="color:#555">' + dh.slice(0, 6).map(x => E(x.t) + ' ' + E(x.s) + ' ' + E(x.p || '')).join('<br>') + '</span>' : ''))}${v.image && /^https:\/\/static\.mercdn\.net\//.test(v.image) ? T('Item photo / 商品の写真（仕入れ先）', `<img src="${E(v.image)}" crossorigin="anonymous" style="max-height:140px;max-width:220px;border:1px solid #ddd;border-radius:4px">`) : ''}${T('Purchase screen / 取引画面', proofImg(v) ? `<img src="${E(proofImg(v))}" crossorigin="anonymous" style="width:380px;max-width:100%;border:1px solid #ddd;border-radius:4px">` : '')}</table>`; }).join('');
     const evHtml = evs.length ? `<h3>Tracking history / 追跡の記録</h3><table>${evs.slice(0, 40).map(e => `<tr><td style="width:26%;white-space:nowrap">${E(tsJ(e.update_time))}</td><td style="width:22%">${E(e.logistics_status)}</td><td>${E(e.description)}</td></tr>`).join('')}</table>` : '';
     const inqs = slsInqFor_(r);
     const inqHtml = inqs.map(q => `<table>${T('Date / 日付', E(q.date))}${T('Subject / 件名', E(q.subject))}${T('Summary / 要旨', E(q.summary))}${q.shot && proofOk(q.shot) ? T('Copy / メールの写し', `<img src="${E(q.shot)}" crossorigin="anonymous" style="width:100%;max-width:700px;border:1px solid #ccc">`) : ''}</table>`).join('<div style="height:6px"></div>');
@@ -29421,7 +29452,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         <h2>Contents / 目次</h2><table class="ev-toc-t">${chs.map((c, i) => `<tr><td>${E(c.t)}</td><td style="width:18%;text-align:right" data-tocp="${i}">p.–</td></tr>`).join('')}</table>
         <div style="margin-top:10px;color:#555;font-size:11.5px">This order was sold and shipped normally from Japan via Shopee Logistics. 通常どおり販売し、Shopee の物流（SLS）で発送した注文です。</div></div>`
       + chs.map((c, i) => `<div class="ev ev-ch" data-ch="${i}"><h2>${E(c.t)}</h2>${c.h}</div>`).join('');
-    return { host, chapters: chs.map(c => c.t), meta: { chat: msgs == null ? null : msgs.length, ship: shipMsgs.length, claim: claimMsgs.length, scan: !!scanEv, sls: !!pk, trkEv: evs.length, inv: invL == null ? null : invL.length, proofs: (invL || []).filter(v => proofOk(v.proof)).length, inq: inqs.length } };
+    return { host, chapters: chs.map(c => c.t), meta: { chat: msgs == null ? null : msgs.length, ship: shipMsgs.length, claim: claimMsgs.length, scan: !!scanEv, sls: !!pk, trkEv: evs.length, inv: invL == null ? null : invL.length, proofs: (invL || []).filter(v => !!proofImg(v)).length, inq: inqs.length } };
   }
   /* ④ Shopee への問い合わせ：app_kv sls_claim.inquiries（[{date,subject,summary,shot,cc,from,to,sns}]）から、この注文に当たる物（注文番号の名指し・または同じ国で注文日が from〜to に入る） */
   function slsInqFor_(r) {
@@ -31599,6 +31630,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '🔒 <b>メルカリの取引画面の写しを、誰でも開ける置き場から鍵の要る置き場へ移しました</b>（全体レビュー 中13・事業本部の決め）：📸 を押すと、その場で10分だけ開ける URL を作って開きます。在庫スプシ・古物台帳の書き出しのリンクは「ポータルの URL#proof=…」の固定リンクで、開くとポータルがすぐ写しへ移ります（書き込みの鍵が入ったポータルでだけ開けます）。返品の申し立ての書類（PDF）にも今まで通り入ります',
       '📌 <b>アクセス（各国）の比較の表：下へ送っても見出しの行が上に残る・左の「国・店」の列も残る</b>（本人のスクショ「これ上の列表示されるように」「いいねとかカートとか」）：表は箱の中で縦にも横にも送れます。左の列は背景と右の線を付けて、横に送った時に数字の頭が隠れて見えないようにしました。見出しは短く（🛒 人・🛒 個・🛒率・🛒→注文・❤ いいね）して、表の下に列の説明を1行出します',
       '📦 <b>在庫の欄を打ってすぐ別の窓へ移った時、もう1台との食い違いの確認で本人の値が消えないように</b>（全体レビュー 中4）：画面の前にいない時は確認を自動で「いいえ（むこうの値を残す）」にしていたので、打った値が黙って消える筋がありました。この確認だけは、画面に戻った時に出します',
       '🔎 <b>単品の JAN の自動探しで、別の作品の JAN を拾わないように</b>（全体レビュー 中3）：「同じ名前の別の明細」から JAN を写す時、開いた時の出品の控えの名前だけで結んでいたので、その後に別の所で明細の詰め直しがあると別の作品の JAN を拾う筋がありました。写す前に、元の明細の今の名前を読み直して照らし、JAN の台帳も最新か確かめます。読めない時はこの探し方は使いません',

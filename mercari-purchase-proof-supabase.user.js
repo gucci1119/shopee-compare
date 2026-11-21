@@ -2,10 +2,10 @@
 // @name         【ポータル】メルカリ仕入れ確証 → Supabase（自動）
 // @name:ja      【メルカリ】🧾 仕入れの証拠を保存（→ポータル・自動）
 // @namespace    https://jp.mercari.com/
-// @version      1.3.3
+// @version      1.4.0
 // @updateURL    https://gucci1119.github.io/shopee-compare/mercari-purchase-proof-supabase.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/mercari-purchase-proof-supabase.user.js
-// @description  メルカリ購入一覧を開くと各取引の「取引情報」スクショを自動で撮り、Supabase Storage(proofsバケット)へ保存してinventory.proofにURLを記録。在庫に無い購入は取引ページの情報（商品名・価格・購入日時・出品者）で取込GASに登録（メール不要・v1.3.0）。既存のDrive保存版(確証→Drive→InventoryItem AC)とは独立に並行稼働する移行用スクリプト。GM_xhrはメルカリ上で死ぬので@grant none＋fetch。撮影は隠しiframe＋html2canvas-pro（メルカリの新CSS color()対策）。開いたら自動実行（1回12件まで・3分毎・重複は撮らない／初回大量分は「未取得を全部」ボタン）。
+// @description  メルカリ購入一覧を開くと各取引の「取引情報」スクショを自動で撮り、Supabase Storage(slsproof＝鍵の要る置き場)へ保存してinventory.proofにポータルの固定リンクを記録。在庫に無い購入は取引ページの情報（商品名・価格・購入日時・出品者）で取込GASに登録（メール不要・v1.3.0）。既存のDrive保存版(確証→Drive→InventoryItem AC)とは独立に並行稼働する移行用スクリプト。GM_xhrはメルカリ上で死ぬので@grant none＋fetch。撮影は隠しiframe＋html2canvas-pro（メルカリの新CSS color()対策）。開いたら自動実行（1回12件まで・3分毎・重複は撮らない／初回大量分は「未取得を全部」ボタン）。
 // @author       Shopee OS
 // @match        https://jp.mercari.com/mypage/purchases*
 // @grant        none
@@ -19,7 +19,7 @@
  *   - 購入一覧ページの取引リンク(a[href*="/transaction/mXXXX"])から対象IDを収集。
  *   - 各IDについて画面外の隠しiframeで /transaction/{id} を開き、html2canvas-proで
  *     「取引情報」〜「メッセージ」見出し直前までをPNG化（ヘッダー＝メルカリと分かる範囲）。
- *   - Supabase Storage `proofs/mercari/{id}.png` へアップロード（x-upsert）。
+ *   - Supabase Storage `slsproof/mercari/{id}.png`（v1.4.0〜・非公開）へアップロード（x-upsert）。
  *   - 公開URLを inventory(source=mercari, supplier_order={id}) の proof 列へPATCH。
  *     行が無ければスキップ（GASメール登録が済むと後で取得可能）。
  *   - 既存の「確証→Drive→InventoryItem AC」版はそのまま。両方に確証が残る（＝どっちも）。
@@ -42,7 +42,10 @@
   if (window.top !== window.self) return; // 念のため（@noframesと二重の保険）
 
   const SB_URL = 'https://khjjjouhryigqunxygyg.supabase.co';
-  const BUCKET = 'proofs';
+  /* ★v1.4.0（2026-11-21 05・全体レビュー 中13・00 の決め）：写しは取引番号が分かれば誰でも開ける公開の置き場（proofs）にあった＝鍵の要る置き場 slsproof へ。
+     在庫に書くのは切れない固定リンク（ポータルの URL#proof=…）＝ポータルが鍵付きでその場の URL を作って開く */
+  const BUCKET = 'slsproof';
+  const PROOF_LINK_BASE = 'https://gucci1119.github.io/shopee-compare/#proof=';
   const DONE_KEY = 'mercari_proof_supabase_done_v1';
   const GAS_REG_URL = 'https://script.google.com/macros/s/AKfycbyOv0ijK4DB8ZJwurLMpCZgmMrjZ5ZW2nIQgvwlSWDp3CIYDtWds5z-hRYLrnsJ6wYC/exec';   // 取込GAS（メルカリ購入→在庫Supabase同期）の /exec
   const getTok = () => { try { return localStorage.getItem('mercari_reg_token') || ''; } catch { return ''; } };
@@ -157,7 +160,7 @@
       body: blob,
     });
     if (!res.ok) throw new Error('storage ' + res.status + ' ' + (await res.text()).slice(0, 120));
-    return SB_URL + '/storage/v1/object/public/' + BUCKET + '/' + path;
+    return PROOF_LINK_BASE + path;
   }
 
   // inventory.proof にURLをPATCH（該当行が無ければ0件＝スキップ）
