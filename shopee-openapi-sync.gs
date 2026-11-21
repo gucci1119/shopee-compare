@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-2100'
+var SRC_VER = '20261122-0300'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -4003,18 +4003,25 @@ function bdEnsure_(shopId, itemIds, why) {
   return res;
 }
 /* ②毎日1回：全部の店で「公開中（status=1）・在庫あり」なのに開催中の割引に入っていない物と、控え bundle_pending の物を入れる。dry＝数えるだけ */
-function bundleSweep(dry) {
+function bundleSweep(dry, opt) {
   var out = { at: new Date().toISOString(), dry: dry === true, shops: [] }, seen = {}, done = [];
   /* ★2026-11-21 05（11/21 4:30 の回が控えに何も書かず、走ったか分からなかった）：走り始めた時に印（app_kv bundle_sweep_run）を書く＝止まりの見張りが26時間で赤にする */
   if (dry !== true) { try { sbUpsert_('app_kv', [{ k: 'bundle_sweep_run', v: { at: out.at, by: baRunnerId_(), phase: 'start' }, updated_at: out.at }], 'k'); } catch (eR) {} }   /* done＝控えから消してよい鍵（入った・公開中の在庫ありでなくなった） */
   var pend = {}; try { var fr = baKvFreshMany_(['bundle_pending']); pend = ((fr && fr.bundle_pending) || {}).items || {}; } catch (eP) {}
   /* ★2026-11-21 05（全体レビュー 中7）：枠の止め（UF_STOP）と時間の打ち切り（4分30秒）が無く、6分で切られても印が「走り始め」のまま緑に見えた → 止め・打ち切りを足し、終わりの印（end／cut）を書く */
   var t0 = Date.now(); out.cut = '';
-  listTokens_().forEach(function (t) {
+  /* ★2026-11-22 05（全体レビュー 11/22 中1）：4分30秒で打ち切ると続きの位置が無く、毎日 listTokens_ の頭から回る＝後ろの店がずっと見回られない筋。
+     打ち切った店をスクリプト プロパティ BS_NEXT に控え、次の回はそこから回す（並びは輪にする）。打ち切った時は5分後に続きの回（bundleSweepCont・1日6回まで）を1つ置く。全部回り終えたら控えを消す */
+  var BSP = PropertiesService.getScriptProperties(), bsNext = dry === true ? '' : String(BSP.getProperty('BS_NEXT') || '');
+  var toks = listTokens_(), bsAt = -1;
+  if (bsNext) toks.forEach(function (t, i) { if (bsAt < 0 && String((t && t.shop_id) || '') === bsNext) bsAt = i; });
+  if (bsAt > 0) toks = (opt && opt.cont) ? toks.slice(bsAt) : toks.slice(bsAt).concat(toks.slice(0, bsAt));   /* 続きの回は残りの店だけ（頭へ戻らない）・毎日の回は前の残りから輪に */
+  out.from = bsAt > 0 ? bsNext : '';
+  toks.forEach(function (t) {
     var sid = String((t && t.shop_id) || ''); if (!sid || seen[sid]) return; seen[sid] = 1;
     if (out.cut) return;
-    if (!dry && !bgAllowed_()) { out.cut = '接続枠の止め（UF_STOP）'; return; }
-    if (Date.now() - t0 > 270000) { out.cut = '時間の打ち切り（4分30秒）'; return; }
+    if (!dry && !bgAllowed_()) { out.cut = '接続枠の止め（UF_STOP）'; out.next = sid; return; }
+    if (Date.now() - t0 > 270000) { out.cut = '時間の打ち切り（4分30秒）'; out.next = sid; return; }
     var row = { shop: sid, live: 0, missing: 0, added: 0, pend: 0, made: [], err: '' };
     try {
       var rows = sbSelectAll_('listings', 'select=item_id&shop_id=eq.' + sid + '&status=eq.1&stock=gt.0') || [];
@@ -4030,9 +4037,18 @@ function bundleSweep(dry) {
     out.shops.push(row);
   });
   if (!dry) { try { var fr2 = baKvFreshMany_(['bundle_pending']); if (fr2) { var v = fr2.bundle_pending || {}; v.items = v.items || {}; done.forEach(function (k) { delete v.items[k]; }); v.at = new Date().toISOString(); baKvSet_('bundle_pending', v); } } catch (eW) {}   /* 読み直した控えから消す（この回に bdEnsure_ が積んだ物を消さない） */ try { baKvSet_('bundle_sweep_last', out); } catch (eS) {}
-    try { var te = new Date().toISOString(); sbUpsert_('app_kv', [{ k: 'bundle_sweep_run', v: { at: out.at, end: te, by: baRunnerId_(), phase: out.cut ? 'cut' : 'end', cut: out.cut, shops: out.shops.length }, updated_at: te }], 'k'); } catch (eR2) {} }
+    try { if (out.next) BSP.setProperty('BS_NEXT', out.next); else BSP.deleteProperty('BS_NEXT'); } catch (eN) {}
+    if (out.next) { try { var day = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd'), cn = JSON.parse(BSP.getProperty('BS_CONT_N') || '{}'); if (cn.d !== day) cn = { d: day, n: 0 };
+      var has = ScriptApp.getProjectTriggers().some(function (tg) { return tg.getHandlerFunction() === 'bundleSweepCont'; });
+      if (!has && cn.n < 6) { ScriptApp.newTrigger('bundleSweepCont').timeBased().after(5 * 60000).create(); cn.n++; BSP.setProperty('BS_CONT_N', JSON.stringify(cn)); out.cont = cn.n; } } catch (eC) { out.contErr = String((eC && eC.message) || eC).slice(0, 120); } }
+    try { var te = new Date().toISOString(); sbUpsert_('app_kv', [{ k: 'bundle_sweep_run', v: { at: out.at, end: te, by: baRunnerId_(), phase: out.cut ? 'cut' : 'end', cut: out.cut, from: out.from || '', next: out.next || '', cont: out.cont || 0, shops: out.shops.length }, updated_at: te }], 'k'); } catch (eR2) {} }
   try { ufPersist_(); } catch (eU) {}
   return out;
+}
+/* ★2026-11-22 05（全体レビュー 11/22 中1）：打ち切った見回りの続き（自分のトリガーを消してから、控えた店から回す） */
+function bundleSweepCont() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'bundleSweepCont') ScriptApp.deleteTrigger(t); });
+  return bundleSweep(false, { cont: true });
 }
 function bundleSweepSetup_() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'bundleSweep') ScriptApp.deleteTrigger(t); });
@@ -10437,7 +10453,7 @@ function acctEmail_() {
   return v;
 }
 /* 自分で消えるトリガー（基準に入れない・欠けても赤にしない） */
-var HB_TRANSIENT_ = { promoTick: 1, dnoteTick: 1, dimgTick: 1, probeReturns: 1 };
+var HB_TRANSIENT_ = { promoTick: 1, dnoteTick: 1, dimgTick: 1, probeReturns: 1, bundleSweepCont: 1 };
 /* 作り直さず知らせるだけの物（間隔が分からない・本人の off がある） */
 var HB_NOHEAL_ = { tcgCron: 1 };
 /* 控えの鍵 → [名前, 何分より古いと赤, 時刻の場所（'upd'＝更新時刻・それ以外は v の中の項目）] */
