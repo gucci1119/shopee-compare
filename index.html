@@ -1926,7 +1926,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-180756';
+  const APP_BUILD = '20261121-181226';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -2544,7 +2544,17 @@
      どのくらいのパーセンテージを使っているか（残りがどのくらいか）が分かるようにしておいた方がいい」。
      枠はアカウントごとに2万回。**2つ並べて、合計も出す**（本人の判断軸は「1日で足して詰まらなければいい」）。
      片方の数字だけを出すと、ほかのGAS（メルカリ取込）の分まで混ざって見えて誤解する。 */
-  async function ufFetchOne(url, timeoutMs) {
+  /* ★2026-11-21 05（全ページを軽く）：起動の時に同じ台の uf_status を2か所から別々に呼んでいた（6台×2＋α＝14本・1本 2〜15秒・GAS の仕事も倍）。
+     60秒以内に読めた返事はそれを使い、読んでいる途中の呼び出しには相乗りする（中身は同じ・数字は60秒より古くならない） */
+  const _ufInflight = {};
+  function ufFetchOne(url, timeoutMs) {
+    if (!url) return Promise.resolve(null);
+    try { const c = (window.__ufFull || {})[url]; if (c && c.o && Date.now() - c.at < 60000) return Promise.resolve(c.o); } catch (_) {}
+    if (_ufInflight[url]) return _ufInflight[url];
+    const p = ufFetchOne_(url, timeoutMs).finally(() => { if (_ufInflight[url] === p) delete _ufInflight[url]; });
+    _ufInflight[url] = p; return p;
+  }
+  async function ufFetchOne_(url, timeoutMs) {
     if (!url) return null;
     try {
       let u = url + (url.includes('?') ? '&' : '?') + 'action=uf_status&callback=cb&cb=' + Date.now();
@@ -31380,6 +31390,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '⚡ <b>起動の時の GAS の枠の読みを半分に</b>（本人「他のページも軽くなるような工夫入れて」）：上のバーと🤖の欄が同じ台の枠の状況（uf_status）を別々に呼んでいた（起動で14本・1本2〜15秒）→ 60秒以内の返事は使い回し、読んでいる途中の呼び出しには相乗り。数字は60秒より古くならない',
       '⚡ <b>事業計画・営業を軽く</b>（本人「他のページも軽くなるような工夫入れて」）：事業計画は🤖が足した明細の日ごとの記録を1日1本ずつ順番に読んでいた（17.5秒の元）→ 過ぎた日は端末の写し（更新時刻で確かめる）を使い、変わった日だけまとめて読む。営業は買い手ごとの注文の読み（約20本）を1本ずつ待っていた → 4本ずつ並べて読む（読む物と量は同じ）',
       '⚡ <b>大きな控えを「変わった時だけ読む」形に</b>（本人「他のページも軽くなるような工夫入れて」「ただ、業務が止まらないようにはして」）：JAN 台帳（約4.5MB）・🤖の台帳・閲覧の集計・商品ごとの成績・明細の属性を、開くたびに丸ごと読んでいた → 先に更新時刻だけ読み、この端末の写しと同じなら写しを使う（時刻で確かめるので古い物は出さない）。出品管理を開いた時の約10秒の読みが無くなります。JAN を書く所・🤖・出品・在庫の処理の読みは今まで通り毎回最新',
       '👣 <b>アクセス（各国）の「最後の取得」に、第3の次の取り込みの時刻</b>（本人「これ読み込み止まってるの？」）：第3の5店は毎晩 21:40ごろに1日1回取り込む＝昼は1日前の分のままでも止まりではない。「次は毎晩 21:40ごろ」と出します。本店 BR の1日遅れ（11/20 夜の 429 の後、転記のタブが別の画面のまま）は、タブを注文画面に戻して 11/20 の分まで入れました',
@@ -44120,11 +44131,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     if (!url) return { ok: true };
     const c = _baBizCache[url]; if (c && Date.now() - c.at < 5 * 60000) return c;
     let used = null;
-    try {
-      const ac = new AbortController(); const tm = setTimeout(() => ac.abort(), 60000);
-      const r = await fetch(url + '?action=uf_status&callback=cb&cb=' + Date.now(), { credentials: 'omit', signal: ac.signal }); clearTimeout(tm);
-      const m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(await r.text()); if (m) { const d = JSON.parse(m[1]); if (d && d.used != null) used = Number(d.used); }
-    } catch (_) {}
+    try { const d = await ufFetchOne(url, 60000); if (d && d.used != null) used = Number(d.used); } catch (_) {}   /* ★11/21 上の uf_status の読みと相乗り（同じ台を2回呼ばない） */
     if (used == null) return { ok: true, unknown: true };   /* 読めない時は止めない（GAS 側の 🐢 と止まり線が残る） */
     const hrs = ufHoursToReset(), left = BA_STOP_LINE - used, need = Math.round(BA_BIZ_PER_H * hrs + BA_BIZ_BUF);
     const o = { ok: left >= need, used, left, need, hrs: Math.round(hrs * 10) / 10, at: Date.now() };
