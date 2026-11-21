@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1230'
+var SRC_VER = '20261121-1300'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -3127,6 +3127,11 @@ var BOOST_KV = 'boost_state', BOOST_GAP_SEC = 12 * 3600;
         断られた登録の品は BOOST_REG_NG_SEC あけてもう一度（断られた理由は控えに）。回った回数は boost_state.regN。GAS は boost_prefer を書き換えない（ポータルと書き合わない）
    ② 第3は一度回した品を BOOST_GAP3_SEC（3日）あける（同じ品ばかり回らない）。候補が足りない時だけ、いちばん前に回した品から埋める（枠を空けない）
    ③ 回した品の控え＝app_kv boost_log_shop3 の rows [時刻, 店, item_id, 先に回す印(1/0), 通った(1/0)]。21日で消す（11/28 に 04 が直した品と直していない品を比べる） */
+/* ★2026-11-21 本人「切り替えて」（00 経由）：第3は閲覧が付くまで広く回す＝
+     ① ポータルの登録（外すまでずっと）→ ② 閲覧・いいね・カートが付いた品（自動の登録＝前に回してから長い順・1回に BOOST_HOT3_MAX 枠まで。全部にすると約26品/店で5枠が埋まり広く回せない）
+     → ③ まだ一度も Bump していない品（boost_state の4日と boost_log_shop3 の21日のどちらにも無い・古い出品から）→ ④ 前に回してから長い品。
+     公開中（Shopee の状態 NORMAL）・在庫ありだけ。品ごとの違反・降格の印は DB に無いので外せていない。本店・2店舗目は今のまま */
+var BOOST_HOT3_MAX = 2;
 var BOOST_GAP3_SEC = 3 * 86400, BOOST_PREF_KV = 'boost_prefer', BOOST_LOG3_KV = 'boost_log_shop3', BOOST_REG_NG_SEC = 30 * 60;
 /* ★2026-11-21 00 の決め：Bump の回は10分ごと（前は30分＝枠が切れてから埋まるまで最大30分空いた）。
    空きの無い回は boost_state（約14KB）を1回読むだけで終わる＝取り札・Shopee の API・書き込みは、終わる時刻から見て枠が空いた店がある回だけ。
@@ -3171,7 +3176,9 @@ function boostTick(manual) {
       var curNow = cur.map(function (x) { return [Number(x.item_id), now + (Number(x.cool_down_second) || 0)]; });   /* ★11/21 ポータルの「⬆ Bump」欄に今 Bump 中の品と終わる時刻を出す（通信は増やさない） */
       if (free > 0) {
         var s3 = isShop3Shop_(t.shop_id);
+        boostPick_.hot = null;
         var picks = boostPick_(t.shop_id, free, cur, st.items, now, pref, s3, st.ngN);
+        if (s3 && boostPick_.hot) ss.hotN = boostPick_.hot.length;   /* 閲覧・いいね・カートが付いた品の数（自動の登録） */
         if (picks.length) {
           var jr, fl;
           try { jr = callShop_(t.shop_id, '/api/v2/product/boost_item', null, 'post', { item_id_list: picks }); fl = ((jr.response || {}).failure_list) || []; }
@@ -3228,6 +3235,24 @@ function boostPick_(shopId, n, cur, hist, now, pref, s3, ngN) {
     return { id: Number(r.item_id), pf: pfOf(id), last: Number(hist[id]) || 0, sale: Number(x.sale) || 0, likes: Number(x.likes) || 0, views: Number(x.views) || 0 };
   });
   var ord = function (a, b) { return (b.pf - a.pf) || (a.pf === 2 ? (a.last - b.last) : 0) || (b.sale - a.sale) || (b.likes - a.likes) || (b.views - a.views); };   /* 登録どうしは前に回してから長い順（一度も回っていない品が先） */
+  if (s3) {   /* ★11/21 第3：広く回す（上の BOOST_HOT3_MAX の説明） */
+    var ever = {}, perf = {};
+    try { ((baKv_(BOOST_LOG3_KV) || {}).rows || []).forEach(function (r) { if (String(r[1]) === String(shopId) && r[4]) { var k3 = String(r[2]); ever[k3] = Math.max(ever[k3] || 0, Number(r[0]) || 0); } }); } catch (eEv) {}
+    try { perf = ((baKv_('product_perf_' + shopId) || {}).items) || {}; } catch (ePf) { perf = {}; }
+    var pick3 = [], used3 = {};
+    var take = function (arr, k) { for (var i3 = 0; i3 < arr.length && pick3.length < n && k > 0; i3++) { if (used3[arr[i3].id]) continue; used3[arr[i3].id] = 1; pick3.push(arr[i3]); k--; } };
+    var ok3 = all.filter(function (c) { return c.pf >= 0; });
+    ok3.forEach(function (c) { var k = String(c.id); c.last = Math.max(c.last || 0, ever[k] || 0); var pv = perf[k] || {}; c.hot = c.pf === 1 || c.views > 0 || c.likes > 0 || (Number(pv.ab) || 0) > 0; });
+    var byLast = function (a, b) { return (a.last - b.last) || (a.id - b.id); };
+    take(ok3.filter(function (c) { return c.pf === 2; }).sort(byLast), n);
+    var hot3 = ok3.filter(function (c) { return c.pf !== 2 && c.hot; }).sort(byLast);
+    take(hot3, BOOST_HOT3_MAX);
+    take(ok3.filter(function (c) { return c.pf !== 2 && !c.hot && !c.last; }).sort(function (a, b) { return a.id - b.id; }), n);
+    take(hot3, n);
+    take(ok3.filter(function (c) { return c.pf !== 2 && !c.hot && c.last; }).sort(byLast), n);
+    boostPick_.hot = hot3.map(function (c) { return c.id; });   /* 呼んだ側が店の控え（ss.hot）に残す＝ポータルに「自動の登録」の数を出す */
+    return pick3.map(function (c) { return c.id; });
+  }
   var cand = all.filter(function (c) { return c.pf >= 0 && (!statsNg || c.pf > 0) && (c.pf === 2 || !(c.last && now - c.last < gap)); }).sort(ord);
   var out = cand.slice(0, n);
   if (s3 && !statsNg && out.length < n) {   /* 3日あけると足りない時は、いちばん前に回した品から埋める（枠を空けない） */
