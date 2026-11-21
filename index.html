@@ -1106,6 +1106,7 @@
     <div id="smd-sidefoot">
       <!-- ★2026-11-22 05（本人「ポータルにshopee japanへの問い合わせリンクと、SLS+の補償の異議申し立てのリンク設置して」）：どのページからも届くよう左の帯の下に常に出す -->
       <div class="smd-jplinks" style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px;width:100%">
+        <button class="smd-btn" id="tcg-export-open" style="font-size:11.5px;text-align:left">🃏 写真判定の候補を保存</button>
         <a class="smd-btn jp-inq-open" href="https://help.shopee.jp/portal/webform/af80f18477a14a93bd2bbd61871ee08c" target="_blank" rel="noopener noreferrer" title="Shopee Japan の窓口に問い合わせる。補償・手数料・キャンペーンの質問など" style="font-size:11.5px;text-decoration:none;text-align:left">📨 Shopee Japan へ問い合わせ</a>
         <a class="smd-btn jp-dsp-open" href="https://docs.google.com/forms/d/e/1FAIpQLSfZOy9Ero5aAFMO8QAeAoBU7q-9umOl5WoYrne-wlDnJIAwXw/viewform" target="_blank" rel="noopener noreferrer" title="SLS+ の補償を断られた注文の異議。注文作成日から1年以内・処理は最大約2か月" style="font-size:11.5px;text-decoration:none;text-align:left">🛡 SLS+ 補償の異議申し立て</a>
       </div>
@@ -1960,7 +1961,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261122-053649';
+  const APP_BUILD = '20261122-055955';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -4389,6 +4390,62 @@
   try { window.__smdTcgPreview = async (hw, n) => { const us = [settings.boshuUrl4, settings.boshuUrl3, settings.boshuUrl2, settings.boshuUrl].filter(Boolean);   /* ★2026-11-17 05：4台目が 10:33 に Google の1日の上限で止まり、次の3台目・2台目（残り少ない）へ流れていた＝余裕のある5台目を先に */ let last = null;
     for (const u of us) { try { return await gasCall({ action: 'tcg_preview', token: settings.writeToken, hw: hw, n: n || 40, _url: u }, 240000); } catch (e) { if (e && e.__final) throw e; last = e; } }
     throw last || new Error('候補を取れる台がありません'); }; } catch (_) {}
+  /* Codex 2026-11-22: 同じ判定候補を、注入なしの通常クリックで書き出す。API判定・出品はしない。
+     原export.jsの40区分×最大200件を維持。直列・完了後5秒・2MB上限・途中保存・同一ブラウザの二重起動禁止。 */
+  async function tcgExportUi() {
+    let panel = document.getElementById('tcg-export-panel');
+    if (panel) { panel.scrollIntoView({ block: 'center' }); return; }
+    panel = document.createElement('div'); panel.id = 'tcg-export-panel';
+    panel.style.cssText = 'position:fixed;z-index:2147480500;top:80px;left:50%;transform:translateX(-50%);width:min(570px,94vw);max-height:78vh;overflow:auto;background:#fff;border:2px solid #1565c0;border-radius:10px;padding:16px;box-shadow:0 8px 30px #0003';
+    panel.innerHTML = '<b>🃏 写真判定の候補を保存</b><p>写真と名前を確認するための候補です。判定や出品は行いません。1区分ずつ取得し、途中から再開できます。</p><div class="tcg-export-status" role="status">待機中</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px"><button class="smd-btn b-read tcg-export-start">取得・続きから再開</button><button class="smd-btn tcg-export-stop" disabled>中断</button><button class="smd-btn tcg-export-save">取得済みを保存</button><button class="smd-btn tcg-export-close">閉じる</button></div>';
+    document.body.appendChild(panel);
+    const status = panel.querySelector('.tcg-export-status'), start = panel.querySelector('.tcg-export-start'), stop = panel.querySelector('.tcg-export-stop');
+    const hws = ['pokeca','yugioh','onepiece','duema','weiss','vanguard','battlespirits','yugioh_rush','unionarena','dbh','wixoss','zx','shadowverse','mtg','digimon','gamba','gambale','acnh','moncolle','yokai','mezastar','frienda','gaole','tretta','battrio','kuji_choko','kuji_defo','kuji_chibi','kuji_mini','kuji_wcf','kuji_acsta','kuji_towel','kuji_rstrap','kuji_rcharm','goods_amiibo','dbs','gundam','fftcg','fecipher','smt'];
+    let cache = { at: Date.now(), out: {}, errors: {} }, running = false, cancelled = false, ac = null;
+    try { const x = JSON.parse(localStorage.getItem('smdTcgExport') || 'null'); if (x && x.at && Date.now() - x.at < 30 * 60000 && x.out) cache = x; } catch (_) {}
+    const save = () => { localStorage.setItem('smdTcgExport', JSON.stringify(cache)); };
+    const describe = txt => { status.textContent = Object.keys(cache.out).length + '／' + hws.length + '区分取得・失敗 ' + Object.keys(cache.errors || {}).length + '区分' + (txt ? ' — ' + txt : ''); };
+    const download = () => {
+      const out = Object.assign({}, cache.out); hws.forEach(hw => { if (!Object.prototype.hasOwnProperty.call(out, hw)) out[hw] = 'ERR ' + ((cache.errors || {})[hw] || '未取得'); });
+      const blob = new Blob([JSON.stringify(out)], { type: 'application/json' }), u = URL.createObjectURL(blob), a = document.createElement('a'); a.href = u; a.download = 'tcg-candidates-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json'; a.click(); setTimeout(() => URL.revokeObjectURL(u), 30000); describe('JSONを保存しました（未取得・失敗はERRで記録）');
+    };
+    const readLimited = async r => { if (!r.ok) throw new Error('HTTP ' + r.status); const reader = r.body.getReader(), chunks = []; let total = 0; try { while (true) { const x = await reader.read(); if (x.done) break; total += x.value.byteLength; if (total > 2000000) throw new Error('返事が2MBを超えたため中断'); chunks.push(x.value); } } catch (e) { await reader.cancel().catch(() => {}); throw e; } const a = new Uint8Array(total); let n = 0; chunks.forEach(x => { a.set(x, n); n += x.length; }); const t = new TextDecoder().decode(a), m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t); return JSON.parse(m ? m[1] : t); };
+    const work = async lock => {
+      if (!lock) { describe('別のタブで取得中です'); return; }
+      running = true; cancelled = false; start.disabled = true; stop.disabled = false;
+      try {
+        if (typeof window.__smdHold === 'function') window.__smdHold(20 * 60000);
+        const urls = [settings.boshuUrl4, settings.boshuUrl3, settings.boshuUrl2, settings.boshuUrl].filter(Boolean); let chosen = '';
+        for (const u of urls) { if (!gasUrlOk(u)) continue; const q = await ufFetchOne(u, 15000); await new Promise(r => setTimeout(r, 5000)); if (cancelled) break; const used = q && Number(q.used); if (q && Number.isFinite(used) && used < 12000 && q.bgAllowed === true && Number(q.stopLine) - used >= 2500 && !ufUrlBlocked(u)) { chosen = u; break; } }
+        if (cancelled) return;
+        if (!chosen) throw new Error('接続枠を確認できる余裕のある台がありません。取得は始めていません');
+        for (const hw of hws) {
+          if (cancelled) break; if (Object.prototype.hasOwnProperty.call(cache.out, hw)) continue;
+          describe(hw + ' を取得中…');
+          const quota = await ufFetchOne(chosen, 15000); if (!quota || quota.bgAllowed !== true || !Number.isFinite(Number(quota.used)) || Number(quota.used) >= 12000 || Number(quota.stopLine) - Number(quota.used) < 2500) throw new Error('接続枠の余裕を確認できないため中断');
+          const healthAt = performance.now(); await sbGetAll('orders', 'select=sn&limit=1'); if (performance.now() - healthAt > 2000) throw new Error('DBの応答が2秒を超えたため中断');
+          await new Promise(r => setTimeout(r, 5000)); if (cancelled) break;
+          ac = new AbortController(); const timer = setTimeout(() => ac.abort(), 240000);
+          try {
+            const q = new URLSearchParams({ action: 'tcg_preview', token: settings.writeToken, hw: hw, n: '200', callback: 'cb' });
+            const res = await readLimited(await fetch(chosen + '?' + q.toString(), { credentials: 'omit', signal: ac.signal }));
+            if (!res || res.ok !== true || !Array.isArray(res.list)) throw new Error(String(res && res.error || '候補の返事の形式が違います'));
+            cache.out[hw] = res.list; delete cache.errors[hw]; save();
+          } catch (e) { cache.errors[hw] = cancelled ? '中断（返事未確認）' : String(e.message || e); save(); throw e; }
+          finally { clearTimeout(timer); ac = null; }
+          describe(hw + ' を保存しました'); await new Promise(r => setTimeout(r, 5000));
+        }
+        describe(cancelled ? '中断しました。取得済みは保持しています' : '取得終了。JSONを保存してください');
+      } catch (e) { describe('中断：' + String(e.message || e) + '。取得済みは保持しています'); }
+      finally { running = false; start.disabled = false; stop.disabled = true; }
+    };
+    start.onclick = () => { if (running) return; if (!navigator.locks) { describe('二重起動を防ぐ機能が無いため、このブラウザでは取得しません'); return; } return navigator.locks.request('smd-photo-candidates-export', { ifAvailable: true }, work); };
+    stop.onclick = () => { cancelled = true; if (ac) ac.abort(); describe('中断しています…'); };
+    panel.querySelector('.tcg-export-save').onclick = download;
+    panel.querySelector('.tcg-export-close').onclick = () => { if (running) { cancelled = true; if (ac) ac.abort(); describe('中断しています。終了後に閉じてください'); } else panel.remove(); };
+    describe('30分以内の取得済み区分は再取得しません');
+  }
+  document.addEventListener('click', e => { if (e.target.closest && e.target.closest('#tcg-export-open')) { e.preventDefault(); tcgExportUi(); } });
   try { window.__smdOaUpdate = async (action, shopId, itemId, modelId, val, expect) => {   /* 在庫・価格を model_id 指定で（名前で引かない＝取り違えない） */
     /* ★2026-11-05 03 営業部：明細を消すと model_id が別の作品へ移る（10/23）。6つ目に明細名（文字）か { name, sku } を渡すと、GAS が今の明細と照らし、合わなければ書かない（SRC 20261106-0600 から） */
     if (action !== 'update_stock' && action !== 'update_price') throw new Error('在庫と価格だけ');
@@ -5968,6 +6025,13 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    '🃏 写真判定の候補を保存': '🃏 Save candidates for photo review',
+    '取得・続きから再開': 'Get candidates / resume',
+    '取得済みを保存': 'Save retrieved candidates',
+    '中断': 'Stop',
+    '待機中': 'Waiting',
+    '写真判定の候補を、通常のボタンで保存': 'Save photo-review candidates using a normal button',
+    '写真と名前を確認するための候補です。判定や出品は行いません。1区分ずつ取得し、途中から再開できます。': 'Candidates for reviewing photos and names. No judgement or listing is performed. Retrieves one category at a time and supports resuming.',
     /* ★2026-11-21 ⬆ Bump */
     "全店の合計": "All shops total",
     "全国の合計": "All countries total",
@@ -31862,6 +31926,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-22', items: [
+      '🃏 <b>写真判定の候補を、通常のボタンで保存</b>：1区分ずつ・取得完了から5秒間隔・1返事2MBまで。途中から再開でき、未取得や通信失敗は空候補と区別します。接続枠とDB応答を確認し、別タブとの二重起動を防ぎます。判定・出品・有料AIは実行しません',
       '📨 <b>問い合わせフォームの詳細を999文字以内に</b>：まとめる本文は件数と要点、注文一覧は添付CSVにします。上限超過は切らずに止め、フォーム上で文字数と直す欄を表示します。件名等も実際の入力欄の上限を確認します',
       '📨 <b>Shopee Japan の問い合わせフォームを、店・国・用件を選ぶだけで欄が埋まった状態で開けるように</b>（本人「shop IDとか入れるの面倒臭い」「なるべくショートカットできるように」）：左の帯の下と SLS+ の区画の「📨 Shopee Japan へ問い合わせ」で店・国を選び、用件（SLS+ 補償・返金/キャンセル・入金・手数料・その他）を押すと、メール・カテゴリ・件名・詳細の書き出し・Username・マーケット・Order ID が入った形で開きます（前の店・国・用件は覚えます）。「📨 申請をまとめる」の「📨 この中身でフォームを開く」は注文の一覧と添付の CSV まで入ります。SLS+ の異議申し立ても、メール・Shop ID・マーケット入りで開きます。送る（Submit）のは本人です。欄を埋めるのは新しい道具（Tampermonkey）',
       '📨 <b>Shopee Japan への問い合わせと、SLS+ 補償の異議申し立てのリンクを置きました</b>（本人「ポータルにshopee japanへの問い合わせリンクと、SLS+の補償の異議申し立てのリンク設置して」）：左の帯の下（どのページでも見える）と、返品・キャンセルの「🛡 SLS+ の補償の申請」のいちばん上。窓口のメール help@support.shopee.jp と問い合わせ ID は 📋 で写せます。どちらも新しいタブで開きます',
