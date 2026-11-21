@@ -1926,7 +1926,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-195219';
+  const APP_BUILD = '20261121-201112';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -10571,7 +10571,7 @@
     [/^前月 (\d+)件（(.+)%）$/, 'Prev. month $1 ($2%)'],
     [/^貢献利益 (.+)\/件$/, 'Contribution $1 per order'],
     [/^仕入未入力 (\d+)件$/, 'Cost missing: $1'],
-    [/^Amazon 分類待ち (\d+)件$/, 'Amazon unclassified: $1'], [/^止まっている店 (\d+)$/, 'Stopped shops: $1'], [/^遅れている店 (\d+)$/, 'Shops behind: $1'], [/^(\d+)日遅れ$/, '$1 day(s) behind'], [/^(\d{2}\/\d{2}) の分$/, 'data for $1'], [/^(.+) 時点$/, 'as of $1'], [/^(\d+)分前の表示・最新を読み直し中$/, 'Showing data from $1 min ago · reloading'], [/^買ったもの 分類待ち (\d+)件$/, 'Purchases unclassified: $1'],
+    [/^Amazon 分類待ち (\d+)件$/, 'Amazon unclassified: $1'], [/^(\d+)分前の表示・最新を読み直せませんでした$/, 'Showing data from $1 min ago · could not reload'], [/^止まっている店 (\d+)$/, 'Stopped shops: $1'], [/^遅れている店 (\d+)$/, 'Shops behind: $1'], [/^(\d+)日遅れ$/, '$1 day(s) behind'], [/^(\d{2}\/\d{2}) の分$/, 'data for $1'], [/^(.+) 時点$/, 'as of $1'], [/^(\d+)分前の表示・最新を読み直し中$/, 'Showing data from $1 min ago · reloading'], [/^買ったもの 分類待ち (\d+)件$/, 'Purchases unclassified: $1'],
     [/^買った資材 (\d+)件を経費に入れました$/, 'Added $1 purchased supplies to expenses'], [/^⚠ 売れた仕入れ品を経費から外せなかった品 (\d+)件（🛒 買ったもの の上に理由）$/, '⚠ $1 sold stock items could not be removed from expenses (reasons at the top of 🛒 Purchases)'],
     [/^✓ 扱いが決まった (\d+)件・(.+)（開くと一覧・取消できます）$/, '✓ Classified $1 · $2 (open to list / undo)'],
     [/^返品を半分に：この月に受理された返品 (\d+)件・(.+)（注文月の入金から減っています）→ \+(.+)\/月。写真の見せ方（新品と間違われない）と説明文で潰す$/, 'Halve returns: $1 returns accepted this month, $2 (already deducted from the order month\'s payout) → +$3/month. Fix with photos that cannot be mistaken for new, and the description'],
@@ -20381,10 +20381,13 @@
     if (!force && outState.data && outState.scope === scope && Date.now() - outState.at < 120000) return outState.data;
     /* 読み直しは1本だけ。読み込み中に店が替わったら、その読み取りを使わない。 */
     if (outState.inflight) {
+      const _t0 = Date.now(), _infAt = outState.inflightAt || 0;
       try { await outState.inflight; } catch (e) {
         if (outScope() === scope) return outLoad(force);
         throw e;
       }
+      /* ★11/21 全体レビュー中5：段階を変えた直後の読み直し（force）が、変える前に始まった古い読みに相乗りして古い中身で描き直していた → force で、相乗りした読みが呼ばれる前に始まった物なら、もう1回読み直す */
+      if (force === true && _infAt && _infAt < _t0) return outLoad(true);
       return outState.scope === scope ? outState.data : outLoad(force);
     }
     const allAccounts = !state.acct || state.acct === 'all';
@@ -20398,11 +20401,12 @@
         try {
           const list = await outLoadBoard(read, c.b); list._allAccounts = allAccounts; list._inputAt = inputAt; list._staleAt = c.at;
           outState.data = list; outState.scope = scope; outState.at = 0;
-          setTimeout(() => { outLoad(true).then(() => { const ob = document.getElementById('out-body'); if (ob && ob.offsetParent) renderOutreach('local'); }).catch(() => {}); }, 50);
+          setTimeout(() => { outLoad(true).then(() => { const ob = document.getElementById('out-body'); if (ob && ob.offsetParent) renderOutreach('local'); }).catch(e => { /* ★11/21 全体レビュー中5：読み直せなかった時に「読み直し中」の帯のまま残さない */ try { if (outState.data === list) { list._staleErr = String((e && e.message) || e).slice(0, 80); const ob = document.getElementById('out-body'); if (ob && ob.offsetParent) renderOutreach('local'); } } catch (_) {} }); }, 50);
           return list;
         } catch (_) {}
       }
     }
+    outState.inflightAt = Date.now();
     outState.inflight = outLoadBoard(read).then(list => {
       if (outScope() !== scope) throw new Error('営業集計の読取中に表示条件が変更されました');
       list._allAccounts = allAccounts; list._inputAt = inputAt;
@@ -21324,7 +21328,7 @@
         + `<td style="text-align:left"><select data-out-st="${esc(p.key)}" style="font-size:12px">${opt(p.stage)}</select></td></tr>`;
     });
     tb += '</tbody></table></div>' + (rows.length > 400 ? `<div class="smd-dim" style="font-size:11px">先頭の400人だけ出しています（全部で ${rows.length}人）</div>` : '') + (!rows.length ? '<div class="smd-dim" style="font-size:12px;margin-top:4px">この絞り込みの人はいません</div>' : '');
-    body.innerHTML = (list._staleAt ? `<div style="font-size:12px;color:#8a4b00;background:#fff8ec;border:1px solid #ffd699;border-radius:6px;padding:4px 10px;margin:0 0 8px" data-guide="この端末に残っていた営業の台帳で先に出しています。裏で最新を読み直していて、読めたら自動で描き直します。"><span class="smd-spin"></span> <span>${Math.max(1, Math.round((Date.now() - list._staleAt) / 60000))}分前の表示・最新を読み直し中</span></div>` : '') + `<div class="tool-card" style="max-width:none">
+    body.innerHTML = (list._staleAt ? `<div style="font-size:12px;color:#8a4b00;background:#fff8ec;border:1px solid #ffd699;border-radius:6px;padding:4px 10px;margin:0 0 8px" data-guide="この端末に残っていた営業の台帳で先に出しています。裏で最新を読み直していて、読めたら自動で描き直します。">${list._staleErr ? '⚠ <span>' + Math.max(1, Math.round((Date.now() - list._staleAt) / 60000)) + '分前の表示・最新を読み直せませんでした</span>（' + esc(list._staleErr) + '）。🔄 で読み直してください' : '<span class="smd-spin"></span> <span>' + Math.max(1, Math.round((Date.now() - list._staleAt) / 60000)) + '分前の表示・最新を読み直し中</span>'}</div>` : '') + `<div class="tool-card" style="max-width:none">
       <div style="font-weight:700;font-size:14px;margin-bottom:4px">📣 営業の流れと進み具合</div>
       <div style="font-size:13px">${line}</div>${qNote}
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:8px 0 6px"><span class="smd-dim" style="font-size:11.5px">期間</span>${perBar}<span class="smd-dim" style="font-size:11.5px;margin-left:8px">分け方</span>${byBar} <button class="smd-btn" id="of-open" style="font-size:11px;padding:2px 8px" data-guide="国・アプリごとの流れ（送った→返事→見積もり→購入）の表を開く／閉じる">${OF.open ? '▲ 流れの表を閉じる' : '▼ 流れの表（' + (by === 'app' ? 'アプリごと' : by === 'cc' ? '国ごと' : '国×アプリ') + '）を開く'}</button></div>
@@ -26810,10 +26814,13 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       out[ym] = (out[ym] || 0) + pr; });
     return out;
   }
-  function plBuyInfo(ym, inv) {
+  function plBuyInfo(ym, inv, expRows) {
     if (!Array.isArray(inv)) return null;
+    /* ★11/21 全体レビュー中1：経費の行に同じ在庫番号がある品（備品などとして経費で数えた物）は仕入れに数えない（💹 のグラフ plGoodsBuyByYm と同じ）。分類（amz_class）が読めない時の二重もこれで外れる */
+    const _expIds = new Set(); (expRows || []).forEach(r => { (String(r.memo || '').match(/[A-Z]{2,5}-[0-9A-Za-z_-]{4,}/g) || []).forEach(x => _expIds.add(x)); });
     let total = 0, n = 0, unsold = 0, unsoldN = 0, noPrice = 0, biz = 0, flea = 0, unk = 0;
     inv.forEach(r => { if (invPurDate(r).slice(0, 7) !== ym) return;
+      if (r.item_id && _expIds.has(String(r.item_id))) return;
       if (buyNotGoods(r, (window.__amzClsC && window.__amzClsC.v) || (typeof renderAlerts !== 'undefined' && renderAlerts._cache && renderAlerts._cache.amz) || {})) return;   /* ★11/21 🛒 の備品・私物・明らかな資材は経費側で数える（前は Amazon で売れていない物を全部外していた＝仕分け待ちの売り物まで仕入れから消えていた・💹 のグラフの仕入れ plGoodsBuyByYm と同じ条件にそろえた） */
       const st = String(r.status || ''); if (/私物|事業外|取消|キャンセル/.test(st)) return;
       const pr = Number(r.price) || 0; if (!(pr > 0)) { noPrice++; return; }
@@ -28090,7 +28097,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     try { plCfgV = await plCfg(); if (plCfgV && Array.isArray(plCfgV.fixBreak)) plCfgV.fixBreak.forEach(x => { const ec = x.ecat || plEcatOf(x.name); if (plModeOf(x) === 'remind' && !rows.some(r => r.category === ec)) plRemind.push({ name: x.name, ecat: ec, amount: plMonthlyOf(x) }); }); } catch (_) {}
     try { const kvy = await sbGetAll('app_kv', 'select=v&k=eq.' + encodeURIComponent('dom_ship_' + exp.ym)); plYmt = (kvy && kvy[0] && kvy[0].v) || null; } catch (_) {}
     try { if (!(window.__amzClsC && Date.now() - window.__amzClsC.at < 300000)) { const kvc = await sbGetAll('app_kv', 'select=v&k=eq.amz_class').catch(() => null); if (Array.isArray(kvc)) window.__amzClsC = { v: (kvc[0] && kvc[0].v) || {}, at: Date.now() }; } } catch (_) {}   /* ★11/21 仕入れの集計（buyNotGoods）に分類を渡す */
-    const buyInfo = plBuyInfo(exp.ym, inv);
+    const buyInfo = plBuyInfo(exp.ym, inv, rows);
     const plCtxV = plCtx(exp.ym, rows, { refund: refundTotal, remind: plRemind, buy: buyInfo });
     const plCard = plCardHtml(plCtxV);
     const plReview = plReviewHtml(plCtxV, await plPrevCount(exp.ym), formalRet, issues);
@@ -31468,6 +31475,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '🩹 <b>損益の仕入れで、経費に入れた品を外す</b>（全体レビュー中1）：備品などとして経費に入れた品（メモに在庫番号）が、分類を読めない時に仕入れにも数えられて二重になりえた → 💹 のグラフと同じく外す',
+      '🩹 <b>営業の写しの直し</b>（全体レビュー中5）：段階を変えた直後に、変える前に始まった古い読みで描き直されて戻って見えていた → 新しく読み直す。裏の読み直しに失敗した時は「読み直し中」のまま残さず「読み直せませんでした」と出す',
       '🩹 <b>利益明細の「店:」の絞りが必ず0件になっていたのを直しました</b>（全体レビュー高1）：注文の読み込みに店の番号（shop_id）が入っていなかった。0件の時の説明にも、店・赤字だけ・PayPal 併用・リクエスト商品・検索の絞りを足した',
       '🔤 <b>アクセスの最後の取得の表の列見出しを「第1（本店）・第2（2店舗目）・第3（3店舗目）」に</b>（本人「だから、表現統一してって」）・「止まっている」の線を、同じページの「止まっている店」・やることと同じ2日（48時間）にそろえた',
       '📥 <b>アクセスの最後の取得を国×店の表に</b>（本人「これもまじ見にくいわ」）：18店が1行に流れる帯 → 行＝国・列＝本店／2店舗目／第3。マスは大きく「何日の分」・小さく取得の時刻。色＝緑（前の日の分まで）・黄（遅れ）・赤（止まっている・理由つき）・灰（出品0）。第3は「次は毎晩 21:40ごろ」。今日の途中の数もマスに出す',
@@ -63926,7 +63935,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     { const cl = pfMonthCancelLoss(); pf.cxlLoss = cl.total; pf.cxlN = cl.n; pf.cxlUndecided = cl.undecided; }
     document.getElementById('pf-note').textContent = `${orders.length}注文`;
     const monthlyProfit = pf.view !== 'sum' && /^\d{4}-\d{2}$/.test(String(pf.ym || ''))
-      ? pfMonthlyProfitHtml(plCtx(pf.ym, pf.expRows, { refund: refundForYm(pf.issuesRows || [], pf.ym), buy: plBuyInfo(pf.ym, stock.rows) }), body.querySelector('.pf-month-breakdown')?.open)
+      ? pfMonthlyProfitHtml(plCtx(pf.ym, pf.expRows, { refund: refundForYm(pf.issuesRows || [], pf.ym), buy: plBuyInfo(pf.ym, stock.rows, pf.expRows) }), body.querySelector('.pf-month-breakdown')?.open)
       : '';
     if (!orders.length) {
       body.innerHTML = plAcctBanner('純利益') + monthlyProfit + ((pf.orders || []).length ? '<div style="color:#1f3d7a;font-size:12px">ℹ 絞り込み（国・店・仕入額未入力のみ・赤字だけ・PayPal 併用だけ・リクエスト商品だけ・検索・入金・配送・キャンセルを隠す）で0件です（この月の注文は全部で ' + pf.orders.length + '件）。絞り込みを外すと出ます</div>' : '<div class="smd-dim">該当する注文がありません（未同期の月は💰転記タブでDB同期を実行）</div>');   /* ★11/21 絞り込みの0件と未同期を分ける */
