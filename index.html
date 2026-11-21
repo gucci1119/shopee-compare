@@ -1955,7 +1955,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261122-023006';
+  const APP_BUILD = '20261122-023530';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -5921,6 +5921,8 @@
     "全国の合計": "All countries total",
     "1つの期間": "One period",
     "期間を並べる": "Periods side by side",
+    "⚠ 一部": "⚠ Partial",
+    "この数で並べ替え（もう一度押すと逆）": "Sort by this (click again to reverse)",
     "並べる指標": "Metrics",
     "今日（途中）": "Today (so far)",
     "訪問者の記録なし": "No visitor records",
@@ -22049,7 +22051,8 @@
     return ymd;
   }
   async function taLoad(kv) {
-    const need = TA.perMode === 'cum' ? 410 : Math.max(TA.period * 2, 60) + 2;   // 前の期間と比べるぶん（★11/21 累計は初日〜＝約400日ぶんだけ・前の期間は読まない）
+    /* ★2026-11-22 05（全体レビュー 11/22 高1）：見方「期間を並べる」は90日（＋前の90日）と累計を並べる＝期間に関係なく410日ぶん読む（前は1か月の時62日だけ＝90日の注文が約36%少なかった） */
+    const need = (TA.perMode === 'cum' || TA.ccView === 'multi') ? 410 : Math.max(TA.period * 2, 60) + 2;   // 前の期間と比べるぶん（★11/21 累計は初日〜＝約400日ぶんだけ・前の期間は読まない）
     const since = taYmd(Date.now() - need * 86400000);
     const [ords, inc] = await Promise.all([
       sbGetAll('orders', 'select=cc,sn,shop_id,order_date,tab,total,items&order_date=gte.' + since).catch(() => null),
@@ -22062,7 +22065,7 @@
       const amt = Number(o.total) > 0 ? Number(o.total) : (paid.get(o.cc + ':' + o.sn) || 0); const qn = (Array.isArray(o.items) && o.items.length) ? o.items.reduce((s2, it) => s2 + (Number(it && it.qty) || 1), 0) : 1;   /* ★11/7 本人「注文数はオーダー数？オーダー商品数？」＝商品数（点）も数える */
       const c = (O[o.cc] = O[o.cc] || {}); const d = (c[y] = c[y] || { ord: 0, qty: 0, gmv: 0 }); d.ord++; d.qty += qn; d.gmv += amt * rate;
       if (o.shop_id) { shopCc[String(o.shop_id)] = o.cc; const cs = (O['S:' + o.shop_id] = O['S:' + o.shop_id] || {}); const ds = (cs[y] = cs[y] || { ord: 0, qty: 0, gmv: 0 }); ds.ord++; ds.qty += qn; ds.gmv += amt * rate; } });
-    TA._d = { kv, O, shopCc, ordOk: ords !== null, incOk: inc !== null };   /* ★2026-10-24 全体レビュー #7：入金が読めない時は帯を出す */
+    TA._d = { kv, O, shopCc, ordOk: ords !== null, incOk: inc !== null, need, since };   /* ★2026-10-24 全体レビュー #7：入金が読めない時は帯を出す */
   }
   // 国×日の生の値 → 期間・粒度でまとめる。比率の指標は分子・分母を足してから割る
   function taAgg(cc, days, gran) {
@@ -22472,7 +22475,9 @@
       if (bt) { const g = bt.dataset.g, v = bt.dataset.v;
         if (g === 'ord') { if (v === 'cc') { TA.ccSort = 'cc'; TA.ccDir = 'asc'; } else { TA.ccSort = TA.ccLastN || 'uv'; TA.ccDir = 'desc'; } }
         else if (g === 'grp') TA.ccGrp = v === '1';
-        else if (g === 'view') TA.ccView = v === 'multi' ? 'multi' : 'one'; }
+        else if (g === 'view') { TA.ccView = v === 'multi' ? 'multi' : 'one';
+          if (TA.ccView === 'multi' && TA._d && (TA._d.need || 0) < 410) { TA._d = null; taSave(); renderTrafficAna(kv); return; } } }
+      else if (hd.dataset.mk) { const mk = hd.dataset.mk; if (TA.ccMSort === mk) TA.ccMDir = TA.ccMDir === 'asc' ? 'desc' : 'asc'; else { TA.ccMSort = mk; TA.ccMDir = 'desc'; } }
       else { const k = hd.dataset.k; if (TA.ccSort === k) TA.ccDir = TA.ccDir === 'asc' ? 'desc' : 'asc'; else { TA.ccSort = k; TA.ccDir = k === 'cc' ? 'asc' : 'desc'; } if (k !== 'cc') TA.ccLastN = k; }
       taSave(); drawCc(); }); }
     TA._ccDraw = drawCc;
@@ -22499,12 +22504,18 @@
       const dl = (a, b) => { if (a == null || b == null || !b) return ''; const r = (a - b) / Math.abs(b) * 100; const up = r >= 0; return `<div style="font-size:9.5px;color:${up ? '#1b5e20' : '#b3261e'}">${up ? '▲' : '▼'}${Math.abs(Math.round(r))}%</div>`; };
       const cell = (ent, pk, k) => { if (pk === 'today') return `<td style="text-align:right;padding:3px 6px;font-variant-numeric:tabular-nums">${fmtV(k, todayOf(ent, k))}</td>`;
         const ents = Array.isArray(ent) ? ent : [ent]; const v = taTotal(ents, dOf(pk), k); const pv = pOf(pk) ? taTotal(ents, pOf(pk), k) : null;
-        return `<td style="text-align:right;padding:3px 6px;font-variant-numeric:tabular-nums">${fmtV(k, v)}${dl(v, pv)}</td>`; };
+        const ORDK = ['ord', 'qty', 'gmv', 'aov', 'cvr'].includes(k), since = (TA._d && TA._d.since) || '', d0 = (pOf(pk) || dOf(pk))[0] || '';
+        const part = ORDK && since && d0 && d0 < since ? `<div style="font-size:9.5px;color:#b26a00" title="注文は ${av(since)} からしか読んでいません（この期間の初めの方は数に入っていません）">⚠ 一部</div>` : '';
+        return `<td style="text-align:right;padding:3px 6px;font-variant-numeric:tabular-nums">${fmtV(k, v)}${part ? part : dl(v, pv)}</td>`; };
       const allE = ccRows.map(r => r.ent);
       const head1 = `<tr class="ta-cch"><th rowspan="2" style="text-align:left;padding:3px 6px">${TA.dim === 'acct' ? '国・店' : '国'}</th>${MK.map(k => `<th colspan="${PER.length}" style="padding:3px 6px;border-left:2px solid #d6dbe3">${esc(colName(k))}</th>`).join('')}</tr>`;
-      const head2 = `<tr class="ta-cch ta-cch2 smd-dim" style="font-size:10.5px">${MK.map(() => PER.map(([pk, pl], i) => `<th style="padding:2px 6px;text-align:right;${i === 0 ? 'border-left:2px solid #d6dbe3' : ''}">${esc(pl)}</th>`).join('')).join('')}</tr>`;
+      /* ★2026-11-22 05（全体レビュー 11/22 中7）：2段目の見出し（指標×期間）を押すとその数で並べ替え（もう一度押すと逆・押した列に ▼▲） */
+      const head2 = `<tr class="ta-cch ta-cch2 smd-dim" style="font-size:10.5px">${MK.map(k => PER.map(([pk, pl], i) => { const mk = k + '@' + pk, on = TA.ccMSort === mk; return `<th class="ta-ccsort" data-mk="${av(mk)}" title="この数で並べ替え（もう一度押すと逆）" style="padding:2px 6px;text-align:right;cursor:pointer;${on ? 'color:#1565c0;' : ''}${i === 0 ? 'border-left:2px solid #d6dbe3' : ''}">${esc(pl)}${on ? (TA.ccMDir === 'asc' ? ' ▲' : ' ▼') : ''}</th>`; }).join('')).join('')}</tr>`;
+      const mVal = (ent, mk) => { const [k, pk] = String(mk).split('@'); if (pk === 'today') return todayOf(ent, k); return taTotal([ent], dOf(pk), k); };
+      const mSort = (list) => { const mk = TA.ccMSort; if (!mk || !MK.includes(String(mk).split('@')[0])) return sortRows(list); const dir = TA.ccMDir === 'asc' ? 1 : -1;
+        const val = new Map(list.map(r => [r, mVal(r.ent, mk)])); return list.slice().sort((a, b) => { const x = val.get(a), y = val.get(b); if (x == null && y == null) return a.ord - b.ord; if (x == null) return 1; if (y == null) return -1; return ((x - y) * dir) || (a.ord - b.ord); }); };
       const rowM = (ent, label, bold) => `<tr style="${bold ? 'background:#eef2f7;--tint:#eef2f7;font-weight:700' : 'border-top:1px solid #eef1f5'}"><td style="padding:3px 6px;white-space:nowrap">${label}</td>${MK.map(k => PER.map(([pk]) => cell(ent, pk, k)).join('')).join('')}</tr>`;
-      const rows = rowM(allE, `<span>全${TA.dim === 'acct' ? '店' : '国'}の合計</span>`, true) + sortRows(ccRows).map(r => rowM(r.ent, `<b style="color:${entCol(r.ent)}">${esc(entLabel(r.ent))}</b>` + (String(r.ent).indexOf('S:') === 0 ? (() => { const x = taSpanInfo(r.ent); return x.none ? '' : `<div style="font-size:10px;color:#5f6b7a"><span>${esc(x.first.slice(5).replace('-', '/'))} から</span>${x.miss ? '・<span style="color:#b26a00;font-weight:700">' + x.miss + '日抜け</span>' : ''}</div>`; })() : ''), false)).join('');
+      const rows = rowM(allE, `<span>全${TA.dim === 'acct' ? '店' : '国'}の合計</span>`, true) + mSort(ccRows).map(r => rowM(r.ent, `<b style="color:${entCol(r.ent)}">${esc(entLabel(r.ent))}</b>` + (String(r.ent).indexOf('S:') === 0 ? (() => { const x = taSpanInfo(r.ent); return x.none ? '' : `<div style="font-size:10px;color:#5f6b7a"><span>${esc(x.first.slice(5).replace('-', '/'))} から</span>${x.miss ? '・<span style="color:#b26a00;font-weight:700">' + x.miss + '日抜け</span>' : ''}</div>`; })() : ''), false)).join('');
       const mkSel = cols.filter(c => !['ppv'].includes(c[0])).map(c => `<label style="font-size:11px;white-space:nowrap;margin-right:6px"><input type="checkbox" class="ta-mk" value="${av(c[0])}" ${MK.includes(c[0]) ? 'checked' : ''}> ${esc(c[1])}</label>`).join('');
       host.innerHTML = `<div style="margin:2px 0 4px" data-guide="${av('「期間を並べる」で並べる指標を選びます（この端末が覚えます）。')}"><b class="ta-blb">並べる指標</b> ${mkSel}</div><div class="ta-cctbox"><table class="ta-cct" style="font-size:11.5px">${head1}${head2}${rows}</table></div><div class="smd-dim" style="font-size:10.5px;margin-top:3px">▲▼＝前の同じ長さの期間からの増減。今日（途中）は今日の途中の数（訪問者・注文だけ・読んだ時刻は上の 📥 の表）。累計は取り込みの初日から昨日まで（店ごとの始まりは名前の下）。</div>`;
       try { const t = host.querySelector('.ta-cct'), h1 = t && t.querySelector('tr.ta-cch:not(.ta-cch2) th:not([rowspan])'); if (t && h1) t.style.setProperty('--ta-h1', h1.offsetHeight + 'px'); } catch (_) {}   /* 2段目の見出しは1段目の高さの下に貼る */
@@ -31694,6 +31705,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-22', items: [
+      '📊 <b>アクセス（各国）「期間を並べる」の90日・累計の注文が少なく出ていたのを直しました</b>（全体レビュー 11/22）：上の帯の期間が1か月以下の時、注文を62日分しか読んでいなかった＝90日の注文が約36%少なかった。この見方の時は410日ぶん読み、切り替えた時に足りなければ読み直します。読めていない期間には「⚠ 一部」と出します。2段目の見出し（指標×期間）を押すとその数で並べ替えできます',
       '🔎 <b>出品一覧の検索で、どの明細に当たったかが行の下に見えるように</b>（本人「バリエーションの時に見つけにくいんだよ」）：検索語（名前・JAN・型番・SKU・ID）が明細に当たった時は、カタログの行のすぐ下に「🔎 当たった明細 N件」として、当たった明細だけを番号・写真・明細名（当たった語に色）・SKU・値段・在庫・販売つきで押さずに出します。「✎ この明細を直す」でカタログが開き、その明細の行へ移って光ります（開いた明細の中でも当たった行は黄色）。カタログ名だけで当たった時は出しません。並べ替えや他の絞り込みと一緒でも効きます',
     ] },
     { date: '2026-11-21', items: [
