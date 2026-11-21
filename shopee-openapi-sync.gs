@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1930'
+var SRC_VER = '20261121-1940'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -1389,7 +1389,13 @@ function doGetInner_(e) {
         if (p.action === 'follow_prize_end') {
           var fwe = P_().getProperty('WRITE_TOKEN'); if (!fwe || p.token !== fwe) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
           var fcid = parseInt(p.campaign_id, 10); if (!(fcid > 0)) throw new Error('campaign_id が要ります');
-          fout = { ok: true, sent: { campaign_id: fcid }, res: callShop_(fshop, '/api/v2/follow_prize/end_follow_prize', null, 'post', { campaign_id: fcid }) };
+          /* ★11/21 00 の決め：1件ずつ・終わらせる前に中身を読んで控える（app_kv promo_end_follow_<店>_<id>）・終わらせた後に読み直して返す */
+          var fBefore = null, fAfter = null; try { fBefore = callShop_(fshop, '/api/v2/follow_prize/get_follow_prize_detail', { campaign_id: fcid }, 'get'); } catch (eFb) { fBefore = { error: String((eFb && eFb.message) || eFb).slice(0, 200) }; }
+          if (!fBefore || fBefore.error) throw new Error('終わらせる前の中身を読めなかったので、終わらせていません：' + JSON.stringify(fBefore).slice(0, 200));
+          try { baKvSet_('promo_end_follow_' + fshop + '_' + fcid, { at: new Date().toISOString(), before: fBefore }); } catch (eFk) { throw new Error('控えを書けなかったので、終わらせていません'); }
+          var fRes = callShop_(fshop, '/api/v2/follow_prize/end_follow_prize', null, 'post', { campaign_id: fcid });
+          try { fAfter = callShop_(fshop, '/api/v2/follow_prize/get_follow_prize_detail', { campaign_id: fcid }, 'get'); } catch (eFa) { fAfter = { error: String((eFa && eFa.message) || eFa).slice(0, 200) }; }
+          fout = { ok: true, sent: { campaign_id: fcid }, res: fRes, before: fBefore, after: fAfter, backup: 'promo_end_follow_' + fshop + '_' + fcid };
         } else if (p.action === 'follow_prize_add') {
           var fwt = P_().getProperty('WRITE_TOKEN'); if (!fwt || p.token !== fwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
           var fb = { follow_prize_name: String(p.follow_prize_name || p.prize_name || ''),   /* ★11/21 01：公式の項目名は follow_prize_name（prize_name で断られた） */
@@ -1432,7 +1438,13 @@ function doGetInner_(e) {
         } else if (p.action === 'voucher_end') {
           var vwe = P_().getProperty('WRITE_TOKEN'); if (!vwe || p.token !== vwe) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
           var vid = parseInt(p.voucher_id, 10); if (!(vid > 0)) throw new Error('voucher_id が要ります');
-          vout = { ok: true, sent: { voucher_id: vid }, res: callShop_(vshop, '/api/v2/voucher/end_voucher', null, 'post', { voucher_id: vid }) };
+          /* ★11/21 00 の決め：1件ずつ・終わらせる前に中身を読んで控える（app_kv promo_end_voucher_<店>_<id>）・終わらせた後に読み直して返す */
+          var vBefore = null, vAfter = null; try { vBefore = callShop_(vshop, '/api/v2/voucher/get_voucher', { voucher_id: vid }, 'get'); } catch (eVb) { vBefore = { error: String((eVb && eVb.message) || eVb).slice(0, 200) }; }
+          if (!vBefore || vBefore.error) throw new Error('終わらせる前の中身を読めなかったので、終わらせていません：' + JSON.stringify(vBefore).slice(0, 200));
+          try { baKvSet_('promo_end_voucher_' + vshop + '_' + vid, { at: new Date().toISOString(), before: vBefore }); } catch (eVk) { throw new Error('控えを書けなかったので、終わらせていません'); }
+          var vRes = callShop_(vshop, '/api/v2/voucher/end_voucher', null, 'post', { voucher_id: vid });
+          try { vAfter = callShop_(vshop, '/api/v2/voucher/get_voucher', { voucher_id: vid }, 'get'); } catch (eVa) { vAfter = { error: String((eVa && eVa.message) || eVa).slice(0, 200) }; }
+          vout = { ok: true, sent: { voucher_id: vid }, res: vRes, before: vBefore, after: vAfter, backup: 'promo_end_voucher_' + vshop + '_' + vid };
         } else if (p.action === 'item_promotion') {
           vout = { ok: true, res: callShop_(vshop, '/api/v2/product/get_item_promotion', { item_id_list: nums(p.item_id_list || p.item_id).join(',') }, 'get') };
         } else {
