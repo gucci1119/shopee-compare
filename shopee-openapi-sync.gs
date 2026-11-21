@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1300'
+var SRC_VER = '20261121-1320'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -348,10 +348,23 @@ function ufSpillTotal_() {
 /* ★2026-11-05 事業本部：記録の無い値上げ（VN の21明細・BR ゼルダ 298→301.97）の書き手が分からない＝GAS で値段を書いたら必ず activity_log に残す。
    1回の実行の分を貯めて、最後（ufPersist_＝doGet/doPost/各 tick の finally）に1回でまとめて書く＝接続枠は1実行1回だけ増える */
 var _priceLog = [];
-function priceLogPush_(shopId, itemId, list, kind) {
+/* ★2026-11-21 00・04（BR の切り分け「8月の表示の落ちと値上げの関係を確かめられなかった」）：値段の記録に【前の値段】と【どの口から来たか】を足す。
+   前の値段＝Shopee に書く直前の DB の出品の控え（listings の models[].price・明細の無い品は price_min）。ポータルは書けた後で控えを書き換える（sbReflectPrices）ので、書く前に読めば前の値段。
+   list の1件＝{ m: model_id, p: 後の値段, b: 前の値段（読めなければ null） }。detail の by＝口の名前（web:action／post:action／trig）。前からある via・list・cc の名前は変えない */
+function priceBeforeOf_(itemId) {
+  try {
+    var r = sbSelect_('listings', 'select=price_min,models&item_id=eq.' + encodeURIComponent(String(itemId)) + '&limit=1'), x = r && r[0];
+    if (!x) return null;
+    var o = {}; (Array.isArray(x.models) ? x.models : []).forEach(function (m) { if (m && m.id != null && m.price != null) o[String(m.id)] = Number(m.price); });
+    if (x.price_min != null) o['0'] = Number(x.price_min);
+    return o;
+  } catch (e) { return null; }
+}
+function priceLogPush_(shopId, itemId, list, kind, before) {
   try {
     var via = ''; try { via = String(new Error().stack || '').split('\n').map(function (l) { var m = /at (\w+)/.exec(l); return m ? m[1] : ''; }).filter(function (x) { return x && !/^(priceLogPush_|updatePriceList_|updatePrice_|Error)$/.test(x); }).slice(0, 4).join('<'); } catch (eS) {}
-    _priceLog.push({ page: 'GAS', action: '値段を書いた（' + kind + '）', target: String(shopId) + '|' + String(itemId), detail: JSON.stringify({ via: via, list: (list || []).slice(0, 40), cc: (function () { try { var t = getToken_(parseInt(shopId, 10)); return t && t.cc ? String(t.cc).toUpperCase() : ''; } catch (eT) { return ''; } })() }).slice(0, 1800) });
+    var lst = (list || []).slice(0, 40).map(function (x) { var y = Object.assign({}, x); if (before) { var bv = before[String(x.m)]; y.b = (bv != null && !isNaN(bv)) ? bv : null; } return y; });
+    _priceLog.push({ page: 'GAS', action: '値段を書いた（' + kind + '）', target: String(shopId) + '|' + String(itemId), detail: JSON.stringify({ via: via, by: String(SB_CALLER || 'trig'), list: lst, cc: (function () { try { var t = getToken_(parseInt(shopId, 10)); return t && t.cc ? String(t.cc).toUpperCase() : ''; } catch (eT) { return ''; } })() }).slice(0, 2600) });
   } catch (e) {}
 }
 function priceLogFlush_() {
@@ -3438,9 +3451,10 @@ function updatePrice_(shopId, itemId, modelId, price) {
   { var sp0 = priceLockSplit_(itemId, [{ model_id: modelId, price: price }]); if (sp0.skip.length) return { lockSkipped: sp0.skip, note: '本人の値段（' + sp0.skip[0].lock + '）なので書いていません' }; }
   vnPriceCapCheck_(shopId, [{ model_id: modelId, price: price }], '値段');   /* ★2026-11-13 高3（同じ型） */
   var body = { item_id: parseInt(itemId, 10), price_list: [{ model_id: parseInt(modelId, 10) || 0, original_price: parseFloat(price) }] };
+  var pb1 = priceBeforeOf_(itemId);   /* ★11/21 前の値段（書く前の控え） */
   var j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body);
   /* ★2026-11-05 洗い出し6（03 営業部）：明細ごとに断られたのに「変えた」と値段の記録を書いていた＝見積もりと出品の額がずれる。断られた時は記録を書かない（投げない＝呼び出し元の流れはそのまま・ポータルの口は ok:false で返す） */
-  if (!((((j && j.response) || {}).failure_list) || []).length) priceLogPush_(shopId, itemId, [{ m: parseInt(modelId, 10) || 0, p: parseFloat(price) }], '1明細');
+  if (!((((j && j.response) || {}).failure_list) || []).length) priceLogPush_(shopId, itemId, [{ m: parseInt(modelId, 10) || 0, p: parseFloat(price) }], '1明細', pb1);
   return (j && j.response) || j;
 }
 // ★モデル(明細)一覧を公式APIで読む（ブリッジのproductRead代替）：model_id/価格/在庫/SKU/バリエ名。
@@ -3668,6 +3682,7 @@ function updatePriceList_(shopId, itemId, list, opt) {
   if (!pl.length) throw new Error('価格リストが空');
   if (!opt.copyOnly) vnPriceCapCheck_(shopId, pl.map(function (x) { return { model_id: x.model_id, price: x.original_price }; }), '値段');   /* ★2026-11-13 高3：1件でも超えたら全部送らない（Shopee に送る前）。写すだけ（copyOnly）は確かめない */
   var body = { item_id: parseInt(itemId, 10), price_list: pl }, j, promo = null;
+  var pbL = priceBeforeOf_(itemId);   /* ★11/21 前の値段（書く前の控え） */
   try { j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body); }
   catch (eP) {
     /* ★2026-10-20 本人「なんでこれ失敗するの？」（🏷値付けの見直し 16明細が全部失敗）：販促に入っている品物は Shopee が値段の変更を断る
@@ -3688,7 +3703,7 @@ function updatePriceList_(shopId, itemId, list, opt) {
   /* ★2026-09-28 Codex：明細ごとの失敗（failure_list）を見ずに全部成功扱いしていた → 1つでも失敗があれば理由つきで失敗にする（価格・在庫は同じ値を送り直しても害がない） */
   var fl = ((j && j.response) || {}).failure_list || [];
   if (fl.length) throw new Error('一部の明細を変えられませんでした（' + fl.length + '/' + pl.length + '）: ' + fl.slice(0, 3).map(function (f) { return (f.model_id || '') + ' ' + String(f.failed_reason || f.reason || ''); }).join(' / ').slice(0, 200));
-  priceLogPush_(shopId, itemId, pl.map(function (x) { return { m: x.model_id, p: x.original_price }; }), pl.length + '明細' + (promo ? '・販促を外して書いた' : ''));
+  priceLogPush_(shopId, itemId, pl.map(function (x) { return { m: x.model_id, p: x.original_price }; }), pl.length + '明細' + (promo ? '・販促を外して書いた' : ''), pbL);
   return { updated: pl.length, response: (j && j.response) || j, promo: promo, lockSkipped: spL.skip.length ? spL.skip : undefined };
 }
 /* 価格を書く前に販促から外す（get_item_promotion で今入っている販促を読む）。戻り＝{bundleOut:[id], discountOut:[id], other:[種類], bundleBack:[], bundleBackErr:[]} */
