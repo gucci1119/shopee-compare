@@ -1964,7 +1964,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261122-063128';
+  const APP_BUILD = '20261122-064233';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -4431,7 +4431,7 @@
     const readLimited = async r => { if (!r.ok) throw new Error('HTTP ' + r.status); const reader = r.body.getReader(), chunks = []; let total = 0; try { while (true) { const x = await reader.read(); if (x.done) break; total += x.value.byteLength; if (total > 2000000) throw new Error('返事が2MBを超えたため中断'); chunks.push(x.value); } } catch (e) { await reader.cancel().catch(() => {}); throw e; } const a = new Uint8Array(total); let n = 0; chunks.forEach(x => { a.set(x, n); n += x.length; }); const t = new TextDecoder().decode(a), m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t); return JSON.parse(m ? m[1] : t); };
     const work = async (lock, maxCategories) => {
       if (!lock) { describe('別のタブで取得中です'); return; }
-      running = true; cancelled = false; start.disabled = true; one.disabled = true; stop.disabled = false;
+      running = true; cancelled = false; start.disabled = true; one.disabled = true; stop.disabled = false; describe('接続枠を確認中…');
       try {
         if (typeof window.__smdHold === 'function') window.__smdHold(20 * 60000);
         const urls = [settings.boshuUrl4, settings.boshuUrl3, settings.boshuUrl2, settings.boshuUrl].filter(Boolean); let chosen = '';
@@ -10623,6 +10623,7 @@
 });
   Object.assign(I18N, {"国・注文番号": "Country / Order ID", "問い合わせの履歴と画面の写し": "Inquiry history and screen evidence", "店の情報をまとめて写す一覧": "Copy shop information in one place", "損失の参考集計と証拠の保全": "Provisional loss totals and preserved evidence", "件名なし": "No subject", "未確認": "Unconfirmed", "添付：": "Attachments:"});
   Object.assign(I18N, {'準備済み（画面は未確認）':'Prepared (screen not yet observed)'});
+  Object.assign(I18N, {'店の連絡先を読込中':'Loading shop contact','店の情報を読込中':'Loading shop information','店の情報を読んでいます…':'Loading shop information…','接続枠を確認中…':'Checking connection budget…'});
   const I18N_PAT = [
     [/^参考損失 (.+)$/, 'Reference loss $1'],
     [/^（計算できた (\d+)件） ／ 数えられない (\d+)件 ／ 対象 (\d+)件$/, '($1 calculable) / $2 unknown / $3 total'],
@@ -29483,8 +29484,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   async function jpSupportProfile(force) {
     if (!force && jpSupportProfile._cache && Date.now() - jpSupportProfile._at < 300000) return jpSupportProfile._cache;
-    const v = await jpSupportKv('shop_profile'); if (!v || !v.families) throw new Error('店の連絡先が未登録です');
-    jpSupportProfile._cache = v; jpSupportProfile._at = Date.now(); return v;
+    if (jpSupportProfile._inflight) return jpSupportProfile._inflight;
+    const promise = jpSupportKv('shop_profile').then(v => { if (!v || !v.families) throw new Error('店の連絡先が未登録です'); jpSupportProfile._cache = v; jpSupportProfile._at = Date.now(); return v; });
+    jpSupportProfile._inflight = promise;
+    try { return await promise; } finally { if (jpSupportProfile._inflight === promise) jpSupportProfile._inflight = null; }
   }
   async function jpSupportEmail(fam) { const p = await jpSupportProfile(); const c = jpInqCfg(); return String((c.emailByFamily || {})[fam] || ((p.families || {})[fam] || {}).email || '').trim(); }
   async function jpShopPanel() {
@@ -29672,20 +29675,35 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">店 ${sel('jp-inq-fam', Object.entries(JP_INQ_FAM), c.fam)} 国 ${sel('jp-inq-cc', ['BR', 'PH', 'SG', 'MY', 'TH', 'TW', 'VN'].map(x => [x, x]), c.cc)}
         <span class="smd-dim" style="font-size:11.5px" id="jp-inq-shop">Shop ID を読んでいます…</span></div>
       <div style="margin-bottom:6px"><b style="font-size:12px">用件を押すと開きます</b></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">${Object.entries(JP_INQ_PURPOSE).map(([k, v]) => `<button class="smd-btn jp-inq-go" data-p="${k}" style="font-size:12.5px;${k === c.purpose ? 'font-weight:700;border-color:#1565c0;color:#1565c0' : ''}">${esc(v.label)}</button>`).join('')}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">${Object.entries(JP_INQ_PURPOSE).map(([k, v]) => `<button class="smd-btn jp-inq-go" disabled data-p="${k}" style="font-size:12.5px;${k === c.purpose ? 'font-weight:700;border-color:#1565c0;color:#1565c0' : ''}">${esc(v.label)}</button>`).join('')}</div>
       <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 8px;align-items:center;font-size:12px">
         <span>Order ID</span><input id="jp-inq-sn" placeholder="あれば（1つ）" style="font-size:12px">
-        <span>メール</span><input id="jp-inq-mail" value="${av(c.email)}" style="font-size:12px" title="返事が届くメール。直すと次からこの値">
-        <span>Username</span><input id="jp-inq-user" value="${av(c.user[c.fam] || '')}" style="font-size:12px" title="店ごとに覚えます（推測で入れた値です。違ったら直してください）"></div>
+        <span>メール</span><input id="jp-inq-mail" value="" disabled placeholder="店の連絡先を読込中" style="font-size:12px" title="返事が届くメール。直すと次からこの値">
+        <span>Username</span><input id="jp-inq-user" value="" disabled placeholder="店の情報を読込中" style="font-size:12px" title="店ごとに覚えます（推測で入れた値です。違ったら直してください）"></div>
       <div class="smd-dim" style="font-size:11px;margin-top:8px">カテゴリ・件名・詳細の書き出し・Username・マーケット・Shop ID・Order ID は自動で入ります（入らなかった欄はフォームの上の帯に出ます）。フォームを埋めるのは Tampermonkey の道具「Shopee Japan 問い合わせフォーム」です。SLS+ 補償の注文をまとめて送る時は、返品・キャンセル →「📨 申請をまとめる」→「📨 この中身でフォームを開く」（詳細は999文字以内・注文一覧は添付CSVに入ります）。</div>`;
     document.body.appendChild(pn);
     const $ = id => pn.querySelector('#' + id);
-    const showShop = async (resetMail) => { const fam = $('jp-inq-fam').value, si = await jpInqShopInfo(fam, $('jp-inq-cc').value); if (resetMail) { try { $('jp-inq-mail').value = await jpSupportEmail(fam); } catch (e) { $('jp-inq-mail').value = ''; toast('店のメールを読めません：' + String(e.message || e), true); } } $('jp-inq-shop').textContent = si.id ? 'Shop ID ' + si.id + (si.user ? '・Username ' + si.user : '') : '⚠ この店・国の Shop ID が登録簿に無い'; $('jp-inq-shop').style.color = si.id ? '' : '#d93025'; if (si.user) $('jp-inq-user').value = si.user; };
+    let showSeq = 0, selectionReady = false;
+    const showShop = async () => {
+      const request = ++showSeq, fam = $('jp-inq-fam').value, cc = $('jp-inq-cc').value;
+      const current = () => request === showSeq && fam === $('jp-inq-fam').value && cc === $('jp-inq-cc').value;
+      selectionReady = false; pn.querySelectorAll('.jp-inq-go').forEach(b => { b.disabled = true; }); $('jp-inq-mail').disabled = true; $('jp-inq-user').disabled = true; $('jp-inq-mail').value = ''; $('jp-inq-user').value = ''; $('jp-inq-shop').textContent = '店の情報を読んでいます…';
+      try {
+        const si = await jpInqShopInfo(fam, cc); if (!current()) return;
+        const email = await jpSupportEmail(fam); if (!current()) return;
+        $('jp-inq-shop').textContent = si.id ? 'Shop ID ' + si.id + (si.user ? '・Username ' + si.user : '') : 'この店・国の Shop ID が登録簿にありません';
+        $('jp-inq-shop').style.color = si.id ? '' : '#b45309'; $('jp-inq-user').value = si.user || jpInqCfg().user[fam] || ''; $('jp-inq-mail').value = email;
+        selectionReady = !!si.id; $('jp-inq-mail').disabled = false; $('jp-inq-user').disabled = false;
+        pn.querySelectorAll('.jp-inq-go').forEach(b => { b.disabled = !selectionReady || !$('jp-inq-mail').value.trim(); });
+      } catch (e) { if (!current()) return; $('jp-inq-shop').textContent = '店の情報を読めません：' + String(e.message || e); }
+    };
     showShop(true);
-    $('jp-inq-fam').onchange = () => { const cc2 = jpInqCfg(); $('jp-inq-user').value = cc2.user[$('jp-inq-fam').value] || ''; showShop(true); };
-    $('jp-inq-cc').onchange = () => showShop(false);
+    $('jp-inq-fam').onchange = showShop;
+    $('jp-inq-cc').onchange = showShop;
+    $('jp-inq-mail').oninput = () => { pn.querySelectorAll('.jp-inq-go').forEach(b => { b.disabled = !selectionReady || !$('jp-inq-mail').value.trim(); }); };
     $('jp-inq-x').onclick = () => pn.remove();
     pn.querySelectorAll('.jp-inq-go').forEach(b => b.addEventListener('click', () => {
+      if (!selectionReady || b.disabled) return;
       const c2 = jpInqCfg(), fam = $('jp-inq-fam').value; c2.emailByFamily[fam] = $('jp-inq-mail').value.trim(); c2.user[fam] = $('jp-inq-user').value.trim(); jpInqSave(c2);
       jpInqOpen({ fam: fam, cc: $('jp-inq-cc').value, purpose: b.dataset.p, orderId: $('jp-inq-sn').value.trim() });
       pn.remove(); }));
@@ -32178,6 +32196,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-22', items: [
+      '📨 <b>問い合わせの店を素早く切り替えた時の混線を防止</b>：連絡先を読み込む間は用件を押せず、最新の店・国に一致した結果だけ表示・保存します。古いメールを先に出さず、同じ連絡先の同時読取は1回にまとめます',
       '🏪 <b>店の情報をまとめて写す一覧</b>：登録簿と非公開の連絡先控えから店・国・メール・Username・Shop ID・メインアカウント・問い合わせIDを表示。店の選択に合わせて連絡先を切り替えます',
       '📨 <b>問い合わせの履歴と画面の写し</b>：開いた・入力済み・送信操作・完了画面の確認を分け、日時付きで保管。送信は本人のまま。画像取得失敗は明示し、メール送信済み/返事の自動取込は未対応と表示します',
       'SLS+ <b>損失の参考集計と証拠の保全</b>：取得日・平均経費・古い受取・推計補償・欠損を明示。既存の注文別JSON等は非公開ZIPへ。担当PCの既存読取時に対象データを保全し、画面/メール未取得を取得済み扱いにしません',
