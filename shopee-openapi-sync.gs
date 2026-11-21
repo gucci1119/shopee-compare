@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1215'
+var SRC_VER = '20261121-1230'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -3128,11 +3128,30 @@ var BOOST_KV = 'boost_state', BOOST_GAP_SEC = 12 * 3600;
    ② 第3は一度回した品を BOOST_GAP3_SEC（3日）あける（同じ品ばかり回らない）。候補が足りない時だけ、いちばん前に回した品から埋める（枠を空けない）
    ③ 回した品の控え＝app_kv boost_log_shop3 の rows [時刻, 店, item_id, 先に回す印(1/0), 通った(1/0)]。21日で消す（11/28 に 04 が直した品と直していない品を比べる） */
 var BOOST_GAP3_SEC = 3 * 86400, BOOST_PREF_KV = 'boost_prefer', BOOST_LOG3_KV = 'boost_log_shop3', BOOST_REG_NG_SEC = 30 * 60;
+/* ★2026-11-21 00 の決め：Bump の回は10分ごと（前は30分＝枠が切れてから埋まるまで最大30分空いた）。
+   空きの無い回は boost_state（約14KB）を1回読むだけで終わる＝取り札・Shopee の API・書き込みは、終わる時刻から見て枠が空いた店がある回だけ。
+   トリガーは台ごとに1回だけ、この関数の中で30分→10分に作り直す（BOOST_TRIG10 の印） */
+function boostTrig10_() {
+  try {
+    var P0 = P_(); if (P0.getProperty('BOOST_TRIG10')) return;
+    var ts = ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'boostTick'; });
+    if (!ts.length) return;   /* この台は Bump を回していない＝作らない */
+    ts.forEach(function (t) { ScriptApp.deleteTrigger(t); });
+    ScriptApp.newTrigger('boostTick').timeBased().everyMinutes(10).create();
+    P0.setProperty('BOOST_TRIG10', new Date().toISOString());
+  } catch (eT) { Logger.log('Bump のトリガーを10分にできなかった ' + String(eT).slice(0, 120)); }
+}
 function boostTick(manual) {
+  if (manual !== true) boostTrig10_();
   if (!bgAllowed_()) return { ok: false, skipped: 'uf' };
-  if (manual !== true && !syncGate_('boostTick', 1500)) return { ok: false, skipped: 'gate' };   /* ★2026-09-23 札は動ける時だけ */
   var st = baKv_(BOOST_KV) || {}; st.shops = st.shops || {}; st.items = st.items || {};
   if (BA_KV_FAIL[BOOST_KV]) return { ok: false, skipped: 'kv', why: 'boost_state を読めなかった（空で選ぶとあけ時間が全部消えるので、この回は何もしない）' };   /* ★11/21 レビュー3 */
+  if (manual !== true) {
+    var now0 = now_(), sids0 = Object.keys(st.shops);
+    var due0 = !sids0.length || sids0.some(function (k) { var x = st.shops[k] || {}; return !x.nextAt || now0 >= x.nextAt; });
+    if (!due0) { try { ufPersist_(); } catch (eP0) {} return { ok: true, skipped: 'nodue' }; }   /* 枠が空いた店が無い＝読み1回で終わる（その1回も接続枠に数える） */
+    if (!syncGate_('boostTick', 480)) return { ok: false, skipped: 'gate' };   /* ★2026-09-23 札は動ける時だけ（10分ごとなので札の長さも8分に） */
+  }
   var pref = ((baKv_(BOOST_PREF_KV) || {}).items) || {};
   if (BA_KV_FAIL[BOOST_PREF_KV]) return { ok: false, skipped: 'kv', why: 'boost_prefer を読めなかった（登録の品が先に回らなくなるので、この回は何もしない）' };   /* ★11/21 レビュー6 */
   var now = now_(), out = [];
@@ -10254,7 +10273,7 @@ var HB_KV_ = [
   ['orders_sync_last', '注文の同期', 90, 'shops'],
   ['sync_claim_syncAll', '同期（syncAll・在庫の自動復活ほか）の取り札', 90, 'upd'],
   ['sync_claim_syncListingsRoundRobin', '出品の同期', 70, 'upd'],
-  ['sync_claim_boostTick', 'Bump', 70, 'upd'],
+  ['sync_claim_boostTick', 'Bump', 270, 'upd'],   /* ★11/21 札は枠が空いた店がある回だけ取る＝全店の枠が同じ頃に埋まると最大約4時間取らない */
   ['bundle_sweep_run', 'まとめ買い割引の見回り（毎日 4:30・本体）', 1560, 'upd'],   /* ★11/21 05 */
   ['sync_claim_condIndexTick', '状態写真の索引', 40, 'upd'],
   ['sync_claim_syncEscrowAll', '入金の同期', 1080, 'upd'],   /* ★2026-11-15 05 レビュー（1）：入金の同期は本体が約12時間おきになった（取り札を通るようになった）＝7時間では誤って赤。18時間 */
@@ -10307,7 +10326,8 @@ function hbMakeTrigger_(fn) {
     case 'backfillEscrowUnchanged': T(fn).everyDays(1).atHour(5).create(); return true;
     case 'syncListingStats': case 'boshuAutoRecheck': T(fn).everyDays(1).atHour(4).create(); return true;
     case 'dailyAdjustmentsCheck': T(fn).everyDays(1).atHour(7).create(); return true;
-    case 'syncListingsRoundRobin': case 'boostTick': T(fn).everyMinutes(30).create(); return true;
+    case 'syncListingsRoundRobin': T(fn).everyMinutes(30).create(); return true;
+    case 'boostTick': T(fn).everyMinutes(10).create(); return true;   /* ★11/21 00 の決め：10分ごと */
     case 'condIndexTick': T(fn).everyMinutes(10).create(); return true;
     case 'cancelWatchTick': T(fn).everyMinutes(15).create(); return true;
     case 'awbKeepTick': T(fn).everyHours(1).create(); return true;
@@ -10683,7 +10703,7 @@ function setupTriggers() {
   ScriptApp.newTrigger('backfillEscrowUnchanged').timeBased().everyDays(1).atHour(5).create();
   ScriptApp.newTrigger('syncPayoutsAll').timeBased().everyHours(6).create();
   ScriptApp.newTrigger('syncListingsRoundRobin').timeBased().everyMinutes(30).create(); // 出品同期(公式get_item_list・数店ずつ)
-  ScriptApp.newTrigger('boostTick').timeBased().everyMinutes(30).create();   // ⬆️ Bump（公式 boost_item・各店5商品/4時間）2026-09-22
+  ScriptApp.newTrigger('boostTick').timeBased().everyMinutes(10).create();   // ⬆️ Bump（公式 boost_item・各店5商品/4時間）2026-09-22・11/21 から10分ごと
   try { setupBoshuAutoTrigger(); } catch (eBA) {}   // 🤖 母数の空白の自動出品（30分毎・設定OFFなら何もしない）
   try { setupCondIndexTrigger(); } catch (eCI) {}   // 📸 状態写真の索引（10分毎）★2026-09-22 ここに無く、作り直すたびに消えていた（Bump追加の時に両方から消えたのを実測）
   // ★ここに入れ忘れると、setupTriggers() が全トリガーを消した時に
