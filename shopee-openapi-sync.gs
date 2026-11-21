@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1210'
+var SRC_VER = '20261121-1215'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -1307,11 +1307,12 @@ function doGetInner_(e) {
         var fshop = parseInt(p.shop_id, 10); if (!getToken_(fshop)) throw new Error('未認可 shop_id=' + p.shop_id);
         if (p.action === 'follow_prize_add') {
           var fwt = P_().getProperty('WRITE_TOKEN'); if (!fwt || p.token !== fwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-          var fb = { prize_name: String(p.prize_name || ''), start_time: parseInt(p.start_time, 10), end_time: parseInt(p.end_time, 10), usage_quantity: parseInt(p.usage_quantity, 10), min_spend: parseFloat(p.min_spend), reward_type: parseInt(p.reward_type, 10) || 1 };
+          var fb = { follow_prize_name: String(p.follow_prize_name || p.prize_name || ''),   /* ★11/21 01：公式の項目名は follow_prize_name（prize_name で断られた） */
+            start_time: parseInt(p.start_time, 10), end_time: parseInt(p.end_time, 10), usage_quantity: parseInt(p.usage_quantity, 10), min_spend: parseFloat(p.min_spend), reward_type: parseInt(p.reward_type, 10) || 1 };
           if (p.discount_amount != null && p.discount_amount !== '') fb.discount_amount = parseFloat(p.discount_amount);
           if (p.percentage != null && p.percentage !== '') fb.percentage = parseInt(p.percentage, 10);
           if (p.max_price != null && p.max_price !== '') fb.max_price = parseFloat(p.max_price);
-          if (!fb.prize_name || !(fb.start_time > 0) || !(fb.end_time > fb.start_time) || !(fb.usage_quantity > 0) || !(fb.min_spend >= 0)) throw new Error('prize_name・start_time・end_time・usage_quantity・min_spend が要ります');
+          if (!fb.follow_prize_name || !(fb.start_time > 0) || !(fb.end_time > fb.start_time) || !(fb.usage_quantity > 0) || !(fb.min_spend >= 0)) throw new Error('prize_name・start_time・end_time・usage_quantity・min_spend が要ります');
           if (fb.reward_type === 1 && !(fb.discount_amount > 0)) throw new Error('reward_type=1（金額引き）は discount_amount が要ります');
           if (fb.reward_type === 2 && !(fb.percentage > 0)) throw new Error('reward_type=2（率引き）は percentage が要ります');
           fout = { ok: true, sent: fb, res: callShop_(fshop, '/api/v2/follow_prize/add_follow_prize', null, 'post', fb) };
