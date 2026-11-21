@@ -1955,7 +1955,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261122-025356';
+  const APP_BUILD = '20261122-030114';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -2054,6 +2054,53 @@
   // ★日本語入力（IME）の変換中に再描画すると、未確定の文字が確定して打てなくなる。
   //   「2文字入れると確定してしまい、続けて打てない」の正体はこれ。
   //   変換が終わる（compositionend）まで待ってから走らせる。全部の検索欄で同じ扱いにする。
+  /* ★2026-11-22 05（本人「❌で消せるように」「他もね」・00）：ポータルの全ページの検索・絞り込みの文字欄の右端に ✕ を重ねて出す共通の部品（1か所）。
+     当てる欄＝文字欄で、見出し・id・案内に「検索・絞り込・探す・🔍・🔎・search・filter」や id が -q で終わる物（新しく作る欄も自動で当たる）。自前の ✕ がある欄（出品一覧）と .smd-noclr の中は除く。
+     ✕ は字が入っている時だけ見える・押すと空にして絞り込みを外し（wireTypeahead の欄はすぐ確定）・焦点は欄に残す・Esc でも消える（変換中の Esc は変換の取り消しだけ）・かざすと「検索をクリア」。
+     欄の作り（親子・種類）は変えない＝欄の外の body に小さな ✕ を置き、欄の右端に合わせて動かす */
+  const CLRX_RE = /検索|絞り込|探す|🔍|🔎|search|filter/i;
+  function clrxWants(el) {
+    if (!el || el.tagName !== 'INPUT' || el._clrxNo) return false;
+    const t = (el.getAttribute('type') || 'text').toLowerCase(); if (t !== 'text' && t !== 'search') return false;
+    if (el.id === 'lst-search' || el.closest('.smd-noclr') || el.readOnly || el.disabled) return false;
+    const key = [el.getAttribute('placeholder'), el.id, el.getAttribute('data-guide'), el.getAttribute('aria-label'), el.className].join(' ');
+    return CLRX_RE.test(key) || /(^|[-_])q$/.test(el.id || '');
+  }
+  function clrxClear(el) {
+    el.value = '';
+    try { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Backspace' })); } catch (_) {}
+    if (el._imeApply) { try { el._imeApply(''); } catch (_) {} }
+    try { el.focus(); } catch (_) {}
+    clrxTick();
+  }
+  const _clrx = new Map();
+  function clrxBtn(el) {
+    let b = _clrx.get(el); if (b) return b;
+    b = document.createElement('button'); b.type = 'button'; b.textContent = '✕'; b.title = '検索をクリア'; b.setAttribute('aria-label', '検索をクリア'); b.className = 'smd-clrx';
+    b.style.cssText = 'position:fixed;z-index:2147480000;display:none;width:18px;height:18px;line-height:16px;padding:0;border:none;border-radius:50%;background:#c9ced6;color:#fff;font-size:11px;font-weight:700;cursor:pointer;text-align:center';
+    b.addEventListener('mousedown', e => e.preventDefault());   /* 焦点を欄から奪わない */
+    b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); clrxClear(el); });
+    document.body.appendChild(b); _clrx.set(el, b);
+    const pr = parseFloat(getComputedStyle(el).paddingRight) || 0; if (pr < 22) el.style.paddingRight = '22px';   /* 字が ✕ の下に入らないように */
+    return b;
+  }
+  function clrxPlace(el, b) {
+    const r = el.getBoundingClientRect(), vis = el.isConnected && r.width > 30 && r.height > 8 && el.offsetParent !== null && r.bottom > 0 && r.top < innerHeight && !!el.value;
+    if (!vis) { b.style.display = 'none'; return; }
+    b.style.display = 'block'; b.style.left = Math.round(r.right - 22) + 'px'; b.style.top = Math.round(r.top + (r.height - 18) / 2) + 'px';
+  }
+  function clrxTick() {
+    try {
+      document.querySelectorAll('input').forEach(el => { if (el._clrxOk === undefined) el._clrxOk = clrxWants(el); if (el._clrxOk && (el.value || _clrx.has(el))) clrxPlace(el, clrxBtn(el)); });
+      _clrx.forEach((b, el) => { if (!el.isConnected) { b.remove(); _clrx.delete(el); } });
+    } catch (_) {}
+  }
+  document.addEventListener('input', e => { const el = e.target; if (el && el.tagName === 'INPUT') { if (el._clrxOk === undefined) el._clrxOk = clrxWants(el); if (el._clrxOk) clrxPlace(el, clrxBtn(el)); } }, true);
+  document.addEventListener('keydown', e => { const el = e.target; if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229 || !el || el.tagName !== 'INPUT' || !el.value) return;
+    if (el._clrxOk === undefined) el._clrxOk = clrxWants(el); if (!el._clrxOk) return; e.preventDefault(); clrxClear(el); }, true);
+  addEventListener('scroll', () => _clrx.forEach((b, el) => clrxPlace(el, b)), true);
+  addEventListener('resize', () => _clrx.forEach((b, el) => clrxPlace(el, b)));
+  setInterval(clrxTick, 700);
   function wireTypeahead(el, apply, delay) {
     if (!el || el._imeWired) return; el._imeWired = true;
     el._imeApply = apply;                                  // プログラムから即時に確定させたい時用
@@ -31708,6 +31755,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-22', items: [
+      '✕ <b>全ページの検索・絞り込みの欄に ✕ を付けました</b>（本人「❌で消せるように」「他もね」）：字が入っている時だけ欄の右端に出て、押すと空になり一覧が全部に戻ります（焦点は欄に残る・Esc でも消える・日本語の変換中の Esc は変換の取り消しだけ）。共通の部品1つで、新しく作る欄にも自動で付きます',
       '⚠ <b>損益の「この月に仕入れた全部」で、Amazon 等の仕分けの記録が読めなかった時に「読めませんでした」と出すように</b>（全体レビュー 11/22 中2）：前は黙って備品・私物まで仕入れに数えていました',
       '📊 <b>アクセス（各国）「期間を並べる」の90日・累計の注文が少なく出ていたのを直しました</b>（全体レビュー 11/22）：上の帯の期間が1か月以下の時、注文を62日分しか読んでいなかった＝90日の注文が約36%少なかった。この見方の時は410日ぶん読み、切り替えた時に足りなければ読み直します。読めていない期間には「⚠ 一部」と出します。2段目の見出し（指標×期間）を押すとその数で並べ替えできます',
       '🔎 <b>出品一覧の検索で、どの明細に当たったかが行の下に見えるように</b>（本人「バリエーションの時に見つけにくいんだよ」）：検索語（名前・JAN・型番・SKU・ID）が明細に当たった時は、カタログの行のすぐ下に「🔎 当たった明細 N件」として、当たった明細だけを番号・写真・明細名（当たった語に色）・SKU・値段・在庫・販売つきで押さずに出します。「✎ この明細を直す」でカタログが開き、その明細の行へ移って光ります（開いた明細の中でも当たった行は黄色）。カタログ名だけで当たった時は出しません。並べ替えや他の絞り込みと一緒でも効きます',
