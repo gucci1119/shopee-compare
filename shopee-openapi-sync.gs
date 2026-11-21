@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1620'
+var SRC_VER = '20261121-1930'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -1379,12 +1379,18 @@ function doGetInner_(e) {
        follow_prize_add：WRITE_TOKEN 必須・公式API add_follow_prize にそのまま渡し返事を全部返す。通信の失敗で送り直さない（callShop_ の一覧に入れた）。
          params: shop_id, prize_name, start_time, end_time（秒）, usage_quantity, min_spend, reward_type（1=金額引き 2=率引き 3=コイン）, discount_amount／percentage・max_price
        follow_prize_list：get_follow_prize_list（status＝upcoming/ongoing/expired/all・既定 all・page_no・page_size） */
-    if (p.action === 'follow_prize_add' || p.action === 'follow_prize_list') {
+    /* ★2026-11-21 01 商品部（00 の決め・本人「クーポンは全部%値引き設定がいい」）：古い額引きのフォロー特典を終わらせる口 follow_prize_end（shop_id・campaign_id）。
+       WRITE_TOKEN 必須・公式 end_follow_prize にそのまま渡し返事を全部返す（ufBump_ は callShop_ の中）。新しい10%の方を作って読み直してから 01 が呼ぶ */
+    if (p.action === 'follow_prize_add' || p.action === 'follow_prize_list' || p.action === 'follow_prize_end') {
       var fcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var fout;
       try {
         var fshop = parseInt(p.shop_id, 10); if (!getToken_(fshop)) throw new Error('未認可 shop_id=' + p.shop_id);
-        if (p.action === 'follow_prize_add') {
+        if (p.action === 'follow_prize_end') {
+          var fwe = P_().getProperty('WRITE_TOKEN'); if (!fwe || p.token !== fwe) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+          var fcid = parseInt(p.campaign_id, 10); if (!(fcid > 0)) throw new Error('campaign_id が要ります');
+          fout = { ok: true, sent: { campaign_id: fcid }, res: callShop_(fshop, '/api/v2/follow_prize/end_follow_prize', null, 'post', { campaign_id: fcid }) };
+        } else if (p.action === 'follow_prize_add') {
           var fwt = P_().getProperty('WRITE_TOKEN'); if (!fwt || p.token !== fwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
           var fb = { follow_prize_name: String(p.follow_prize_name || p.prize_name || ''),   /* ★11/21 01：公式の項目名は follow_prize_name（prize_name で断られた） */
             start_time: parseInt(p.start_time, 10), end_time: parseInt(p.end_time, 10), usage_quantity: parseInt(p.usage_quantity, 10), min_spend: parseFloat(p.min_spend), reward_type: parseInt(p.reward_type, 10) || 1 };
@@ -1402,7 +1408,8 @@ function doGetInner_(e) {
       try { ufPersist_(); } catch (eP) {}
       return ContentService.createTextOutput(fcb + '(' + JSON.stringify(fout) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
     }
-    if (p.action === 'voucher_add' || p.action === 'item_promotion' || p.action === 'voucher_get') {
+    /* ★2026-11-21 01 商品部（上と同じ）：開催中のクーポンを終わらせる口 voucher_end（shop_id・voucher_id）。WRITE_TOKEN 必須・公式 end_voucher にそのまま渡し返事を全部返す */
+    if (p.action === 'voucher_add' || p.action === 'item_promotion' || p.action === 'voucher_get' || p.action === 'voucher_end') {
       var vcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var vout;
       try {
@@ -1422,6 +1429,10 @@ function doGetInner_(e) {
           if (vb.voucher_type === 2 && !(vb.item_id_list && vb.item_id_list.length)) throw new Error('商品クーポン（voucher_type=2）は item_id_list が要ります');
           var vj = callShop_(vshop, '/api/v2/voucher/add_voucher', null, 'post', vb);
           vout = { ok: true, sent: vb, res: vj };
+        } else if (p.action === 'voucher_end') {
+          var vwe = P_().getProperty('WRITE_TOKEN'); if (!vwe || p.token !== vwe) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
+          var vid = parseInt(p.voucher_id, 10); if (!(vid > 0)) throw new Error('voucher_id が要ります');
+          vout = { ok: true, sent: { voucher_id: vid }, res: callShop_(vshop, '/api/v2/voucher/end_voucher', null, 'post', { voucher_id: vid }) };
         } else if (p.action === 'item_promotion') {
           vout = { ok: true, res: callShop_(vshop, '/api/v2/product/get_item_promotion', { item_id_list: nums(p.item_id_list || p.item_id).join(',') }, 'get') };
         } else {
@@ -3436,7 +3447,7 @@ function callShop_(shopId, path, query, method, body, beforeFetch) {
       txt = UrlFetchApp.fetch(url, opt).getContentText();
       break;
     }
-    catch (e) { lastErr = e; ufNoteErr_(e); if (/too many times|回数が多すぎます|quota|rate/i.test(String(e))) break; if (beforeFetch || String(method || '').toLowerCase() === 'post' && /add_item|add_model|init_tier_variation|update_tier_variation|delete_|unlist_item|boost_item|ship_order|copy|register_brand|add_voucher|add_follow_prize/.test(String(path)) || /\/(add_discount|add_discount_item|add_bundle_deal|add_bundle_deal_item|split_order)$/.test(String(path))) break; Utilities.sleep(700 * (a + 1)); }   /* ★2026-09-28 Codex：作る・消す・並べ替える POST は、通信例外（Shopee側で済んでいて返事だけ落ちた可能性）で送り直さない＝二重作成・二重削除を防ぐ */ // クォータ枯渇は即諦める＋【断られた事実】を残す（2026-09-21）
+    catch (e) { lastErr = e; ufNoteErr_(e); if (/too many times|回数が多すぎます|quota|rate/i.test(String(e))) break; if (beforeFetch || String(method || '').toLowerCase() === 'post' && /add_item|add_model|init_tier_variation|update_tier_variation|delete_|unlist_item|boost_item|ship_order|copy|register_brand|add_voucher|add_follow_prize|end_voucher|end_follow_prize/.test(String(path)) || /\/(add_discount|add_discount_item|add_bundle_deal|add_bundle_deal_item|split_order)$/.test(String(path))) break; Utilities.sleep(700 * (a + 1)); }   /* ★2026-09-28 Codex：作る・消す・並べ替える POST は、通信例外（Shopee側で済んでいて返事だけ落ちた可能性）で送り直さない＝二重作成・二重削除を防ぐ */ // クォータ枯渇は即諦める＋【断られた事実】を残す（2026-09-21）
   }
   if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + redactSecrets_((lastErr && lastErr.message) || lastErr));   /* ★11/15 鍵を伏せる */
   var j = JSON.parse(txt);
