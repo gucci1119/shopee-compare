@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1330'
+var SRC_VER = '20261121-1430'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -13957,6 +13957,26 @@ function baCandidates_(hw, ccs, listedByCc, janByCc, ledger, famRows, soldVar, p
   });
   // ★他国で売れた作品 → メルカリ写真あり → 駿河屋にある（物理で流通が確か）→ JANあり → 名前順（同じ群の中は安定）
   out.sort(function (a, b) { return (b.sold - a.sold) || (b.hasPre - a.hasPre) || (b.sg - a.sg) || ((b.jan ? 1 : 0) - (a.jan ? 1 : 0)) || String(a.ja).localeCompare(String(b.ja), 'ja'); });
+  /* ★2026-11-21 05（00 の決め・本人「第一店舗目のブラジルは出品枠クソ余ってるから、出しまくっていいよ」・01 の「BR 横展開」）：
+     ほかの国（候補の国 ccs に無い国＝今は BR 以外）で🤖が一度出した作品（台帳に品番がある＝仕入れ目安・JAN・写真・値付けの守りを一度通った）を、
+     1日 cfg.brSpreadPerDay（既定10＝最初の10件は 01 が実物で確かめる）件まで候補の先頭へ回す。守りは今の🤖と同じ（足す所は baAddBatch_ のまま）。
+     数え＝app_kv br_spread_day {d, n}（先頭に回した数・日本時間の日）。下見（BA_SNAP_USE）では数えない。11/21 の数え＝BR の記録が無い作品 809・skip:err 45 */
+  try {
+    var _bsCfg = baKv_(BA_CFG) || {}, _bsMax = Number(_bsCfg.brSpreadPerDay); if (!(_bsMax >= 0)) _bsMax = 10;
+    if (_bsMax > 0 && ccs.indexOf('BR') >= 0) {
+      var _isDone = function (v) { return /^\d/.test(String(v || '')); };
+      var _de = out.filter(function (r) { var L = ledger[r.key] || {}; return (r.need || []).indexOf('BR') >= 0 && Object.keys(L).some(function (cc) { return ccs.indexOf(cc) < 0 && _isDone(L[cc]); }); });
+      if (_de.length) {
+        var _d = new Date(now_() * 1000 + 9 * 3600000).toISOString().slice(0, 10), _bs = baKv_('br_spread_day') || {}; if (_bs.d !== _d) _bs = { d: _d, n: 0 };
+        var _k = Math.max(0, Math.min(_de.length, _bsMax - (Number(_bs.n) || 0), 20));
+        if (_k > 0) {
+          var _front = _de.slice(0, _k), _fk = {}; _front.forEach(function (r) { _fk[r.key] = 1; r.brSpread = 1; });
+          out = _front.concat(out.filter(function (r) { return !_fk[r.key]; }));
+          if (!BA_SNAP_USE && !BA_KV_FAIL['br_spread_day']) { _bs.n = (Number(_bs.n) || 0) + _k; _bs.at = new Date().toISOString(); _bs.last = _front.map(function (r) { return hw + ':' + r.key; }).slice(0, 20); try { baKvSet_('br_spread_day', _bs); } catch (eBs) {} }
+        }
+      }
+    }
+  } catch (eBsp) {}
   return out;
 }
 /* 🆕 その国に【機種ごとの汎用カタログ】が1つも無い時、同じ店の同じ機種のカタログを元に1つ作る（2026-09-23 本人「明細を足す先がない場合、勝手に作れたりしないですか？」→「よろしく」）
