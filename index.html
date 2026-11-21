@@ -1955,7 +1955,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-225832';
+  const APP_BUILD = '20261122-023006';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -8744,6 +8744,15 @@
     "時点の数え（内訳 🔴": " count (breakdown 🔴",
     "件＝1回の幅 +40%／−15% の中の提案）。": " = proposals within the per-step band +40% / −15%).",
     "商品 ▸ 明細": "Item ▸ variation",
+    "🔎 当たった明細": "🔎 Matching variations",
+    "番号": "No.",
+    "明細名": "Variation name",
+    "値段": "Price",
+    "販売": "Sold",
+    "✎ この明細を直す": "✎ Edit this variation",
+    "検索した語（名前・JAN・型番・SKU・ID）が、このカタログの中のどの明細に当たったかです。カタログ名だけで当たった時は出しません": "Which variations in this catalog matched your search (name, JAN, model no., SKU, ID). Not shown when only the catalog name matched",
+    "このカタログの明細を開き、この明細の行へ移ります。値段・在庫・SKU・JAN はその行でそのまま直せます": "Opens this catalog's variations and jumps to this row. Edit price, stock, SKU and JAN right there",
+    "✎カタログ編集・Shopee と同じ明細の番号です": "Same variation number as in Edit catalog and on Shopee",
     "今の価格 → 提案": "Now → proposed",
     "利益/個 今 → 提案": "Profit/unit now → proposed",
     "残す　候補＝仕入 ¥": " kept · candidates = cost ¥",
@@ -31684,6 +31693,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-22', items: [
+      '🔎 <b>出品一覧の検索で、どの明細に当たったかが行の下に見えるように</b>（本人「バリエーションの時に見つけにくいんだよ」）：検索語（名前・JAN・型番・SKU・ID）が明細に当たった時は、カタログの行のすぐ下に「🔎 当たった明細 N件」として、当たった明細だけを番号・写真・明細名（当たった語に色）・SKU・値段・在庫・販売つきで押さずに出します。「✎ この明細を直す」でカタログが開き、その明細の行へ移って光ります（開いた明細の中でも当たった行は黄色）。カタログ名だけで当たった時は出しません。並べ替えや他の絞り込みと一緒でも効きます',
+    ] },
     { date: '2026-11-21', items: [
       '🧩 <b>アクセス（各国）の上の帯の「店」を見やすく</b>（本人「ここも見にくいのよな」「上にphとsgが来て、下に他とか」）：全店のボタン（すべて・第1〜第3 全部）の行と、国ごとの店の選び（7つ）の行を分けました。国ごとの選びは横4つずつの同じ幅の格子（PH SG MY BR／VN TH TW）で、画面の幅が変わっても並びは同じです',
       '⚡ <b>在庫の読みを「変わった行だけ」に</b>（事業本部・通信量の数え①）：在庫（約6,700行）を開くたびに全部読んでいた → データベースに「行が変わった時刻」を足し、この端末の写しに変わった行だけ重ねます。12時間ごと・読めない時は今まで通り全部読みます',
@@ -55989,6 +56001,60 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     _kwExpandCache.set(t, out);
     return out;
   }
+  /* ★2026-11-22 05（本人「バリエーションの時に見つけにくいんだよ」・出品一覧で「super mario wonder」を探すと Request Page〔明細100件〕が出るが、どの明細が当たったか見えない）：
+     検索語（名前・JAN・型番・SKU・ID）が明細に当たった時は、カタログの行のすぐ下に当たった明細だけを押さずに見える形で出す。
+     カタログ名（・ID・親SKU・カタログの JAN）だけで全部の語がそろう時は出さない＝明細が当たった時だけ。並べ替え・他の絞り込みは行の側で済んでいる */
+  function lstHitCatHay(r) { const p = pidOf(pidKey(r.parent_sku)); return kwNorm([r.name || '', String(r.item_id), r.parent_sku || '', p.jan || '', p.mpn || ''].join(' \u0001 ')); }
+  function lstHitModelHay(r, m) { const q = pidOf(pidKeyModel(r, m)); return kwNorm([m.n || '', m.id != null ? String(m.id) : '', m.sku || '', q.jan || '', q.mpn || '', q.own || ''].join(' \u0001 ')); }
+  function lstHitModels(r) {
+    const hq = lst._hitQ; if (!hq || !Array.isArray(r.models) || !r.models.length) return null;
+    const cat = lstHitCatHay(r);
+    if (hq.inc.every(vs => vs.some(t => cat.includes(t)))) return null;   /* カタログ名で全部そろう＝明細は出さない */
+    const out = [];
+    r.models.forEach((m, i) => {
+      if (!m || m.ghost || !String(m.n || '').trim()) return;
+      const mh = lstHitModelHay(r, m);
+      if (!hq.inc.some(vs => vs.some(t => mh.includes(t)))) return;              /* 明細に1語も無い */
+      if (!hq.inc.every(vs => vs.some(t => mh.includes(t) || cat.includes(t)))) return;   /* 明細＋カタログ名で全部の語がそろう物だけ */
+      out.push({ m: m, no: (m.ti != null ? m.ti + 1 : i + 1) });
+    });
+    return out;
+  }
+  /* 名前の中の当たった語に色を付ける（kwNorm は é→e 等で長さが変わるので、1文字ずつ元の位置へ戻す） */
+  function lstHitMark(name, terms) {
+    const src = String(name || ''); let norm = '', map = [];
+    for (let i = 0; i < src.length; i++) { const n = kwNorm(src[i]); for (let j = 0; j < n.length; j++) { norm += n[j]; map.push(i); } }
+    const on = new Array(src.length).fill(false);
+    terms.forEach(vs => vs.forEach(t => { if (!t) return; let k = norm.indexOf(t); while (k >= 0) { for (let x = k; x < k + t.length && x < map.length; x++) on[map[x]] = true; k = norm.indexOf(t, k + 1); } }));
+    let html = '', open = false;
+    for (let i = 0; i < src.length; i++) { if (on[i] && !open) { html += '<mark style="background:#ffe066;color:inherit;padding:0 1px;border-radius:2px">'; open = true; } if (!on[i] && open) { html += '</mark>'; open = false; } html += esc(src[i]); }
+    return html + (open ? '</mark>' : '');
+  }
+  function lstHitHtml(r, key) {
+    let hits; try { hits = lstHitModels(r); } catch (_) { hits = null; }
+    if (!hits || !hits.length) return '';
+    const rg = regionByCc(r.cc) || {}, cur = rg.cur || '';
+    const terms = (lst._hitQ && lst._hitQ.inc) || [];
+    const MAX = 30, shown = hits.slice(0, MAX);
+    const rowsH = shown.map(({ m, no }) => {
+      const img = m.img ? `<img src="${/^https?:/.test(m.img) ? esc(m.img) : IMG_CDN + esc(m.img) + '_tn'}" style="width:40px;height:28px;object-fit:cover;border-radius:4px;background:#eee" decoding="async" onerror="if(!this._r){this._r=1;this.src=this.src.replace(/_tn$/,'');}else{this.style.opacity=.15;}">` : '<span style="color:#c9c9c9">—</span>';
+      const sold = Number(m.sold) > 0 ? Number(m.sold) : lstOrdSold(r, m);
+      return `<tr style="border-top:1px solid #f1ecd2">`
+        + `<td style="padding:3px 6px;color:#9aa0a6;font-size:10px;text-align:center" title="✎カタログ編集・Shopee と同じ明細の番号です">${no}</td>`
+        + `<td style="padding:3px 4px">${img}</td>`
+        + `<td style="padding:3px 6px;min-width:180px">${lstHitMark(m.n || '', terms)}</td>`
+        + `<td style="padding:3px 6px;font-family:monospace;font-size:10.5px;color:#555;white-space:nowrap">${esc(m.sku || '') || '<span style="color:#c9c9c9">—</span>'}</td>`
+        + `<td style="padding:3px 6px;text-align:right;white-space:nowrap;color:#1565c0;font-weight:600">${cur}${lfmt(m.price)}</td>`
+        + `<td style="padding:3px 6px;text-align:right;white-space:nowrap;color:${(m.stock || 0) <= 0 ? '#d93025' : '#333'};font-weight:600">${lfmt(m.stock)}</td>`
+        + `<td style="padding:3px 6px;text-align:right;white-space:nowrap;color:#555">${sold || 0}</td>`
+        + `<td style="padding:3px 6px;white-space:nowrap"><button class="lst-hitopen smd-btn" data-k="${av(key)}" data-id="${av(r.item_id)}" data-no="${no}" title="このカタログの明細を開き、この明細の行へ移ります。値段・在庫・SKU・JAN はその行でそのまま直せます" style="font-size:10.5px;padding:2px 9px">✎ この明細を直す</button></td>`
+        + `</tr>`;
+    }).join('');
+    return `<div class="lst-hitbox" style="margin-top:6px;border:1px solid #f1d98a;background:#fffbea;border-radius:8px;padding:5px 8px">`
+      + `<div style="font-size:11.5px;font-weight:700;color:#8a5a00;margin-bottom:3px" title="検索した語（名前・JAN・型番・SKU・ID）が、このカタログの中のどの明細に当たったかです。カタログ名だけで当たった時は出しません"><span>🔎 当たった明細</span> ${hits.length}<span>件</span>${hits.length > MAX ? ` <span class="smd-dim" style="font-weight:400">（上の${MAX}件を表示・残りは ▶ 明細 を開いて黄色の行）</span>` : ''}</div>`
+      + `<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;width:100%"><tr style="color:#8a5a00;font-size:10px;text-align:left"><th style="padding:1px 6px">番号</th><th>写真</th><th style="padding:1px 6px">明細名</th><th style="padding:1px 6px">SKU</th><th style="padding:1px 6px;text-align:right">値段</th><th style="padding:1px 6px;text-align:right">在庫</th><th style="padding:1px 6px;text-align:right">販売</th><th></th></tr>${rowsH}</table></div>`
+      + `</div>`;
+  }
   function listingCardHtml(r) {
     const rg = regionByCc(r.cc) || { color: '#333', host: '' };
     const key = r.cc + ':' + r.item_id;
@@ -56009,6 +56075,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const isSingle = !(r.models && r.models.length);          // 単品（バリエ無し）＝model_id 0 で価格・在庫を編集
     const editModels = isSingle ? [{ id: 0, n: '（この単品）', sku: r.parent_sku || '', img: '', price: r.price_min, stock: r.stock, sold: 0 }] : r.models;
     const canPreorderRow = false;          // 簡易インライン編集は価格・在庫のみ（100%公式API・展開時のproductReadも走らない）。予約(Pre-order)は行の ✎カタログ編集で公式API(update_item)編集できるのでここには出さない
+    const _hitNos = opened ? (() => { try { const h = lstHitModels(r); return h && h.length ? new Set(h.map(x => x.no)) : null; } catch (_) { return null; } })() : null;
     const varRows = opened
       ? `<div class="lst-inline" data-cc="${r.cc}" data-host="${esc(rg.host || '')}" data-id="${r.item_id}" style="margin-top:6px;border-top:1px dashed #eee;padding-top:6px${
         // ★以前はここで max-height + overflow-y:auto を付けて「明細だけその場でスクロール」させていたが、
@@ -56059,7 +56126,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         //   以前は「JANも型番も両方空」だけを空としていたため、型番だけ入っている行が光らなかった。
         //   重複を見つける手がかりはJANが最優先なので、そこを基準にする。
         const _emptyRow = !String(pv.jan || '').trim() ? '1' : '0';
-        return `<div class="lst-vrow" data-id="${r.item_id}" data-no="${_no}" data-empty="${_emptyRow}" style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px">`
+        const _hitRow = !!(_hitNos && _hitNos.has(_no));
+        return `<div class="lst-vrow" data-id="${r.item_id}" data-no="${_no}" data-empty="${_emptyRow}"${_hitRow ? ' data-hit="1"' : ''} style="${LGRID};padding:4px 0;border-bottom:1px solid #f4f4f4;font-size:11px${_hitRow ? ';background:#fff6cc' : ''}">`
           + cell(0, 'text-align:center;color:#9aa0a6;font-size:10px;align-self:stretch;' + LSTKL[0], isSingle ? '↳'
               : ('<span title="✎カタログ編集・Shopeeの商品ページと同じ番号です。番号が飛んでいたら、そこに『中身のない明細』があります">' + _no + '</span>'
                  // ★まとめて消すための選択。番号のところ＝左に固定される列なので、横に振っても付いてくる
@@ -56326,7 +56394,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           ${isSingle && canEdit ? `<span class="lst-save-msg" style="font-size:10px;color:#888;text-align:center"></span>` : ''}
         </div>
         <div style="text-align:right;min-width:0;font-size:12px">${lstCartHtml(r, null)}</div>
-      </div>${varRows}<div style="display:flex;gap:6px;align-items:center;margin-top:5px;font-size:11px">
+      </div>${lstHitHtml(r, key)}${varRows}<div style="display:flex;gap:6px;align-items:center;margin-top:5px;font-size:11px">
         <span title="この出品のメモ（自由記入・自動保存）">📝</span>
         <input class="lst-memo" data-id="${r.item_id}" value="${av(meta.note || '')}" placeholder="メモ（自由記入）" style="flex:1;min-width:0;padding:2px 6px;border:1px solid #eee;border-radius:6px;font-size:11px">
         <label title="仕入元が過少で在庫0のまま運用する出品。ONにすると全明細に自動適用され、在庫を増やす保存時に警告します" style="white-space:nowrap;cursor:pointer;color:${meta.keep0 ? '#b71c1c' : '#999'};font-weight:${meta.keep0 ? '700' : '400'}"><input type="checkbox" class="lst-keep0" data-id="${r.item_id}" ${meta.keep0 ? 'checked' : ''}> ⚠️在庫0固定${meta.keep0 ? '（全明細）' : ''}</label>
@@ -57115,7 +57183,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const specsReady = lstSpecs && Object.keys(lstSpecs).length > 0; // GASのlisting_specsがまだ無ければコンディション/ブランドUIは出さない
     const brands = specsReady ? [...new Set(all.map(r => specOf(r.item_id).brand).filter(Boolean))].sort() : [];
     const q = kwNorm(lst.search).trim();
-    let rows = all; lst._idSearch = null;
+    let rows = all; lst._idSearch = null; lst._hitQ = null;
     // 🔎 どの条件で何件まで減ったかを控える。0件になった時に【どれを外せば見えるか】を
     //   その場で出すため（本人「PHのヒットがゼロって明らかにおかしい」→実は条件が3つ効いていた）。
     //   ★判定は二重に持たない。ここは絞り込んだ【あと】の件数を控えるだけ。
@@ -57149,6 +57217,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         return incV.every(vs => vs.some(t => h.includes(t))) && !excV.some(vs => vs.some(t => h.includes(t))); });
       // ★ID だけで探している時の逃げ道（下で使う）：他の絞り込み（国・明細/単品・状態…）で 0件になったら、全件から ID で当て直す
       lst._idSearch = (inc.length && !exc.length && inc.every(t => /^\d{6,}$/.test(t))) ? (r => incV.every(vs => vs.some(t => hayC(r).includes(t)))) : null;
+      /* ★2026-11-22 05（本人「バリエーションの時に見つけにくいんだよ」）：どの明細に当たったかを行の下に出すため、含める語だけ控える（除外語は行の絞り込みで済んでいる） */
+      lst._hitQ = incV.length ? { inc: incV, memo: memo } : null;
       T('q', '検索「' + lst.search + '」');
     }
     // 公開/非公開（status 1=公開・それ以外=非公開）
@@ -57905,6 +57975,15 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (d) { const sc = document.getElementById('lst-scroll'); (sc && sc.scrollHeight > sc.clientHeight ? sc : window).scrollBy(0, d); }
       });
     };
+    /* ★2026-11-22 05：🔎 当たった明細の「✎ この明細を直す」＝カタログを開いて、その明細の行へ移り光らせる（値段・在庫・SKU・JAN はその行で直す） */
+    document.querySelectorAll('#lst-list .lst-hitopen').forEach(el => el.addEventListener('click', () => {
+      const k = el.dataset.k, id = el.dataset.id, no = el.dataset.no;
+      if (!lst.open.has(k)) { lst.open.add(k); try { localStorage.setItem('smdListOpen', JSON.stringify([...lst.open].slice(-40))); } catch (_) {}
+        try { const p2 = String(k).split(':'); modelDatesLoad(p2[0], p2[1]).then(fresh => { if (fresh && lst.open.has(k)) lstRedrawKeep(k); }).catch(() => {}); } catch (_) {}
+        lstRedrawKeep(k); }
+      requestAnimationFrame(() => { const row = document.querySelector('#lst-list .lst-vrow[data-id="' + id + '"][data-no="' + no + '"]'); if (!row) return;
+        row.scrollIntoView({ block: 'center' }); row.style.outline = '2px solid #f0a500'; setTimeout(() => { row.style.outline = ''; }, 2500); });
+    }));
     document.querySelectorAll('#lst-list .lst-exp').forEach(el => el.addEventListener('click', () => {
       const k = el.dataset.k;
       if (lst.open.has(k)) lst.open.delete(k); else lst.open.add(k);
