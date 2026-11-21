@@ -1,5 +1,11 @@
 name: Deploy static site to GitHub Pages
 
+# 2026-11-21 05（00・本人「落ちてる？」「何が原因なの？」）：
+#   公開の失敗＝荷物（github-pages）の作りは成功しているのに、直後の deploy-pages が「Found 0 artifact(s)」で落ちる（GitHub 側でまだ見えない遅れ・推測）。
+#   同じ run のやり直し（--failed）は「Multiple artifacts」でまた落ちる。
+#   → GitHub の公式の形に分ける（build で荷物を作る → deploy を needs で後に回す）＋ deploy が落ちたら間を空けて自動で2回までやり直す。
+#   荷物は今まで通り全部（GAS が Pages から .gs と promo の動画・絵を読むので外さない）。
+
 on:
   push:
     branches: [main]
@@ -15,10 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,5 +29,32 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: '.'
-      - id: deployment
+
+  deploy:
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.d3.outputs.page_url || steps.d2.outputs.page_url || steps.d1.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 荷物が見えるまで少し待つ
+        run: sleep 20
+      - id: d1
         uses: actions/deploy-pages@v4
+        continue-on-error: true
+      - name: 1回目が落ちた時は60秒待つ
+        if: steps.d1.outcome == 'failure'
+        run: sleep 60
+      - id: d2
+        if: steps.d1.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+      - name: 2回目も落ちた時は120秒待つ
+        if: steps.d1.outcome == 'failure' && steps.d2.outcome == 'failure'
+        run: sleep 120
+      - id: d3
+        if: steps.d1.outcome == 'failure' && steps.d2.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+      - name: 結果
+        if: always()
+        run: echo "1回目=${{ steps.d1.outcome }} 2回目=${{ steps.d2.outcome }} 3回目=${{ steps.d3.outcome }}"
