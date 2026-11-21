@@ -1926,7 +1926,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-174414';
+  const APP_BUILD = '20261121-180756';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -20384,14 +20384,13 @@
     /* Shopee の注文（Shopee名＝buyer）。最初の案内より後のものだけ */
     const accs = [...new Set(list.map(p => (p.acc || '').trim()).filter(Boolean))];
     let orders = [];
-    for (let i = 0; i < accs.length; i += 60) {
-      const part = accs.slice(i, i + 60).map(a => '"' + a.replace(/"/g, '') + '"').join(',');
-      try {
-        const r = await read('orders', 'select=buyer,status,order_ts,cc,sn,total,items&buyer=in.(' + encodeURIComponent(part) + ')&limit=1000');
-        if (!Array.isArray(r) || r.length >= 1000) throw new Error('注文を読めませんでした');
-        orders = orders.concat(r);
-      } catch (_) { list._ordErr = true; break; }  /* 読めなかった時は流れの数（④購入）を出さない */
-    }
+    /* ★2026-11-21 05（全ページを軽く・営業 9秒）：60人ずつの読み（約20本）を1本ずつ順番に待っていた → 4本ずつ並べて読む（読む物と量は同じ・1本でも読めなければ今まで通り④を出さない） */
+    { const parts = []; for (let i = 0; i < accs.length; i += 60) parts.push(accs.slice(i, i + 60).map(a => '"' + a.replace(/"/g, '') + '"').join(','));
+      for (let j = 0; j < parts.length && !list._ordErr; j += 4) {
+        const got = await Promise.all(parts.slice(j, j + 4).map(part => read('orders', 'select=buyer,status,order_ts,cc,sn,total,items&buyer=in.(' + encodeURIComponent(part) + ')&limit=1000').then(r => { if (!Array.isArray(r) || r.length >= 1000) throw new Error('注文を読めませんでした'); return r; }).catch(() => null)));
+        if (got.some(r => r === null)) { list._ordErr = true; break; }   /* 読めなかった時は流れの数（④購入）を出さない */
+        got.forEach(r => { orders = orders.concat(r); });
+      } }
     const ordBy = {}; orders.forEach(o => { (ordBy[String(o.buyer || '').toLowerCase()] = ordBy[String(o.buyer || '').toLowerCase()] || []).push(o); });
     const now = Date.now();
     list.forEach(p => {
@@ -26943,7 +26942,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         const m1 = {}; Object.keys(m0).forEach(k => { const x = m0[k]; if (x && jstDate(x.at) >= sinceDay) m1[k] = x; }); return { m: m1, days: 0, old: true };
       }
       const days = meta.days.filter(d => !sinceDay || d >= sinceDay).sort(), m = {};
-      for (const d of days) { const r = await sbGet('app_kv', 'select=v&k=eq.' + ahDayKey(d)); Object.assign(m, (r && r[0] && r[0].v && r[0].v.m) || {}); }   /* 1本ずつ順番に。1本でも読めなければ全体を失敗にする（欠けたまま数えない） */
+      /* ★2026-11-21 05（全ページを軽く・事業計画 17.5秒の元）：1日1本を順番に読んでいた（1本 約0.4秒×日数）。過ぎた日は変わらない＝更新時刻で確かめた端末の写しを使い、変わった日だけまとめて読む（kvCachedRows）。読めなければ全体を失敗にするのは同じ */
+      for (let i = 0; i < days.length; i += 40) { const rows = await kvCachedRows('k=in.(' + days.slice(i, i + 40).map(d => encodeURIComponent('"' + ahDayKey(d) + '"')).join(',') + ')'); (rows || []).forEach(r => Object.assign(m, (r && r.v && r.v.m) || {})); }
       return { m, days: days.length };
     })().then(v => { _ahCache[ck] = { at: Date.now(), v, p: null }; return v; }, e => { if (_ahCache[ck]) _ahCache[ck].p = null; throw e; });
     _ahCache[ck] = Object.assign(_ahCache[ck] || {}, { p });
@@ -26954,7 +26954,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     const mr = await sbGet('app_kv', 'select=v&k=eq.' + AH_META); const meta = mr && mr[0] && mr[0].v;
     if (!meta || !Array.isArray(meta.days)) return addedHistRead('');
     const have = new Set(meta.days), m = {}; let n = 0;
-    for (const d of [...new Set(days)].filter(d => have.has(d)).sort()) { const r = await sbGet('app_kv', 'select=v&k=eq.' + ahDayKey(d)); Object.assign(m, (r && r[0] && r[0].v && r[0].v.m) || {}); n++; }
+    { const dd = [...new Set(days)].filter(d => have.has(d)).sort();   /* ★11/21 まとめて・端末の写しで（上と同じ） */
+      for (let i = 0; i < dd.length; i += 40) { const rows = await kvCachedRows('k=in.(' + dd.slice(i, i + 40).map(d => encodeURIComponent('"' + ahDayKey(d) + '"')).join(',') + ')'); (rows || []).forEach(r => Object.assign(m, (r && r.v && r.v.m) || {})); }
+      n = dd.length; }
     return { m, days: n };
   }
   const ahKeyOf = a => a.cc + '#' + (a.model_id || (normVar(a.en) + '@' + String(a.at).slice(0, 13)));
@@ -31378,6 +31380,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '⚡ <b>事業計画・営業を軽く</b>（本人「他のページも軽くなるような工夫入れて」）：事業計画は🤖が足した明細の日ごとの記録を1日1本ずつ順番に読んでいた（17.5秒の元）→ 過ぎた日は端末の写し（更新時刻で確かめる）を使い、変わった日だけまとめて読む。営業は買い手ごとの注文の読み（約20本）を1本ずつ待っていた → 4本ずつ並べて読む（読む物と量は同じ）',
       '⚡ <b>大きな控えを「変わった時だけ読む」形に</b>（本人「他のページも軽くなるような工夫入れて」「ただ、業務が止まらないようにはして」）：JAN 台帳（約4.5MB）・🤖の台帳・閲覧の集計・商品ごとの成績・明細の属性を、開くたびに丸ごと読んでいた → 先に更新時刻だけ読み、この端末の写しと同じなら写しを使う（時刻で確かめるので古い物は出さない）。出品管理を開いた時の約10秒の読みが無くなります。JAN を書く所・🤖・出品・在庫の処理の読みは今まで通り毎回最新',
       '👣 <b>アクセス（各国）の「最後の取得」に、第3の次の取り込みの時刻</b>（本人「これ読み込み止まってるの？」）：第3の5店は毎晩 21:40ごろに1日1回取り込む＝昼は1日前の分のままでも止まりではない。「次は毎晩 21:40ごろ」と出します。本店 BR の1日遅れ（11/20 夜の 429 の後、転記のタブが別の画面のまま）は、タブを注文画面に戻して 11/20 の分まで入れました',
       '⚡ <b>出品ログを軽くしました</b>（本人「このページやっぱり毎回読み込んでるから遅いんやって」）：①明細ごとの「店」は、開くたびに全出品の店（約8千行）を読み直していた＝「店 読み込み中…」→ 起動時に読んである出品データから作る（通信0）／無ければこの端末の控え（6時間）ですぐ出す ②日・店を替えるたびにその日の明細名（約2千行）を読み直していた → 前に開いた日は手元から戻してすぐ出し、増えた行だけ読む（この端末に10日分）。SKU・在庫の控えも日を替えても捨てない。表示だけに使い、出品・値段・在庫を書く処理は今まで通り毎回最新を読みます',
