@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1940'
+var SRC_VER = '20261121-2100'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -365,7 +365,7 @@ function promoDiscountModels_(q) {
   var cur = {};
   for (var i = 0; i < ids.length; i += 50) {
     (sbSelectAll_('listings', 'select=item_id,price_min,models&shop_id=eq.' + shop + '&item_id=in.(' + ids.slice(i, i + 50).join(',') + ')') || []).forEach(function (r) {
-      var o = { _min: Number(r.price_min) }; (r.models || []).forEach(function (m) { if (m && m.id != null) o[String(m.id)] = Number(m.price); }); cur[String(r.item_id)] = o;
+      var o = { _min: Number(r.price_min), _nm: {} }; (r.models || []).forEach(function (m) { if (m && m.id != null) { o[String(m.id)] = Number(m.price); o._nm[String(m.id)] = String(m.n || ''); } }); cur[String(r.item_id)] = o;
     });
   }
   var send = [], skipped = [];
@@ -378,8 +378,11 @@ function promoDiscountModels_(q) {
       x.model_list.forEach(function (m) {
         var mid = Number(m.model_id), pp = Number(m.model_promotion_price), now = c[String(mid)];
         if (!(now > 0)) { skipped.push({ item_id: iid, model_id: mid, why: '今の値段が分からない' }); return; }
+        /* ★2026-11-21 05（全体レビュー 中8①）：明細を消すと model_id が別のソフトに移る＝番号だけで結ぶと別の明細を値下げする。名前（model_name）が来た時は今の名前と照らし、違えば外す */
+        var _nz = function (t) { return String(t || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase(); };
+        if (m.model_name != null && String(m.model_name).trim() && _nz(m.model_name) !== _nz((c._nm || {})[String(mid)])) { skipped.push({ item_id: iid, model_id: mid, why: '明細の名前が今と違う（今「' + String((c._nm || {})[String(mid)] || '').slice(0, 40) + '」）＝番号がずれた見込みなので送らない' }); return; }
         if (!(pp > 0) || pp >= now) { skipped.push({ item_id: iid, model_id: mid, why: '割引の値段が今の値段（' + now + '）より低くない', price: pp }); return; }
-        ml.push({ model_id: mid, model_promotion_price: pp, _now: now });
+        ml.push({ model_id: mid, model_promotion_price: pp, _now: now, _n: String((c._nm || {})[String(mid)] || '').slice(0, 80) });
       });
       if (ml.length) send.push({ item_id: iid, purchase_limit: 0, model_list: ml });
     } else {
@@ -2239,7 +2242,9 @@ function doGetInner_(e) {
           return { cc: o.cc, sn: o.sn, date: o.order_date || String(o.order_ts || '').slice(0, 10), total: o.total, tab: o.tab, status: o.status || '', issue: issues[o.cc + ':' + o.sn] || '', refunded: retSt[o.cc + ':' + o.sn] === 'ACCEPTED' || String(o.status || '') === 'TO_RETURN', returnStatus: retSt[o.cc + ':' + o.sn] || '', tracking: o.tracking || '', shop_id: String(o.shop_id || ''), shop_label: shopLabelOf_(o.shop_id),   /* ★11/16 03-12：店名で照らせるように */
             items: (o.items || []).slice(0, 10).map(function (it) { var im = String(it.image || ''); return { name: String(it.name || '').slice(0, 120), variation: String(it.variation || '').slice(0, 80), qty: it.qty || 1, item_id: it.item_id != null ? String(it.item_id) : '', model_id: it.model_id != null ? String(it.model_id) : '', sku: String(it.sku || '') || (it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) || '', skuSrc: it.sku ? 'order' : ((it.item_id != null && it.model_id != null && skuOf[String(it.item_id) + ':' + String(it.model_id)]) ? 'listing' : ''),   /* ★2026-11-06 03 営業部：注文した時の SKU を先に（詰め直し削除の後は model_id が別の REQ_番号を指す）。注文に SKU が無い古い注文だけ今の出品の表から（skuSrc で分かる） */ img: im ? (/^https?:/.test(im) ? im : 'https://' + (IMGD[o.cc] || 'cf.shopee.sg') + '/file/' + im + '_tn') : '' }; }) }; }) };
         _bms.total = Date.now() - _bt0;
-        try { var boStr = JSON.stringify(boout); if (boout.ok && boStr.length < 90000) boC.put(boCk, boStr, 300); } catch (ePut) {}
+        /* ★2026-11-21 05（全体レビュー 中10）：返品の読みが断られると refunded:false のまま5分控えていた＝声かけの「前に買った物」に返金済みが混ざる → 読めなかったことを返事に載せ（returnsUnread・新しい名前）、その時は控えない */
+        var boRetUnread = !!(borows.length && !boMany[0]); if (boRetUnread) boout.returnsUnread = true;
+        try { var boStr = JSON.stringify(boout); if (boout.ok && !boRetUnread && boStr.length < 90000) boC.put(boCk, boStr, 300); } catch (ePut) {}
         }
       } catch (err) { boout = { ok: false, error: String((err && err.message) || err) }; }
       var _bp0 = Date.now(); ufPersist_(); _bms.persist = Date.now() - _bp0; if (boout) { _bms.total2 = Date.now() - _bt0; boout.ms = _bms; }
@@ -3270,7 +3275,7 @@ function boostTick(manual) {
   var now = now_(), out = [];
   Object.keys(st.items).forEach(function (k) { if (now - st.items[k] > BOOST_GAP3_SEC + 86400) delete st.items[k]; });   /* ★11/21 第3の3日あけを効かせるため4日まで覚える */
   st.ngWhy = st.ngWhy || {}; st.ngN = st.ngN || {}; st.regN = st.regN || {};
-  Object.keys(st.ngWhy).forEach(function (k) { if (now - Number((st.ngWhy[k] || [])[0] || 0) > 7 * 86400) { delete st.ngWhy[k]; delete st.ngN[k]; } });   /* ★11/21 レビュー5：断られた理由は7日で消す */
+  Object.keys(st.ngWhy).forEach(function (k) { if (now - Number((st.ngWhy[k] || [])[0] || 0) > 3 * 86400) { delete st.ngWhy[k]; delete st.ngN[k]; } });   /* ★11/21 レビュー5：断られた理由は7日で消す → ★同日 中9：6台が10分ごとに読む控えが太るので3日に */
   Object.keys(st.regN).forEach(function (k) { if (!(pref[k] && typeof pref[k] === 'object')) delete st.regN[k]; });   /* 登録を外した品の回数は消す（pref は読めた時だけここに来る） */
   var log3 = null, log3Add = [];
   listTokens_().forEach(function (t) {
@@ -3307,7 +3312,10 @@ function boostTick(manual) {
         } else { why = '押し上げる候補なし（在庫あり・公開中が足りない）'; }
       }
       /* 次に空きが出る時刻＝いちばん早く終わる枠。候補が無かった店は2時間後にもう一度だけ見る */
-      var nextIn = cds.length >= 5 ? Math.min.apply(null, cds) + 60 : ((fail && !/slot limit/i.test(why)) ? 300 : why ? (cur.length ? 2 * 3600 : 24 * 3600) : 300);   /* ★11/21 断られた時は別の品で埋めるため5分後（前は2時間空いた） */   /* 出品が1件も無い店（2店舗目の空の店）は1日1回だけ見る */
+      /* ★2026-11-21 05（全体レビュー 中9）：店ごと断られ続けると5分ごとに戻り、1日144回×4通信以上になる → 1件も通らなかった回が続くほど間を延ばす（5・10・20・40・80分…2時間まで）。1件でも通れば元の5分 */
+      if (fail && !added) ss.failRun = (Number(ss.failRun) || 0) + 1; else if (added) ss.failRun = 0;
+      var failWait = Math.min(2 * 3600, 300 * Math.pow(2, Math.max(0, Math.min(6, (Number(ss.failRun) || 1) - 1))));
+      var nextIn = cds.length >= 5 ? Math.min.apply(null, cds) + 60 : ((fail && !/slot limit/i.test(why)) ? (added ? 300 : failWait) : why ? (cur.length ? 2 * 3600 : 24 * 3600) : 300);   /* ★11/21 断られた時は別の品で埋めるため5分後（前は2時間空いた） */   /* 出品が1件も無い店（2店舗目の空の店）は1日1回だけ見る */
       ss.nextAt = now + Math.max(300, nextIn); ss.at = now; ss.lastAdded = added; ss.lastFail = fail; ss.why = why; ss.cc = t.cc || ss.cc || ''; ss.cur = curNow; delete ss.err;   /* ★11/21 通った回は前の失敗の文字を消す（成功しても「使用できないアドレス」が残り続けていた） */
       st.shops[sid] = ss;
       out.push({ shop_id: sid, cc: t.cc || '', boosted: cur.length, added: added, fail: fail, why: why });
@@ -3794,6 +3802,11 @@ function updatePriceList_(shopId, itemId, list, opt) {
     try { j = callShop_(shopId, '/api/v2/product/update_price', null, 'post', body); }
     catch (eP2) { priceRelockPromo_(shopId, itemId, promo, _rl); throw new Error(String((eP2 && eP2.message) || eP2).slice(0, 250) + ' ／販促は元に戻しました（値下げは' + (_rl ? '戻しました' : '外したまま') + ': ' + promo.discountOut.length + '）'); }
     priceRelockPromo_(shopId, itemId, promo, _rl);
+    /* ★2026-11-21 05（全体レビュー 中8②）：値上げ前の値段に戻す割引（promoDiscountModels_ の控え promo_discount_<id>・mode=models）から外したまま戻さないと、2週間の割引が黙って消える → 🔔（promo_back_skip）に出す */
+    if (!_rl && promo.discountOut.length) { try { var pbHit = promo.discountOut.filter(function (pid) { var rr = baKvFresh_('promo_discount_' + pid); return rr && rr.mode === 'models'; });
+      if (pbHit.length) { var cc8 = ''; try { cc8 = baCcOfShop_(shopId); } catch (eC8) {} var pb8 = baKvFresh_('promo_back_skip'); if (!BA_KV_FAIL['promo_back_skip']) { pb8 = pb8 || {}; var a8 = Array.isArray(pb8.items) ? pb8.items : [];
+        a8.unshift({ at: new Date().toISOString(), cc: cc8, shop: String(shopId), item: String(itemId), r: '値段を書くため、値上げ前の値段に戻す割引（' + pbHit.join(',') + '）から外しました。戻していません（新しい値段で割引を作り直すか決めてください）' });
+        baKvSet_('promo_back_skip', { items: a8.slice(0, 100), at: new Date().toISOString() }); } } } catch (eP8) { Logger.log('中8② の知らせを書けませんでした ' + String(eP8).slice(0, 100)); } }
   }
   /* ★2026-09-28 Codex：明細ごとの失敗（failure_list）を見ずに全部成功扱いしていた → 1つでも失敗があれば理由つきで失敗にする（価格・在庫は同じ値を送り直しても害がない） */
   var fl = ((j && j.response) || {}).failure_list || [];
@@ -3941,8 +3954,17 @@ function bdNewDeal_(shopId, base, deals) {
   try { baKvSet_('promo_bundle_' + bid, { bundle_deal_id: String(bid), cc: (function () { try { return baCcOfShop_(shopId); } catch (e) { return ''; } })(), shop_id: String(shopId), name: body.name, pct1: 5, min1: 2, pct2: 10, min2: 3, start: body.start_time, end: body.end_time, by: 'bdNewDeal_', at: new Date().toISOString() }); } catch (eK) {}
   return d;
 }
+/* ★2026-11-21 05（全体レビュー 中7）：bdEnsure_ の中で1件断られるごとに控え（最大3,000件）を丸ごと読み書きしていた → bdEnsure_ の間は手元に貯め、最後に1回だけ書く */
+var BD_PEND_BUF = null;
+function bdPendFlush_() {
+  var buf = BD_PEND_BUF; BD_PEND_BUF = null; if (!buf || !buf.length) return;
+  try { var fr = baKvFreshMany_(['bundle_pending']); if (!fr) return; var v = fr.bundle_pending || {}; v.items = v.items || {};
+    buf.forEach(function (b) { b.ids.forEach(function (id) { var k = String(b.shop) + '|' + String(id), o = v.items[k] || { n: 0 }; o.at = new Date().toISOString(); o.why = String(b.why || '').slice(0, 120); o.n = (o.n || 0) + 1; v.items[k] = o; }); });
+    var ks = Object.keys(v.items); if (ks.length > 3000) ks.sort(function (a, b) { return String(v.items[a].at).localeCompare(String(v.items[b].at)); }).slice(0, ks.length - 3000).forEach(function (k) { delete v.items[k]; });
+    v.at = new Date().toISOString(); baKvSet_('bundle_pending', v); } catch (e) {}
+}
 function bdPend_(shopId, ids, why) {
-  if (!ids || !ids.length) return; try { var fr = baKvFreshMany_(['bundle_pending']); if (!fr) return; var v = fr.bundle_pending || {}; v.items = v.items || {};
+  if (!ids || !ids.length) return; if (BD_PEND_BUF) { BD_PEND_BUF.push({ shop: String(shopId), ids: ids.slice(), why: why }); return; } try { var fr = baKvFreshMany_(['bundle_pending']); if (!fr) return; var v = fr.bundle_pending || {}; v.items = v.items || {};
     ids.forEach(function (id) { var k = String(shopId) + '|' + String(id), o = v.items[k] || { n: 0 }; o.at = new Date().toISOString(); o.why = String(why || '').slice(0, 120); o.n = (o.n || 0) + 1; v.items[k] = o; });
     var ks = Object.keys(v.items); if (ks.length > 3000) ks.sort(function (a, b) { return String(v.items[a].at).localeCompare(String(v.items[b].at)); }).slice(0, ks.length - 3000).forEach(function (k) { delete v.items[k]; });
     v.at = new Date().toISOString(); baKvSet_('bundle_pending', v); } catch (e) {}
@@ -3954,23 +3976,29 @@ function bdEnsure_(shopId, itemIds, why) {
   var deals = bdDeals_(shopId);
   if (!deals.length) { res.pend = ids.slice(); bdPend_(shopId, ids, 'この店に開催中の割引（2点5%・3点10%）が無い'); return res; }
   var todo = ids.filter(function (id) { if (deals.some(function (d) { return d.items[id]; })) { res.already.push(id); return false; } return true; });
-  var guard = 0;
+  var guard = 0, ownBuf = !BD_PEND_BUF; if (ownBuf) BD_PEND_BUF = [];
+  /* ★2026-11-21 05（全体レビュー 中6）：断りの文に limit・exceed・max があるだけで満杯とみなし、1店1回で最大40本の割引を作りうる。
+     → 満杯とみなすのは「1,000件近く入っている」か「品数の上限と読める文」だけ。新しく作るのは1回2本まで（超えたら控えに積んで次の日） */
+  var isFullMsg = function (msg, d) { msg = String(msg || ''); if (/rate_limit|too many|stock/i.test(msg)) return false; if (d && d.n >= 900 && /limit|exceed|max|full/i.test(msg)) return true; return /item.?(count|num|limit)|items? (limit|exceed)|exceed.{0,20}item|maximum.{0,20}item|1000|bundle.{0,20}(full|limit)/i.test(msg); };
+  try {
   while (todo.length && guard++ < 40) {
     var d = deals.filter(function (x) { return !x.full; }).sort(function (a, b) { return a.n - b.n; })[0];
+    if (!d && res.made.length >= 2) { todo.forEach(function (i) { res.pend.push(i); }); bdPend_(shopId, todo, '割引がどれも満杯で、この回に作る本数（2本）を超えた'); todo = []; break; }
     if (!d) { d = bdNewDeal_(shopId, deals[0], deals); res.made.push(String(d.id)); }
     var room = Math.max(1, 1000 - d.n), chunk = todo.slice(0, Math.min(50, room)), aj;
     try { aj = bdCall_(shopId, '/api/v2/bundle_deal/add_bundle_deal_item', null, 'post', { bundle_deal_id: d.id, item_list: chunk.map(function (i) { return { item_id: parseInt(i, 10), status: 1 }; }) }); }
-    catch (eA) { var em = String((eA && eA.message) || eA); if (/limit|exceed|max|full/i.test(em) && !/rate_limit|too many/i.test(em)) { d.full = true; continue; } chunk.forEach(function (i) { res.pend.push(i); }); bdPend_(shopId, chunk, '送れなかった: ' + em.slice(0, 80)); todo = todo.slice(chunk.length); continue; }
+    catch (eA) { var em = String((eA && eA.message) || eA); if (isFullMsg(em, d)) { d.full = true; continue; } chunk.forEach(function (i) { res.pend.push(i); }); bdPend_(shopId, chunk, '送れなかった: ' + em.slice(0, 80)); todo = todo.slice(chunk.length); continue; }
     var r = aj.response || {}; (r.success_list || []).forEach(function (x) { var i = String((x && x.item_id) || x); res.added.push(i); d.items[i] = 1; d.n++; });
     var fullHit = false;
     (r.failed_list || []).forEach(function (f) { var i = String(f.item_id), fe = String(f.fail_error || '') + ' ' + String(f.fail_message || '');
-      if (/limit|exceed|max|full/i.test(fe) && !/stock/i.test(fe)) { fullHit = true; return; }
+      if (isFullMsg(fe, d)) { fullHit = true; return; }
       res.pend.push(i); res.err.push(i + ' ' + fe.slice(0, 80)); bdPend_(shopId, [i], fe.slice(0, 100)); });
     if (d.n >= 1000) d.full = true;
     if (fullHit) { d.full = true; todo = todo.filter(function (i) { return res.added.indexOf(i) < 0 && res.pend.indexOf(i) < 0; }); continue; }
     todo = todo.slice(chunk.length);
   }
   if (todo.length) { todo.forEach(function (i) { res.pend.push(i); }); bdPend_(shopId, todo, '入れ切れなかった（回数の上限）'); }
+  } finally { if (ownBuf) bdPendFlush_(); }
   try { var fr = baKvFreshMany_(['bundle_auto_log']); if (fr) { var lg = fr.bundle_auto_log || {}, a = Array.isArray(lg.items) ? lg.items : []; a.unshift({ at: new Date().toISOString(), shop: String(shopId), why: String(why || ''), added: res.added.length, already: res.already.length, pend: res.pend.length, made: res.made, err: res.err.slice(0, 3) }); lg.items = a.slice(0, 200); lg.at = new Date().toISOString(); baKvSet_('bundle_auto_log', lg); } } catch (eL) {}
   return res;
 }
@@ -3980,8 +4008,13 @@ function bundleSweep(dry) {
   /* ★2026-11-21 05（11/21 4:30 の回が控えに何も書かず、走ったか分からなかった）：走り始めた時に印（app_kv bundle_sweep_run）を書く＝止まりの見張りが26時間で赤にする */
   if (dry !== true) { try { sbUpsert_('app_kv', [{ k: 'bundle_sweep_run', v: { at: out.at, by: baRunnerId_(), phase: 'start' }, updated_at: out.at }], 'k'); } catch (eR) {} }   /* done＝控えから消してよい鍵（入った・公開中の在庫ありでなくなった） */
   var pend = {}; try { var fr = baKvFreshMany_(['bundle_pending']); pend = ((fr && fr.bundle_pending) || {}).items || {}; } catch (eP) {}
+  /* ★2026-11-21 05（全体レビュー 中7）：枠の止め（UF_STOP）と時間の打ち切り（4分30秒）が無く、6分で切られても印が「走り始め」のまま緑に見えた → 止め・打ち切りを足し、終わりの印（end／cut）を書く */
+  var t0 = Date.now(); out.cut = '';
   listTokens_().forEach(function (t) {
     var sid = String((t && t.shop_id) || ''); if (!sid || seen[sid]) return; seen[sid] = 1;
+    if (out.cut) return;
+    if (!dry && !bgAllowed_()) { out.cut = '接続枠の止め（UF_STOP）'; return; }
+    if (Date.now() - t0 > 270000) { out.cut = '時間の打ち切り（4分30秒）'; return; }
     var row = { shop: sid, live: 0, missing: 0, added: 0, pend: 0, made: [], err: '' };
     try {
       var rows = sbSelectAll_('listings', 'select=item_id&shop_id=eq.' + sid + '&status=eq.1&stock=gt.0') || [];
@@ -3996,7 +4029,8 @@ function bundleSweep(dry) {
     } catch (e) { row.err = String((e && e.message) || e).slice(0, 160); }
     out.shops.push(row);
   });
-  if (!dry) { try { var fr2 = baKvFreshMany_(['bundle_pending']); if (fr2) { var v = fr2.bundle_pending || {}; v.items = v.items || {}; done.forEach(function (k) { delete v.items[k]; }); v.at = new Date().toISOString(); baKvSet_('bundle_pending', v); } } catch (eW) {}   /* 読み直した控えから消す（この回に bdEnsure_ が積んだ物を消さない） */ try { baKvSet_('bundle_sweep_last', out); } catch (eS) {} }
+  if (!dry) { try { var fr2 = baKvFreshMany_(['bundle_pending']); if (fr2) { var v = fr2.bundle_pending || {}; v.items = v.items || {}; done.forEach(function (k) { delete v.items[k]; }); v.at = new Date().toISOString(); baKvSet_('bundle_pending', v); } } catch (eW) {}   /* 読み直した控えから消す（この回に bdEnsure_ が積んだ物を消さない） */ try { baKvSet_('bundle_sweep_last', out); } catch (eS) {}
+    try { var te = new Date().toISOString(); sbUpsert_('app_kv', [{ k: 'bundle_sweep_run', v: { at: out.at, end: te, by: baRunnerId_(), phase: out.cut ? 'cut' : 'end', cut: out.cut, shops: out.shops.length }, updated_at: te }], 'k'); } catch (eR2) {} }
   try { ufPersist_(); } catch (eU) {}
   return out;
 }
@@ -9855,7 +9889,10 @@ function syncListingsRoundRobin() {
       /* ★2026-11-19 05（全体レビュー 11/19 中6）：前は始める前に印（listChangedLast）を進めていた＝6分で切られた回はその窓の変更を取りこぼす。
          → 始めた時刻を控え、全店を回し切った時だけ印をその時刻に進める。時間が足りない店は次の回へ（印が古いままなので窓が広がって拾い直す） */
       var _chgT0 = now_(), _chg = syncListingsChangedAll(_gapH, RUN_T0_ + 270000);
-      if (_chg && !_chg._cut) P_().setProperty('listChangedLast', String(_chgT0));
+      /* ★2026-11-21 05（全体レビュー 中11）：1店が例外で落ちた回は印を進めない。ただしずっと落ちる店（鍵切れ等）で毎回広い窓を読み続けないよう、続けて3回落ちたら進める */
+      if (_chg && !_chg._cut) { var _P9 = P_(), _er = parseInt(_P9.getProperty('listChangedErrRun') || '0', 10) || 0;
+        if (_chg._shopErr && _er + 1 < 3) _P9.setProperty('listChangedErrRun', String(_er + 1));
+        else { _P9.setProperty('listChangedLast', String(_chgT0)); _P9.deleteProperty('listChangedErrRun'); } }
       log.push({ changed: _chg, windowH: Math.round(_gapH * 10) / 10, cut: !!(_chg && _chg._cut) });
     }
     else log.push({ changedSkipped: true });
@@ -9878,7 +9915,7 @@ function syncListingsChangedAll(hours, deadlineMs) {
         var del = dkeys[sid].filter(function (k) { var m = /^ldirty_\d+_(\d+)$/.exec(k); return m && !failSet[m[1]]; });
         for (var di = 0; di < del.length; di += 100) { try { sbDelete_('app_kv', 'k=in.(' + del.slice(di, di + 100).join(',') + ')&v-%3E%3Eat=lt.' + encodeURIComponent(t0iso)); } catch (eDel) { dirtyDelErr++; Logger.log('ldirty の印を消せなかった（' + sid + '）: ' + redactSecrets_(String((eDel && eDel.message) || eDel)).slice(0, 120)); } } }
       else if (res) delete res._mdlFailAll;
-    } catch (e) { log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });
+    } catch (e) { log._shopErr = true; log.push({ cc: tok.cc, shop_id: tok.shop_id, error: String(e).slice(0, 140) }); } });   /* ★2026-11-21 05（全体レビュー 中11）：1店が例外で落ちた回も印を進めない（進めるとその店の窓の変更を取りこぼす） */
   if (dirtyDelErr) log.push({ ldirtyDelErr: dirtyDelErr });
   Logger.log('listings増分同期(changed ' + (hours || 2) + 'h): ' + JSON.stringify(log)); return log;
 }
@@ -10408,7 +10445,7 @@ var HB_KV_ = [
   ['orders_sync_last', '注文の同期', 90, 'shops'],
   ['sync_claim_syncAll', '同期（syncAll・在庫の自動復活ほか）の取り札', 90, 'upd'],
   ['sync_claim_syncListingsRoundRobin', '出品の同期', 70, 'upd'],
-  ['sync_claim_boostTick', 'Bump', 270, 'upd'],   /* ★11/21 札は枠が空いた店がある回だけ取る＝全店の枠が同じ頃に埋まると最大約4時間取らない */
+  ['sync_claim_boostTick', 'Bump', 90, 'upd'],   /* ★11/21 札は枠が空いた店がある回だけ取る＝全店の枠が同じ頃に埋まると最大約4時間取らない → ★同日 中9：本体は待つ店が無い回も30分ごとに握り直すようになった（BOOST_CLAIM_AT）＝90分で赤 */
   ['bundle_sweep_run', 'まとめ買い割引の見回り（毎日 4:30・本体）', 1560, 'upd'],   /* ★11/21 05 */
   ['sync_claim_condIndexTick', '状態写真の索引', 40, 'upd'],
   ['sync_claim_syncEscrowAll', '入金の同期', 1080, 'upd'],   /* ★2026-11-15 05 レビュー（1）：入金の同期は本体が約12時間おきになった（取り札を通るようになった）＝7時間では誤って赤。18時間 */
@@ -10468,6 +10505,7 @@ function hbMakeTrigger_(fn) {
     case 'awbKeepTick': T(fn).everyHours(1).create(); return true;
     case 'boshuRevalueTick': case 'hbWatchTick': T(fn).everyHours(1).create(); return true;
     case 'boshuAutoTick': setupBoshuAutoTrigger(); return true;
+    case 'bundleSweep': ScriptApp.newTrigger('bundleSweep').timeBased().atHour(4).nearMinute(30).everyDays(1).inTimezone('Asia/Tokyo').create(); return true;   /* ★11/21 全体レビュー 中7：消えた時に戻せるように */
     default: return false;
   }
 }
