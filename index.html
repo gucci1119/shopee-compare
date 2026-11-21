@@ -1960,7 +1960,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261122-045333';
+  const APP_BUILD = '20261122-045600';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -29318,17 +29318,21 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     c.email = c.email || (typeof _slsC !== 'undefined' && _slsC && _slsC.email) || 'gcsonlinestore631@gmail.com';
     c.fam = JP_INQ_FAM[c.fam] ? c.fam : 'main'; c.cc = c.cc || 'BR'; c.purpose = JP_INQ_PURPOSE[c.purpose] ? c.purpose : 'sls'; return c; }
   function jpInqSave(c) { try { localStorage.setItem('smdJpInq', JSON.stringify(c)); } catch (_) {} }
-  let _jpAcct = null;
-  async function jpInqAcct() { if (_jpAcct) return _jpAcct; try { const r = await sbGet('accounts', 'select=cc,shop_id,status&order=cc.asc'); _jpAcct = Array.isArray(r) && r.length ? r : null; document.documentElement.setAttribute('data-jp-acct', Array.isArray(r) ? 'rows ' + r.length + ' ' + JSON.stringify(r.slice(0, 2)) : 'not array ' + typeof r); } catch (e) { _jpAcct = null; document.documentElement.setAttribute('data-jp-acct', 'err ' + String((e && e.message) || e).slice(0, 120)); }   /* ほかの所と同じ sbGet（sbGetAll では読めなかった） */ return _jpAcct || []; }
-  async function jpInqShop(fam, cc) { const a = await jpInqAcct(); const x = a.find(r => r.cc === cc && r.status === fam); return x ? String(x.shop_id) : ''; }
+  /* 店の Shop ID と Username は、ポータルが起動時に読んだ登録簿（state.accounts・系統は label から famNoOfAcct）から。label が国ごとの Username（例 gcsonlinestore.ph）。ポータルの鍵で accounts を直に読むと0行（読む権限の作り） */
+  const JP_FAM_NO = { main: 1, sub: 2, new: 3 };
+  async function jpInqAcct() { if (!(state.accounts && state.accounts.length)) { try { if (typeof initAcctBar === 'function') await initAcctBar(); } catch (_) {} } return state.accounts || []; }
+  async function jpInqShopInfo(fam, cc) { const a = await jpInqAcct(); const x = a.find(r => r && String(r.cc || '').toUpperCase() === cc && famNoOfAcct(r) === JP_FAM_NO[fam]);
+    if (x) return { id: String(x.shop_id || ''), user: demoOn() ? '' : String(x.label || '') };
+    const F = famInfo(JP_FAM_NO[fam]); const sid = F && F.shops ? F.shops[cc] : null; return { id: sid ? String(sid) : '', user: '' }; }
+  async function jpInqShop(fam, cc) { return (await jpInqShopInfo(fam, cc)).id; }
   function jpInqB64(o) { return btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
   /* p: { fam, cc, purpose, subject, detail, orderId, csv:{name,text} }。押した瞬間に窓を開いてから中身を入れる（後から開くとポップアップで止まる） */
   async function jpInqOpen(p) {
     const c = jpInqCfg(); p = Object.assign({ fam: c.fam, cc: c.cc, purpose: c.purpose }, p || {});
     const pu = JP_INQ_PURPOSE[p.purpose] || JP_INQ_PURPOSE.other, w = window.open('about:blank', '_blank');
-    const shopId = await jpInqShop(p.fam, p.cc);
-    const head = pu.head ? pu.head + '\n\n' : '', base = 'ショップ：' + (JP_INQ_FAM[p.fam] || '') + '（Username ' + (c.user[p.fam] || '') + '・Shop ID ' + (shopId || '不明') + '・' + p.cc + '）\n';
-    const payload = { email: c.email, path: pu.path, subject: p.subject || pu.subj, username: c.user[p.fam] || '', market: p.cc, shopId: shopId, orderId: p.orderId || '', detail: p.detail || (head + base), csv: p.csv || null };
+    const si = await jpInqShopInfo(p.fam, p.cc), shopId = si.id, user = si.user || c.user[p.fam] || '';
+    const head = pu.head ? pu.head + '\n\n' : '', base = 'ショップ：' + (JP_INQ_FAM[p.fam] || '') + '（Username ' + user + '・Shop ID ' + (shopId || '不明') + '・' + p.cc + '）\n';
+    const payload = { email: c.email, path: pu.path, subject: p.subject || pu.subj, username: user, market: p.cc, shopId: shopId, orderId: p.orderId || '', detail: p.detail || (head + base), csv: p.csv || null };
     const url = JP_INQ_FORM + '#smdjp=' + jpInqB64(payload);
     if (w) { try { w.location.href = url; w.opener = null; } catch (_) { window.open(url, '_blank', 'noopener'); } } else window.open(url, '_blank', 'noopener');
     jpInqSave(Object.assign(c, { fam: p.fam, cc: p.cc, purpose: p.purpose }));
@@ -29356,7 +29360,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       <div class="smd-dim" style="font-size:11px;margin-top:8px">カテゴリ・件名・詳細の書き出し・Username・マーケット・Shop ID・Order ID は自動で入ります（入らなかった欄はフォームの上の帯に出ます）。フォームを埋めるのは Tampermonkey の道具「Shopee Japan 問い合わせフォーム」です。SLS+ 補償の注文をまとめて送る時は、返品・キャンセル →「📨 申請をまとめる」→「📨 この中身でフォームを開く」（注文の一覧と CSV も入ります）。</div>`;
     document.body.appendChild(pn);
     const $ = id => pn.querySelector('#' + id);
-    const showShop = async () => { const sid = await jpInqShop($('jp-inq-fam').value, $('jp-inq-cc').value); $('jp-inq-shop').textContent = sid ? 'Shop ID ' + sid : '⚠ この店・国の Shop ID が登録簿に無い'; $('jp-inq-shop').style.color = sid ? '' : '#d93025'; };
+    const showShop = async () => { const si = await jpInqShopInfo($('jp-inq-fam').value, $('jp-inq-cc').value); $('jp-inq-shop').textContent = si.id ? 'Shop ID ' + si.id + (si.user ? '・Username ' + si.user : '') : '⚠ この店・国の Shop ID が登録簿に無い'; $('jp-inq-shop').style.color = si.id ? '' : '#d93025'; if (si.user) $('jp-inq-user').value = si.user; };
     showShop();
     $('jp-inq-fam').onchange = () => { const cc2 = jpInqCfg(); $('jp-inq-user').value = cc2.user[$('jp-inq-fam').value] || ''; showShop(); };
     $('jp-inq-cc').onchange = showShop;
