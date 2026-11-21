@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1320'
+var SRC_VER = '20261121-1330'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -351,6 +351,66 @@ var _priceLog = [];
 /* ★2026-11-21 00・04（BR の切り分け「8月の表示の落ちと値上げの関係を確かめられなかった」）：値段の記録に【前の値段】と【どの口から来たか】を足す。
    前の値段＝Shopee に書く直前の DB の出品の控え（listings の models[].price・明細の無い品は price_min）。ポータルは書けた後で控えを書き換える（sbReflectPrices）ので、書く前に読めば前の値段。
    list の1件＝{ m: model_id, p: 後の値段, b: 前の値段（読めなければ null） }。detail の by＝口の名前（web:action／post:action／trig）。前からある via・list・cc の名前は変えない */
+/* 💸 ★2026-11-21 01 商品部（00 の決め：BR 本店の値上げ前に粗利が出ていた明細を、値段はそのまま Shopee の割引で値上げ前の値段に戻す・2週間）：
+   明細ごとの値段で割引（Discount）に入れる口。今の promo_discount は品物ごとに一律の％で全明細＝100明細のカタログだと全部下がるため。
+   q＝{ shop_id, name, days（既定14）, items＝[{item_id, model_list:[{model_id, model_promotion_price}]}] か単品 [{item_id, item_promotion_price}]（JSON の文字でも可） }
+   守り：今の値段（DB の出品の控え）より低く 0 より大きい明細だけ送る。高い・同じ・今の値段が分からない明細は外して skipped に返す。
+   作り：add_discount（開始は65分後・同じ名前と開始時刻を一覧で探して二重に作らない）→ add_discount_item を50件ずつ（purchase_limit 0）→ 控え promo_discount_<id>（送った値段も）→ error_list を全部返す */
+function promoDiscountModels_(q) {
+  var shop = parseInt(q.shop_id, 10); if (!shop) throw new Error('shop_id 必須');
+  var items = q.items; if (typeof items === 'string') { try { items = JSON.parse(items); } catch (eJ) { throw new Error('items が JSON として読めません'); } }
+  if (!Array.isArray(items) || !items.length) throw new Error('items 必須（配列）');
+  var days = Number(q.days) || 14; if (days < 1 || days > 180) throw new Error('days は 1〜180');
+  var ids = items.map(function (x) { return parseInt((x || {}).item_id, 10); }).filter(function (x) { return x > 0; });
+  var cur = {};
+  for (var i = 0; i < ids.length; i += 50) {
+    (sbSelectAll_('listings', 'select=item_id,price_min,models&shop_id=eq.' + shop + '&item_id=in.(' + ids.slice(i, i + 50).join(',') + ')') || []).forEach(function (r) {
+      var o = { _min: Number(r.price_min) }; (r.models || []).forEach(function (m) { if (m && m.id != null) o[String(m.id)] = Number(m.price); }); cur[String(r.item_id)] = o;
+    });
+  }
+  var send = [], skipped = [];
+  items.forEach(function (x) {
+    var iid = parseInt((x || {}).item_id, 10), c = cur[String(iid)];
+    if (!iid) return;
+    if (!c) { skipped.push({ item_id: iid, why: 'この店の出品の控えに無い' }); return; }
+    if (Array.isArray(x.model_list) && x.model_list.length) {
+      var ml = [];
+      x.model_list.forEach(function (m) {
+        var mid = Number(m.model_id), pp = Number(m.model_promotion_price), now = c[String(mid)];
+        if (!(now > 0)) { skipped.push({ item_id: iid, model_id: mid, why: '今の値段が分からない' }); return; }
+        if (!(pp > 0) || pp >= now) { skipped.push({ item_id: iid, model_id: mid, why: '割引の値段が今の値段（' + now + '）より低くない', price: pp }); return; }
+        ml.push({ model_id: mid, model_promotion_price: pp, _now: now });
+      });
+      if (ml.length) send.push({ item_id: iid, purchase_limit: 0, model_list: ml });
+    } else {
+      var ip = Number(x.item_promotion_price), nowI = c._min;
+      if (!(nowI > 0)) { skipped.push({ item_id: iid, why: '今の値段が分からない' }); return; }
+      if (!(ip > 0) || ip >= nowI) { skipped.push({ item_id: iid, why: '割引の値段が今の値段（' + nowI + '）より低くない', price: ip }); return; }
+      send.push({ item_id: iid, purchase_limit: 0, item_promotion_price: ip, _now: nowI });
+    }
+  });
+  if (!send.length) return { ok: false, error: '送れる明細がありません（全部外れた）', skipped: skipped };
+  var start = now_() + 3900, end = start + days * 86400;
+  var name = String(q.name || ('Price back ' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'MMdd'))).slice(0, 60);
+  var dj = null, id = null;
+  try { dj = callShop_(shop, '/api/v2/discount/add_discount', null, 'post', { discount_name: name, start_time: start, end_time: end }); id = (dj.response || {}).discount_id; }
+  catch (eAd) { dj = { error: String((eAd && eAd.message) || eAd) }; }
+  if (!id) { try { Utilities.sleep(2500); var dl = callShop_(shop, '/api/v2/discount/get_discount_list', { discount_status: 'upcoming', page_no: 1, page_size: 100 }, 'get'); ((dl.response || {}).discount_list || []).forEach(function (d) { if (!id && String(d.discount_name || '') === name && Number(d.start_time) === start) id = d.discount_id; }); } catch (eL) {} }
+  if (!id) throw new Error('add_discount: ' + JSON.stringify(dj).slice(0, 200));
+  var clean = function (b) { var o = { item_id: b.item_id, purchase_limit: 0 }; if (b.model_list) o.model_list = b.model_list.map(function (m) { return { model_id: m.model_id, model_promotion_price: m.model_promotion_price }; }); else o.item_promotion_price = b.item_promotion_price; return o; };
+  var added = 0, errs = [], models = 0;
+  for (var j = 0; j < send.length; j += 50) {
+    var batch = send.slice(j, j + 50);
+    var aj; try { aj = callShop_(shop, '/api/v2/discount/add_discount_item', null, 'post', { discount_id: Number(id), item_list: batch.map(clean) }); }
+    catch (eAi) { errs.push({ item_id: 0, err: '送れなかった（入ったかは分からない・送り直していない）: ' + String((eAi && eAi.message) || eAi).slice(0, 160) }); continue; }
+    var rs = aj.response || {}; added += Number(rs.count) || 0;
+    (rs.error_list || []).forEach(function (e2) { errs.push({ item_id: e2.item_id, model_id: e2.model_id, err: String(e2.fail_error || '') + ' ' + String(e2.fail_message || '').slice(0, 120) }); });
+    batch.forEach(function (b) { models += (b.model_list || []).length || 1; });
+  }
+  var rec = { discount_id: String(id), shop_id: String(shop), name: name, mode: 'models', days: days, start: start, end: end, sent: send, skipped: skipped, items: send.length, models: models, added: added, errors: errs, at: new Date().toISOString() };
+  try { baKvSet_('promo_discount_' + id, rec); } catch (eK) {}
+  return { ok: added > 0, error: added > 0 ? undefined : '割引は作りましたが、1件も入りませんでした（控え promo_discount_' + id + '）', discount_id: String(id), start: start, end: end, items: send.length, models: models, added: added, error_list: errs, skipped: skipped };
+}
 function priceBeforeOf_(itemId) {
   try {
     var r = sbSelect_('listings', 'select=price_min,models&item_id=eq.' + encodeURIComponent(String(itemId)) + '&limit=1'), x = r && r[0];
@@ -1090,6 +1150,12 @@ function doGetInner_(e) {
        値段そのものは触らず、期限つきの割引にする＝期限が来れば自動で元に戻る・Shopee が「いいねした人」に値下げ通知を出す・打消し線つきで見える。
        手順：add_discount（開始は今から1時間以上先・180日以内）→ listings の models から明細ごとの割引価格を計算 → add_discount_item（1回50件まで）。
        控え＝app_kv promo_discount_<discount_id>（店・件数・期限・失敗一覧）。終わらせるなら action=promo_discount_end */
+    if (p.action === 'promo_discount_models') {   /* ★11/21 01：明細ごとの値段で割引（下の promoDiscountModels_）。明細が多い時は POST（同じ action）でも受ける */
+      var pmcb = String(p.callback || 'cb').replace(/[^\w$.]/g, ''), pmo;
+      try { var pmwt = P_().getProperty('WRITE_TOKEN'); if (!pmwt || p.token !== pmwt) throw new Error('WRITE_TOKEN不正（書き込み拒否）'); pmo = promoDiscountModels_(p); }
+      catch (err) { pmo = { ok: false, error: String((err && err.message) || err) }; }
+      return ContentService.createTextOutput(pmcb + '(' + JSON.stringify(pmo) + ')').setMimeType(ContentService.MimeType.JAVASCRIPT);
+    }
     if (p.action === 'promo_discount' || p.action === 'promo_discount_end') {
       var pdcb = String(p.callback || 'cb').replace(/[^\w$.]/g, '');
       var pdo;
@@ -2844,6 +2910,7 @@ function doPostInner_(e) {
     else if (body.action === 'list_meta') out = listMeta_(body);      // 公式API出品：category/logistic解決（出品前の確認用）
     else if (body.action === 'shop3_candidate_publish') out = shop3CandidatePublish_(body); // 第3店候補専用の公開。旧配備へは書き込まない
     else if (body.action === 'add_item') out = addItem_(body);        // 公式API出品：指定shop_idにadd_item（アカウント/国を明示）
+    else if (body.action === 'promo_discount_models') out = promoDiscountModels_(body);   /* ★11/21 01：明細ごとの値段で割引（GET と同じ） */
     else if (body.action === 'upload_image') out = uploadImageData_(body);
     else if (body.action === 'undo_backup') out = undoBackup_(body);   /* ★2026-11-04 ポータルの戻す控え（IndexedDB の smd_*_undo_）を Drive にも置く（作った時に1回だけ・接続枠を使わない） */
     else if (body.action === 'desc_block') out = descBlockSet_(body.shop_id, body.item_id, String(body.block || ''), String(body.tag || '中文說明'), !!body.dry);   /* ★2026-10-04 段落が長くGETのURLに入らない（HTTP 404）のでPOSTでも受ける */  // ★PCのファイルをShopeeへアップ→image_idを返す（D&D/ファイル選択用）
@@ -3364,7 +3431,7 @@ function callShop_(shopId, path, query, method, body, beforeFetch) {
       txt = UrlFetchApp.fetch(url, opt).getContentText();
       break;
     }
-    catch (e) { lastErr = e; ufNoteErr_(e); if (/too many times|回数が多すぎます|quota|rate/i.test(String(e))) break; if (beforeFetch || String(method || '').toLowerCase() === 'post' && /add_item|add_model|init_tier_variation|update_tier_variation|delete_|unlist_item|boost_item|ship_order|copy|register_brand|add_voucher|add_follow_prize/.test(String(path)) || /\/(add_discount|add_bundle_deal|split_order)$/.test(String(path))) break; Utilities.sleep(700 * (a + 1)); }   /* ★2026-09-28 Codex：作る・消す・並べ替える POST は、通信例外（Shopee側で済んでいて返事だけ落ちた可能性）で送り直さない＝二重作成・二重削除を防ぐ */ // クォータ枯渇は即諦める＋【断られた事実】を残す（2026-09-21）
+    catch (e) { lastErr = e; ufNoteErr_(e); if (/too many times|回数が多すぎます|quota|rate/i.test(String(e))) break; if (beforeFetch || String(method || '').toLowerCase() === 'post' && /add_item|add_model|init_tier_variation|update_tier_variation|delete_|unlist_item|boost_item|ship_order|copy|register_brand|add_voucher|add_follow_prize/.test(String(path)) || /\/(add_discount|add_discount_item|add_bundle_deal|add_bundle_deal_item|split_order)$/.test(String(path))) break; Utilities.sleep(700 * (a + 1)); }   /* ★2026-09-28 Codex：作る・消す・並べ替える POST は、通信例外（Shopee側で済んでいて返事だけ落ちた可能性）で送り直さない＝二重作成・二重削除を防ぐ */ // クォータ枯渇は即諦める＋【断られた事実】を残す（2026-09-21）
   }
   if (txt == null) throw new Error(path + ' fetch失敗(3回): ' + redactSecrets_((lastErr && lastErr.message) || lastErr));   /* ★11/15 鍵を伏せる */
   var j = JSON.parse(txt);
