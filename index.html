@@ -1955,7 +1955,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261122-023530';
+  const APP_BUILD = '20261122-023637';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -5922,6 +5922,7 @@
     "1つの期間": "One period",
     "期間を並べる": "Periods side by side",
     "⚠ 一部": "⚠ Partial",
+    "⚠ 仕分けの記録が読めませんでした（備品・私物が混ざっている見込み）": "⚠ Could not read the supply/personal classification (supplies may be counted as purchases)",
     "この数で並べ替え（もう一度押すと逆）": "Sort by this (click again to reverse)",
     "並べる指標": "Metrics",
     "今日（途中）": "Today (so far)",
@@ -27046,6 +27047,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     /* ★11/21 全体レビュー中1：経費の行に同じ在庫番号がある品（備品などとして経費で数えた物）は仕入れに数えない（💹 のグラフ plGoodsBuyByYm と同じ）。分類（amz_class）が読めない時の二重もこれで外れる */
     const _expIds = new Set(); (expRows || []).forEach(r => { (String(r.memo || '').match(/[A-Z]{2,5}-[0-9A-Za-z_-]{4,}/g) || []).forEach(x => _expIds.add(x)); });
     let total = 0, n = 0, unsold = 0, unsoldN = 0, noPrice = 0, biz = 0, flea = 0, unk = 0;
+    /* ★2026-11-22 05（全体レビュー 11/22 中2）：仕分け（amz_class）がまだ読めていない時は、備品・私物が仕入れに混ざる＝黙って数えず「読めませんでした」と出す */
+    const clsOk = !!((window.__amzClsC && window.__amzClsC.v) || (typeof renderAlerts !== 'undefined' && renderAlerts._cache && renderAlerts._cache.amz));
     inv.forEach(r => { if (invPurDate(r).slice(0, 7) !== ym) return;
       if (r.item_id && _expIds.has(String(r.item_id))) return;
       if (buyNotGoods(r, (window.__amzClsC && window.__amzClsC.v) || (typeof renderAlerts !== 'undefined' && renderAlerts._cache && renderAlerts._cache.amz) || {})) return;   /* ★11/21 🛒 の備品・私物・明らかな資材は経費側で数える（前は Amazon で売れていない物を全部外していた＝仕分け待ちの売り物まで仕入れから消えていた・💹 のグラフの仕入れ plGoodsBuyByYm と同じ条件にそろえた） */
@@ -27053,7 +27056,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
       const pr = Number(r.price) || 0; if (!(pr > 0)) { noPrice++; return; }
       total += pr; n++; if (!r.shopee_sn) { unsold += pr; unsoldN++; }
       { const k = plVatKind(r.supplier); if (k === 'biz') biz += pr; else if (k === 'flea') flea += pr; else unk += pr; } });
-    return { total, n, unsold, unsoldN, noPrice, biz, flea, unk };
+    return { total, n, unsold, unsoldN, noPrice, biz, flea, unk, clsOk };
   }
   function plCtx(ym, expRows, extras) {
     const ok = pf.grossYm === ym && typeof pf.grossTotal === 'number';
@@ -27085,7 +27088,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
        ＝粗利の「仕入」は【売れた注文の仕入】だけ。ここに【その月に買った全部】（まだ売れていない在庫も）を別に持ち、現金ベースの残りを出す。
        buy：在庫台帳の purchase_date がこの月の行の price 合計（Amazon の備品は経費側で数えるので除く。Amazon でも注文に紐付いた＝仕入れ品は入れる） */
     const bi = (extras && extras.buy) || null;
-    c.buy = bi ? bi.total : null; c.buyN = bi ? bi.n : 0; c.buyUnsold = bi ? bi.unsold : 0; c.buyUnsoldN = bi ? bi.unsoldN : 0; c.buyNoPrice = bi ? bi.noPrice : 0;
+    c.buy = bi ? bi.total : null; c.buyN = bi ? bi.n : 0; c.buyUnsold = bi ? bi.unsold : 0; c.buyUnsoldN = bi ? bi.unsoldN : 0; c.buyNoPrice = bi ? bi.noPrice : 0; c.buyClsNg = !!(bi && !bi.clsOk);
     c.cashNet = (c.ok && bi) ? (c.depFix + c.depProv) - bi.total - c.expTotal - (c.refund || 0) : null;
     /* 税引後と消費税還付（輸出免税）の見込み。税率は📈事業計画の「税・保険 見込み率」を共用（plan.cfg／plCfg の控え）。
        還付＝国内で払った消費税の見込み＝（仕入＋国内経費：送料・資材・家賃・ツール）×10/110。人件費・返金は対象外。年数回の申告で戻る。 */
@@ -27204,7 +27207,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         ${c.retBack.n ? line('　返品で入金が減った分', '（織り込み済）', { indent: true, col: '#6b7280', sub: `${c.retBack.n}件・${y(c.retBack.drop)}（上の入金に反映済み${c.retBack.unmeasured ? '・測れない ' + c.retBack.unmeasured + '件' : ''}）` }) : ''}
         ${c.cxl ? line('− キャンセル損失（日本を出た後）', '− ' + y(c.cxl), { indent: true, col: '#a15', sub: c.cxlN + '件' }) : ''}
         ${line('＝ 純利益', (c.net < 0 ? '▲ ' : '') + y(Math.abs(c.net)), { strong: true, big: true, bg: c.net < 0 ? '#fdecea' : '#e6f4ea', col: c.net < 0 ? '#c5221f' : '#137333', sub: `<b style="color:${c.net < 0 ? '#c5221f' : '#137333'};font-size:12.5px">${c.net < 0 ? '🔴 赤字' : '🟢 黒字'}</b>　売上比 ${pct(c.net, c.sales)}／経費計 ${y(c.expTotal)}` })}
-        ${c.buy != null ? line('💵 この月に仕入れた全部', '− ' + y(c.buy), { col: '#7b4a12', sub: `${c.buyN}件（在庫台帳の仕入日がこの月）／うち<b>まだ売れていない ${y(c.buyUnsold)}（${c.buyUnsoldN}件）</b>${c.buyNoPrice ? '／金額未入力 ' + c.buyNoPrice + '件は含まず' : ''}` }) : ''}
+        ${c.buy != null ? line('💵 この月に仕入れた全部', '− ' + y(c.buy), { col: '#7b4a12', sub: `${c.buyN}件（在庫台帳の仕入日がこの月）／うち<b>まだ売れていない ${y(c.buyUnsold)}（${c.buyUnsoldN}件）</b>${c.buyNoPrice ? '／金額未入力 ' + c.buyNoPrice + '件は含まず' : ''}${c.buyClsNg ? '<div style="color:#b26a00;font-weight:700" title="Amazon などの仕分け（備品・私物・仕入れ）の記録が読めなかったので、備品・私物が仕入れに混ざっている見込みです。少し待って開き直すと読み直します">⚠ 仕分けの記録が読めませんでした（備品・私物が混ざっている見込み）</div>' : ''}` }) : ''}
         ${c.cashNet != null ? line('　＝ 現金ベースの残り', (c.cashNet < 0 ? '▲ ' : '') + y(Math.abs(c.cashNet)), { strong: true, col: c.cashNet < 0 ? '#c5221f' : '#137333', sub: `入金（確定＋暫定）− この月に仕入れた全部 − 経費 − 返金。売れていない在庫 ${y(c.buyUnsold)} は来月以降に売れれば戻る` }) : ''}
         ${line('　税引後の手取り目安', (c.afterTax < 0 ? '▲ ' : '') + y(Math.abs(c.afterTax)), { col: c.afterTax < 0 ? '#c5221f' : '#137333', sub: c.taxPct > 0 ? `税・保険 ${c.taxPct}%（📈事業計画）` : '⚠ 📈事業計画の「税・保険 見込み率」が未設定' })}
         ${line('　＋ 消費税還付の見込み（輸出免税）', '+ ' + y(c.vatRefund), { col: '#0f9d58', sub: c.vatBuyBiz == null ? `国内経費 ${y(c.vatBase)} の 10/110（この月の仕入を読めていない＝お店からの仕入が入っていない）` : `お店からの仕入 ${y(c.vatBuyBiz)}＋国内経費 ${y(c.vatBase - c.vatBuyBiz)} の 10/110。フリマ等の個人からの仕入 ${y(c.vatBuyFlea)} は数えない${c.vatBuyUnk ? '・仕入先が空 ' + y(c.vatBuyUnk) + ' も数えない' : ''}` })}
@@ -31705,6 +31708,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-22', items: [
+      '⚠ <b>損益の「この月に仕入れた全部」で、Amazon 等の仕分けの記録が読めなかった時に「読めませんでした」と出すように</b>（全体レビュー 11/22 中2）：前は黙って備品・私物まで仕入れに数えていました',
       '📊 <b>アクセス（各国）「期間を並べる」の90日・累計の注文が少なく出ていたのを直しました</b>（全体レビュー 11/22）：上の帯の期間が1か月以下の時、注文を62日分しか読んでいなかった＝90日の注文が約36%少なかった。この見方の時は410日ぶん読み、切り替えた時に足りなければ読み直します。読めていない期間には「⚠ 一部」と出します。2段目の見出し（指標×期間）を押すとその数で並べ替えできます',
       '🔎 <b>出品一覧の検索で、どの明細に当たったかが行の下に見えるように</b>（本人「バリエーションの時に見つけにくいんだよ」）：検索語（名前・JAN・型番・SKU・ID）が明細に当たった時は、カタログの行のすぐ下に「🔎 当たった明細 N件」として、当たった明細だけを番号・写真・明細名（当たった語に色）・SKU・値段・在庫・販売つきで押さずに出します。「✎ この明細を直す」でカタログが開き、その明細の行へ移って光ります（開いた明細の中でも当たった行は黄色）。カタログ名だけで当たった時は出しません。並べ替えや他の絞り込みと一緒でも効きます',
     ] },
