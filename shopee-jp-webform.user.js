@@ -2,7 +2,7 @@
 // @name         Shopee JP webform filler
 // @name:ja      【Shopee】Shopee Japan 問い合わせフォーム：ポータルから欄を埋める
 // @namespace    https://gucci1119.github.io/shopee-compare/
-// @version      1.0.1
+// @version      1.0.2
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-jp-webform.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-jp-webform.user.js
 // @description  Shopee OS ポータルの「📨 Shopee Japan へ問い合わせ」から開いた時だけ、メール・カテゴリ・件名・Username・マーケット・Order ID・Shop ID・詳細・添付（CSV）を入れる。Submit は押さない（送るのは本人）。
@@ -46,7 +46,7 @@
     if (path.length) await waitFor(function () { return document.querySelector('textarea'); }, 8000);
     fill('件名', /件名|Subject/, P.subject);
     fill('Username', /Username/, P.username);
-    /* ★1.0.1：Shop ID の欄が無い道（補償など）もある＝無い時は「入らなかった」に入れず、詳細に書いてある旨だけ出す */
+    /* ★1.0.2（00「⚠ と赤い字をやめて」）：Shop ID の欄が無い時は普通の字で知らせる。★1.0.1：Shop ID の欄が無い道（補償など）もある＝無い時は「入らなかった」に入れず、詳細に書いてある旨だけ出す */
     var noShop = false; if (P.shopId) { var se = field(/Shop\s*ID|ショップID/i); if (se) { setVal(se, String(P.shopId)); done.push('Shop ID'); } else noShop = true; }
     fill('Order ID', /Order\s*ID/i, P.orderId);
     fill('詳細内容', /詳細内容|Inquiry Details/, P.detail);
@@ -54,7 +54,7 @@
     if (P.csv && P.csv.text) { var fi = document.querySelector('input[type=file]');
       if (fi) { try { var dt = new DataTransfer(); dt.items.add(new File([P.csv.text], P.csv.name || 'orders.csv', { type: 'text/csv' })); fi.files = dt.files; fi.dispatchEvent(new Event('change', { bubbles: true })); done.push('添付 ' + (P.csv.name || 'orders.csv')); } catch (e) { miss.push('添付（' + e.message + '）'); } }
       else miss.push('添付'); }
-    say('📨 <b>ポータルから入れました</b>：' + done.join('・') + (miss.length ? '<br><b style="color:#d93025">⚠ 入らなかった欄：' + miss.join('・') + '</b>（ここは手で入れてください）' : '') + (noShop ? '<br><span style="color:#555">この用件のフォームには Shop ID の欄がありません（Shop ID ' + P.shopId + ' は詳細に書いてあります）</span>' : '') +
+    say('📨 <b>ポータルから入れました</b>：' + done.join('・') + (miss.length ? '<br><b style="color:#d93025">⚠ 入らなかった欄：' + miss.join('・') + '</b>（ここは手で入れてください）' : '') + (noShop ? '<br><span style="color:#333">このフォームに Shop ID の欄はありません' + (String(P.detail || '').indexOf(String(P.shopId)) >= 0 ? '（詳細内容に Shop ID を書き入れました）' : '（Shop ID ' + P.shopId + '）') + '</span>' : '') +
       '<br>中身を見て、よければ一番下の <b>Submit</b> を押してください（このツールは押しません）。<button style="float:right;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer" onclick="this.parentNode.remove()">閉じる</button>');
   })();
 })();
