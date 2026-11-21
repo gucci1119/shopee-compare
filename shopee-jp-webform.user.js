@@ -2,7 +2,7 @@
 // @name         Shopee JP webform filler
 // @name:ja      【Shopee】Shopee Japan 問い合わせフォーム：ポータルから欄を埋める
 // @namespace    https://gucci1119.github.io/shopee-compare/
-// @version      1.0.2
+// @version      1.0.3
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-jp-webform.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-jp-webform.user.js
 // @description  Shopee OS ポータルの「📨 Shopee Japan へ問い合わせ」から開いた時だけ、メール・カテゴリ・件名・Username・マーケット・Order ID・Shop ID・詳細・添付（CSV）を入れる。Submit は押さない（送るのは本人）。
@@ -20,7 +20,8 @@
   var P; try { P = JSON.parse(decodeURIComponent(escape(atob(m[1].replace(/-/g, '+').replace(/_/g, '/'))))); } catch (e) { return; }
   try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
   var W = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
-  var done = [], miss = [];
+  var done = [], miss = [], rejected = [];
+  var html = function (v) { return String(v).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); };
   var bar = document.createElement('div');
   bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483000;background:#fff8e1;border-bottom:2px solid #f0a500;padding:8px 14px;font:13px/1.6 sans-serif;color:#333';
   var say = function (t) { bar.innerHTML = t; if (!bar.isConnected) document.body.appendChild(bar); };
@@ -32,10 +33,26 @@
   /* 見出しの字で欄を探す：その欄だけを囲む一番小さい箱の字に見出しが入っている物 */
   var field = function (re) { var els = Array.prototype.slice.call(document.querySelectorAll('input[type=text],textarea'));
     for (var i = 0; i < els.length; i++) { var p = els[i].parentElement; for (var k = 0; k < 7 && p; k++, p = p.parentElement) { if (p.querySelectorAll('input[type=text],textarea').length > 1) break; if (re.test(p.innerText || '')) return els[i]; } } return null; };
-  var fill = function (name, re, v) { if (v == null || v === '') return; var el = field(re); if (el) { setVal(el, String(v)); done.push(name); } else miss.push(name); };
+  var fill = function (name, re, v) {
+    if (v == null || v === '') return;
+    var el = field(re);
+    if (!el) { miss.push(name); return; }
+    var value = String(v);
+    var limit = el.maxLength >= 0 ? el.maxLength : Infinity;
+    if (name === '詳細内容') limit = Math.min(limit, 999);
+    if (value.length > limit) {
+      var issue = { name: name, length: value.length, limit: limit, resolved: false, el: el };
+      rejected.push(issue);
+      return;
+    }
+    setVal(el, value); done.push(name);
+  };
   (async function () {
     await waitFor(function () { return document.querySelector('input[type=text]'); }, 15000);
-    var em = document.querySelector('input[type=text]'); if (em && P.email) { setVal(em, P.email); done.push('メール'); }
+    var em = document.querySelector('input[type=text]'); if (em && P.email) {
+      if (em.maxLength >= 0 && String(P.email).length > em.maxLength) rejected.push({ name: 'メール', length: String(P.email).length, limit: em.maxLength, el: em });
+      else { setVal(em, P.email); done.push('メール'); }
+    }
     var path = P.path || [];
     for (var s = 0; s < path.length; s++) {
       var lb = await waitFor(function () { return labelBy(path[s]); }, 8000);
@@ -54,7 +71,22 @@
     if (P.csv && P.csv.text) { var fi = document.querySelector('input[type=file]');
       if (fi) { try { var dt = new DataTransfer(); dt.items.add(new File([P.csv.text], P.csv.name || 'orders.csv', { type: 'text/csv' })); fi.files = dt.files; fi.dispatchEvent(new Event('change', { bubbles: true })); done.push('添付 ' + (P.csv.name || 'orders.csv')); } catch (e) { miss.push('添付（' + e.message + '）'); } }
       else miss.push('添付'); }
-    say('📨 <b>ポータルから入れました</b>：' + done.join('・') + (miss.length ? '<br><b style="color:#d93025">⚠ 入らなかった欄：' + miss.join('・') + '</b>（ここは手で入れてください）' : '') + (noShop ? '<br><span style="color:#333">このフォームに Shop ID の欄はありません' + (String(P.detail || '').indexOf(String(P.shopId)) >= 0 ? '（詳細内容に Shop ID を書き入れました）' : '（Shop ID ' + P.shopId + '）') + '</span>' : '') +
-      '<br>中身を見て、よければ一番下の <b>Submit</b> を押してください（このツールは押しません）。<button style="float:right;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer" onclick="this.parentNode.remove()">閉じる</button>');
+    var detailEl = field(/詳細内容|Inquiry Details/);
+    var detailLimit = detailEl && detailEl.maxLength >= 0 ? Math.min(detailEl.maxLength, 999) : 999;
+    var renderStatus = function () {
+      var issues = rejected.filter(function (r) { return !r.resolved; });
+      var count = detailEl ? detailEl.value.length : null;
+      var countText = count == null ? '' : '<br>詳細 ' + count + '／' + detailLimit + '文字';
+      if (count != null && count > detailLimit) countText += ' <b>⚠ 上限を超えています。注文の一覧は添付CSVへ移してください。</b>';
+      var warning = issues.map(function (r) { return html(r.name) + 'は' + r.length + '／' + r.limit + '文字のため入力を止めました。'; }).join(' ');
+      say('📨 <b>ポータルから入れました</b>：' + done.map(html).join('・') +
+        (miss.length ? '<br><b>⚠ 入らなかった欄：' + miss.map(html).join('・') + '</b>（ここは手で入れてください）' : '') +
+        (warning ? '<br><b>⚠ ' + warning + ' 文は切っていません。詳細の注文一覧は添付CSVへ移し、件名などは要点にしてください。</b>' : '') + countText +
+        (noShop ? '<br><span>このフォームに Shop ID の欄はありません' + (detailEl && detailEl.value.indexOf(String(P.shopId)) >= 0 ? '（詳細内容に Shop ID を書き入れました）' : '（Shop ID ' + html(P.shopId) + '）') + '</span>' : '') +
+        '<br>中身を確認してから一番下の <b>Submit</b> を押してください。<button style="float:right;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer" onclick="this.parentNode.remove()">閉じる</button>');
+    };
+    if (detailEl) detailEl.addEventListener('input', renderStatus);
+    rejected.forEach(function (r) { r.el.addEventListener('input', function () { r.resolved = r.el.value.length <= r.limit; renderStatus(); }); });
+    renderStatus();
   })();
 })();
