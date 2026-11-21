@@ -2,7 +2,7 @@
 // @name         Claude Console Cost → Shopee OS
 // @name:ja      【Claude Console】💴 コスト（本当の請求）を取り込む（→ポータル・自動）
 // @namespace    https://gucci1119.github.io/shopee-compare/
-// @version      0.2.5
+// @version      0.2.6
 // @updateURL    https://gucci1119.github.io/shopee-compare/claude-console-cost.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/claude-console-cost.user.js
 // @description  platform.claude.com のコスト画面で「エクスポート」を自動で押し、CSV の中身（ダウンロードはしない）を日×モデル×種別の USD にして Shopee OS（GAS ai_actual_ingest・鍵なし）へ送る。6時間ごとに自動で読み直す。月初3日は前の月も取り直す。
@@ -16,7 +16,7 @@
   const smdIk_ = () => { try { return localStorage.getItem('smd_ingest_key') || ''; } catch (_) { return ''; } };
   /* 鍵を入れるリンク（Drive の「取り込みの鍵を入れる.html」）から来た時は、URL の #smd_ik=… をこのサイトの localStorage に置いて、URL から消す */
   try { const _m = String(location.hash || '').match(/smd_ik=([A-Za-z0-9_-]{24,80})/); if (_m) { localStorage.setItem('smd_ingest_key', _m[1]); history.replaceState(null, '', location.pathname + location.search); } } catch (_) {}
-  const VER = '0.2.5';
+  const VER = '0.2.6';
   const GAS = 'https://script.google.com/macros/s/AKfycbwbCbQpW0ZrsnWQ4WMX5FXDinIEd8DkVwikbFSjxbkss2NFl72dhZoiLJt-mqUEBLG7yA/exec';
   const log = (...a) => { try { console.log('[console-cost]', ...a); } catch (_) {} };
   function badge(t) { try { let b = document.getElementById('cc-badge'); if (!b) { b = document.createElement('div'); b.id = 'cc-badge'; b.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;background:#111;color:#fff;font:11px/1.4 -apple-system,sans-serif;padding:4px 9px;border-radius:8px;opacity:.85;max-width:60vw'; (document.body || document.documentElement).appendChild(b); } b.textContent = t; } catch (_) {} }
@@ -64,10 +64,12 @@
     badge('🧾 送信中… ' + rows.length + '行・' + days.length + '日');
     try {
       const t = await post({ action: 'ai_actual_ingest', ver: VER, url: u, rows, raw: rawSent ? '' : text.slice(0, 20000) }); rawSent = true;
-      if (/"ok"\s*:\s*true/.test(t)) badge('🧾 Console の実績を送りました：' + days[0] + '〜' + days[days.length - 1] + '・$' + rows.reduce((a, r) => a + r.usd, 0).toFixed(2) + '（' + new Date().toTimeString().slice(0, 5) + '）');
+      if (ccOk_(t)) badge('🧾 Console の実績を送りました：' + days[0] + '〜' + days[days.length - 1] + '・$' + rows.reduce((a, r) => a + r.usd, 0).toFixed(2) + '（' + new Date().toTimeString().slice(0, 5) + '）');
       else badge('⚠ 送れませんでした（返事が違う）：' + t.slice(0, 80));
     } catch (e) { badge('⚠ 送れませんでした：' + String(e && e.message || e).slice(0, 80)); }
   }
+  /* ★v0.2.6（2026-11-21 05・全体レビュー 中17）：ok:true の文字だけでは、POST が GET に化けて doGet の ok が返った時も「送った」になる＝ai_actual_ingest の返事（days の数）まで見る */
+  function ccOk_(t) { try { const j = JSON.parse(t); return !!(j && j.ok === true && typeof j.days === 'number'); } catch (_) { return false; } }
   /* fetch と XHR の両方を横取り（ページがどちらで取るか分からない） */
   const of = window.fetch; window.fetch = async function (input, init) { const res = await of.apply(this, arguments); try { const u = typeof input === 'string' ? input : (input && input.url) || ''; if (/platform\.claude\.com|anthropic\.com|claude\.com/.test(u) && !/\.(js|css|png|svg|woff2?)(\?|$)/.test(u)) { res.clone().text().then(t => handle(u, t)).catch(() => {}); } } catch (_) {} return res; };
   const oo = XMLHttpRequest.prototype.open, os = XMLHttpRequest.prototype.send;
@@ -90,7 +92,7 @@
     const days = [...new Set(rows.map(r => r.d))].sort();
     badge('🧾 送信中… ' + rows.length + '行・' + days.length + '日');
     try { const t = await post({ action: 'ai_actual_ingest', ver: VER, url: location.href, rows });
-      if (/"ok"\s*:\s*true/.test(t)) { badge('🧾 Console の実績を送りました：' + days[0] + '〜' + days[days.length - 1] + '・$' + rows.reduce((a, r) => a + r.usd, 0).toFixed(2) + '（' + new Date().toTimeString().slice(0, 5) + '）'); try { localStorage.setItem('cc_last_ok', String(Date.now())); } catch (_) {} }
+      if (ccOk_(t)) { badge('🧾 Console の実績を送りました：' + days[0] + '〜' + days[days.length - 1] + '・$' + rows.reduce((a, r) => a + r.usd, 0).toFixed(2) + '（' + new Date().toTimeString().slice(0, 5) + '）'); try { localStorage.setItem('cc_last_ok', String(Date.now())); } catch (_) {} }
       else badge('⚠ 送れませんでした（返事が違う）：' + t.slice(0, 80)); } catch (e) { badge('⚠ 送れませんでした：' + String(e && e.message || e).slice(0, 80)); }
   }
   /* ★v0.2.1 エクスポートのボタンは文字が無く aria-label だけ（実測）＝textContent では見つからなかった */

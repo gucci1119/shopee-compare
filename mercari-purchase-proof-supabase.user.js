@@ -2,7 +2,7 @@
 // @name         【ポータル】メルカリ仕入れ確証 → Supabase（自動）
 // @name:ja      【メルカリ】🧾 仕入れの証拠を保存（→ポータル・自動）
 // @namespace    https://jp.mercari.com/
-// @version      1.3.2
+// @version      1.3.3
 // @updateURL    https://gucci1119.github.io/shopee-compare/mercari-purchase-proof-supabase.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/mercari-purchase-proof-supabase.user.js
 // @description  メルカリ購入一覧を開くと各取引の「取引情報」スクショを自動で撮り、Supabase Storage(proofsバケット)へ保存してinventory.proofにURLを記録。在庫に無い購入は取引ページの情報（商品名・価格・購入日時・出品者）で取込GASに登録（メール不要・v1.3.0）。既存のDrive保存版(確証→Drive→InventoryItem AC)とは独立に並行稼働する移行用スクリプト。GM_xhrはメルカリ上で死ぬので@grant none＋fetch。撮影は隠しiframe＋html2canvas-pro（メルカリの新CSS color()対策）。開いたら自動実行（1回12件まで・3分毎・重複は撮らない／初回大量分は「未取得を全部」ボタン）。
@@ -180,7 +180,10 @@
     if (!key) { setStatus('キー未設定（右下パネルで1回だけ設定）'); return; }
     running = true;
     const done = loadDone();
-    let ids = collectIds().filter(id => !done.has(id));
+    /* ★2026-11-21 05（全体レビュー 中14）：在庫の行が無い取引も3分ごとに撮り直して上げ直していた → 在庫に無かった取引は1日あけてから撮る（手で押した時は今まで通り全部） */
+    const NOROW_KEY = 'mercari_proof_norow_v1'; let noRow = {}; try { noRow = JSON.parse(localStorage.getItem(NOROW_KEY) || '{}') || {}; } catch (_) { noRow = {}; }
+    const saveNoRow = () => { try { const ks = Object.keys(noRow); if (ks.length > 500) ks.sort((a, b) => noRow[a] - noRow[b]).slice(0, ks.length - 500).forEach(k => delete noRow[k]); localStorage.setItem(NOROW_KEY, JSON.stringify(noRow)); } catch (_) {} };
+    let ids = collectIds().filter(id => !done.has(id) && (!silent || !noRow[id] || Date.now() - noRow[id] > 86400000));
     if (onlyFirst) ids = ids.slice(0, 1);
     else if (limit) ids = ids.slice(0, limit);
     if (!ids.length) { setStatus('未取得なし（全て取得済み）'); running = false; return; }
@@ -193,7 +196,7 @@
         const blob = cap && cap.blob, info = cap && cap.info;
         /* v1.3.0 在庫に無ければ、取引ページから読んだ項目で取込GASに登録（メール不要） */
         let itm = '';
-        try { itm = await hasRow(key, id); } catch (eH) { console.warn('[確証SB] 在庫の確認に失敗', id, eH.message); }
+        let rowErr = false; try { itm = await hasRow(key, id); } catch (eH) { rowErr = true; console.warn('[確証SB] 在庫の確認に失敗', id, eH.message); }
         /* ★v1.3.1 全体レビュー：①在庫の当て方を source=mercari から supplier=メルカリ に（メール取込の行は source が空のことがある＝永久に登録失敗・GAS 枠を食っていた）
            ②購入から7日を過ぎた取引は登録しない（ポータルで消した行が、一覧に出ている限り登録し直されていた） */
         const _old = info && info.date && (Date.now() - Date.parse(info.date) > 7 * 86400000);
@@ -202,10 +205,11 @@
           catch (eR) { console.warn('[確証SB] 登録失敗', id, eR.message); }
         }
         if (!blob) { err++; continue; }
+        if (!itm && !rowErr) { skip++; noRow[id] = Date.now(); saveNoRow(); if (_old) { done.add(id); saveDone(done); } continue; }   /* ★中14：在庫の行が無い取引は上げない（上げても付ける行が無い）。7日を過ぎた取引は済み */
         const url = await uploadProof(key, id, blob);
         const n = await patchProof(key, id, url);
-        if (n >= 1) { ok++; done.add(id); saveDone(done); }
-        else { skip++; /* 在庫行未登録＝doneにせず次回再試行 */ }
+        if (n >= 1) { ok++; done.add(id); saveDone(done); if (noRow[id]) { delete noRow[id]; saveNoRow(); } }
+        else { skip++; noRow[id] = Date.now(); saveNoRow(); /* 在庫行未登録＝doneにせず1日あけて再試行 */ }
       } catch (e) { err++; console.warn('[確証SB]', id, e.message); }
       await new Promise(r => setTimeout(r, 600));
     }

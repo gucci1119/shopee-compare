@@ -2,7 +2,7 @@
 // @name         【ポータル】メルカリ配送情報 → Supabase（自動）
 // @name:ja      【メルカリ】🚚 配送状況を取り込む（→ポータル・自動）
 // @namespace    https://jp.mercari.com/
-// @version      2.3.1
+// @version      2.3.2
 // @updateURL    https://gucci1119.github.io/shopee-compare/mercari-purchase-info-supabase.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/mercari-purchase-info-supabase.user.js
 // @description  メルカリ購入一覧を開くと、各取引の配送方法/追跡番号（＋既存配送スクリプトのキャッシュがあれば配達状況）を自動でSupabase inventoryへ連携。取引ページは隠しiframeで自前に読むので、既存スクリプトのボタンを押さなくても動く。v2.1: 追跡番号が未取得の取引を優先し、番号が付くまで取引ページを読み直す（ゆうパケットポスト等は発送後に番号が付くため）。抽出も「お問い合わせ番号/追跡番号」に拡張。v2.2: ★PATCHの絞り込みを source=mercari → supplier=メルカリ＋supplier_order に変更（メール取り込みの source=null 行=全体の約9割にも当たるように＝これまで開いても書けていなかった主因を修正）＋取引画面から配達中/配達済も抽出し delivery_info へ（番号不要・誤検出回避のライブ詳細のみ）。スプシ版(InventoryItem X/Y/Z連携)とは独立に並行稼働。メルカリ上でGM_xmlhttpRequestは死ぬため@grant none＋fetch（SupabaseはCORS対応）。
@@ -164,12 +164,14 @@
       }
       const fields = { ship_method: info.method || null, ship_region: info.region || null, tracking_no: info.tracking || null, delivery_info: info.deliveryDate || null };
       if (!fields.ship_method && !fields.ship_region && !fields.tracking_no && !fields.delivery_info) { if (!info.tracking) pending++; continue; }
+      /* ★2026-11-21 05（全体レビュー 中15）：読めなかった項目を null のまま PATCH していた＝「配達済」が空に戻る・別の経路が入れた追跡番号を null で消す筋。読めた項目だけ送る（sig は今まで通り4つで作る） */
+      const sendF = {}; Object.keys(fields).forEach(k => { if (fields[k] != null && fields[k] !== '') sendF[k] = fields[k]; });
       const sig = [fields.ship_method, fields.ship_region, fields.tracking_no, fields.delivery_info].join('|');
       if (!fields.tracking_no) pending++;               // まだ番号なし＝次回も優先対象
       if (sigOf(sync[id]) === sig) continue;            // 同内容は連携済み（番号未取得でも方法だけは書けている）
       tried++;
       setBadge('同期中 ' + tried + '…');
-      const n = await patchOne(key, id, fields);
+      const n = await patchOne(key, id, sendF);
       if (n >= 1) { sync[id] = { sig, tk: !!fields.tracking_no, v3: !!info.verified }; ok++; saveSync(sync); }
       await new Promise(r => setTimeout(r, 250));
     }

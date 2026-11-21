@@ -2,7 +2,7 @@
 // @name         【ポータル】ヤフオク/PayPay セラー → Supabase（自動）
 // @name:ja      【ヤフオク・PayPay】🏪 出品者の情報を取り込む（→ポータル・自動）
 // @namespace    https://aucpay.yahoo.co.jp/
-// @version      1.1.1
+// @version      1.1.2
 // @updateURL    https://gucci1119.github.io/shopee-compare/yahoo-pay-seller-supabase.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/yahoo-pay-seller-supabase.user.js
 // @description  Yahoo!かんたん決済の支払い一覧から各支払い明細を巡回し、出品者(セラー)・商品ID・販売価格を取得してSupabase inventoryへ連携。ヤフオク・PayPayフリマは購入メールにセラー/価格が載らないため、ここで古物台帳用の相手方(出品者)を埋める。明細はJSで描画されるので隠しiframeで読む。@grant none＋fetch（SupabaseはCORS対応）。
@@ -44,6 +44,11 @@
   };
   const loadDone = () => { try { return new Set(JSON.parse(localStorage.getItem(DONE_KEY) || '[]')); } catch { return new Set(); } };
   const saveDone = (s) => localStorage.setItem(DONE_KEY, JSON.stringify([...s]));
+  /* ★2026-11-21 05（全体レビュー 中12）：在庫に0件の時も「済み」にしていた＝鍵の違い・Supabase が止まっている間・在庫の取り込みより先に開くと、その月の出品者が二度と埋まらない。
+     → 0件は「最初に0件だった時刻」を控え、1日あけて読み直す。7日たっても0件なら済みにする。書き込みの失敗（-1）は済みにしない */
+  const ZERO_KEY = 'yahoo_pay_zero_v1';
+  const loadZero = () => { try { return JSON.parse(localStorage.getItem(ZERO_KEY) || '{}') || {}; } catch { return {}; } };
+  const saveZero = (z) => { try { localStorage.setItem(ZERO_KEY, JSON.stringify(z)); } catch (_) {} };
 
   // 支払い一覧から決済IDを収集
   function collectSettleIds() {
@@ -99,8 +104,8 @@
     const key = silent ? (localStorage.getItem(KEY_LS) || '') : getKey();
     if (!key) { setBadge('キー未設定'); return; }
     running = true;
-    const done = loadDone();
-    const ids = collectSettleIds().filter(id => !done.has(id));
+    const done = loadDone(), zero = loadZero(), nowMs = Date.now();
+    const ids = collectSettleIds().filter(id => !done.has(id) && !(zero[id] && nowMs - (zero[id].last || 0) < 86400e3));
     if (!ids.length) { setBadge('この月は取得済み'); running = false; return; }
     let ok = 0, skip = 0, err = 0;
     for (let i = 0; i < ids.length; i++) {
@@ -110,8 +115,11 @@
         if (!d || !d.itemId || !d.seller) { err++; continue; }
         const fields = { seller: String(d.seller).slice(0, 50) };
         const n = await patchInv(key, d.itemId, fields);
-        if (n >= 1) { ok++; done.add(ids[i]); saveDone(done); }
-        else { skip++; /* 在庫に該当なし＝次回再試行しない(決済IDでdone) */ done.add(ids[i]); saveDone(done); }
+        if (n >= 1) { ok++; done.add(ids[i]); saveDone(done); if (zero[ids[i]]) { delete zero[ids[i]]; saveZero(zero); } }
+        else if (n === 0) { skip++; const z = zero[ids[i]] || { first: nowMs }; z.last = nowMs; zero[ids[i]] = z;
+          if (nowMs - z.first > 7 * 86400e3) { done.add(ids[i]); saveDone(done); delete zero[ids[i]]; }   /* 7日たっても在庫に無い＝済み */
+          saveZero(zero); }
+        else { err++; }   /* 書き込みの失敗（鍵・Supabase の止まり）＝済みにしない＝次に開いた時にもう一度 */
       } catch (e) { err++; console.warn('[aucpay]', ids[i], e.message); }
       await new Promise(r => setTimeout(r, 400));
     }

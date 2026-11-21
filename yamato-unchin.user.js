@@ -2,7 +2,7 @@
 // @name         Shopee OS - ヤマト運賃の取り込み（Web請求書 → ポータル）
 // @name:ja      【ヤマト】🚚 運賃情報をポータルへ送る（ログイン中に自動）
 // @namespace    gucci-shopee-yamato
-// @version      1.3.3
+// @version      1.3.4
 // @updateURL    https://gucci1119.github.io/shopee-compare/yamato-unchin.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/yamato-unchin.user.js
 // @description  ヤマトビジネスメンバーズ「Web請求書提供サービス」にログインしている間に、運賃情報参照（受付日・直近31日）を裏で取ってポータル（GAS経由）へ送る。1日1回。鍵は持たない。
@@ -80,7 +80,7 @@
     return { lines, total, cstmr };
   }
   function post(payload) {
-    return new Promise((res, rej) => GM_xmlhttpRequest({ method: 'POST', url: GAS_URL, headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, data: JSON.stringify(payload), onload: r => { try { const j = JSON.parse(r.responseText); j && j.ok ? res(j) : rej(new Error((j && j.error) || 'GAS応答が ok ではありません')); } catch (e) { rej(new Error('GAS応答を読めません: ' + String(r.responseText).slice(0, 80))); } }, onerror: () => rej(new Error('GASへ届きませんでした')), ontimeout: () => rej(new Error('GAS 時間切れ')), timeout: 60000 }));
+    return new Promise((res, rej) => GM_xmlhttpRequest({ method: 'POST', url: GAS_URL, headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, data: JSON.stringify(payload), onload: r => { try { const j = JSON.parse(r.responseText); (j && j.ok === true && typeof j.n === 'number') ? res(j) : rej(new Error((j && j.error) || 'GAS応答が yamato_ship の返事ではありません（ok と件数 n が無い）'));   /* ★v1.3.4 全体レビュー 中17：ok だけで成功にしない */ } catch (e) { rej(new Error('GAS応答を読めません: ' + String(r.responseText).slice(0, 80))); } }, onerror: () => rej(new Error('GASへ届きませんでした')), ontimeout: () => rej(new Error('GAS 時間切れ')), timeout: 60000 }));
   }
   async function run(force) {
     if (!loggedIn()) { if (force) banner('ログインしてから実行してください', true); return; }

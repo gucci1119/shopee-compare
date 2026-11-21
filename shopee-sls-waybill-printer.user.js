@@ -2,7 +2,7 @@
 // @name         Shopee SLS Waybill Printer
 // @name:ja      【Shopee】🖨 発送伝票をまとめて印刷
 // @namespace    https://frontier-order-manager.com/
-// @version      6.0.2
+// @version      6.0.3
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-sls-waybill-printer.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-sls-waybill-printer.user.js
 // @description  frontier-order-managerから伝票印刷＋Webチャット自動遷移（検索→会話クリックまで自動）
@@ -40,6 +40,10 @@
 // (document-start で即実行 — ハッシュがSPAに消される前にキャッチ)
 // ========================================
 (function () {
+  function slsSnMismatch(obj, sn) {
+    try { const seen = []; const walk = (o, d) => { if (!o || typeof o !== 'object' || d > 3) return; for (const k of Object.keys(o)) { const v = o[k]; if (/^order_?sn$/i.test(k) && typeof v === 'string') seen.push(v); else if (v && typeof v === 'object') walk(v, d + 1); } }; walk(obj, 0);
+      return seen.length && !seen.includes(String(sn)) ? seen[0] : ''; } catch (_) { return ''; }
+  }
   'use strict';
   if (location.pathname.startsWith('/portal/sale') || location.pathname.startsWith('/portal/order')) {
     // === デバッグ用リアルタイムログ（画面上部に常時表示） ===
@@ -132,6 +136,7 @@
         });
         const idx = s.data?.index_list?.[0];
         if (!idx) throw new Error('Order not found');
+        { const bad = slsSnMismatch(idx, orderSn); if (bad) throw new Error('一覧の先頭が別の注文（' + bad + '）'); }
         slsLog(`STEP2 OK: order_id=${idx.order_id}`);
 
         // 2. get_package
@@ -153,7 +158,7 @@
         slsLog(`✓ DONE → awbprint job_id=${job.job_id}`);
         location.href = `https://${domain}/awbprint?job_id=${job.job_id}&shop_id=${idx.shop_id}&lang=${lang}&first_time=${job.is_first_time}`;
       } catch (err) {
-        const isShipped = /code=(10|11|12|13|14)|already|shipped|completed|cancel/i.test(err.message);
+        const isShipped = /code=(10|11|12|13|14)(?!\d)|already|shipped|completed|cancel/i.test(err.message);   /* ★v6.0.3 中18：10005 などに当たらない */
         const msg = isShipped ? '既に発送済のため出力不可' : err.message;
         slsLog(`✗ ERROR: ${msg}`);
         slsLog(`Full: ${err.stack || err.message}`);
@@ -223,6 +228,11 @@
     }, 500);
   }
 
+  /* ★v6.0.3（2026-11-21 05・全体レビュー 中18）：一覧の先頭が頼んだ注文番号か照らす。返事に order_sn が見えれば照らし、違えば止める（項目が無い時は照らせない＝今まで通り） */
+  function slsSnMismatch(obj, sn) {
+    try { const seen = []; const walk = (o, d) => { if (!o || typeof o !== 'object' || d > 3) return; for (const k of Object.keys(o)) { const v = o[k]; if (/^order_?sn$/i.test(k) && typeof v === 'string') seen.push(v); else if (v && typeof v === 'object') walk(v, d + 1); } }; walk(obj, 0);
+      return seen.length && !seen.includes(String(sn)) ? seen[0] : ''; } catch (_) { return ''; }
+  }
   // 検索結果の最初の会話アイテムを自動クリック
   function waitForResultAndClick(name) {
     let tries = 0;
@@ -233,7 +243,7 @@
       for (const el of allEls) {
         if (el.children.length === 0 && el.textContent) {
           const text = el.textContent.trim().toLowerCase();
-          if (text === name.toLowerCase() || text.includes(name.toLowerCase())) {
+          if (text === name.toLowerCase()) {   /* ★v6.0.3 中18：含む一致で別のお客さんの会話を開かない（名前がちょうど同じ時だけ） */
             // onclick付き祖先を探す
             let p = el.parentElement;
             for (let i = 0; i < 8 && p; i++) {
@@ -249,7 +259,7 @@
         }
       }
       // 方法2: "Customers" ラベル付近のonclickアイテムをクリック (フォールバック)
-      if (tries >= 3) {
+      if (false && tries >= 3) {   /* ★v6.0.3 中18：見つからない時に「先頭の会話を押す」予備は別のお客さんの会話を開く（記憶「会話を自動で切り替えない」）＝使わない */
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
         while (walker.nextNode()) {
           const t = walker.currentNode.textContent.trim();
@@ -809,7 +819,7 @@
           sort: { sort_type: 3, ascending: false }
         });
         const idx = searchData.data?.index_list?.[0];
-        if (!idx) { msgCache.set(info.orderId, ''); continue; }
+        if (!idx || slsSnMismatch(idx, info.orderId)) { msgCache.set(info.orderId, ''); continue; }   /* ★v6.0.3 中18：別の注文のメッセージを出さない */
 
         // 2. get_one_order でメッセージ取得
         const detail = await apiGet(cfg.domain, '/api/v3/order/get_one_order', {
@@ -867,12 +877,16 @@
 
       const idx = searchData.data?.index_list?.[0];
       if (!idx) throw new Error('オーダーが見つかりません');
+      { const bad = slsSnMismatch(idx, info.orderId); if (bad) throw new Error('一覧の先頭が別の注文（' + bad + '）なので止めました'); }
       const { order_id, shop_id, region_id } = idx;
 
       // 2. パッケージ情報取得
       const pkgData = await apiGet(cfg.domain, '/api/v3/order/get_package', { order_id });
-      const pkg = pkgData.data?.order_info?.package_list?.[0];
-      if (!pkg) throw new Error('パッケージ情報がありません');
+      { const bad = slsSnMismatch(pkgData.data, info.orderId); if (bad) throw new Error('荷物の情報が別の注文（' + bad + '）なので止めました'); }
+      const pkgs = pkgData.data?.order_info?.package_list || [];
+      if (!pkgs.length) throw new Error('パッケージ情報がありません');
+      /* ★v6.0.3 中18：分割発送の2個目以降の伝票が出なかった → 荷物ごとに伝票を作って開く */
+      for (const pkg of pkgs) {
 
       // 3. 伝票ジョブ作成
       const sdData = await apiPost(cfg.domain, '/api/v3/logistics/create_sd_jobs', {
@@ -887,11 +901,12 @@
       }, { async_sd_version: '0.2' });
 
       const job = sdData.data?.list?.[0];
-      if (!job) throw new Error('伝票ジョブの作成に失敗');
+      if (!job) throw new Error('伝票ジョブの作成に失敗' + (pkgs.length > 1 ? '（荷物 ' + pkg.package_number + '）' : ''));
 
       // 4. PDF ページを新タブで開く
       const pdfUrl = `https://${cfg.domain}/awbprint?job_id=${job.job_id}&shop_id=${shop_id}&lang=${cfg.lang}&first_time=${job.is_first_time}`;
       window.open(pdfUrl, '_blank');
+      }
 
       setDone(btn);
 

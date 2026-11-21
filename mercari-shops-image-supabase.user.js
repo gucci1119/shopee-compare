@@ -2,7 +2,7 @@
 // @name         メルカリShops 商品画像 → Supabase在庫
 // @name:ja      【メルカリShops】🖼 商品画像を取り込む（→ポータル）
 // @namespace    smd
-// @version      1.0.1
+// @version      1.0.2
 // @updateURL    https://gucci1119.github.io/shopee-compare/mercari-shops-image-supabase.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/mercari-shops-image-supabase.user.js
 // @description  メルカリShopsの注文ページ(ログイン済み)から商品画像を取り出し、Supabase inventory.image に保存。画像なしのメルカリShops在庫を自動巡回して一括補完もできる。
@@ -59,8 +59,26 @@
     var m = location.pathname.match(/\/orders\/([A-Za-z0-9]+)/);
     return m ? m[1] : null;
   }
+  /* ★2026-11-21 05（全体レビュー 中16）：like *注文番号* に当たる全行の image を上書きしていた＋「同じ写真が2件以上の明細に付いたら貼らない」の守りが無かった。
+     → 先に当たる行を読み、URL の /orders/<番号> がちょうど同じ行だけにする。2行以上・同じ写真がほかの行に付いている時は貼らない（-2 を返す） */
   function patchImage(oid, src, done) {
-    sbFetch('inventory?supplier_url=like.*' + encodeURIComponent(oid) + '*', {
+    var exact = new RegExp('/orders/' + oid.replace(/[^A-Za-z0-9]/g, '') + '(?:[/?#]|$)');
+    sbFetch('inventory?select=item_id,supplier_url&supplier_url=like.*' + encodeURIComponent(oid) + '*&limit=20')
+      .then(function (r) { if (!r.ok) throw new Error('read ' + r.status); return r.json(); })
+      .then(function (rows) {
+        rows = (rows || []).filter(function (x) { return exact.test(String(x.supplier_url || '')); });
+        if (!rows.length) return done(0);
+        if (rows.length > 1) return done(-2, '同じ注文の行が' + rows.length + '件あるので貼りません');
+        var iid = String(rows[0].item_id);
+        return sbFetch('inventory?select=item_id&image=eq.' + encodeURIComponent(src) + '&item_id=neq.' + encodeURIComponent(iid) + '&limit=1')
+          .then(function (r2) { if (!r2.ok) throw new Error('read2 ' + r2.status); return r2.json(); })
+          .then(function (dup) { if (dup && dup.length) return done(-2, '同じ写真がほかの行（' + dup[0].item_id + '）に付いているので貼りません');
+            return patchImageRow(iid, src, done); });
+      })
+      .catch(function (e) { done(-1, String(e)); });
+  }
+  function patchImageRow(iid, src, done) {
+    sbFetch('inventory?item_id=eq.' + encodeURIComponent(iid), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
       body: JSON.stringify({ image: src, edited_at: new Date().toISOString() })
@@ -85,6 +103,7 @@
       patchImage(oid, src, function (n, err) {
         if (n > 0) toast('✅ 画像を保存（' + n + '件）', '#188038');
         else if (n === 0) toast('該当する在庫が無し（' + oid + '）', '#e8710a');
+        else if (n === -2) toast('⚠ ' + (err || '') + '（' + oid + '）', '#e8710a');
         else toast('保存失敗: ' + (err || '') + '（キーを確認）', '#c0392b');
         if (crawling) advance();
       });

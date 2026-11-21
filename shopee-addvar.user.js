@@ -2,9 +2,9 @@
 // @name         Shopee Add-Variation (Mercari)
 // @name:ja      【Shopee出品】➕ 明細（バリエーション）を足す
 // @namespace    https://github.com/kawaguchiryoya
-// @version      0.3.1
-// @updateURL    http://127.0.0.1:8765/shopee-addvar.meta.js
-// @downloadURL  http://127.0.0.1:8765/shopee-addvar.user.js
+// @version      0.3.2
+// @updateURL    https://gucci1119.github.io/shopee-compare/shopee-addvar.meta.js
+// @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-addvar.user.js
 // @description  ポータルから渡されたジョブ(URLハッシュ #smdjob=)を受け取り、Shopee商品編集ページでメルカリ画像をアップロード→バリエ追加をUI自動操作する。まずは診断＋半自動（最後の保存は人が押す）。
 // @match        https://seller.shopee.ph/portal/product/*
 // @match        https://seller.shopee.sg/portal/product/*

@@ -2,7 +2,7 @@
 // @name         【Shopee】📈 アクセス（Business Insights）取り込み
 // @name:ja      【Shopee】📈 アクセス（Business Insights）取り込み
 // @namespace    shopee-os
-// @version      1.5.6
+// @version      1.5.7
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-insights.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-insights.user.js
 // @description  Seller Center の Business Insights（Traffic Overview）が読んだ日別の訪問者・ページビューを横取りしてポータル（app_kv traffic_daily）へ送る。深夜に Shopee 側で見られない時間帯でもポータルで見られるようにする。v1.4.0：転記のタブが1日1回ここへ来て、取り込んだら元の画面へ戻る。v1.3.0：商品パフォーマンス（カタログ・明細ごとのカート追加数など・直近30日）を1日1回読んで app_kv product_perf_<店> へ送る。
@@ -52,8 +52,11 @@
     const sh = await shopInfo();
     if (SHOP_BAD || (URL_SHOP && !sh)) return;   /* ★v1.5.4 違う店の画面・URL が店を指しているのに店が読めない時は送らない（店なしで送ると国の数字に直接入る＝レビュー中2） */
     const payload = { action: 'traffic_ingest', cc: CC, period: period, rows: rows, shop_id: sh ? sh.id : '', shop_name: sh ? sh.name : '' };
-    fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.6' })) })
-      .then(r => r.text()).then(t => { log('sent', period, rows.length, t.slice(0, 120)); if (!/"ok"\s*:\s*true/.test(t)) { badge('⚠ 送れませんでした（返事が違う）＝次の回にもう一度'); return; }   /* ★1.4.0 2026-10-07 SG：GAS がログイン画面の HTML を返したのに「送った」と記録して、その日は二度と送らなかった */ try { localStorage.setItem(sentKey, JSON.stringify({ at: Date.now(), period, n: rows.length, res: t.slice(0, 80) })); } catch (_) {} badge('📈 ' + rows.length + '日ぶんを送りました（' + period + '）'); })
+    fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.7' })) })
+      .then(r => r.text()).then(t => { log('sent', period, rows.length, t.slice(0, 120));
+        /* ★v1.5.7（2026-11-21 05・全体レビュー 中17）：ok:true だけでは、POST が GET に化けて doGet の ok を返した時も「送った」になる（記憶 gas-ok-true-is-not-success）。traffic_ingest の返事（国と件数 n）まで見る */
+        let jj = null; try { jj = JSON.parse(t); } catch (_) { jj = null; }
+        if (!(jj && jj.ok === true && jj.cc === CC && typeof jj.n === 'number')) { badge('⚠ 送れませんでした（返事が違う）＝次の回にもう一度'); return; }   /* ★1.4.0 2026-10-07 SG：GAS がログイン画面の HTML を返したのに「送った」と記録して、その日は二度と送らなかった */ try { localStorage.setItem(sentKey, JSON.stringify({ at: Date.now(), period, n: rows.length, res: t.slice(0, 80) })); } catch (_) {} badge('📈 ' + rows.length + '日ぶんを送りました（' + period + '）'); })
       .catch(e => { log('send fail', e); badge('⚠ 送れませんでした ' + String(e).slice(0, 60)); });
   }
   function handle(url, text) {
@@ -95,9 +98,13 @@
   /* 読み直しの当番：現地 11:05 以降で今日まだ送っていなければ読み直す（1分ごとに時計を見る） */
   function localYmd() { return new Date(Date.now() + TZ * 3600000).toISOString().slice(0, 10); }
   function localHour() { return new Date(Date.now() + TZ * 3600000).getUTCHours() * 60 + new Date(Date.now() + TZ * 3600000).getUTCMinutes(); }
+  /* ★v1.5.7（全体レビュー 中17）：本人がこの画面を見て操作している時は、ページの移動・読み直しをしない（2分操作が無い時か裏の時だけ） */
+  let _siAct = 0; ['pointerdown', 'keydown', 'wheel'].forEach(ev => document.addEventListener(ev, () => { _siAct = Date.now(); }, true));
+  const _siBusy = () => !document.hidden && Date.now() - _siAct < 120000;
   setInterval(() => {
     try {
-      if (SHOP_BAD) return;   /* ★v1.5.4 レビュー低5：違う店の画面で読み直しを繰り返さない（止めた理由はバッジとコンソール） */
+      if (SHOP_BAD) return;
+      if (_siBusy()) return;   /* ★v1.5.4 レビュー低5：違う店の画面で読み直しを繰り返さない（止めた理由はバッジとコンソール） */
       const st = JSON.parse(localStorage.getItem(sentKey) || '{}'); const sentDay = st.at ? new Date(st.at + TZ * 3600000).toISOString().slice(0, 10) : '';
       if (localHour() >= 665 && sentDay !== localYmd() && !/traffic\/overview/.test(location.pathname)) { location.href = location.origin + '/datacenter/traffic/overview' + (URL_SHOP ? '?cnsc_shop_id=' + URL_SHOP : ''); return; }   /* ★v1.5.4 レビュー低4：店の指定を落とさない */
       if (localHour() >= 665 && sentDay !== localYmd() && (!st.at || Date.now() - st.at > 60 * 60000)) { const rl = Number(sessionStorage.getItem('si_reload') || 0); if (Date.now() - rl > 30 * 60000) { sessionStorage.setItem('si_reload', String(Date.now())); location.reload(); } }
@@ -145,7 +152,7 @@
   const sleep = ms => new Promise(res => setTimeout(res, ms));
   async function postGas(payload) {
     try {
-      const t = await (await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.6' })) })).text();
+      const t = await (await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.7' })) })).text();
       let j = null; try { j = JSON.parse(t); } catch (_) {}
       return { t: t, j: j, ok: !!(j && j.ok === true), busy: !!(j && j.error === 'busy'), unknown: /WRITE_TOKEN/.test(t) };
     } catch (e) { return { t: String(e), j: null, ok: false, busy: false, unknown: false }; }
