@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1440'
+var SRC_VER = '20261121-1620'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -3234,8 +3234,13 @@ function boostTick(manual) {
   if (manual !== true) {
     var now0 = now_(), sids0 = Object.keys(st.shops);
     var due0 = !sids0.length || sids0.some(function (k) { var x = st.shops[k] || {}; return !x.nextAt || now0 >= x.nextAt; });
+    /* ★2026-11-21 05（00・予定タスクの確かめ：第3 PH の登録の品 51471993101 が今日1回も回らなかった）：
+       11/19 版のままの子の台（2台目・5台目・6台目のどれか・古い boostTick は登録の品を見ずに自動の5品を選び、記録も cur も書かない）が、
+       本体の取り札が55分より古くなった隙に Bump を回していた（12:32 TH・13:32 第3 PH＝cur が前の回のまま・記録0）。
+       → 本体は、待つ店が無い回でも取り札が30分より古ければ握り直す（子は本体の札が新しい間は見送る）。前に握った時刻はスクリプト プロパティ＝通信は30分に1回だけ */
+    if (!due0 && !isChild_()) { try { var P1 = P_(), lastC = Number(P1.getProperty('BOOST_CLAIM_AT')) || 0; if (now_() - lastC > 1800) { P1.setProperty('BOOST_CLAIM_AT', String(now_())); syncGate_('boostTick', 480); } } catch (eCl) {} }
     if (!due0) { try { ufPersist_(); } catch (eP0) {} return { ok: true, skipped: 'nodue' }; }   /* 枠が空いた店が無い＝読み1回で終わる（その1回も接続枠に数える） */
-    if (!syncGate_('boostTick', 480)) return { ok: false, skipped: 'gate' };   /* ★2026-09-23 札は動ける時だけ（10分ごとなので札の長さも8分に） */
+    if (!syncGate_('boostTick', 480)) return { ok: false, skipped: 'gate' }; if (!isChild_()) { try { P_().setProperty('BOOST_CLAIM_AT', String(now_())); } catch (eCp) {} }   /* ★2026-09-23 札は動ける時だけ（10分ごとなので札の長さも8分に） */
   }
   var pref = ((baKv_(BOOST_PREF_KV) || {}).items) || {};
   if (BA_KV_FAIL[BOOST_PREF_KV]) return { ok: false, skipped: 'kv', why: 'boost_prefer を読めなかった（登録の品が先に回らなくなるので、この回は何もしない）' };   /* ★11/21 レビュー6 */
