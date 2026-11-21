@@ -1918,6 +1918,17 @@
       if (away()) { try { alert('⏸ 確認が要る処理が出ましたが、' + why() + 'ので、小窓を出さずに「やらない」側で止めました（裏の道具を止めないため）。\n\n― 確認の中身 ―\n' + String(m == null ? '' : m) + '\n\nやる時は、画面の前でもう一度ボタンを押してください。'); } catch (_) {} return false; }
       return nConfirm(m);
     };
+    /* ★2026-11-21 05（全体レビュー 中4）：本人の値が消える確認（在庫台帳の欄の食い違い）は「いいえ」に倒さず、画面に戻った時に出す。そのための口 */
+    window.__smdAway = away;
+    window.__smdConfirmWhenBack = function (m) {
+      if (!away()) return Promise.resolve(nConfirm(m));
+      return new Promise(res => {
+        let done = false; const evs = ['focus', 'visibilitychange', 'pointerdown', 'keydown'];
+        const fin = () => { if (done) return; setTimeout(() => { if (done || away()) return; done = true; evs.forEach(ev => { window.removeEventListener(ev, fin, true); document.removeEventListener(ev, fin, true); }); clearInterval(iv); res(nConfirm(m)); }, 0); };
+        evs.forEach(ev => { window.addEventListener(ev, fin, true); document.addEventListener(ev, fin, true); });
+        const iv = setInterval(fin, 3000);
+      });
+    };
     window.prompt = function (m, d) {
       if (away()) { try { alert('⏸ 入力が要る処理が出ましたが、' + why() + 'ので、小窓を出さずに止めました（入力なし＝キャンセル）。\n\n― 聞かれた事 ―\n' + String(m == null ? '' : m) + '\n\nやる時は、画面の前でもう一度ボタンを押してください。'); } catch (_) {} return null;
       }
@@ -1926,7 +1937,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-201742';
+  const APP_BUILD = '20261121-204220';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -7458,6 +7469,7 @@
     "全部出す": "Show all",
     "このPCだけの表示です。左の固定列（ItemID〜商品名）は常に出ます": "Saved on this PC only. The pinned columns on the left (ItemID to Name) are always shown",
     "むこうの値を残しました。画面を更新します": "Kept the other PC's value. Refreshing",
+    "⏸ 在庫の欄の保存は、もう1台との食い違いがあるので、画面に戻った時に確認を出します": "⏸ This stock field conflicts with the other PC. You will be asked when you come back to this screen",
     "🏦 銀行口座への着金見込み（3段階）": "🏦 Expected arrival in your bank account (3 stages)",
     "確定リリース履歴なし（payouts未同期）": "No confirmed release history (payouts not synced)",
     "売れ続けている＝先に仕入れておく価値がある": "Keeps selling — worth buying in advance",
@@ -12592,7 +12604,7 @@
             const gap = raw.payoutJpy - (sale + dDisc + dFee + dSls + dFix + dFx); if (gap) { if (raw.payFxPct > 0) dFx += gap; else dFee += gap; }
             const rows2 = [{ label: pl === '1' ? '売り値' : '売り値（Shopee に出す分）', jpy: sale, local: listL }];   /* ★2026-10-25 03：local と同じ額を note に重ねない */
             if (dDisc) rows2.push({ label: pcBundleDealPct() ? 'まとめ買い割引（Bundle Deal）' : '想定値引き', jpy: dDisc, note: raw.discPct + '%' });
-            rows2.push({ label: 'Shopee 手数料', jpy: dFee, note: (Math.round(feeTotalPct(cc) * 100) / 100) + '%' });   /* raw.feePct は小数1桁（15.75→15.7）なので設定の値をそのまま */
+            rows2.push({ label: 'Shopee 手数料', jpy: dFee, note: (Math.round(feeTotalPct(cc, feePriceAt_()) * 100) / 100) + '%' });   /* raw.feePct は小数1桁（15.75→15.7）なので設定の値をそのまま */
             rows2.push({ label: '送料 SLS', jpy: dSls, note: (pcBundleLive() && window._pcBundle.items.every(x => Number(x.w) > 0) ? window._pcBundle.items.map(x => Math.round(x.w)).join(' + ') + ' = ' : '') + raw.chargeG + 'g（' + curS + (Math.round(raw.slsL * 100) / 100).toLocaleString('en-US') + '）' });   /* SLS は 0.5 刻みがある（R$33.5） */
             if (dFix) rows2.push({ label: '国別の固定控除', jpy: dFix });
             if (dFx) rows2.push({ label: '入金時の為替手数料', jpy: dFx, note: raw.payFxPct + '%' });
@@ -13429,7 +13441,7 @@
       const disc3 = pcDiscPctNow() / 100;
       const slsL = pf.slsJpy / rg.rateJpy;                                   // 現地通貨のSLS送料
       const fixedL = Number((settings.priceFixedFee || {})[cc]) || 0;        // 現地通貨の固定控除
-      const minRaw = (slsL + fixedL) / Math.max(0.05, (1 - disc3) * feeKeep(cc));
+      const minRaw = (slsL + fixedL) / Math.max(0.05, (1 - disc3) * feeKeep(cc, feePriceAt_()));   /* ★11/21 見積もりは30日先の率（中2） */
       let minLocal = Number(pcOvShop['3'][cc]) > 0 ? (pcIsAgreedAmt(cc, pcOvShop['3'][cc]) ? Number(pcOvShop['3'][cc]) : roundLocal(Number(pcOvShop['3'][cc]), unit)) : Math.max(unit, Math.ceil(minRaw / unit) * unit);      // 切り上げ（下回るとShopee側が赤字）
       /* ★2026-11-13 03（spec 23.21・本人「ほんで、内訳のとこも」）：&shop3（新しい名前）＝③の Shopee 分。&splitSale と一緒の時だけ、③は Shopee 分＝shop3・PayPal＝合計−shop3（最低額の所を shop3 に替える）。
          最低額より安くても止めない（赤字の円を se3.lossJpy で返す）。合計以上・VN の上限 909,090 超えは使わない（今のまま）。&shop2・pcOvShop['3'] は変えない */
@@ -13493,7 +13505,7 @@
         : `<span class="pc-cap ok" title="${r.cc}の上限 ${r.rg.cur}${cap.toLocaleString()} の範囲内です">✓可</span>`;
     };
     const CC_JA = { PH: 'フィリピン', SG: 'シンガポール', MY: 'マレーシア', BR: 'ブラジル', VN: 'ベトナム', TH: 'タイ', TW: '台湾' };
-    const F = (cc) => feesAt(cc);  // [販売, プログラム, 決済] %（加算方式）・★11/21 手数料の改定日を過ぎたら新しい率（FEE_SCHEDULE）
+    const F = (cc) => feesAt(cc, feePriceAt_());  // [販売, プログラム, 決済] %（加算方式）・★11/21 手数料の改定日を過ぎたら新しい率（FEE_SCHEDULE）
     const discPct = pcDiscPctNow(), payFxPct = Number(settings.pricePayoutFxPct) || 0;
     // ★国は「横（列）」に並べる：この画面は国どうしを見比べるのが目的なので、横に並んでいた方が一目で比較できる
     const th = rows.map(r => `<th style="text-align:right"><span class="ord-cc" style="background:${r.rg.color}">${r.cc}</span></th>`).join('');
@@ -17865,7 +17877,11 @@
             if (clash.length) {
               const en = i18nOn();
               const msg = (en ? 'Another PC (or another screen) has already changed the same field of this row.\n\n' : 'もう1台のPC（または別の画面）が、この行の同じ項目を先に変えています。\n\n') + clash.map(k => '・' + k + (en ? ': theirs "' + N(sv[k]) + '" / yours "' + N(patch[k]) + '"' : '：むこう「' + N(sv[k]) + '」／こちら「' + N(patch[k]) + '」')).join('\n') + (en ? '\n\nOK = overwrite with your value   /   Cancel = keep their value' : '\n\nOK＝こちらの値で上書き　／　キャンセル＝むこうの値を残す');
-              if (!confirm(msg)) { clash.forEach(k => { before[k] = sv[k]; }); toast('むこうの値を残しました。画面を更新します'); try { renderStock(); } catch (_) {} return false; }
+              /* ★2026-11-21 05（全体レビュー 中4）：画面の前にいない時の「自動でいいえ」に倒すと、打ってすぐ別の窓へ移った時に本人の値が黙って消える → 戻った時に聞く */
+              let _ok;
+              if (typeof window.__smdConfirmWhenBack === 'function' && window.__smdAway && window.__smdAway()) { try { toast('⏸ 在庫の欄の保存は、もう1台との食い違いがあるので、画面に戻った時に確認を出します', 8000); } catch (_) {} _ok = await window.__smdConfirmWhenBack(msg); }
+              else _ok = confirm(msg);
+              if (!_ok) { clash.forEach(k => { before[k] = sv[k]; }); toast('むこうの値を残しました。画面を更新します'); try { renderStock(); } catch (_) {} return false; }
             }
           }
         } catch (_) {}
@@ -31567,6 +31583,9 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '📦 <b>在庫の欄を打ってすぐ別の窓へ移った時、もう1台との食い違いの確認で本人の値が消えないように</b>（全体レビュー 中4）：画面の前にいない時は確認を自動で「いいえ（むこうの値を残す）」にしていたので、打った値が黙って消える筋がありました。この確認だけは、画面に戻った時に出します',
+      '🔎 <b>単品の JAN の自動探しで、別の作品の JAN を拾わないように</b>（全体レビュー 中3）：「同じ名前の別の明細」から JAN を写す時、開いた時の出品の控えの名前だけで結んでいたので、その後に別の所で明細の詰め直しがあると別の作品の JAN を拾う筋がありました。写す前に、元の明細の今の名前を読み直して照らし、JAN の台帳も最新か確かめます。読めない時はこの探し方は使いません',
+      '📅 <b>台湾の手数料の改定（12/11〜 14.55%）を、値付け・見積もりでは30日前から使います</b>（全体レビュー 中2）：今つけた値段は何週間も後に売れるので、今の率（12.75%）で値付けすると 12/11 以降に売れた時に粗利が減っていました。価格計算・見積もり・出品の値付けは「30日先の率」で計算します（台湾は今日から 14.55%）。注文の粗利は今まで通り、その注文の日の率で数えます',
       '📊 <b>アクセスの比較の表に「全店の合計」・始まりと抜け・「期間を並べる」</b>（本人「これ、累計も見たいのよ」「この一覧の見方も見やすいのよな」）：一番上に全店の合計の行（率は足してから割る）。累計・長い期間の時は店ごとに「◯/◯ から」（最初に訪問者が1人以上だった日）と「◯日抜け」（0 ではなく記録が無い日）。見方「期間を並べる」＝選んだ指標を今日（途中）・7日・30日・90日・累計で横に並べ、前の同じ長さからの ▲▼％。左の列は固定',
       '📅 <b>アクセス（各国）の期間に「累計・今月・先月・日付で」</b>（本人「これ、累計も見たいのよ」「期間指定できるように」「上と被るのか...?」）：期間の選びは上の帯の1か所だけ（比較の表に別の選びは作らない）。比較の表の見出しに今の期間の名前（例：累計 10/17〜11/20）と「📅 期間を変える」（上の帯の期間へ移る）',
       '📥 <b>アクセスの最後の取得の表を折り畳めるように</b>（本人「折り畳めるように」）：見出しを押すと開け閉め（▸／▾・この端末で覚える）。閉じた時は「全18店 最新・遅れ・止まっている・出品0／今日の訪問者 計」の1行。遅れ・止まっている店がある時は開いた形で出す',
@@ -38231,7 +38250,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
               // ★なぜその価格になったかを必ず出す。数字が変なときに気づけるように内訳を全部見せる。
               const usedW = wg > 0 ? wg : ((listState && listState.weightG) || settings.weightG || 0);
               const roiP = (roiIn > 0) ? roiIn : (settings.roiBracketOn ? roiForCost(cost, usedW, cc) : settings.roiPct);
-              const feeP = Math.round((1 - feeKeep(cc)) * 1000) / 10;          // 手数料合計%
+              const feeP = Math.round((1 - feeKeep(cc, feePriceAt_())) * 1000) / 10;          // 手数料合計%（★11/21 値付けと同じ30日先の率）
               const slsL = slsLocal(cc, usedW);                                 // SLS送料(現地通貨)
               const slsJ = Math.round(slsL * rg.rateJpy);                       // 同(円)
               const fxM = Number(settings.priceFxMargin) || 0, pb = Number(settings.priceProfitBuffer) || 0;
@@ -54271,14 +54290,29 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       else if (pidNameMultiHw(nm)) tried.push('同じ名前の明細（この名前は複数の機種にあるので使わない）');
       else if (!myHw) tried.push('同じ名前の明細（この明細の SKU に機種が無いので、別の作品と区別できず使わない）');
       else {
-        const js = new Set(), mp = new Set(), src = []; let seen = 0;
+        const js = new Set(), mp = new Set(), src = []; let seen = 0, cand = [];
         for (const cc of Object.keys(byCc)) for (const r of (byCc[cc] || [])) for (const m of (r.models || [])) {
           if (!m || nz(m.n) !== nm || (String(r.item_id) === String(e.item_id) && String(m.id) === String(e.model_id))) continue;
           if (pidSkuHw(m) !== myHw) continue;
-          seen++; const pr = (productIds || {})[pidKeyModel(r, m)] || {};
-          if (okJan(pr.jan) && !blocked(String(pr.jan).trim())) { js.add(String(pr.jan).trim()); src.push(r.cc + ' ' + r.item_id); }
-          else if (String(pr.mpn || '').trim()) mp.add(String(pr.mpn).trim());
+          seen++; cand.push({ r, m });
         }
+        /* ★2026-11-21 05（全体レビュー 中3）：出品の控え（lst.byCc）は開いた時の名前。その後に別の所で詰め直し削除が起きると、同じ model_id に別の作品が入っていて、
+           台帳（item#model）から別の作品の JAN を拾う。→ 拾う元の明細の【今の名前】を出品の表から読み直して照らし、台帳も更新時刻で確かめた最新を使う。読めなければ①は使わない */
+        let pidNow = productIds || {}, liveName = null;
+        if (cand.length) {
+          try { const pr = await kvCachedRows('k=eq.product_ids'); if (pr && pr[0] && pr[0].v && pr[0].v.items && typeof pr[0].v.items === 'object') pidNow = pr[0].v.items; } catch (_) {}
+          try {
+            liveName = {}; const ids = [...new Set(cand.map(c => String(c.r.item_id)))].slice(0, 80);
+            for (let i = 0; i < ids.length; i += 40) { const rows = await sbGetAll('listings', 'select=item_id,models&item_id=in.(' + ids.slice(i, i + 40).join(',') + ')'); (rows || []).forEach(x => (x.models || []).forEach(m => { if (m && m.id) liveName[String(x.item_id) + '#' + String(m.id)] = nz(m.n); })); }
+          } catch (_) { liveName = null; }
+        }
+        if (cand.length && !liveName) tried.push('同じ名前の明細（今の名前を読み直せなかったので使わない）');
+        else { let moved = 0; for (const c of cand) {
+          if (liveName[String(c.r.item_id) + '#' + String(c.m.id)] !== nm) { moved++; continue; }   /* 今は別の名前（詰め直しで入れ替わった）か消えた */
+          const pr = pidNow[pidKeyModel(c.r, c.m)] || {};
+          if (okJan(pr.jan) && !blocked(String(pr.jan).trim())) { js.add(String(pr.jan).trim()); src.push(c.r.cc + ' ' + c.r.item_id); }
+          else if (String(pr.mpn || '').trim()) mp.add(String(pr.mpn).trim());
+        } if (moved) seen -= moved; }
         if (js.size === 1) return { jan: [...js][0], mpn: '', src: '同じ名前・同じ機種の明細（' + src.slice(0, 2).join('・') + '）の JAN' };
         if (js.size > 1) tried.push('同じ名前・同じ機種の明細（JAN が ' + js.size + '種類に分かれていて決められない）');
         else if (mp.size === 1) return { jan: '', mpn: [...mp][0], src: '同じ名前・同じ機種の明細の型番' };
@@ -59591,6 +59625,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function FEE_SCHEDULE_() { return [   /* 関数にしておく＝読み込みの途中で先に呼ばれても止まらない（const は宣言の行より前に使うと止まる） */
     { cc: 'TW', i: 0, day: '2026-12-11', from: Date.parse('2026-12-11T00:00:00+08:00'), pct: 14.55, was: 12.75, note: 'Shopee Japan のメール 11/18：台湾の販売手数料 12.75% → 14.55%（税込）・2026-12-11（台湾時間）以降に作られた注文から' },
   ]; }
+  /* ★2026-11-21 05（全体レビュー 中2）：値付け・見積もりは「売れる頃」の率で計算する。今出した出品や見積もりは何週間も後に売れるので、
+     今の時刻の率だと、12/11 より前に値付けした台湾の出品が 12/11 以降に売れた時に手数料が 1.8 ポイント上がった分だけ粗利が減る。
+     → 値付け（注文の時刻を渡さない計算）は30日先の率。注文の粗利は今まで通り注文の時刻（ordFeeAt）の率。設定の表の合計は今の率のまま */
+  function feePriceAt_() { return Date.now() + 30 * 864e5; }
   function feesAt(cc, at) {
     const f = ((settings.priceFees || {})[cc] || [0, 0, 0]).slice(), t = Number(at) > 0 ? Number(at) : Date.now();
     FEE_SCHEDULE_().forEach(x => { if (x.cc !== cc) return; const v = Number(f[x.i]) || 0;
@@ -59665,7 +59703,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     const roi = (opt.roiPct != null ? opt.roiPct
       : (draftRoi != null ? draftRoi
         : (settings.roiBracketOn ? roiForCost(costJpy, chargeG, cc) : settings.roiPct))) / 100;
-    const feeMult = feeKeep(cc); // 1 − 合計手数料%（加算方式・スプシ準拠）
+    const feeMult = feeKeep(cc, opt.at != null ? opt.at : feePriceAt_()); // 1 − 合計手数料%（加算方式・スプシ準拠）・★11/21 値付けは30日先の率（中2）
     const fxM = (Number(settings.priceFxMargin) || 0) / 100, pb = (Number(settings.priceProfitBuffer) || 0) / 100;
     const slsJpy = slsLocal(cc, chargeG) * rg.rateJpy;
     // 帯ROIを使う（＝ROIを手で指定していない）ときだけ、帯の上限仕入で計算する＝スプシと同じ挙動。
@@ -59678,7 +59716,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function priceProfitFor(cc, costJpy, localPrice, opt) {
     const rg = regionByCc(cc); if (!rg) return { buyerJpy: 0, profit: 0, roi: 0 };
     opt = opt || {};
-    const feeMult = feeKeep(cc, opt.at); // 1 − 合計手数料%（加算方式）。opt.at＝その時点の率（注文の粗利は注文の時刻・無ければ今）
+    const feeMult = feeKeep(cc, opt.at != null ? opt.at : feePriceAt_()); // 1 − 合計手数料%（加算方式）。opt.at＝その時点の率（注文の粗利は注文の時刻）・★11/21 渡さない＝値付け・見積もり＝30日先の率（中2）
     const weightG = (opt.weightG != null ? opt.weightG : (listState.weightG != null ? listState.weightG : settings.weightG)) || 0;
     const dW = opt.dimW != null ? opt.dimW : listState.dimW, dH = opt.dimH != null ? opt.dimH : listState.dimH, dD = opt.dimD != null ? opt.dimD : listState.dimD;
     const vol = (dW && dH && dD) ? (dW * dH * dD / 6) : 0; // 容積重量(g)=W×H×D(cm)÷6000×1000＝÷6。weightG(g)と同単位で比較
