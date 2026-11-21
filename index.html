@@ -1922,7 +1922,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-105030';
+  const APP_BUILD = '20261121-105215';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -47059,12 +47059,14 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
      数は Shopee の上限（1店5品・4時間）のまま。入れた後に1回回ったら済み（GAS は boost_prefer を書き換えない）。文字の値（例 kc1121）は 01 の「ずっと先に」の印で、ここでは外さない。
      今 Bump 中の品と終わる時刻は boost_state.shops[店].cur（GAS が Bump を見た時に残す）。控え＝boost_log_shop3（第3は全部・ほかの店はポータルで入れた品）。 */
   var BUMPQ = { pref: null, st: null, log: null, at: 0, msg: '' };
-  async function bumpLoad(force) {
-    if (!force && BUMPQ.at && Date.now() - BUMPQ.at < 60000) return BUMPQ;
-    const r = await sbGet('app_kv', 'select=k,v&k=in.(boost_prefer,boost_state,boost_log_shop3)');
+  async function bumpLoad(force, withLog) {
+    if (!force && BUMPQ.at && Date.now() - BUMPQ.at < 60000 && (!withLog || BUMPQ.logAt)) return BUMPQ;
+    /* 控え（boost_log_shop1〜3・合わせて数百KB）は ⬆ Bump タブを開いた時だけ読む（出品一覧の上の表では読まない＝通信を増やさない） */
+    const r = await sbGet('app_kv', 'select=k,v&k=in.(boost_prefer,boost_state' + (withLog ? ',boost_log_shop1,boost_log_shop2,boost_log_shop3,boost_log_shop12' : '') + ')');
     if (!Array.isArray(r)) throw new Error('Bump の控えを読めませんでした');
     const m = {}; r.forEach(x => { m[x.k] = x.v; });
-    BUMPQ.pref = (m.boost_prefer && m.boost_prefer.items) || {}; BUMPQ.st = m.boost_state || { shops: {}, items: {} }; BUMPQ.log = (m.boost_log_shop3 && m.boost_log_shop3.rows) || []; BUMPQ.at = Date.now();
+    BUMPQ.pref = (m.boost_prefer && m.boost_prefer.items) || {}; BUMPQ.st = m.boost_state || { shops: {}, items: {} }; BUMPQ.at = Date.now();
+    if (withLog) { BUMPQ.log = [].concat(...['boost_log_shop1', 'boost_log_shop2', 'boost_log_shop3', 'boost_log_shop12'].map(k => (m[k] && m[k].rows) || [])).sort((a, b) => a[0] - b[0]); BUMPQ.logAt = Date.now(); }
     return BUMPQ;
   }
   /* 待ちの品の今の状態：'done'＝入れた後に回った／'wait'＝まだ／'ng'＝断られて1日待ち */
@@ -47127,7 +47129,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     const hid = hostId || 'list-bump';
     const host = document.getElementById(hid); if (!host) return;
     if (!host.innerHTML) host.innerHTML = '<div class="smd-dim" style="padding:8px">⏳ Bump の控えを読み込み中…</div>';
-    try { await bumpLoad(); } catch (e) { host.innerHTML = '<div class="smd-err" style="padding:8px">⚠ ' + esc(e.message || String(e)) + '（0件ではありません）</div>'; return; }
+    try { await bumpLoad(false, !compact); } catch (e) { host.innerHTML = '<div class="smd-err" style="padding:8px">⚠ ' + esc(e.message || String(e)) + '（0件ではありません）</div>'; return; }
     const st = BUMPQ.st || {}, shops = st.shops || {}, pref = BUMPQ.pref || {}, nowS = Date.now() / 1000;
     const hm = (s) => s ? fmtOrdTs(s * 1000) : '—';
     const rem = (s) => { const m = Math.max(0, Math.round((s - nowS) / 60)); return m >= 60 ? 'あと ' + Math.floor(m / 60) + '時間' + (m % 60) + '分' : 'あと ' + m + '分'; };
@@ -47166,7 +47168,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
         <button class="smd-btn bump-reload" data-guide="Bump の様子を読み直します（GAS は30分ごとに Bump の空きを見ます）。" style="margin-left:auto;font-size:11px;padding:2px 10px">🔄 読み直す</button></div>
       ${BUMPQ.msg ? `<div style="font-size:12px;margin:4px 0 8px;color:#2b5fd9">${esc(BUMPQ.msg)}</div>` : ''}
       <div style="overflow-x:auto">${tbl}</div>
-      <div style="margin-top:12px"><b style="font-size:12.5px">回した品の控え（新しい順・40件まで）</b> <span class="smd-dim" style="font-size:11px">第3は全部・ほかの店は登録の品。21日分を残します</span>
+      <div style="margin-top:12px"><b style="font-size:12.5px">回した品の控え（新しい順・40件まで）</b> <span class="smd-dim" style="font-size:11px">全店（本店・2店舗目・第3）の回した品。21日分を残します</span>
       <div style="overflow-x:auto;margin-top:4px"><table style="border-collapse:collapse;font-size:11.5px"><tbody>${lgH}</tbody></table></div></div></div>`;
     host.querySelectorAll('.bump-reload').forEach(rl => { rl.onclick = () => { BUMPQ.at = 0; BUMPQ.msg = ''; renderBumpTab(hid, compact); }; });
     host.querySelectorAll('.bump-full').forEach(b => { b.onclick = () => { const t = document.querySelector('#list-tab button[data-k="bump"]'); if (t) t.click(); }; });

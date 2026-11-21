@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1150'
+var SRC_VER = '20261121-1200'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -3155,7 +3155,7 @@ function boostTick(manual) {
           picks.forEach(function (id) { var pv0 = pref && pref[String(id)]; if (flIdA[String(id)] && pv0 && typeof pv0 === 'object') return; st.items[String(id)] = now; if (!flIdA[String(id)] && pv0 && typeof pv0 === 'object') st.regN[String(id)] = (Number(st.regN[String(id)]) || 0) + 1; });   /* 登録の品が断られた時は「回した」にしない（_ng で30分あける）・通ったら回数を足す */
           if (fl.length) { st.ngWhy = st.ngWhy || {}; fl.forEach(function (f) { st.ngWhy[String((f || {}).item_id)] = [now, String((f || {}).failed_reason || '').slice(0, 120)]; }); }
           var flId = {}; fl.forEach(function (f) { flId[String((f || {}).item_id)] = 1; });
-          picks.forEach(function (id) { var pv = pref && pref[String(id)]; if (s3 || pv) log3Add.push([now, sid, Number(id), pv ? (typeof pv === 'object' ? 2 : 1) : 0, flId[String(id)] ? 0 : 1]); });
+          picks.forEach(function (id) { var pv = pref && pref[String(id)]; log3Add.push([now, sid, Number(id), pv ? (typeof pv === 'object' ? 2 : 1) : 0, flId[String(id)] ? 0 : 1, s3 ? 3 : 0]); });   /* ★11/21 04（本人「bumpは効果ある？」）：全店の回した品を残す（系統ごとの鍵に分ける） */
           picks.forEach(function (id) { if (flId[String(id)]) st.items[String(id) + '_ng'] = now; });
           if (fail) why = String((fl[0] || {}).failed_reason || '').slice(0, 80);
           for (var i = 0; i < added; i++) cds.push(4 * 3600);
@@ -3170,7 +3170,16 @@ function boostTick(manual) {
     } catch (e) { ss.err = String((e && e.message) || e).slice(0, 120); ss.nextAt = now + 3600; st.shops[sid] = ss; out.push({ shop_id: sid, cc: t.cc || '', error: ss.err }); }
   });
   st.at = now; try { baKvSet_(BOOST_KV, st); } catch (eS) {}
-  if (log3Add.length) { try { log3 = baKv_(BOOST_LOG3_KV) || {}; var rows3 = (log3.rows || []).filter(function (r) { return now - Number(r[0]) < 21 * 86400; }).concat(log3Add); baKvSet_(BOOST_LOG3_KV, { rows: rows3, at: now, cols: ['時刻(秒)', '店', 'item_id', '先に回す印(1=ずっと・2=ポータルで入れた)', '通った'] }); } catch (eL3) {} }
+  if (log3Add.length) {
+    /* 系統：第3＝boost_log_shop3／2店舗目（accounts の status=sub）＝boost_log_shop2／ほか＝boost_log_shop1（本店）。[時刻(秒), 店, item_id, 印(0いつもの・1ずっと先に・2登録), 通った(1/0)]・21日 */
+    var subIds = null;
+    if (log3Add.some(function (r) { return r[5] !== 3; })) { try { subIds = {}; (sbSelect_('accounts', 'select=shop_id&status=eq.sub') || []).forEach(function (a) { subIds[String(a.shop_id)] = 1; }); } catch (eAc) { subIds = null; } }
+    var byKey = {};
+    log3Add.forEach(function (r) { var key = r[5] === 3 ? BOOST_LOG3_KV : (subIds ? (subIds[String(r[1])] ? 'boost_log_shop2' : 'boost_log_shop1') : 'boost_log_shop12'); (byKey[key] = byKey[key] || []).push(r.slice(0, 5)); });
+    Object.keys(byKey).forEach(function (key) {
+      try { var lg = baKv_(key) || {}; var rowsL = (lg.rows || []).filter(function (r) { return now - Number(r[0]) < 21 * 86400; }).concat(byKey[key]); baKvSet_(key, { rows: rowsL, at: now, cols: ['時刻(秒)', '店', 'item_id', '印(0いつもの・1ずっと先に・2登録)', '通った'] }); } catch (eL3) {}
+    });
+  }
   try { ufPersist_(); } catch (eP) {}   /* ★2026-09-23 レビュー：Bump の通信（1日 約150回）が一度も数えられていなかった */
   return { ok: true, shops: out };
 }
