@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1430'
+var SRC_VER = '20261121-1440'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -14517,6 +14517,7 @@ function baBrNewMode_(cfg, cc, hw, series, st) {
   var main = '', capMain = 0; try { ((baKv_('shop_item_limit') || {}).shops || []).forEach(function (x) { if (x && x.cc === 'BR' && x.role === 'main') { main = String(x.shop_id); capMain = Number(x.cap) || 0; } }); } catch (e) {}
   if (!main || !capMain || !BA_LIVE_OF) return null;   /* 本店・上限・公開中の数が分からない時は今までどおり（安全側） */
   var minFree = Math.max(0, Number(o.minFree) || 500), free = capMain - (Number(BA_LIVE_OF[main]) || 0);
+  if (Number(o.maxLive) > 0) free = Math.min(free, Number(o.maxLive) - (Number(BA_LIVE_OF[main]) || 0));   /* ★2026-11-21 00 の決め：公開中が maxLive（4,900）に届いたら新しいカタログを作らない（記録の枠 10,000 と本人の言う 5,000 が食い違うため・本人の数で止める） */
   if (free < minFree) { if (!BA_BRNEW_NOTE) { BA_BRNEW_NOTE = true; baLog_(st, 'BR：本店の空き枠が ' + free + '（' + minFree + ' 未満）なので、新しい総称カタログには入れず今までどおりにします'); } return null; }
   if (!BA_BRNEW_MEMO) { var rec = baKv_(BR_NEWCAT_KEY); if (BA_KV_FAIL[BR_NEWCAT_KEY]) return null; BA_BRNEW_MEMO = (rec && rec.items) || {}; }
   return { main: main, cap: Math.max(2, Math.min(100, Number(o.cap) || 30)), perDay: Math.max(1, Number(o.perDay) || 8), ids: BA_BRNEW_MEMO, free: free };
