@@ -2,13 +2,14 @@
 // @name         【ポータル】ヤフオク/PayPay セラー → Supabase（自動）
 // @name:ja      【ヤフオク・PayPay】🏪 出品者の情報を取り込む（→ポータル・自動）
 // @namespace    https://aucpay.yahoo.co.jp/
-// @version      1.1.2
+// @version      1.1.3
 // @updateURL    https://gucci1119.github.io/shopee-compare/yahoo-pay-seller-supabase.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/yahoo-pay-seller-supabase.user.js
 // @description  Yahoo!かんたん決済の支払い一覧から各支払い明細を巡回し、出品者(セラー)・商品ID・販売価格を取得してSupabase inventoryへ連携。ヤフオク・PayPayフリマは購入メールにセラー/価格が載らないため、ここで古物台帳用の相手方(出品者)を埋める。明細はJSで描画されるので隠しiframeで読む。@grant none＋fetch（SupabaseはCORS対応）。
 // @author       Shopee OS
 // @match        https://aucpay.yahoo.co.jp/detail-front/PaymentDetailList*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -37,9 +38,11 @@
   const DONE_KEY = 'yahoo_pay_done_v1';
   const AUTO_DELAY = 4000;
 
+  /* ★2026-11-22 05（全体レビュー 11/22 中3）：service_role の鍵は Tampermonkey の中（GM_setValue）に置く＝ページ（メルカリ等）の JS から読めない。前の localStorage の鍵は1回だけ移して消す */
+  const keyNow = () => { let k = GM_getValue('sb_key', '') || ''; if (!k) { const ls = localStorage.getItem(KEY_LS) || ''; if (ls) { GM_setValue('sb_key', ls); k = ls; } } if (k) { try { localStorage.removeItem(KEY_LS); } catch (_) {} } return k; };
   const getKey = (force) => {
-    let k = localStorage.getItem(KEY_LS) || '';
-    if (!k || force) { k = (prompt('Supabase service_role キー（supabase-keys.txt 4行目）を貼り付け:', '') || '').trim(); if (k) localStorage.setItem(KEY_LS, k); }
+    let k = keyNow();
+    if (!k || force) { k = (prompt('Supabase service_role キー（supabase-keys.txt 4行目）を貼り付け:', '') || '').trim(); if (k) GM_setValue('sb_key', k); }
     return k;
   };
   const loadDone = () => { try { return new Set(JSON.parse(localStorage.getItem(DONE_KEY) || '[]')); } catch { return new Set(); } };
@@ -101,7 +104,7 @@
   let running = false;
   async function run(silent) {
     if (running) return;
-    const key = silent ? (localStorage.getItem(KEY_LS) || '') : getKey();
+    const key = silent ? keyNow() : getKey();
     if (!key) { setBadge('キー未設定'); return; }
     running = true;
     const done = loadDone(), zero = loadZero(), nowMs = Date.now();

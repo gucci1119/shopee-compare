@@ -2,12 +2,13 @@
 // @name         メルカリShops 商品画像 → Supabase在庫
 // @name:ja      【メルカリShops】🖼 商品画像を取り込む（→ポータル）
 // @namespace    smd
-// @version      1.0.2
+// @version      1.0.3
 // @updateURL    https://gucci1119.github.io/shopee-compare/mercari-shops-image-supabase.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/mercari-shops-image-supabase.user.js
 // @description  メルカリShopsの注文ページ(ログイン済み)から商品画像を取り出し、Supabase inventory.image に保存。画像なしのメルカリShops在庫を自動巡回して一括補完もできる。
 // @match        https://mercari-shops.com/*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // ==/UserScript==
 //
 // 使い方:
@@ -25,8 +26,11 @@
   var DONE_FLAG = '__mshops_img_done';     // 同一ページの二重処理防止
 
   function key() {
-    var k = localStorage.getItem(KEY_LS);
-    if (!k) { k = prompt('Supabaseの書き込みキー(service_role)を貼り付けてください（この端末に保存されます）'); if (k) { k = k.trim(); localStorage.setItem(KEY_LS, k); } }
+    /* ★2026-11-22 05（全体レビュー 11/22 中3）：service_role の鍵は Tampermonkey の中（GM_setValue）に置く＝ページ（メルカリ等）の JS から読めない。前の localStorage の鍵は1回だけ移して消す */
+    var k = GM_getValue('sb_key', '') || '';
+    if (!k) { var ls = localStorage.getItem(KEY_LS) || ''; if (ls) { GM_setValue('sb_key', ls); k = ls; } }
+    if (k) { try { localStorage.removeItem(KEY_LS); } catch (_) {} }
+    if (!k) { k = prompt('Supabaseの書き込みキー(service_role)を貼り付けてください（この端末に保存されます）'); if (k) { k = k.trim(); GM_setValue('sb_key', k); } }
     return (k || '').trim();
   }
   function sbFetch(path, opt) {
