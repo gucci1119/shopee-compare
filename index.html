@@ -1922,7 +1922,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-105215';
+  const APP_BUILD = '20261121-105926';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -10269,6 +10269,7 @@
   });
   const I18N_PAT = [
     /* ★2026-11-21 ⬆ Bump */
+    [/^⚠ 断られた：(.*)（続けて断られたので24時間あけてもう一度）$/, '⚠ Rejected: $1 (rejected repeatedly, retry in 24 h)'],
     [/^⬆ 選んだ (\d+) 件を Bump に登録$/, '⬆ Register $1 selected to Bump'],
     [/^⬆ (\d+)件を Bump に登録しました（外すまでずっと回します・その店の枠が空くたびに先に回ります）/, '⬆ Registered $1 to Bump (bumped until removed, first each time the shop slot frees up)'],
     [/^(\d+)件はもう登録してあります$/, '$1 already registered'],
@@ -47054,10 +47055,10 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     };
   }
 
-  /* ★2026-11-21 05（本人「bumpの仕組み作れないかね」「もっと簡単にしたい」「ポータルとかから」・00 経由）：⬆ Bump の待ちの列。
-     出品一覧・出品ログで選んだ品を app_kv boost_prefer に {once:1, at:秒} で入れる → GAS の boostTick（30分ごと・本体）が、その店の枠が空いた時に先に回す。
-     数は Shopee の上限（1店5品・4時間）のまま。入れた後に1回回ったら済み（GAS は boost_prefer を書き換えない）。文字の値（例 kc1121）は 01 の「ずっと先に」の印で、ここでは外さない。
-     今 Bump 中の品と終わる時刻は boost_state.shops[店].cur（GAS が Bump を見た時に残す）。控え＝boost_log_shop3（第3は全部・ほかの店はポータルで入れた品）。 */
+  /* ★2026-11-21 05（本人「bumpの仕組み作れないかね」「もっと簡単にしたい」「ポータルとかから」「登録してるやつがずっと動くようにして」・00 経由）：⬆ Bump の登録。
+     出品一覧・出品ログで選んだ品を app_kv boost_prefer に {reg:1, at:秒, shop} で入れる → GAS の boostTick（30分ごと・本体）が、外すまで、その店の枠が空くたびに先に回す。
+     数は Shopee の上限（1店5品・4時間）のまま。登録が5品を超えた店は前に回してから長い順。GAS は boost_prefer を書き換えない（ポータルと書き合わない）。文字の値（例 kc1121）は「ずっと先に」の印で、ここでは外さない。
+     今 Bump 中の品と終わる時刻は boost_state.shops[店].cur・回った回数は regN・断られた理由は ngWhy。控え＝boost_log_shop1（本店）・shop2（2店舗目）・shop3（第3）。 */
   var BUMPQ = { pref: null, st: null, log: null, at: 0, msg: '' };
   async function bumpLoad(force, withLog) {
     if (!force && BUMPQ.at && Date.now() - BUMPQ.at < 60000 && (!withLog || BUMPQ.logAt)) return BUMPQ;
@@ -47068,13 +47069,6 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
     BUMPQ.pref = (m.boost_prefer && m.boost_prefer.items) || {}; BUMPQ.st = m.boost_state || { shops: {}, items: {} }; BUMPQ.at = Date.now();
     if (withLog) { BUMPQ.log = [].concat(...['boost_log_shop1', 'boost_log_shop2', 'boost_log_shop3', 'boost_log_shop12'].map(k => (m[k] && m[k].rows) || [])).sort((a, b) => a[0] - b[0]); BUMPQ.logAt = Date.now(); }
     return BUMPQ;
-  }
-  /* 待ちの品の今の状態：'done'＝入れた後に回った／'wait'＝まだ／'ng'＝断られて1日待ち */
-  function bumpOnceState(id, v) {
-    const it = ((BUMPQ.st || {}).items) || {}, at = Number(v && v.at) || 0;
-    if ((Number(it[id]) || 0) > at) return 'done';
-    if ((Number(it[id + '_ng']) || 0) > at && Date.now() / 1000 - it[id + '_ng'] < 86400) return 'ng';
-    return 'wait';
   }
   async function bumpQueueAdd(list) {
     const out = { added: 0, already: 0, keep: 0, noShop: 0 };
@@ -47144,7 +47138,7 @@ ${'' /* 仕入元URLでの一括除外はやめた（同じ商品でもURLは毎
       const q = (qBy[sid] || []).slice().sort((x, y) => (Number(its[x[0]]) || 0) - (Number(its[y[0]]) || 0)); qTot += q.length;
       let rank = 0;
       const curH = cur.length ? cur.map(x => bumpCard(x[0], '⬆ ' + rem(x[1]) + '（' + hm(x[1]) + ' まで）' + (pref[x[0]] && typeof pref[x[0]] === 'object' ? '・登録の品' : ''), '', compact, 'いま Shopee で上位に出している品です。Bump は1回4時間で、残り時間が0になると枠が空き、登録の品、無ければいつもの順（売れた数→いいね→閲覧）で次の品が入ります。')).join('') : `<span class="smd-dim" style="font-size:11px">${ss.cur ? '今 Bump 中の品は無し' : '（次に GAS が見た時から出ます）'}</span>`;
-      const qH = q.length ? q.map(([id, v]) => { const r = bumpRowOf(id); const bad = r && (Number(r.status) !== 1 || Number(r.stock) === 0) ? '<span style="display:block;color:#b71c1c;font-size:10.5px">⚠ 非公開か在庫0＝回せません</span>' : ''; const n = Number(regN[id]) || 0; const ng = ngW[id] && (nowS - ngW[id][0] < 1800) ? '<span style="display:block;color:#b71c1c;font-size:10.5px">⚠ 断られた：' + esc(ngW[id][1] || '') + '（30分あけてもう一度）</span>' : ''; let nx; if (curIds.has(String(id))) { const cx = cur.find(x => String(x[0]) === String(id)); nx = '⬆ いま Bump 中・' + rem(cx[1]); } else { rank++; nx = '次に回る：' + hm(ss.nextAt) + ' 以降（' + rank + '番目）'; } return bumpCard(id, nx + '<br>回った ' + n + '回・' + hm(v.at) + ' に登録', bad + ng + `<button class="smd-btn bump-rm" data-id="${esc(id)}" data-guide="この品の登録を外します。いま Bump 中なら4時間の終わりまではそのままです。出品そのものは変わりません。" style="font-size:10.5px;padding:1px 6px;margin-top:2px">✕ 登録を外す</button>`, compact, 'ポータルで「⬆ Bump に登録」を押した品です。外すまで、この店の枠が空くたびに（4時間ごと）先に回ります。登録が5品を超えた店は、前に回してからいちばん長くたった品から順に回ります。'); }).join('') : '<span class="smd-dim" style="font-size:11px">登録の品は無し</span>';
+      const qH = q.length ? q.map(([id, v]) => { const r = bumpRowOf(id); const bad = r && (Number(r.status) !== 1 || Number(r.stock) === 0) ? '<span style="display:block;color:#b71c1c;font-size:10.5px">⚠ 非公開か在庫0＝回せません</span>' : ''; const n = Number(regN[id]) || 0; const ngT = Number(its[id + '_ng']) || 0, ngLong = (Number((st.ngN || {})[id]) || 0) >= 3, ng = ngT && (nowS - ngT < (ngLong ? 86400 : 1800)) ? '<span style="display:block;color:#b71c1c;font-size:10.5px">⚠ 断られた：' + esc((ngW[id] || [])[1] || '') + (ngLong ? '（続けて断られたので24時間あけてもう一度）' : '（30分あけてもう一度）') + '</span>' : ''; let nx; if (curIds.has(String(id))) { const cx = cur.find(x => String(x[0]) === String(id)); nx = '⬆ いま Bump 中・' + rem(cx[1]); } else { rank++; nx = '次に回る：' + hm(ss.nextAt) + ' 以降（' + rank + '番目）'; } return bumpCard(id, nx + '<br>回った ' + n + '回・' + hm(v.at) + ' に登録', bad + ng + `<button class="smd-btn bump-rm" data-id="${esc(id)}" data-guide="この品の登録を外します。いま Bump 中なら4時間の終わりまではそのままです。出品そのものは変わりません。" style="font-size:10.5px;padding:1px 6px;margin-top:2px">✕ 登録を外す</button>`, compact, 'ポータルで「⬆ Bump に登録」を押した品です。外すまで、この店の枠が空くたびに（4時間ごと）先に回ります。登録が5品を超えた店は、前に回してからいちばん長くたった品から順に回ります。'); }).join('') : '<span class="smd-dim" style="font-size:11px">登録の品は無し</span>';
       const err = ss.err ? `<span style="color:#b71c1c">⚠ ${esc(ss.err)}</span>` : (ss.why ? `<span class="smd-dim">${esc(ss.why)}</span>` : '');
       return `<tr style="border-top:1px solid #f0f0f0"><td style="vertical-align:top;padding:${compact ? 5 : 8}px 8px;white-space:nowrap"><b style="font-size:12.5px">${esc(ss.cc || '')}</b> ${acctChip(sid) || ''}<div style="font-size:11px">${esc(acctLabel(sid) || ('店 ' + sid))}</div><div class="smd-dim" style="font-size:10.5px;margin-top:3px" data-guide="この時刻のころに、GAS がこの店の Bump の空きを見て次の品を入れます（30分ごとに見ています）。">次に見る ${hm(ss.nextAt)}</div>${keepN[sid] ? `<div style="font-size:10.5px;color:#2b8a3e" data-guide="01 が Keychain に直した品など、いつも先に回す印の付いた品の数です（一度回したら3日あけます）。">★ ずっと先に回す品 ${keepN[sid]}件</div>` : ''}<div style="font-size:10.5px;margin-top:2px;max-width:200px;white-space:normal">${err}</div></td>
         <td style="vertical-align:top;padding:${compact ? 5 : 8}px 8px"><div style="display:flex;flex-wrap:wrap;gap:4px">${curH}</div></td>
