@@ -2,7 +2,7 @@
 // @name         Shopee SLS Waybill Printer
 // @name:ja      【Shopee】🖨 発送伝票をまとめて印刷
 // @namespace    https://frontier-order-manager.com/
-// @version      6.0.3
+// @version      6.0.4
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-sls-waybill-printer.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-sls-waybill-printer.user.js
 // @description  frontier-order-managerから伝票印刷＋Webチャット自動遷移（検索→会話クリックまで自動）
@@ -886,6 +886,8 @@
       const pkgs = pkgData.data?.order_info?.package_list || [];
       if (!pkgs.length) throw new Error('パッケージ情報がありません');
       /* ★v6.0.3 中18：分割発送の2個目以降の伝票が出なかった → 荷物ごとに伝票を作って開く */
+      /* ★v6.0.4 全体レビュー 11/22 中12：window.open の戻りを見ていなかった＝ポップアップが止められると2個目以降が黙って開かず「済み」になる筋 → 開けなかった荷物を数え、1つでもあれば「済み」にせず止めて言う */
+      const notOpened = [];
       for (const pkg of pkgs) {
 
       // 3. 伝票ジョブ作成
@@ -905,8 +907,10 @@
 
       // 4. PDF ページを新タブで開く
       const pdfUrl = `https://${cfg.domain}/awbprint?job_id=${job.job_id}&shop_id=${shop_id}&lang=${cfg.lang}&first_time=${job.is_first_time}`;
-      window.open(pdfUrl, '_blank');
+      const w = window.open(pdfUrl, '_blank');
+      if (!w) notOpened.push(pkg.package_number);
       }
+      if (notOpened.length) throw new Error('伝票のタブが開けませんでした（' + notOpened.length + '/' + pkgs.length + '個・ポップアップが止められた見込み）。アドレス欄の右のポップアップの印から「常に許可」にしてから、もう一度押してください');
 
       setDone(btn);
 

@@ -2,7 +2,7 @@
 // @name         Shopee SLS Waybill Printer
 // @name:ja      【Shopee】🖨 発送伝票をまとめて印刷
 // @namespace    https://frontier-order-manager.com/
-// @version      6.0.3
+// @version      6.0.4
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-sls-waybill-printer.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-sls-waybill-printer.user.js
 // @description  frontier-order-managerから伝票印刷＋Webチャット自動遷移（検索→会話クリックまで自動）
