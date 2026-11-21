@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261121-1050'
+var SRC_VER = '20261121-1100'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -3113,6 +3113,7 @@ function boostTick(manual) {
       var cur = ((jb.response || {}).item_list) || [];
       var cds = cur.map(function (x) { return Number(x.cool_down_second) || 0; });
       var free = 5 - cur.length, added = 0, fail = 0, why = '';
+      var curNow = cur.map(function (x) { return [Number(x.item_id), now + (Number(x.cool_down_second) || 0)]; });   /* ★11/21 ポータルの「⬆ Bump」欄に今 Bump 中の品と終わる時刻を出す（通信は増やさない） */
       if (free > 0) {
         var s3 = isShop3Shop_(t.shop_id);
         if (pref === null) { try { pref = ((baKv_(BOOST_PREF_KV) || {}).items) || {}; } catch (ePf) { pref = {}; } }
@@ -3128,11 +3129,12 @@ function boostTick(manual) {
           picks.forEach(function (id) { if (flId[String(id)]) st.items[String(id) + '_ng'] = now; });
           if (fail) why = String((fl[0] || {}).failed_reason || '').slice(0, 80);
           for (var i = 0; i < added; i++) cds.push(4 * 3600);
+          picks.forEach(function (id) { if (!flId[String(id)]) curNow.push([Number(id), now + 4 * 3600]); });
         } else { why = '押し上げる候補なし（在庫あり・公開中が足りない）'; }
       }
       /* 次に空きが出る時刻＝いちばん早く終わる枠。候補が無かった店は2時間後にもう一度だけ見る */
       var nextIn = cds.length >= 5 ? Math.min.apply(null, cds) + 60 : (why ? (cur.length ? 2 * 3600 : 24 * 3600) : 300);   /* 出品が1件も無い店（2店舗目の空の店）は1日1回だけ見る */
-      ss.nextAt = now + Math.max(300, nextIn); ss.at = now; ss.lastAdded = added; ss.lastFail = fail; ss.why = why; ss.cc = t.cc || ss.cc || '';
+      ss.nextAt = now + Math.max(300, nextIn); ss.at = now; ss.lastAdded = added; ss.lastFail = fail; ss.why = why; ss.cc = t.cc || ss.cc || ''; ss.cur = curNow;
       st.shops[sid] = ss;
       out.push({ shop_id: sid, cc: t.cc || '', boosted: cur.length, added: added, fail: fail, why: why });
     } catch (e) { ss.err = String((e && e.message) || e).slice(0, 120); ss.nextAt = now + 3600; st.shops[sid] = ss; out.push({ shop_id: sid, cc: t.cc || '', error: ss.err }); }
