@@ -1950,7 +1950,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-220545';
+  const APP_BUILD = '20261121-223101';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -16760,6 +16760,33 @@
      （出品10分・在庫5分まで）。開いた後の画面の中の読み直しは今までどおり毎回 DB を読む。ポータルから書いた時（sbUpsert・sbPatch・sbDelete）はその表の控えを捨てる。🎭デモでは使わない */
   const SB_BOOT_TTL = { listings: 10 * 60e3, inventory: 5 * 60e3 };
   const sbBootKey = (table, qs) => 'boot|' + table + '|' + String(state && state.acct || '') + '|' + qs;
+  /* ★2026-11-21 05（00 の決め・egress の数え①：在庫 6,723行・全項目で1回約8MB を、開くたび・新しい版の読み直しのたびに丸ごと読んでいた）：
+     inventory に DB の列 row_updated_at（行が変わると DB のトリガーが時刻を入れる・11/21 22:30 に足した）。この端末に写し（IndexedDB inv_delta）を置き、
+     写しの一番新しい時刻−2分より新しい行だけ読み、消えた行は item_id の一覧（1行約25バイト）で外す。12時間ごと・写しが無い・読めない時は今まで通り全部読む（古い写しを黙って出さない）。
+     並びは呼んだ側の order（追加日時の新しい順／番号の新しい順）を手元で付け直す */
+  async function invAllDelta_(order) {
+    const full = async () => { const rows = await sbGetAll('inventory', 'select=*&order=' + order); let mx = ''; (rows || []).forEach(r => { if (r.row_updated_at && r.row_updated_at > mx) mx = r.row_updated_at; }); if (!demoOn() && mx) { try { idbSet('inv_delta', { at: Date.now(), mx, rows }); } catch (_) {} } window.__invMode = 'full'; return rows; };
+    if (demoOn()) return full();
+    let c = null; try { c = await idbGet('inv_delta'); } catch (_) { c = null; }
+    if (!c || !Array.isArray(c.rows) || !c.mx || Date.now() - (c.at || 0) > 12 * 3600e3) return full();
+    try {
+      const since = new Date(Date.parse(c.mx) - 120000).toISOString();
+      const [chg, ids] = await Promise.all([sbGetAll('inventory', 'select=*&row_updated_at=gt.' + encodeURIComponent(since)), sbGetAll('inventory', 'select=item_id')]);
+      if (!Array.isArray(chg) || !Array.isArray(ids) || !ids.length) return full();
+      const live = new Set(ids.map(r => String(r.item_id))), byId = new Map();
+      c.rows.forEach(r => { if (live.has(String(r.item_id))) byId.set(String(r.item_id), r); });
+      let mx = c.mx; chg.forEach(r => { byId.set(String(r.item_id), r); if (r.row_updated_at && r.row_updated_at > mx) mx = r.row_updated_at; });
+      const miss = [...live].filter(id => !byId.has(id));
+      for (let i = 0; i < miss.length; i += 100) { const r2 = await sbGetAll('inventory', 'select=*&item_id=in.(' + miss.slice(i, i + 100).map(x => encodeURIComponent('"' + x + '"')).join(',') + ')'); (r2 || []).forEach(r => byId.set(String(r.item_id), r)); }
+      const rows = [...byId.values()];
+      if (rows.length !== live.size) return full();   /* 数が合わない＝写しが信用できない */
+      const sid = (a, b) => String(b.item_id).localeCompare(String(a.item_id));
+      if (/^created_at/.test(order)) rows.sort((a, b) => { const x = a.created_at || '', y = b.created_at || ''; if (x && !y) return -1; if (!x && y) return 1; if (x !== y) return x < y ? 1 : -1; return sid(a, b); }); else rows.sort(sid);
+      try { idbSet('inv_delta', { at: c.at, mx, rows }); } catch (_) {}
+      window.__invMode = 'delta ' + chg.length + (miss.length ? '+' + miss.length : '');
+      return rows;
+    } catch (_) { return full(); }
+  }
   async function sbGetAllBoot(table, qs, fresh = false) {
     const ttl = SB_BOOT_TTL[table], k = sbBootKey(table, qs);
     const boot = (typeof performance !== 'undefined' ? performance.now() : 0) < 90000;
@@ -17865,7 +17892,7 @@
         // ★2026-10-24 レビュー#3：棚卸の記録（stocktake）と機種・カテゴリの手直し（inv_class）は ensureInv でしか読んでいなかった。
         //   在庫管理を開いたまま再読み込みすると在庫だけ読んで描き、棚卸バーが「✓あり 0／全部未確認」・手直しが自動判定に見えた。
         //   → 一緒に待つ（読めていれば takLoad / invClsLoad は何も読まない）。どちらも中で例外を拾うので、ここは止まらない
-        const [invRows] = await Promise.all([sbGetAllBoot('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'), takLoad(), invClsLoad()]);
+        const [invRows] = await Promise.all([invAllDelta_('created_at.desc.nullslast,item_id.desc'), takLoad(), invClsLoad()]);
         stock.rows = invRows; stock._stale = false;
         // 画像: Shopee注文SN → 注文明細の画像（在庫名は日本語で商品名照合できないため、SN一致が確実）
         stock.imgMap = new Map();
@@ -19294,7 +19321,7 @@
     const host = document.getElementById('stock-dupid'); if (!host) return;
     host.innerHTML = '<span class="smd-dim">読み込み中...</span>';
     if (!stock.rows || stock._stale) {
-      try { stock.rows = await sbGetAllBoot('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'); stock._stale = false; }
+      try { stock.rows = await invAllDelta_('created_at.desc.nullslast,item_id.desc'); stock._stale = false; }
       catch (e) { host.innerHTML = errBox(e); return; }
     }
     const { pairs, orphans } = dupIdScan(stock.rows);
@@ -19387,7 +19414,7 @@
     }
     alert('まとめました：' + del + '件を統合' + (moved ? '（うち' + moved + '件は情報をスプシ側へ移動）' : '') + (ng ? '／失敗 ' + ng + '件' : ''));
     stock.rows = null;
-    try { stock.rows = await sbGetAllBoot('inventory', 'select=*&order=created_at.desc.nullslast,item_id.desc'); } catch (_) {}
+    try { stock.rows = await invAllDelta_('created_at.desc.nullslast,item_id.desc'); } catch (_) {}
     try { pf._invAt = 0; plan._cache = null; } catch (_) {}   // 行が消えた・紐付けが移った＝💹📈を読み直させる
     renderDupId();
   }
@@ -19995,7 +20022,7 @@
   async function ensureInv() {
     if (stock.rows && !stock._stale) return stock.rows;
     // 棚卸の✓記録とハード/カテゴリの手直しも一緒に読む（在庫台帳の描画で必ず要る）
-    const [rows] = await Promise.all([sbGetAllBoot('inventory', 'select=*&order=item_id.desc'), takLoad(), invClsLoad()]);
+    const [rows] = await Promise.all([invAllDelta_('item_id.desc'), takLoad(), invClsLoad()]);
     stock.rows = rows; stock._stale = false;
     return stock.rows;
   }
@@ -22523,12 +22550,35 @@
     return nm || ('店 ' + id);
   }
   const TA_NOREAD = '<span class="smd-dim" style="font-size:10.5px">—（読めていない）</span>';
+  /* ★2026-11-21 05（00・egress の数え③：アクセスの画面を開くたびに出品の全件（約2万行・約5MB）を読んでいた）：
+     この端末に写し（IndexedDB ta_lsbase）を置き、出品の表の row_updated_at（明細・状態・名前・店・重さ・明細数が変わると DB が時刻を入れる）が写しの一番新しい時刻−2分より新しい行だけ読む。
+     消えた出品は item_id の一覧（1行約20バイト）で外す。絵（image）は時刻が動かないので、12時間ごとと 🔄 の時は全部読み直す。読めない時は全読みに戻る（古い写しを黙って出さない） */
+  async function taListingsBase_(force) {
+    const COLS = 'cc,item_id,shop_id,name,image,status,create_time,model_count,row_updated_at';
+    let c = null; try { c = force ? null : await idbGet('ta_lsbase'); } catch (_) { c = null; }
+    const full = async () => { const rows = await sbGetAll('listings', 'select=' + COLS); let mx = ''; (rows || []).forEach(r => { if (r.row_updated_at && r.row_updated_at > mx) mx = r.row_updated_at; }); try { idbSet('ta_lsbase', { at: Date.now(), mx, rows }); } catch (_) {} TA._lsMode = 'full'; return rows; };
+    if (!c || !Array.isArray(c.rows) || !c.mx || Date.now() - (c.at || 0) > 12 * 3600e3) return full();
+    try {
+      const since = new Date(Date.parse(c.mx) - 120000).toISOString();
+      const [chg, ids] = await Promise.all([sbGetAll('listings', 'select=' + COLS + '&row_updated_at=gt.' + encodeURIComponent(since)), sbGetAll('listings', 'select=item_id')]);
+      if (!Array.isArray(chg) || !Array.isArray(ids) || !ids.length) return full();
+      const live = new Set(ids.map(r => String(r.item_id))), byId = new Map();
+      c.rows.forEach(r => { if (live.has(String(r.item_id))) byId.set(String(r.item_id), r); });
+      let mx = c.mx; chg.forEach(r => { byId.set(String(r.item_id), r); if (r.row_updated_at && r.row_updated_at > mx) mx = r.row_updated_at; });
+      const miss = [...live].filter(id => !byId.has(id));   /* 写しにも差分にも無い出品（時刻が古いまま入った等）は1回だけ読む */
+      for (let i = 0; i < miss.length; i += 150) { const r2 = await sbGetAll('listings', 'select=' + COLS + '&item_id=in.(' + miss.slice(i, i + 150).join(',') + ')'); (r2 || []).forEach(r => byId.set(String(r.item_id), r)); }
+      const rows = [...byId.values()];
+      try { idbSet('ta_lsbase', { at: c.at, mx, rows }); } catch (_) {}   /* at は全読みの時刻のまま＝12時間で全部読み直す */
+      TA._lsMode = 'delta ' + chg.length + (miss.length ? '+' + miss.length : '');
+      return rows;
+    } catch (_) { return full(); }
+  }
   async function taProdBase(force) {
     if (TA._pBase && !force) { if (!TA._pBase.perf) { const pf = await lstPerfLoad(); if (pf) TA._pBase.perf = pf; } return TA._pBase; }   /* 30日の控えが一度読めなかった時は、次の描き直しで読み直す（読めないまま止めない） */
     if (force) { try { _lstPerf = null; _taOrdC = null; } catch (_) {} }   /* 🔄・取り直しの後は30日のカート・注文も読み直す */
     const [cur, li, statAt, perf, ing] = await Promise.all([
       lsStatsRows(force),
-      sbGetAll('listings', 'select=cc,item_id,shop_id,name,image,status,create_time,model_count'),   /* ★2026-10-19 枠空け候補の判定に 公開状態と出品日／★11/13 全体レビュー中38：単品（明細1つ）かを見るために明細の数も */
+      taListingsBase_(force),   /* ★11/21 05（egress の数え③）：変わった行だけ読む（下の taListingsBase_） */   /* ★2026-10-19 枠空け候補の判定に 公開状態と出品日／★11/13 全体レビュー中38：単品（明細1つ）かを見るために明細の数も */
       sbGetAll('app_kv', 'select=k,updated_at&k=like.listing_stats_*').catch(() => []),
       lstPerfLoad(),   /* 出品管理の🛒と同じ控え（product_perf_* を1回だけ読む） */
       trafficIngestStatus_(force).catch(() => null),   /* 店ごとの最後の日（perf_d_sum・product_perf の目印）＝上の取り込み状況と同じ控え */
@@ -31630,6 +31680,8 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '⚡ <b>在庫の読みを「変わった行だけ」に</b>（事業本部・通信量の数え①）：在庫（約6,700行）を開くたびに全部読んでいた → データベースに「行が変わった時刻」を足し、この端末の写しに変わった行だけ重ねます。12時間ごと・読めない時は今まで通り全部読みます',
+      '⚡ <b>出品ログ・アクセスの画面を開いた時の読みを減らしました</b>（事業本部・通信量の数え）：出品ログの🤖の印は、🤖の控えが変わったカタログだけ明細名を読みます（この端末に6時間）。アクセスの商品の表は、出品の全件（約2万行）を毎回読まず、変わった出品だけ読んでこの端末の写しに重ねます（12時間ごとと 🔄 の時は全部読み直し）。読めない時は今まで通り全部読みます',
       '🔒 <b>メルカリの取引画面の写しを、誰でも開ける置き場から鍵の要る置き場へ移しました</b>（全体レビュー 中13・事業本部の決め）：📸 を押すと、その場で10分だけ開ける URL を作って開きます。在庫スプシ・古物台帳の書き出しのリンクは「ポータルの URL#proof=…」の固定リンクで、開くとポータルがすぐ写しへ移ります（書き込みの鍵が入ったポータルでだけ開けます）。返品の申し立ての書類（PDF）にも今まで通り入ります',
       '📌 <b>アクセス（各国）の比較の表：下へ送っても見出しの行が上に残る・左の「国・店」の列も残る</b>（本人のスクショ「これ上の列表示されるように」「いいねとかカートとか」）：表は箱の中で縦にも横にも送れます。左の列は背景と右の線を付けて、横に送った時に数字の頭が隠れて見えないようにしました。見出しは短く（🛒 人・🛒 個・🛒率・🛒→注文・❤ いいね）して、表の下に列の説明を1行出します',
       '📦 <b>在庫の欄を打ってすぐ別の窓へ移った時、もう1台との食い違いの確認で本人の値が消えないように</b>（全体レビュー 中4）：画面の前にいない時は確認を自動で「いいえ（むこうの値を残す）」にしていたので、打った値が黙って消える筋がありました。この確認だけは、画面に戻った時に出します',
@@ -48925,10 +48977,22 @@ create policy "listing_log all" on listing_log for all using (true) with check (
           const dn = await doneAllCached().catch(() => []);
           (dn || []).forEach(x => { const v = (x && x.v) || {}; Object.keys(v).forEach(wk => { const o = v[wk]; if (!o || typeof o !== 'object') return; Object.keys(o).forEach(cc => { const m = /#(\d+)/.exec(String(o[cc] || '')); if (m) mids.add(cc + '|' + m[1]); }); }); });
         } catch (_) {}
-        for (let i = 0; i < items.length; i += 150) {
-          const rs = await sbGetAll('listing_log', 'select=cc,item_id,model_id,model_name&item_id=in.(' + items.slice(i, i + 150).join(',') + ')').catch(() => []);
-          (rs || []).forEach(r => { if (am[r.cc + '|' + r.item_id + '|' + String(r.model_name || '').toLowerCase().trim()]) mids.add(r.cc + '|' + r.model_id); });
+        /* ★2026-11-21 05（00・egress の数え②：出品ログを開くたびに🤖のカタログ全部の明細名を読み直していた＝11/20 712回・11/21 13時間で1,460回）：
+           カタログごとに「🤖の控えの数」と結果（cc|model_id）をこの端末に置き（IndexedDB llog_automid・6時間）、控えの数が変わったカタログと新しいカタログだけ読む。
+           読めなかった束があった時は、その束を置かない（次にまた読む）。表示の色分けだけに使う（書き込みには使わない） */
+        const amN = {}; Object.keys(am).forEach(k => { const it = k.split('|')[1]; if (it) amN[it] = (amN[it] || 0) + 1; });
+        let amc = null; try { amc = await idbGet('llog_automid'); } catch (_) { amc = null; }
+        if (!amc || !amc.byItem || Date.now() - (amc.at || 0) > 6 * 3600e3) amc = { at: Date.now(), byItem: {} };
+        const need = items.filter(it => { const c = amc.byItem[it]; return !c || c.n !== amN[it]; });
+        items.forEach(it => { const c = amc.byItem[it]; if (c && c.n === amN[it]) (c.m || []).forEach(x => mids.add(x)); });
+        let _amcChanged = false;
+        for (let i = 0; i < need.length; i += 150) {
+          const part = need.slice(i, i + 150); let okPart = true;
+          const rs = await sbGetAll('listing_log', 'select=cc,item_id,model_id,model_name&item_id=in.(' + part.join(',') + ')').catch(() => { okPart = false; return []; });
+          const per = {}; (rs || []).forEach(r => { if (am[r.cc + '|' + r.item_id + '|' + String(r.model_name || '').toLowerCase().trim()]) { const x = r.cc + '|' + r.model_id; mids.add(x); (per[String(r.item_id)] = per[String(r.item_id)] || []).push(x); } });
+          if (okPart) { part.forEach(it => { amc.byItem[it] = { n: amN[it], m: per[it] || [] }; }); _amcChanged = true; }
         }
+        if (_amcChanged) { Object.keys(amc.byItem).forEach(it => { if (!amN[it]) delete amc.byItem[it]; }); try { idbSet('llog_automid', amc); } catch (_) {} }
       } catch (_) {}
       // 購入側の商品ページのURLにはショップIDが要る（⚙️設定の shopIds が空の国ではリンクが作れず、✏️しか出ていなかった）→ 出品データから引く
       /* ★2026-09-25 本人「これ、100%なのにそこから10秒くらい待つけど？」＝出品ログを読み終えた後に、リンク用の店IDを全出品ぶん（2万行超）
