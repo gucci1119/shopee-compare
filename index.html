@@ -1926,7 +1926,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261121-190552';
+  const APP_BUILD = '20261121-190636';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -5888,6 +5888,7 @@
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
     /* ★2026-11-21 ⬆ Bump */
+    "この端末に残っていた営業の台帳で先に出しています。裏で最新を読み直していて、読めたら自動で描き直します。": "Showing the outreach ledger saved on this device first. The latest is being reloaded in the background and the page redraws when it arrives.",
     "次は毎晩 21:40ごろ": "next: every night ~21:40 JST",
     "純利益の累計と初期投資の累計（線に届いた月が回収）": "Cumulative net profit vs cumulative initial investment (payback when the lines meet)",
     "🧾 初期投資の内訳": "🧾 Initial investment breakdown",
@@ -10557,7 +10558,7 @@
     [/^前月 (\d+)件（(.+)%）$/, 'Prev. month $1 ($2%)'],
     [/^貢献利益 (.+)\/件$/, 'Contribution $1 per order'],
     [/^仕入未入力 (\d+)件$/, 'Cost missing: $1'],
-    [/^Amazon 分類待ち (\d+)件$/, 'Amazon unclassified: $1'], [/^買ったもの 分類待ち (\d+)件$/, 'Purchases unclassified: $1'],
+    [/^Amazon 分類待ち (\d+)件$/, 'Amazon unclassified: $1'], [/^(\d+)分前の表示・最新を読み直し中$/, 'Showing data from $1 min ago · reloading'], [/^買ったもの 分類待ち (\d+)件$/, 'Purchases unclassified: $1'],
     [/^買った資材 (\d+)件を経費に入れました$/, 'Added $1 purchased supplies to expenses'], [/^⚠ 売れた仕入れ品を経費から外せなかった品 (\d+)件（🛒 買ったもの の上に理由）$/, '⚠ $1 sold stock items could not be removed from expenses (reasons at the top of 🛒 Purchases)'],
     [/^✓ 扱いが決まった (\d+)件・(.+)（開くと一覧・取消できます）$/, '✓ Classified $1 · $2 (open to list / undo)'],
     [/^返品を半分に：この月に受理された返品 (\d+)件・(.+)（注文月の入金から減っています）→ \+(.+)\/月。写真の見せ方（新品と間違われない）と説明文で潰す$/, 'Halve returns: $1 returns accepted this month, $2 (already deducted from the order month\'s payout) → +$3/month. Fix with photos that cannot be mistaken for new, and the description'],
@@ -20376,6 +20377,19 @@
     const allAccounts = !state.acct || state.acct === 'all';
     const read = (table, qs) => sbGet(table, qs, { allAccounts });
     const inputAt = Date.now();
+    /* ★2026-11-21 05（本人「他のページも軽くなるような工夫入れて」）：開くたびに GAS の台帳（outreach_board・約6秒）を待っていた。
+       この端末の写し（1日以内）があれば先にそれで描き、上に「◯分前の表示・最新を読み直し中」と出す。裏で読み直して描き直す（黙って古いまま見せない）。表示だけ（送る・書く処理は今まで通り） */
+    if (!force && !outState.data) {
+      let c = null; try { c = await idbGet('out_board'); } catch (_) { c = null; }
+      if (c && c.b && Array.isArray(c.b.events) && Date.now() - (c.at || 0) < 24 * 3600e3 && outScope() === scope) {
+        try {
+          const list = await outLoadBoard(read, c.b); list._allAccounts = allAccounts; list._inputAt = inputAt; list._staleAt = c.at;
+          outState.data = list; outState.scope = scope; outState.at = 0;
+          setTimeout(() => { outLoad(true).then(() => { const ob = document.getElementById('out-body'); if (ob && ob.offsetParent) renderOutreach('local'); }).catch(() => {}); }, 50);
+          return list;
+        } catch (_) {}
+      }
+    }
     outState.inflight = outLoadBoard(read).then(list => {
       if (outScope() !== scope) throw new Error('営業集計の読取中に表示条件が変更されました');
       list._allAccounts = allAccounts; list._inputAt = inputAt;
@@ -20384,8 +20398,9 @@
     }).finally(() => { outState.inflight = null; });
     return outState.inflight;
   }
-  async function outLoadBoard(read) {
-    const b = await outCallMain({ action: 'outreach_board' }, 90000);
+  async function outLoadBoard(read, useB) {
+    const b = useB || await outCallMain({ action: 'outreach_board' }, 90000);
+    if (!useB && b && Array.isArray(b.events)) { try { idbSet('out_board', { at: Date.now(), b }); } catch (_) {} }   /* ★11/21 次に開いた時にすぐ出す写し（下の outLoad） */
     if (!Array.isArray(b.events)) throw new Error('営業の台帳を読めませんでした');
     const ppl = Object.create(null);
     b.events.forEach(e => {
@@ -21296,7 +21311,7 @@
         + `<td style="text-align:left"><select data-out-st="${esc(p.key)}" style="font-size:12px">${opt(p.stage)}</select></td></tr>`;
     });
     tb += '</tbody></table></div>' + (rows.length > 400 ? `<div class="smd-dim" style="font-size:11px">先頭の400人だけ出しています（全部で ${rows.length}人）</div>` : '') + (!rows.length ? '<div class="smd-dim" style="font-size:12px;margin-top:4px">この絞り込みの人はいません</div>' : '');
-    body.innerHTML = `<div class="tool-card" style="max-width:none">
+    body.innerHTML = (list._staleAt ? `<div style="font-size:12px;color:#8a4b00;background:#fff8ec;border:1px solid #ffd699;border-radius:6px;padding:4px 10px;margin:0 0 8px" data-guide="この端末に残っていた営業の台帳で先に出しています。裏で最新を読み直していて、読めたら自動で描き直します。"><span class="smd-spin"></span> <span>${Math.max(1, Math.round((Date.now() - list._staleAt) / 60000))}分前の表示・最新を読み直し中</span></div>` : '') + `<div class="tool-card" style="max-width:none">
       <div style="font-weight:700;font-size:14px;margin-bottom:4px">📣 営業の流れと進み具合</div>
       <div style="font-size:13px">${line}</div>${qNote}
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:8px 0 6px"><span class="smd-dim" style="font-size:11.5px">期間</span>${perBar}<span class="smd-dim" style="font-size:11.5px;margin-left:8px">分け方</span>${byBar} <button class="smd-btn" id="of-open" style="font-size:11px;padding:2px 8px" data-guide="国・アプリごとの流れ（送った→返事→見積もり→購入）の表を開く／閉じる">${OF.open ? '▲ 流れの表を閉じる' : '▼ 流れの表（' + (by === 'app' ? 'アプリごと' : by === 'cc' ? '国ごと' : '国×アプリ') + '）を開く'}</button></div>
@@ -31399,6 +31414,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-21', items: [
+      '⚡ <b>営業の画面をすぐ出すように</b>（本人「他のページも軽くなるような工夫入れて」）：開くたびに GAS の台帳を約6秒待っていた → この端末に残っている台帳（1日以内）で先に出し、上に「◯分前の表示・最新を読み直し中」と出して、裏で読み直したら描き直す',
       '⚡ <b>利益台帳の写真の読みを無くしました</b>（本人「他のページも軽くなるような工夫入れて」）：写真を出すために全出品の名前と画像（約8千行）を毎回読んでいた → 起動時に読んである出品データから作る（通信0）。台帳そのもの（仕入れを書き込む表）は今まで通り毎回最新を読みます',
       '⚡ <b>起動の時の GAS の枠の読みを半分に</b>（本人「他のページも軽くなるような工夫入れて」）：上のバーと🤖の欄が同じ台の枠の状況（uf_status）を別々に呼んでいた（起動で14本・1本2〜15秒）→ 60秒以内の返事は使い回し、読んでいる途中の呼び出しには相乗り。数字は60秒より古くならない',
       '⚡ <b>事業計画・営業を軽く</b>（本人「他のページも軽くなるような工夫入れて」）：事業計画は🤖が足した明細の日ごとの記録を1日1本ずつ順番に読んでいた（17.5秒の元）→ 過ぎた日は端末の写し（更新時刻で確かめる）を使い、変わった日だけまとめて読む。営業は買い手ごとの注文の読み（約20本）を1本ずつ待っていた → 4本ずつ並べて読む（読む物と量は同じ）',
