@@ -2002,7 +2002,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261123-024758';
+  const APP_BUILD = '20261123-030536';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -6086,6 +6086,9 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    '控えからJANを取り込む': 'Import verified JAN codes',
+    'JANの控えを確認中…': 'Checking verified JAN codes…',
+    '調査済みのJANを空欄にだけ取り込みます。追加の検索は行いません。': 'Fill blank JAN fields from the verified results without running another search.',
     '🃏 写真判定の候補を保存': '🃏 Save candidates for photo review',
     '取得・続きから再開': 'Get candidates / resume',
     '次の1区分を確認': 'Check the next category',
@@ -32362,6 +32365,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-23', items: [
+      '🔖 <b>出品一覧から調査済みのJANを取り込めます</b>。控えにある答えを空欄に取り込み、保存結果を表示します',
       '📥 <b>日次アクセスの確定待ちと未取得を区別</b>。前日分が届いた店舗数を表示し、日次取り込みは対象日が受理されるまで完了にしません',
       '📍 <b>当日のアクセス速報を現地日付で表示</b>。訪問者の合計は、各店の現地日付が一致する速報だけを使います。各店の取得時刻と取得できた店数を表示します',
     ] },
@@ -58105,6 +58109,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       `<div class="smd-toolbar" style="margin-bottom:6px">
         <button class="smd-btn" id="lst-sync" ${lst.syncing ? 'disabled' : ''} title="個店を選ぶとその店だけShopeeから取り込みます。グループを選ぶとポータルの出品データを読み直します。">🔄 ${lst.syncing ? '取得中...' : '最新に更新'}</button>
         <button class="smd-btn" id="lst-stats" title="👁閲覧・❤️いいね・🛒販売数をShopeeから取り直します（全店で1〜3分。通常は6時間ごとに自動更新）">📊 統計を更新</button>
+        ${!demoOn() && settings.sbSecret ? '<button class="smd-btn b-write" id="lst-janmanual" title="調査済みのJANを空欄にだけ取り込みます。追加の検索は行いません。">控えからJANを取り込む</button>' : ''}
         <!-- ★全件バックフィルのボタンは出さない（2026-08-28）。
              全4,078種類を引くと約¥53,000かかるのに、【同じ名前が複数カタログにある】ものは
              もともと名前で照合できているので新しい情報が増えない。
@@ -59738,24 +59743,62 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       return { ok: true, catalogs: rows, models: hit, count: cnt };
     };
     window.__smdJanManualImport = async () => {
-      if (!kvOk.product_ids) return { ok: false, error: 'JANの台帳をまだ読めていません' };
-      const g = await sbGetAll('app_kv', 'select=v&k=eq.jan_manual');
-      const man = (((g || [])[0] || {}).v || {}).items || {};
+      if (demoOn()) return { ok: false, error: 'デモ表示中は取り込みできません' };
+      if (!kvOk.product_ids || !productIds) return { ok: false, error: 'JANの台帳をまだ読めていません' };
+      const g = await sbGetAll('app_kv', 'select=v&k=eq.jan_manual&limit=1');
+      const man = Array.isArray(g) && g[0] && g[0].v && g[0].v.items;
+      if (!man || typeof man !== 'object' || Array.isArray(man)) return { ok: false, error: '調査済みJANの控えを確認できません' };
       const grp = janTodoGroups(); let hit = 0, names = 0;
+      const changes = new Map();
       const bySku = {}; Object.keys(man).forEach(k => { const i = k.indexOf('|@sku:'); if (i >= 0) bySku[k.slice(i + 1)] = man[k]; });   /* 単品は検索語が国で変わりうる＝親SKUだけで引く */
       grp.forEach((gv, gk) => {
         const a = man[String(gv.kw).toLowerCase() + '|' + (gv.machine || '')] || (/^@sku:/.test(gv.machine || '') ? bySku[gv.machine] : null); if (!a || !String(a.jan || '').trim() || !/^\d{8}$|^\d{13}$/.test(String(a.jan).trim())) return;
-        names++;
+        const before = hit;
         gv.keys.forEach(k => {
-          const prev = productIds[k] || {}; if (String(prev.jan || '').trim()) return;
+          const previous = productIds[k], prev = previous || {}; if (String(prev.jan || '').trim()) return;
           if (pidJanBlocked(prev, a.jan)) return;   /* 新3-11 */
           productIds[k] = Object.assign({}, prev, { jan: String(a.jan).trim(), mpn: String(prev.mpn || '').trim() || String(a.mpn || '').trim(), src: a.src || 'Claudeが調べた', srcUrl: a.url || '', at: Date.now(), noJan: undefined, noJanAt: undefined });
+          changes.set(k, { previous, written: productIds[k] });
           hit++;
         });
+        if (hit > before) names++;
       });
-      if (hit) { _pidDupCache = null; saveProductIds(); try { logAct('出品', 'JANをClaudeの調べから入れた', 'all', hit + '明細・' + names + '種類'); } catch (_) {} }
+      if (hit) {
+        _pidDupCache = null;
+        if (!await saveProductIds()) {
+          changes.forEach(({ previous, written }, key) => {
+            const current = productIds[key];
+            if (!current || current.at !== written.at || current.jan !== written.jan) return;
+            if (previous === undefined) delete productIds[key];
+            else productIds[key] = previous;
+          });
+          return { ok: false, error: 'JANを保存できませんでした。ページを再読み込みしてから再試行してください' };
+        }
+        try { logAct('出品', '調査済みのJANを取り込んだ', 'all', hit + '明細・' + names + '種類'); } catch (_) {}
+      }
       return { ok: true, names: names, models: hit, have: Object.keys(man).length };
     };
+    document.getElementById('lst-janmanual')?.addEventListener('click', async event => {
+      const button = event.currentTarget;
+      if (lst.janManualImporting) return;
+      lst.janManualImporting = true;
+      const label = button.textContent;
+      button.disabled = true;
+      button.textContent = 'JANの控えを確認中…';
+      try {
+        const result = await window.__smdJanManualImport();
+        if (!result.ok) throw new Error(result.error);
+        toast(result.models
+          ? (i18nOn() ? `Imported JAN codes for ${result.models} variants (${result.names} products).` : `JANを ${result.models}明細（${result.names}種類）に保存しました`)
+          : (i18nOn() ? 'No matching blank JAN fields.' : '控えに一致するJANの空欄はありません'));
+      } catch (error) {
+        toast(i18nOn() ? 'JAN import could not be confirmed. Refresh the listing before trying again.' : error.message, true);
+      } finally {
+        lst.janManualImporting = false;
+        button.disabled = false;
+        button.textContent = label;
+      }
+    });
     // ⚡ 1タッチ：①規則で自社コード ②画像からJAN ③ネットからJAN・型番 を順に走らせる。
     //   ★処理そのものは足さない。既にある3つのボタンを順番に押して待つだけ＝同じ判定を二重に持たない。
     //   ★途中のお知らせは出さない（1タッチなのに3回ダイアログが出ると意味がない）。最後にまとめて出す。
