@@ -1988,7 +1988,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261122-223054';
+  const APP_BUILD = '20261122-225356';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -5875,7 +5875,7 @@
     if (!running && (hidden || Date.now() - _jobPollLast < 60000)) return;
     _jobPollLast = Date.now(); jobPoll(); }, 5000); }
   // ページを閉じようとした時に「ブラウザ側でしか走っていない作業」があれば止める（DB管理の作業は閉じてOK）
-  window.addEventListener('beforeunload', (e) => { if (JOBS.list.some(j => !j.remote && (j.state === 'run' || j.state === 'wait'))) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('beforeunload', (e) => { if (appHasLocalJobs()) { e.preventDefault(); e.returnValue = ''; } });
 
   function toast(msg, isErr, durMs) {   /* ★2026-10-29 レビュー（UI 12）：失敗でない長めの案内は toast(msg, false, ミリ秒)＝赤くしない（赤は失敗と注意だけ） */
     let el = document.getElementById('smd-toast');
@@ -7438,6 +7438,16 @@
     "⚠ 中身のない明細 ": "⚠ Empty variation slots ",
     "🆕 新しいバージョンがあります": "🆕 A new version is available",
     "今すぐ更新": "Update now",
+    "「今すぐ更新」で公開版と読込結果を確認": "Update now checks the published version and confirms the result",
+    "公開版を確認中…": "Checking the published version…",
+    "新版を読み込み中…": "Loading the new version…",
+    "すでに最新版です": "You already have the latest version",
+    "最新版に更新しました": "Updated to the latest version",
+    "このタブの作業が終わってから更新してください": "Finish the running task in this tab before updating",
+    "公開版を確認できませんでした。もう一度押してください": "Couldn't check the published version. Try again",
+    "新版を読み込めませんでした。もう一度押してください": "Couldn't load the new version. Try again",
+    "未保存の入力があるので待っています": "Waiting for unsaved input",
+    "手が5分止まったら自動で更新します": "Updates automatically after five minutes of inactivity",
     "作業が終わったら自動で更新します": "It will update automatically once you finish",
     "⚠ 親SKUが別シリーズと重複（": "⚠ Parent SKU clashes with another series (",
     "🖨 きょうの作業指示": "🖨 Today's work sheet",
@@ -11414,13 +11424,7 @@
   //   本人が「ハードリロードしても直らない」に当たっていた。**読み直さなくても自動で新しくなる**ようにする。
   //   仕組み：自分自身にHEADを投げて ETag / Last-Modified を見るだけ（本体2.7MBは落とさない）。
   //   安全な時だけ勝手に読み直す。入力中・モーダル・ジョブ実行中は読み直さず、バナーで知らせて待つ。
-  let _appTag = null, _appNew = false, _appTimer = null;
-  async function appTag() {
-    try {
-      const r = await fetch(location.pathname, { method: 'HEAD', cache: 'no-store' });
-      return r.headers.get('etag') || r.headers.get('last-modified') || null;
-    } catch (_) { return null; }
-  }
+  let _appNew = false, _appChecking = false, _appTimer = null;
   // ★「手が動いていたら更新しない」。入力欄からフォーカスが外れた瞬間に再読み込みが走り、
   //   打ちかけのJANも見ていた位置も飛んでいた（2026-08-31 本人「途中までやってるのに勝手に再読み込みされてうざい」）。
   //   activeElement だけ見ても、打ち終わって次の欄へ移る一瞬に外れるので足りない。
@@ -11577,10 +11581,58 @@
   //   URLに時刻を付けて読み直す＝確実に新しい版を取りに行く。#ハッシュ（開いているページ）は保つ。
   function appReloadFresh() {
     try {
-      const u = location.pathname + '?v=' + Date.now() + (location.hash || '');
-      try { sessionStorage.setItem('smdFreshReloadAt', String(Date.now())); } catch (_) {}   /* ★2026-11-15 05（全面改修・型F）：自動の読み直しだった印（同じ #…&auto=1 を2回走らせない） */
-      location.replace(u);
+      const now = String(Date.now());
+      const url = new URL(location.href);
+      url.searchParams.set('v', now);
+      try { sessionStorage.setItem('smdFreshReloadAt', now); } catch (_) {}   /* 同じ #…&auto=1 を2回走らせない */
+      location.replace(url.href);
     } catch (_) { location.reload(); }
+  }
+  const APP_MANUAL_RELOAD = 'smdAppManualReload';
+  function appUpdateText(message) { return i18nOn() ? i18nText(message) || message : message; }
+  function appHasLocalJobs() { return JOBS.list.some(j => !j.remote && (j.state === 'run' || j.state === 'wait')); }
+  async function appUpdateManual(button, note) {
+    button.disabled = true;
+    note.dataset.manual = '1';
+    if (appHasLocalJobs()) {
+      note.textContent = appUpdateText('このタブの作業が終わってから更新してください');
+      button.disabled = false;
+      return;
+    }
+    note.textContent = appUpdateText('公開版を確認中…');
+    const build = await appRemoteBuild(8000, true);
+    if (build === APP_BUILD) {
+      _appNew = false;
+      clearTimeout(_appTimer);
+      button.closest('#smd-appup').remove();
+      toast(appUpdateText('すでに最新版です'), false, 4000);
+      return;
+    }
+    const hasLocalJobs = appHasLocalJobs();
+    if (!appBuildNewer(build, APP_BUILD) || hasLocalJobs) {
+      note.textContent = appUpdateText(hasLocalJobs ? 'このタブの作業が終わってから更新してください' : '公開版を確認できませんでした。もう一度押してください');
+      button.disabled = false;
+      return;
+    }
+    note.textContent = appUpdateText('新版を読み込み中…');
+    try { sessionStorage.setItem(APP_MANUAL_RELOAD, JSON.stringify({ build, at: Date.now() })); } catch (_) {}
+    setTimeout(() => {
+      try { sessionStorage.removeItem(APP_MANUAL_RELOAD); } catch (_) {}
+      note.textContent = appUpdateText('新版を読み込めませんでした。もう一度押してください');
+      button.disabled = false;
+    }, 12000);
+    appReloadFresh();
+  }
+  function appReportManualReload() {
+    let pending;
+    try {
+      pending = JSON.parse(sessionStorage.getItem(APP_MANUAL_RELOAD) || 'null');
+      sessionStorage.removeItem(APP_MANUAL_RELOAD);
+    } catch (_) {}
+    if (!pending || Date.now() - pending.at > 90000) return;
+    const updated = APP_BUILD === pending.build || appBuildNewer(APP_BUILD, pending.build);
+    if (!updated) appUpdateBanner();
+    toast(appUpdateText(updated ? '最新版に更新しました' : '新版を読み込めませんでした。もう一度押してください'), !updated, 6000);
   }
   function appUpdateBanner() {
     if (document.getElementById('smd-appup')) return;
@@ -11588,55 +11640,72 @@
     b.id = 'smd-appup'; b.setAttribute('data-noi18n', '');
     b.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);top:10px;z-index:9999;background:#1a7f37;color:#fff;'
       + 'border-radius:20px;padding:7px 14px;font-size:12.5px;font-weight:700;box-shadow:0 4px 14px rgba(0,0,0,.22);'
-      + 'display:flex;align-items:center;gap:10px;cursor:default';
-    b.innerHTML = '🆕 新しいバージョンがあります'
-      + '<button id="smd-appup-now" style="border:none;background:#fff;color:#1a7f37;border-radius:14px;padding:3px 10px;font-weight:700;cursor:pointer">今すぐ更新</button>'
-      + '<span id="smd-appup-note" style="font-weight:400;font-size:11px;opacity:.9"></span>';
+      + 'display:flex;flex-wrap:wrap;align-items:center;gap:7px 10px;width:max-content;max-width:calc(100% - 24px);cursor:default';
+    b.innerHTML = '<span></span>'
+      + '<button id="smd-appup-now" type="button" style="border:none;background:#fff;color:#1a7f37;border-radius:14px;padding:3px 10px;font-weight:700;cursor:pointer"></button>'
+      + '<span id="smd-appup-note" role="status" style="font-weight:400;font-size:11px;opacity:.9"></span>';
+    const button = b.querySelector('#smd-appup-now');
+    const note = b.querySelector('#smd-appup-note');
+    b.firstElementChild.textContent = appUpdateText('🆕 新しいバージョンがあります');
+    button.textContent = appUpdateText('今すぐ更新');
+    button.addEventListener('click', () => appUpdateManual(button, note));
     document.body.appendChild(b);
-    document.getElementById('smd-appup-now').addEventListener('click', () => appReloadFresh());
+  }
+  function appAutoUpdateReady() {
+    return _appNew && !document.getElementById('smd-appup-now')?.disabled && !appBusy();
   }
   function appUpdateApply() {
     if (!_appNew) return;
     /* ★2026-10-12 新しい版を出すと、全PCの空いている全タブが3分以内に一斉に読み直していた（＝起動時の重い読みが押し寄せる）。裏のタブは表に戻った時に、表のタブは0〜3分ばらつかせて */
-    if (!appBusy()) {
-      if (document.hidden) { if (!window.__appUpVis) { window.__appUpVis = true; document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(() => { if (!appBusy()) appReloadFresh(); }, 1500); }); } return; }
-      if (!window.__appUpJit) { window.__appUpJit = true; setTimeout(() => { if (!appBusy()) appReloadFresh(); else { window.__appUpJit = false; appUpdateApply(); } }, Math.random() * 180000); }
+    if (appAutoUpdateReady()) {
+      if (document.hidden) { if (!window.__appUpVis) { window.__appUpVis = true; document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(() => { if (appAutoUpdateReady()) appReloadFresh(); }, 1500); }); } return; }
+      if (!window.__appUpJit) { window.__appUpJit = true; setTimeout(() => { if (appAutoUpdateReady()) appReloadFresh(); else { window.__appUpJit = false; appUpdateApply(); } }, Math.random() * 180000); }
       return;
     }
     // 作業中は待つ（勝手に消すと入力が飛ぶ）。理由も出しておく
     const n = document.getElementById('smd-appup-note');
-    if (n) n.textContent = (typeof appDirtyField === 'function' && appDirtyField()) ? '打ったまま保存していない欄があるので待っています（急ぐときは左のボタン）' : '手が5分止まったら自動で更新します（急ぐときは左のボタン）';
+    if (n && !n.dataset.manual) n.textContent = appUpdateText(appDirtyField() ? '未保存の入力があるので待っています' : '手が5分止まったら自動で更新します');
     clearTimeout(_appTimer);
     _appTimer = setTimeout(appUpdateApply, 15000);
   }
   /* ★2026-11-15 05（全面改修・型B）：古い index.html で開かれた窓が、自分が古いと気づけなかった（最初の HEAD の ETag を「この窓の版」と覚えていた＝キャッシュの古い版で開くと、新しい ETag を自分の版と思い込む）。
-     → ページに埋めた版の印（APP_BUILD）と、公開中の index.html の中の印を比べる。本体（約3.5MB）を読むのは ETag が変わった時だけ（ETag ごとに読んだ印を覚える）＝3分ごとに本体を読まない。
-     05 が印の書き換えを忘れた時のために、ETag の変化も予備として今までどおり見る */
+     → APP_BUILD を比較し、読み取った版は同じ応答の ETag に紐付ける。手動更新では保存済みの版を使わない。 */
   function appBuildRe() { return new RegExp('const APP_' + "BUILD = '([0-9A-Za-z_.-]{4,40})'"); }
   function appBuildNewer(remote, mine) { remote = String(remote || ''); mine = String(mine || ''); if (!remote || remote === mine) return false; const f = /^\d{8}-\d{4}(\d{2})?$/;   /* ★11/17 中7：印は秒まで（前の分までの印とも比べられる＝文字の並びで新しい方が大きい） */ return (f.test(remote) && f.test(mine)) ? remote > mine : true; }
-  async function appRemoteBuild(maxMs) {
-    const lim = (p) => maxMs ? Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), maxMs))]) : p;
-    let etag = null;
-    try { const r = await lim(fetch(location.pathname, { method: 'HEAD', cache: 'no-store' })); etag = r.headers.get('etag') || r.headers.get('last-modified') || null; } catch (_) {}
-    if (etag) { try { const m = JSON.parse(localStorage.getItem('smdAppBuildByEtag') || 'null'); if (m && m.etag === etag && m.build) return { build: m.build, etag }; } catch (_) {} }
-    /* ETag が取れない時は、本体を読むのを30分に1回までにする（見積もりの窓の確かめ＝maxMs あり は別） */
-    if (!etag && !maxMs) { try { if (Date.now() - Number(localStorage.getItem('smdAppBuildGetAt') || 0) < 30 * 60000) return { build: '', etag }; localStorage.setItem('smdAppBuildGetAt', String(Date.now())); } catch (_) {} }
+  async function appRemoteBuild(maxMs, fresh = false) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), maxMs || 12000);
+    const options = { cache: 'no-store', signal: controller.signal };
+    const cacheKey = 'smdAppPublishedBuild';
     try {
-      const r = await lim(fetch(location.pathname + '?bv=' + Date.now(), { cache: 'no-store' }));
-      if (!r.ok) return { build: '', etag };
-      const tx = await lim(r.text()); const mm = appBuildRe().exec(tx);
-      const k = etag || r.headers.get('etag') || r.headers.get('last-modified') || '';
-      if (mm && k) { try { localStorage.setItem('smdAppBuildByEtag', JSON.stringify({ etag: k, build: mm[1] })); } catch (_) {} }
-      return { build: mm ? mm[1] : '', etag: etag || k || null };
-    } catch (_) { return { build: '', etag }; }
+      if (!fresh) {
+        const head = await fetch(location.pathname, { ...options, method: 'HEAD' }).catch(() => null);
+        const etag = head?.ok && (head.headers.get('etag') || head.headers.get('last-modified'));
+        try {
+          if (etag) {
+            const cached = JSON.parse(localStorage.getItem(cacheKey) || 'null');
+            if (cached?.etag === etag && cached.build) return cached.build;
+          } else if (!maxMs) {
+            if (Date.now() - Number(localStorage.getItem('smdAppBuildGetAt') || 0) < 30 * 60000) return '';
+            localStorage.setItem('smdAppBuildGetAt', String(Date.now()));
+          }
+        } catch (_) {}
+      }
+      const response = await fetch(location.pathname + '?bv=' + Date.now(), options);
+      if (!response.ok) return '';
+      const build = appBuildRe().exec(await response.text())?.[1] || '';
+      const etag = response.headers.get('etag') || response.headers.get('last-modified');
+      if (build && etag) { try { localStorage.setItem(cacheKey, JSON.stringify({ etag, build })); } catch (_) {} }
+      return build;
+    } catch (_) { return ''; }
+    finally { clearTimeout(timeout); }
   }
   async function appUpdateCheck() {
-    if (_appNew) return;
-    const rb = await appRemoteBuild(0);
-    let isNew = !!(rb && rb.build && appBuildNewer(rb.build, APP_BUILD));
-    const t = rb && rb.etag;
-    if (!isNew && t) { if (!_appTag) _appTag = t; else if (t !== _appTag) isNew = true; }   /* 予備：印の書き換え忘れでも、ETag が変われば新しい版 */
-    if (!isNew || _appNew) return;
+    if (_appNew || _appChecking) return;
+    _appChecking = true;
+    const build = await appRemoteBuild(0);
+    _appChecking = false;
+    if (!appBuildNewer(build, APP_BUILD)) return;
     _appNew = true;
     appUpdateBanner();
     appUpdateApply();
@@ -11645,15 +11714,16 @@
      読めない・5秒で返らない時は待たずに進める（返事の無い止まり方をしない） */
   async function appBuildGate() {
     try {
-      const rb = await Promise.race([appRemoteBuild(5000), new Promise(z => setTimeout(() => z(null), 5000))]);   /* 全体で5秒まで */
-      if (!rb || !rb.build || !appBuildNewer(rb.build, APP_BUILD)) { if (rb && rb.build) { try { sessionStorage.removeItem('smdBuildGateReload'); } catch (_) {} } return true; }   /* ★2026-11-15 05（全面改修2・型B）：古くないと分かったら印を外す */
+      const build = await appRemoteBuild(5000);
+      if (!appBuildNewer(build, APP_BUILD)) { if (build) { try { sessionStorage.removeItem('smdBuildGateReload'); } catch (_) {} } return true; }
       let done = ''; try { done = sessionStorage.getItem('smdBuildGateReload') || ''; } catch (_) { return true; }
-      if (done === rb.build) { /* 同じ公開の版で読み直し済みの時だけ見送る＝使い回す窓でも次の公開では読み直す */ try { console.warn('[版] 読み直しても古い版のまま', APP_BUILD, '→', rb.build); } catch (_) {} return true; }
-      try { sessionStorage.setItem('smdBuildGateReload', rb.build); } catch (_) { return true; }
+      if (done === build) { try { console.warn('[版] 読み直しても古い版のまま', APP_BUILD, '→', build); } catch (_) {} return true; }
+      try { sessionStorage.setItem('smdBuildGateReload', build); } catch (_) { return true; }
       appReloadFresh(); return false;
     } catch (_) { return true; }
   }
   try { window.__appBuildGate = appBuildGate; } catch (_) {}
+  appReportManualReload();
   appUpdateCheck();
   setInterval(appUpdateCheck, 180000);                                   // 3分ごと
   document.addEventListener('visibilitychange', () => { if (!document.hidden) appUpdateCheck(); });  // タブに戻った時
@@ -32231,6 +32301,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-22', items: [
+      '🆕 <b>「今すぐ更新」で公開版と読込結果を確認</b>。押すと確認中を表示し、最新なら案内を閉じ、新版を読み込めなければその場で再試行できます。開いているページを引き継ぎます',
       '💹 <b>利益明細の横移動と左端の固定を調整</b>。上の操作は表への移動指示だけにし、表の実際の位置を表示します。保存済みの列順を保ち、画面幅に収まる先頭数列を見出し・合計・まとめ買い明細で固定します',
       '📦 <b>長い商品名でも販売・編集リンクを表示</b>。注文管理などで 🛒 と ✏️ を商品名と別に表示します。ダッシュボードの発送期限カードでは注文詳細と商品リンクを分け、狭いカードでも商品名に横幅を取ります',
       '🔒 <b>デモ表示への切替時は、開いている店情報・問い合わせ・損失の画面も閉じます</b>。問い合わせの用件選択や異議申し立てもデモ表示では開きません',
