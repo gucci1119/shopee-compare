@@ -1700,7 +1700,7 @@
   </div>
   <!-- 📈 アクセス（各国の Business Insights） -->
   <div id="page-traffic" style="display:none">
-    <div class="smd-pagehead">👣 アクセス（各国） <span class="smd-dim" style="font-weight:400;font-size:12px">（Business Insights の Traffic Overview を毎日取り込み。前日分は Shopee 側で 10:00 に確定）</span></div>
+    <div class="smd-pagehead">👣 アクセス（各国） <span class="smd-dim" style="font-weight:400;font-size:12px">（Shopeeの前日分は各店の現地10:00以降に取得できます）</span></div>
     <details class="pagehelp ta-fold" data-k="help" style="margin:0 20px 10px"><summary style="cursor:pointer;font-weight:700">この画面の説明</summary><b>この画面：各国の訪問者数・ページビューの日別推移です。</b> 各国の Seller Center で「Business Insights → Traffic」のタブを開いたままにしておくと、毎日 11:05（現地）に30日ぶんを読み直してここへ送ります。Shopee 側が深夜〜10時に見られない時間帯でも、ここは前日までの数字が見られます。</details>
     <div id="traffic-body" style="padding:0 20px 12px"></div>
   </div>
@@ -2002,7 +2002,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261123-014714';
+  const APP_BUILD = '20261123-024758';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -6141,6 +6141,9 @@
     "第3": "3rd shop",
     "今日の途中の数": "Today so far",
     "今日の速報は未取得": "No snapshot for today",
+    "（Shopeeの前日分は各店の現地10:00以降に取得できます）": "(Previous-day data can be imported after 10:00 local time)",
+    "確定待ち": "Awaiting Shopee",
+    "日次": "Daily",
     "現地": "local",
     "速報が取れた店": "Shops with a snapshot",
     "今日（その国の日付）の途中の数です。Business Insights の今日の数を、各店の画面を1回ずつ開いて読みました（読んだ時刻を右に）。下のグラフ・表は前の日までの1日ごとの数です。取れなかった店は理由を出します（0ではありません）。": "Today's numbers so far (local date). Read once per shop from Business Insights (time on the right). The charts and tables below are daily numbers up to yesterday. Shops that could not be read show the reason (not 0).",
@@ -8459,6 +8462,8 @@
     // 列名・項目
     '商品': 'Item', '商品名': 'Item name', '画像': 'Image', '状態': 'Status', '在庫': 'Stock', '価格': 'Price',
     '数量': 'Qty', '合計': 'Total', '注文': 'Order', '注文日': 'Order date', '注文日 / 💳支払': 'Ordered / 💳Paid', '注文日時 ／ 💳支払': 'Ordered ／ 💳Paid', '日時': 'Date/time', '日付': 'Date',
+    '日次アクセスの確定待ちと未取得を区別': 'Separate pending and missing daily traffic',
+    '前日分が届いた店舗数を表示し、日次取り込みは対象日が受理されるまで完了にしません': 'Shows how many shops have the previous day, and only marks an import complete when the target date is saved.',
     '当日のアクセス速報を現地日付で表示': 'Show same-day traffic snapshots using local dates',
     '訪問者の合計は、各店の現地日付が一致する速報だけを使います。各店の取得時刻と取得できた店数を表示します': 'Visitor totals include snapshots matching each shop’s current local date. Shows the retrieval time and number of shops reporting.',
     '注文日時と支払い欄の見切れを修正': 'Fixed clipped order dates and payment details',
@@ -22545,25 +22550,36 @@
       const fams = [[1, famFull(1)], [2, famFull(2)], [3, famFull(3)]];   /* ★11/21 本人「だから、表現統一してって」＝第1（本店）・第2（2店舗目）・第3（3店舗目） */
       const famOf = id => { try { return famNoOfShop(id) || 0; } catch (_) { return 0; } };
       const ccs = allCc.filter(cc => shopIds.some(id => shopCcOf[id] === cc));
-      const ymd0 = new Date(Date.now() + 9 * 3600000 - 86400000).toISOString().slice(0, 10);   /* 日本時間の前の日 */
-      let nRed = 0, nYel = 0, nOk = 0, nGray = 0;
+      const ymd0 = taYmd(taLiveNow + 9 * 3600000 - 86400000);
+      const cutoffByCountry = Object.fromEntries(ccs.map(cc => {
+        const tz = taLiveZones[cc];
+        if (!tz) return [cc, ''];
+        const localDate = taLiveDate(taLiveNow, cc);
+        const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hourCycle: 'h23' }).format(taLiveNow));
+        return [cc, taYmd(Date.parse(localDate) - (hour < 10 ? 2 : 1) * 86400000)];
+      }));
+      const targetLabel = ymd0.slice(5).replace('-', '/');
+      const counts = { ok: 0, wait: 0, yel: 0, red: 0, gray: 0 };
       const cell = (cc, fn) => {
         const ids = shopIds.filter(id => shopCcOf[id] === cc && famOf(id) === fn); if (!ids.length) return '<td style="padding:4px 8px;text-align:center;color:#bbb">—</td>';
         return '<td style="padding:3px 6px;vertical-align:top">' + ids.map(id => {
           const f = taFetchOf(id), td = taLiveOf(id);
-          const lag = f.d ? Math.round((Date.parse(ymd0) - Date.parse(f.d)) / 86400000) : null;
-          const st = f.noList ? 'gray' : (!f.at || f.stale) ? 'red' : (lag != null && lag >= 1) ? 'yel' : 'ok';
-          if (st === 'red') nRed++; else if (st === 'yel') nYel++; else if (st === 'gray') nGray++; else nOk++;
-          const col = { ok: ['#e8f5e9', '#1b5e20'], yel: ['#fff8e1', '#8a5a00'], red: ['#fdecea', '#b3261e'], gray: ['#f1f3f4', '#6b7280'] }[st];
+          const cutoff = cutoffByCountry[cc];
+          const hasDay = !!byShop[id]?.d?.[ymd0];
+          const awaiting = !!cutoff && cutoff < ymd0 && f.d >= cutoff;
+          const st = f.noList ? 'gray' : hasDay ? 'ok' : !f.at || f.stale ? 'red' : awaiting ? 'wait' : 'yel';
+          counts[st]++;
+          const col = { ok: ['#e8f5e9', '#1b5e20'], wait: ['#eef3fc', '#244578'], yel: ['#fff8e1', '#8a5a00'], red: ['#fdecea', '#b3261e'], gray: ['#f1f3f4', '#6b7280'] }[st];
           const big = f.noList ? '出品0' : f.d ? esc(f.d.slice(5).replace('-', '/')) + ' の分' : 'まだ取れていない';
-          const why = st === 'red' ? (f.at ? '止まっている（その店の Chrome で Business Insights が開かれていない見込み）' : '一度も取れていない（その店の Chrome が開いていない見込み）') : st === 'yel' ? (lag + '日遅れ') : '';
-          const small = (f.at ? esc(taJst(f.at)) + ' 取得' : '') + (fn === 3 ? '<br><span>次は毎晩 21:40ごろ</span>' : '') + (why ? '<br><span>' + esc(why) + '</span>' : '');
+          const why = st === 'wait' ? '確定待ち' : st === 'yel' || st === 'red' ? '未取得' : '';
+          const small = (f.at ? esc(taJst(f.at)) + ' 取得' : '') + (fn === 3 ? '<br><span>次は毎晩 21:40ごろ</span>' : '')
+            + (why ? '<br>' + esc(targetLabel) + ' <span>の分</span> <span>' + why + '</span>' : '');
           const tdy = !td?.current
             ? '<div class="smd-dim" style="font-size:10.5px"><span>今日の速報は未取得</span></div>'
             : td.why
               ? '<div style="color:#b3261e;font-size:10px"><span>' + esc(td.why) + '</span></div>'
               : '<div style="font-size:10.5px;color:#1f3d7a"><span>今日（途中）</span> ' + esc(taJst(td.at)) + ' <span>時点</span>（' + esc(td.d.slice(5).replace('-', '/')) + ' <span>現地</span>）：<span>訪問者</span> ' + taLiveFmt(td.uv) + '・<span>注文</span> ' + taLiveFmt(td.orders) + '</div>';
-          const g = 'この店のアクセスを最後に取り込んだのは ' + (f.at ? taJst(f.at) : '（まだ無い）') + '、中身は ' + (f.d || '?') + ' の分まで。緑＝前の日の分まで入っている／黄＝1日以上遅れ／赤＝止まっている／灰＝出品0（訪問者0は Shopee の値どおり）。' + (fn === 3 ? '第3は毎晩 21:40ごろに1日1回取り込みます。' : '') + (td?.current && !td.why ? '「今日」は各店の現地日付の速報です。時刻は日本時間で表示します。' : '');
+          const g = 'この店のアクセスを最後に取り込んだのは ' + (f.at ? taJst(f.at) : '（まだ無い）') + '、中身は ' + (f.d || '?') + ' の分まで。緑＝対象日を取得／青＝Shopeeの確定待ち／黄＝確定時刻を過ぎて未取得／赤＝取得が停止／灰＝出品0（訪問者0は Shopee の値どおり）。' + (fn === 3 ? '第3は毎晩 21:40ごろに1日1回取り込みます。' : '') + (td?.current && !td.why ? '「今日」は各店の現地日付の速報です。時刻は日本時間で表示します。' : '');
           return `<div data-guide="${av(g)}" style="background:${col[0]};color:${col[1]};border-radius:6px;padding:3px 7px;margin:1px 0;min-width:120px"><div style="font-weight:700;font-size:12.5px">${big}</div><div style="font-size:10.5px;line-height:1.35">${small}</div>${tdy}</div>`;
         }).join('') + '</td>';
       };
@@ -22573,14 +22589,14 @@
          開け閉めはこの端末に覚える（smdTaFetchOpen）。初めは閉じた形。黄（遅れ）か赤（止まっている）がある時は開いた形で出す（止まりを見落とさない） */
       const tdVals = shopIds.map(taLiveOf).filter(x => x?.current && !x.why && taLiveNum(x.uv) != null);
       const tdSum = tdVals.reduce((a, x) => a + taLiveNum(x.uv), 0);
-      const nAll = nOk + nYel + nRed + nGray;
-      const sumTxt = `<span>全${nAll}店</span> <span style="color:#1b5e20">最新 ${nOk}</span>・<span style="color:${nYel ? '#8a5a00;font-weight:700' : '#6b7280'}">遅れ ${nYel}</span>・<span style="color:${nRed ? '#b3261e;font-weight:700' : '#6b7280'}">止まっている ${nRed}</span>・<span style="color:#6b7280">出品0 ${nGray}</span>`
+      const nAll = counts.ok + counts.wait + counts.yel + counts.red + counts.gray;
+      const sumTxt = `<span>全${nAll}店</span>　<span>日次</span> ${esc(targetLabel)} <span style="color:#1b5e20">${counts.ok}/${nAll - counts.gray}</span>・<span>確定待ち</span> ${counts.wait}・<span style="color:${counts.yel ? '#8a5a00' : '#6b7280'}">未取得</span> ${counts.yel}・<span style="color:${counts.red ? '#b3261e' : '#6b7280'}">止まっている</span> ${counts.red}・<span style="color:#6b7280">出品0 ${counts.gray}</span>`
         + (tdVals.length ? `／<span>今日の訪問者 計 ${tdSum.toLocaleString()}人</span>（<span>速報が取れた店</span> ${tdVals.length}/${nAll}）` : '／<span>今日の速報は未取得</span>');
       let saved = ''; try { saved = localStorage.getItem('smdTaFetchOpen') || ''; } catch (_) {}
-      const open = (nRed || nYel) ? true : saved === '1';
+      const open = !!(counts.red || counts.yel || counts.wait) || saved === '1';
       const tog = "const b=this.nextElementSibling;const o=b.style.display==='none';b.style.display=o?'':'none';const a=this.querySelector('.ta-fx-arw');if(a)a.textContent=o?'▾':'▸';try{localStorage.setItem('smdTaFetchOpen',o?'1':'0')}catch(_){}";
-      return `<div style="border:1px solid ${nRed ? '#f0c4bd' : nYel ? '#ffd699' : '#e3e6ea'};background:#fafbfc;border-radius:8px;padding:6px 10px;margin:0 0 8px;font-size:11.5px">`
-        + `<div onclick="${tog}" style="cursor:pointer;user-select:none" data-guide="${av('押すと開け閉めします（この端末で覚えます）。閉じた時は要約の1行だけ出します。遅れ・止まっている店がある時は開いた形で出します。店ごとに、アクセスを最後に取り込んだ日と時刻（日本時間）を、国×店の表で出します。緑＝前の日の分まで入っている／黄＝1日以上遅れ／赤＝止まっている／灰＝出品0。')}"><span class="ta-fx-arw" style="display:inline-block;width:12px;color:#5f6b7a">${open ? '▾' : '▸'}</span><b>📥 <span>アクセスの最後の取得（日本時間）</span></b> <span style="margin-left:6px">${sumTxt}</span></div>`
+      return `<div style="border:1px solid ${counts.red ? '#f0c4bd' : counts.yel ? '#ffd699' : '#e3e6ea'};background:#fafbfc;border-radius:8px;padding:6px 10px;margin:0 0 8px;font-size:11.5px">`
+        + `<div onclick="${tog}" style="cursor:pointer;user-select:none" data-guide="${av('押すと開け閉めします（この端末で覚えます）。閉じた時は要約の1行だけ出します。遅れ・止まっている店がある時は開いた形で出します。店ごとに、アクセスを最後に取り込んだ日と時刻（日本時間）を、国×店の表で出します。緑＝対象日を取得／青＝Shopeeの確定待ち／黄＝確定時刻を過ぎて未取得／赤＝取得が停止／灰＝出品0。')}"><span class="ta-fx-arw" style="display:inline-block;width:12px;color:#5f6b7a">${open ? '▾' : '▸'}</span><b>📥 <span>アクセスの最後の取得（日本時間）</span></b> <span style="margin-left:6px">${sumTxt}</span></div>`
         + `<div style="overflow-x:auto;display:${open ? '' : 'none'}"><table style="border-collapse:collapse;margin-top:4px;font-size:11.5px">${head}${rows}</table></div></div>`;
     };
     const taBandHtml = () => {
@@ -23496,7 +23512,7 @@
     host.innerHTML = `<div class="ta-tabs">${TA_TABS.map(([k, l]) => `<button class="ta-tab${k === taTab ? ' on' : ''}" data-tab="${k}" data-guide="${av(({ trend: '店ごとの訪問者・オーダー数などの、日ごとの推移のグラフに切り替えます。', prod: '商品ごとの閲覧・カート・注文の表に切り替えます。絞り込みと並べ替えができます。', cart: 'カートに入れた人の数が多い品の一覧に切り替えます。', ns: 'カートに入っているのに売れていない品（商品ごとの表を、その絞り込みで出した形）に切り替えます。', stop: 'アクセスの取り込みが止まっている店の表に切り替えます（1以上なら赤）。' }[k] || '') + '選んだタブはこの端末が覚えます。読むだけです。')}">${l}<b class="n" id="ta-tabn-${k}"></b></button>`).join('')}</div><div id="traffic-ing" class="ta-pane" data-pane="stop"></div><div id="traffic-ana" class="ta-pane" data-pane="trend"></div><div id="traffic-cart" class="ta-pane" data-pane="cart"></div><div id="traffic-exp" class="ta-pane" data-pane="trend"></div><div id="traffic-prodslot" class="ta-pane" data-pane="prod ns" style="margin:0 0 10px"></div><details id="ta-visitbox" class="tool-card ta-fold ta-pane" data-pane="trend" data-k="visit" data-def="1" style="max-width:none;margin:0">
       <summary style="cursor:pointer;margin-bottom:6px" data-guide="直近14日の訪問者・ページビューの、日ごと・国ごとの表を開く・閉じる。読むだけです。"><b>訪問者 <span class="smd-dim" style="font-weight:400">/ページビュー</span>（直近14日・国ごと・現地日付）</b></summary><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px"><span class="smd-dim" style="font-size:11px">マスにカーソルを当てると 新規/既存・フォロワー・滞在・直帰率</span><button class="smd-btn" id="traffic-reload" style="margin-left:auto;font-size:11px">🔄 読み直す</button></div>
       <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11.5px;min-width:900px"><thead><tr style="border-bottom:1px solid #e3e6ea"><th style="text-align:left;padding:3px 6px">国 <span class="smd-dim" style="font-weight:400;font-size:10.5px">最終取込</span></th>${days.map(d => `<th style="text-align:right;padding:3px 6px;white-space:nowrap">${esc(d.slice(5).replace('-', '/'))}</th>`).join('')}<th style="text-align:right;padding:3px 6px">30日計</th><th style="text-align:right;padding:3px 6px" title="新しいフォロワー（30日）">＋フォロワー</th></tr></thead><tbody>${rows}${foot}</tbody></table></div>
-      <div class="smd-dim" style="font-size:10.5px;margin-top:6px">前日分は Shopee 側で 10:00 に確定し、各国のタブが 11:05（現地）に読み直して送ります。⚠＝2日以上届いていない国（そのタブが閉じているか、ログアウトしています）。<span>「⚠1店」＝その国の店のうち2日以上届いていない店がある（国の数字はその店の分が抜けて少なく出ます）。</span></div>
+      <div class="smd-dim" style="font-size:10.5px;margin-top:6px">Shopeeの現地10:00以降に前日分が確定します。各国のタブは現地11:05以降に前日分を取り込みます。⚠＝2日以上届いていない国（そのタブが閉じているか、ログアウトしています）。<span>「⚠1店」＝その国の店のうち2日以上届いていない店がある（国の数字はその店の分が抜けて少なく出ます）。</span></div>
     </details>`;
     taFoldInit(host);
     host.dataset.tab = taTab;
@@ -32346,6 +32362,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-23', items: [
+      '📥 <b>日次アクセスの確定待ちと未取得を区別</b>。前日分が届いた店舗数を表示し、日次取り込みは対象日が受理されるまで完了にしません',
       '📍 <b>当日のアクセス速報を現地日付で表示</b>。訪問者の合計は、各店の現地日付が一致する速報だけを使います。各店の取得時刻と取得できた店数を表示します',
     ] },
     { date: '2026-11-22', items: [

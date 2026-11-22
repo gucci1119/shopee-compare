@@ -2,7 +2,7 @@
 // @name         【Shopee】📈 アクセス（Business Insights）取り込み
 // @name:ja      【Shopee】📈 アクセス（Business Insights）取り込み
 // @namespace    shopee-os
-// @version      1.5.7
+// @version      1.5.8
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-insights.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-insights.user.js
 // @description  Seller Center の Business Insights（Traffic Overview）が読んだ日別の訪問者・ページビューを横取りしてポータル（app_kv traffic_daily）へ送る。深夜に Shopee 側で見られない時間帯でもポータルで見られるようにする。v1.4.0：転記のタブが1日1回ここへ来て、取り込んだら元の画面へ戻る。v1.3.0：商品パフォーマンス（カタログ・明細ごとのカート追加数など・直近30日）を1日1回読んで app_kv product_perf_<店> へ送る。
@@ -30,7 +30,11 @@
   const CC = (function () { const h = location.hostname; if (/\.ph$/.test(h)) return 'PH'; if (/\.sg$/.test(h)) return 'SG'; if (/\.com\.my$/.test(h)) return 'MY'; if (/\.com\.br$/.test(h)) return 'BR'; if (/\.vn$/.test(h)) return 'VN'; if (/\.co\.th$/.test(h)) return 'TH'; if (/\.tw$/.test(h)) return 'TW'; return ''; })();
   const TZ = { PH: 8, SG: 8, MY: 8, BR: -3, VN: 7, TH: 7, TW: 8 }[CC] || 8;
   const log = (...a) => { try { console.log('[SI]', ...a); } catch (_) {} };
+  const VERSION = '1.5.8';
   const sentKey = 'si_sent_' + CC;
+  const DAY_SECONDS = 86400;
+  const targetDay = () => ymdOf(Math.floor(Date.now() / 1000) - DAY_SECONDS);
+  const dayKey = (shopId, day) => sentKey + '_' + shopId + '_' + day;
   function ymdOf(t) { const d = new Date((Number(t) + TZ * 3600) * 1000); return d.toISOString().slice(0, 10); }   /* t は現地0時の epoch。現地の日付に直す */
   /* ★v1.1.0（2026-09-26 本人「アカウントごとに見れるようにもしておいて」）：どの店の数字かを一緒に送る（同じ国に店が2つある）。
      /api/selleraccount/shop_info/ はログイン中の店の shop_id と名前を返す（同じ origin・署名不要）。取れなければ店なしで送る＝国には入る */
@@ -38,7 +42,7 @@
   /* ★v1.5.4（2026-11-20 05・00・本人「Chrome のアカウントごとで、第一・第二・第三アカウントって分けてるんですよ。混ざっちゃうから」）：
      2店舗目の Chrome で MY の店（URL の cnsc_shop_id=1863981586）を開いたのに、Shopee が本店 VN（gcsonlinestore.vn）の画面に戻し、そこで本店 VN の数字を送った。
      → URL が店を指している時（cnsc_shop_id・このタブで最後に見た物を sessionStorage に覚える）、shop_info の店がそれと違えば、どの口（訪問者・商品・カートの日ごと）も送らない */
-  try { document.documentElement.setAttribute('data-si-ver', '1.5.6'); } catch (_) {}   /* ★v1.5.5 入っている版を外から確かめる印 */
+  try { document.documentElement.setAttribute('data-si-ver', VERSION); } catch (_) {}   /* ★v1.5.5 入っている版を外から確かめる印 */
   const URL_SHOP = (function () { let v = ''; try { v = (new URLSearchParams(location.search).get('cnsc_shop_id') || '').replace(/\D/g, ''); if (v) sessionStorage.setItem('si_url_shop', v); else v = sessionStorage.getItem('si_url_shop') || ''; } catch (_) {} return v; })();
   let SHOP_BAD = '';
   async function shopInfo() {
@@ -50,31 +54,68 @@
   async function send(period, rows) {
     if (!CC || !rows.length) return;
     const sh = await shopInfo();
-    if (SHOP_BAD || (URL_SHOP && !sh)) return;   /* ★v1.5.4 違う店の画面・URL が店を指しているのに店が読めない時は送らない（店なしで送ると国の数字に直接入る＝レビュー中2） */
-    const payload = { action: 'traffic_ingest', cc: CC, period: period, rows: rows, shop_id: sh ? sh.id : '', shop_name: sh ? sh.name : '' };
-    fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.7' })) })
-      .then(r => r.text()).then(t => { log('sent', period, rows.length, t.slice(0, 120));
-        /* ★v1.5.7（2026-11-21 05・全体レビュー 中17）：ok:true だけでは、POST が GET に化けて doGet の ok を返した時も「送った」になる（記憶 gas-ok-true-is-not-success）。traffic_ingest の返事（国と件数 n）まで見る */
-        let jj = null; try { jj = JSON.parse(t); } catch (_) { jj = null; }
-        if (!(jj && jj.ok === true && jj.cc === CC && typeof jj.n === 'number')) { badge('⚠ 送れませんでした（返事が違う）＝次の回にもう一度'); return; }   /* ★1.4.0 2026-10-07 SG：GAS がログイン画面の HTML を返したのに「送った」と記録して、その日は二度と送らなかった */ try { localStorage.setItem(sentKey, JSON.stringify({ at: Date.now(), period, n: rows.length, res: t.slice(0, 80) })); } catch (_) {} badge('📈 ' + rows.length + '日ぶんを送りました（' + period + '）'); })
-      .catch(e => { log('send fail', e); badge('⚠ 送れませんでした ' + String(e).slice(0, 60)); });
+    if (SHOP_BAD || !sh) return;
+    const yesterday = targetDay();
+    const confirmed = rows.some(row => row.d === yesterday);
+    const payload = { action: 'traffic_ingest', cc: CC, period, rows, shop_id: sh.id, shop_name: sh.name };
+    try {
+      const response = await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        body: JSON.stringify({ ...payload, ik: smdIk_(), ver: VERSION }) });
+      const text = await response.text();
+      log('sent', period, rows.length, text.slice(0, 120));
+      let receipt;
+      try { receipt = JSON.parse(text); } catch (_) {}
+      if (!response.ok || receipt?.ok !== true || receipt.cc !== CC ||
+          String(receipt.shop || '') !== sh.id || receipt.n !== rows.length) {
+        badge('⚠ 送れませんでした（返事が違う）＝次の回にもう一度');
+        return;
+      }
+      try {
+        const savedAt = Date.now();
+        const currentTarget = targetDay();
+        // 注文画面の既存連携が読む共通印にも、対象日を保存した時だけ時刻を入れる。
+        if (confirmed) {
+          localStorage.setItem(dayKey(sh.id, yesterday), String(savedAt));
+          localStorage.removeItem(dayKey(sh.id, ymdOf(Math.floor(savedAt / 1000) - 8 * DAY_SECONDS)));
+        }
+        if (confirmed && yesterday === currentTarget) {
+          localStorage.setItem(sentKey, JSON.stringify({ at: savedAt, shop: sh.id, through: yesterday,
+            period, n: rows.length, res: text.slice(0, 80) }));
+        } else {
+          const old = JSON.parse(localStorage.getItem(sentKey) || '{}');
+          if (!old.through && (!old.shop || old.shop === sh.id)) localStorage.removeItem(sentKey);
+        }
+      } catch (_) {}
+      if (confirmed || sentToday()) badge('📈 ' + rows.length + '日ぶんを送りました（' + period + '）');
+      else badge('📈 ' + yesterday + ' の確定分は未取得');
+    } catch (e) {
+      log('send fail', e);
+      badge('⚠ 送れませんでした ' + String(e).slice(0, 60));
+    }
   }
   function handle(url, text) {
     if (!/mydata\/traffic\/dashboard\/trend\//.test(url)) return;
-    let j; try { j = JSON.parse(text); } catch (_) { return; }
-    const period = (url.match(/[?&]period=([a-z0-9_]+)/) || [])[1] || '';   /* ★v1.5.5 レビュー低3：compare_period などに引っかからない */
-    /* ★v1.5.5（2026-11-20 00 の決め・2店舗目 BR は出品0＝訪問者0は本当の数字）：直近30日（past30days）で Shopee が確定済み（data_ready:true）の no_data を返した時は、0人の日として送る（止まりと見分けるため）。
-       過去の月（period=month）の no_data は今までどおり送らない（店を始める前の月を0で埋めない） */
-    if (((j || {}).result || {}).no_data && !(period === 'past30days' && ((j || {}).result || {}).data_ready === true)) { log('no_data', period); return; }   /* ★v1.2.0 店を始める前の月などは全部0で来る＝送らない */
-    const all = (((j || {}).result || {}).data || {}).all || [];
-    const rows = all.filter(x => x && x.t).map(x => ({ d: ymdOf(x.t), pv: x.page_views, uv: x.visitors, nv: x.new_visitors, ev: x.existing_visitors, nf: x.new_followers, stay: x.avg_stay_time, bounce: x.bounce_rate }));
-    /* 「まだ確定していない日」は 0 で入ってくる（data_ready:false）。確定前の 0 で上書きしない＝直近日が全部0なら落とす */
-    const today = ymdOf(Math.floor(Date.now() / 1000) - TZ * 3600 + TZ * 3600);
-    /* ★v1.4.1（2026-10-22 本人「なぜ点々なってるん？」「データあるはずやろ？」）：Shopee は確定したかを result.data_ready で返す（実測：2店舗目 SG の 10-21 は data_ready:true・訪問者0）。
-       確定済みなら 0 人の日もそのまま送る（訪問者の少ない店で、本当に0人の日が未確定扱いで捨てられ、線が途切れていた）。data_ready が無い／false の時だけ直近2日の 0 を落とす */
-    const ready = ((j || {}).result || {}).data_ready === true;
-    const keep = rows.filter(r => r.d < today && (ready || !(r.pv === 0 && r.uv === 0 && r.d >= ymdOf(Math.floor(Date.now() / 1000) - 2 * 86400))));
-    if (keep.length) send(period, keep); else log('no rows to send', period, rows.length);
+    let result;
+    try { result = JSON.parse(text)?.result; } catch (_) { return; }
+    if (!result) return;
+    const period = (url.match(/[?&]period=([a-z0-9_]+)/) || [])[1] || '';
+    const ready = result.data_ready === true;
+    if (result.no_data && !(period === 'past30days' && ready)) { log('no_data', period); return; }
+    const all = result.data?.all;
+    if (!Array.isArray(all)) return;
+    const rows = all.filter(row => row && Number.isFinite(Number(row.t)) && Number(row.t) > 0)
+      .map(row => ({ d: ymdOf(row.t), pv: row.page_views, uv: row.visitors, nv: row.new_visitors,
+        ev: row.existing_visitors, nf: row.new_followers, stay: row.avg_stay_time, bounce: row.bounce_rate }));
+    const now = Math.floor(Date.now() / 1000);
+    const today = ymdOf(now), yesterday = ymdOf(now - DAY_SECONDS), twoDaysAgo = ymdOf(now - 2 * DAY_SECONDS);
+    // 確定前の前日分を送らない。確定済みの0件と取得不能を区別する。
+    const isCount = value => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) &&
+      Number.isFinite(Number(value)) && Number(value) >= 0;
+    const keep = rows.filter(row => row.d < today && isCount(row.uv) && isCount(row.pv) &&
+      (ready || (row.d < yesterday && !(Number(row.pv) === 0 && Number(row.uv) === 0 && row.d >= twoDaysAgo))));
+    if (keep.length) send(period, keep);
+    else log('no rows to send', period, rows.length);
   }
   /* XHR と fetch の両方を横取り */
   const oo = XMLHttpRequest.prototype.open, osend = XMLHttpRequest.prototype.send;
@@ -95,7 +136,7 @@
     setTimeout(() => { const op = [...document.querySelectorAll('li,div,span')].find(e => e.children.length <= 1 && /^Past 30 Days$/.test((e.textContent || '').trim())); if (op) op.click(); }, 800);
     return true;
   }
-  /* 読み直しの当番：現地 11:05 以降で今日まだ送っていなければ読み直す（1分ごとに時計を見る） */
+  /* 現地11:05以降、前日分が未取得の店だけ間隔を空けて読み直す。 */
   function localYmd() { return new Date(Date.now() + TZ * 3600000).toISOString().slice(0, 10); }
   function localHour() { return new Date(Date.now() + TZ * 3600000).getUTCHours() * 60 + new Date(Date.now() + TZ * 3600000).getUTCMinutes(); }
   /* ★v1.5.7（全体レビュー 中17）：本人がこの画面を見て操作している時は、ページの移動・読み直しをしない（2分操作が無い時か裏の時だけ） */
@@ -105,9 +146,17 @@
     try {
       if (SHOP_BAD) return;
       if (_siBusy()) return;   /* ★v1.5.4 レビュー低5：違う店の画面で読み直しを繰り返さない（止めた理由はバッジとコンソール） */
-      const st = JSON.parse(localStorage.getItem(sentKey) || '{}'); const sentDay = st.at ? new Date(st.at + TZ * 3600000).toISOString().slice(0, 10) : '';
-      if (localHour() >= 665 && sentDay !== localYmd() && !/traffic\/overview/.test(location.pathname)) { location.href = location.origin + '/datacenter/traffic/overview' + (URL_SHOP ? '?cnsc_shop_id=' + URL_SHOP : ''); return; }   /* ★v1.5.4 レビュー低4：店の指定を落とさない */
-      if (localHour() >= 665 && sentDay !== localYmd() && (!st.at || Date.now() - st.at > 60 * 60000)) { const rl = Number(sessionStorage.getItem('si_reload') || 0); if (Date.now() - rl > 30 * 60000) { sessionStorage.setItem('si_reload', String(Date.now())); location.reload(); } }
+      if (localHour() < 665 || sentToday()) return;
+      const shopId = _shop?.id || URL_SHOP;
+      const attemptKey = 'si_retry_' + CC + '_' + shopId;
+      const previous = Number(localStorage.getItem(attemptKey) || 0);
+      if (Date.now() - previous < 60 * 60000) return;
+      localStorage.setItem(attemptKey, String(Date.now()));
+      if (!/traffic\/overview/.test(location.pathname)) {
+        location.href = location.origin + '/datacenter/traffic/overview' + (URL_SHOP ? '?cnsc_shop_id=' + URL_SHOP : '');
+      } else {
+        location.reload();
+      }
     } catch (_) {}
   }, 60000);
   /* ★v1.2.0（2026-09-26 本人「これ1年は取れないのか？」）：過去の月を1か月ずつ取り込む（店ごとに1回だけ）。
@@ -283,7 +332,11 @@
   /* ★v1.4.0（2026-10-07 本人「毎日1回、各国のタブで自動でその画面を開く」「たまにPC閉じて持ち運んでる」）：
      転記のタブ（shopee-row-sync 1.5.3）が1日1回ここへ来る（sessionStorage si_return に元のURL）。
      訪問者（直近30日）を送り、商品の数字も済んだら元の画面へ戻す。人が触っている間は戻さない。最長8分で戻す（取れなくても注文画面を空けない） */
-  function sentToday() { try { const st = JSON.parse(localStorage.getItem(sentKey) || '{}'); return !!st.at && new Date(st.at + TZ * 3600000).toISOString().slice(0, 10) === localYmd(); } catch (_) { return false; } }
+  function sentToday() {
+    const shopId = _shop?.id || URL_SHOP;
+    if (!shopId || SHOP_BAD) return false;
+    try { return !!localStorage.getItem(dayKey(shopId, targetDay())); } catch (_) { return false; }
+  }
   function goBack(why) {
     let u = ''; try { u = sessionStorage.getItem('si_return') || ''; } catch (_) {}
     if (!u) return;
