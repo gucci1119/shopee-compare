@@ -2005,7 +2005,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261123-105036';
+  const APP_BUILD = '20261123-112031';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -10711,6 +10711,11 @@
   "画面の写し": "Screen image",
   "画面の写し未取得": "Screen image not captured",
   "表示内容・入力値を記録": "Visible content and field values recorded",
+  "2MB以下の画面画像を選んでください": "Choose a screenshot no larger than 2 MB",
+  "保存しました。送信完了の状態は変更していません": "Screenshot saved. Submission status is unchanged.",
+  "画面の写しを保存できませんでした。": "Could not save the screenshot.",
+  "。保存先が画像を受け付けなかった場合に、失敗の理由を表示します": ". If storage rejects the screenshot, the reason is shown.",
+  "問い合わせ履歴に添付した画面の保存結果を表示": "Show whether an inquiry screenshot was saved",
   "取得結果": "Capture result",
   "メール送信済み画面・返事の証拠は、実際の画面の写しを添付できます（送信済みの自動判定には使いません）。": "Attach actual sent-mail or reply screenshots as evidence. Attachments do not automatically mark an inquiry as submitted.",
   "直近100件。開いただけのものを送信済みにしません。返事の自動取込は未設定です。": "Latest 100 inquiries. Opening a form does not mark it as submitted. Automatic reply import is not configured.",
@@ -11367,6 +11372,8 @@
     // ${cc} の「${jb.fam || apiFam}」ショップに、公式APIで【${stW}】で出品します。  ← stW は 公開 / 非公開(下書き) の2値
     [/^(.+) の「(.+)」ショップに、公式APIで【公開】で出品します。$/, 'Create the listing for $1 in the "$2" shop via the official API, published.'],
     [/^(.+) の「(.+)」ショップに、公式APIで【非公開\(下書き\)】で出品します。$/, 'Create the listing for $1 in the "$2" shop via the official API, as an unpublished draft.'],
+    [/^画面の写しを保存できませんでした。 証拠の保存 HTTP (\d+)$/, 'Could not save the screenshot (HTTP $1).'],
+    [/^画面の写しを保存できませんでした。 ([\s\S]+)$/, 'Could not save the screenshot. $1'],
     // 価格(現地): ${jb.price}
     [/^価格\(現地\): (.+)$/, 'Price (local): $1'],
     // 条件: ${listState.apiCondition || 'USED'} ／ 作成後: ${stWb}
@@ -29817,7 +29824,28 @@ grant all on public.tasks to anon, authenticated, service_role;`;
           '<p>添付：' + esc(v.payload.csv ? v.payload.csv.name : '記録なし') + '</p><table class="pf-table"><thead><tr><th>日時（日本時間）</th><th>状態</th><th>証拠</th><th>取得結果</th></tr></thead><tbody>' + (v.events || []).map((ev,i) => '<tr><td>' + esc(new Date(ev.at).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})) + '</td><td>' + esc(names[ev.phase] || ev.phase) + '</td><td>' + (ev.proof ? '<button class="smd-btn support-proof" data-i="' + i + '">画面の写し</button>' : '画面の写し未取得') + '</td><td style="white-space:normal">' + esc(ev.proofError || ev.successMarker || '表示内容・入力値を記録') + '</td></tr>').join('') + '</tbody></table><p>メール送信済み画面・返事の証拠は、実際の画面の写しを添付できます（送信済みの自動判定には使いません）。</p><input class="support-attach" type="file" accept="image/png,image/jpeg"><div class="support-attach-status" role="status"></div>';
         box.querySelector('.support-back').onclick = () => { p.remove(); jpInquiryHistoryPanel(); };
         box.querySelectorAll('.support-proof').forEach(b => b.onclick = async () => { const w = window.open('about:blank','_blank'); try { const ev = v.events[Number(b.dataset.i)]; if (!ev || !/^support\/[0-9a-f-]{36}\/[a-z_-]+-\d+\.(png|jpg)$/.test(ev.proof || '')) throw new Error('証拠の場所が不正です'); const r = await fetch(SB_URL + '/storage/v1/object/authenticated/slsproof/' + ev.proof,{headers:{apikey:settings.sbSecret,authorization:'Bearer '+settings.sbSecret}}); if (!r.ok) throw new Error('HTTP '+r.status); const u = URL.createObjectURL(await r.blob()); if(w){w.location.href=u;w.opener=null;} setTimeout(()=>URL.revokeObjectURL(u),600000); } catch(e){if(w)w.close();toast('写しを開けません：'+String(e.message||e),true)} });
-        box.querySelector('.support-attach').onchange = async e => { const file = e.target.files && e.target.files[0], st = box.querySelector('.support-attach-status'); if(!file)return; if(file.size>2000000){st.textContent='2MB以下の画面画像を選んでください';return} st.textContent='保存中…'; try { const url=await new Promise((ok,ng)=>{const r=new FileReader();r.onload=()=>ok(r.result);r.onerror=ng;r.readAsDataURL(file)});await jpInquiryEvent({id:v.id,nonce:v.nonce,event:{id:crypto.randomUUID(),phase:'screen_saved',at:new Date().toISOString(),sourceUrl:'本人が選んだ画面の写し',image:url,attachmentNames:[file.name]}});st.textContent='保存しました。送信完了の状態は変更していません'; }catch(e2){st.textContent='保存できません：'+String(e2.message||e2)} };
+        box.querySelector('.support-attach').onchange = async e => {
+          const file = e.target.files && e.target.files[0], st = box.querySelector('.support-attach-status');
+          if (!file) return;
+          if (file.size > 2000000) { st.textContent = '2MB以下の画面画像を選んでください'; return; }
+          st.textContent = '保存中…';
+          try {
+            const url = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsDataURL(file);
+            });
+            const result = await jpInquiryEvent({id:v.id,nonce:v.nonce,event:{id:crypto.randomUUID(),phase:'screen_saved',at:new Date().toISOString(),sourceUrl:'本人が選んだ画面の写し',image:url,attachmentNames:[file.name]}});
+            if (result.proofSaved === true) {
+              st.textContent = '保存しました。送信完了の状態は変更していません';
+            } else {
+              st.textContent = '画面の写しを保存できませんでした。' + (result.proofError ? ' ' + result.proofError : '');
+            }
+          } catch (error) {
+            st.textContent = '保存できません：' + String(error.message || error);
+          }
+        };
       } catch(e){box.textContent='履歴を表示できません：'+String(e.message||e)}
     };
     try {
@@ -32406,6 +32434,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-23', items: [
+      '📨 <b>問い合わせ履歴に添付した画面の保存結果を表示</b>。保存先が画像を受け付けなかった場合に、失敗の理由を表示します',
       '<b>写真候補の取得を左メニューで表示</b>。折りたたんでも取得が続き、ほかのページを操作できます',
       '🔖 <b>出品一覧から調査済みのJANを取り込めます</b>。控えにある答えを空欄に取り込み、保存結果を表示します',
       '📥 <b>日次アクセスの確定待ちと未取得を区別</b>。前日分が届いた店舗数を表示し、日次取り込みは対象日が受理されるまで完了にしません',
