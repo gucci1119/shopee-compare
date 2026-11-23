@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261122-0300'
+var SRC_VER = '20261123-1958'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -2937,7 +2937,8 @@ function doPostInner_(e) {
     if (body.action === 'yamato_ship') { var yc = P_().getProperty('YAMATO_CSTMR'); if (yc && String(body.cstmr || '') !== yc) throw new Error('お客様コード不一致'); out = yamatoShip_(body); return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON); }
     var wt = P_().getProperty('WRITE_TOKEN');
     if (!wt || body.token !== wt) throw new Error('WRITE_TOKEN不正（書き込み拒否）');
-    if (body.action === 'chat_ingest') out = chatIngest_(body);
+    if (body.action === 'support_mail_read_one') out = supportMailReadOne_(body); // 物販窓口の返信1通だけ。既読/ラベル/履歴は変更しない
+    else if (body.action === 'chat_ingest') out = chatIngest_(body);
     else if (body.action === 'outbox_done') out = outboxDone_(body);
     else if (body.action === 'sls_awb_parameter') out = slsAwbParameter_(body); // 手配済みの単一梱包の帳票形式を照会
     else if (body.action === 'sls_awb_existing_status') out = slsAwbExistingStatus_(body); // 既発行の感熱帳票の状態を読むだけ
@@ -2951,6 +2952,67 @@ function doPostInner_(e) {
     else throw new Error('unknown action: ' + body.action);
   } catch (err) { out = { ok: false, error: String((err && err.message) || err).slice(0, 200) }; }
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+}
+/* ★2026-11-23 05：既存のGmail/実行者メール権限だけで、SLS窓口の返信1通を保全用に読む。
+   POSTのWRITE_TOKEN照合後のみ。新しいサービス/スコープ/定期処理/UrlFetchを追加しない。
+   メールのフラグを個別に読む。スレッドのラベルを完全なメッセージラベルとは呼ばない。 */
+function supportMailAddresses_(value) {
+  return (String(value || '').match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || []).map(function (s) { return s.toLowerCase(); });
+}
+function supportMailCaseMatches_(subject, plain, caseId) {
+  var token = new RegExp('(^|[^A-Za-z0-9])' + caseId + '($|[^A-Za-z0-9])');
+  if (token.test(subject)) return true;
+  var fresh = String(plain || '').split(/(?:^|\n)(?:\s*>|On .{1,200}wrote:|-----\s*Original Message\s*-----|[-─]{2,}\s*(?:元のメッセージ|転送メッセージ)|(?:From|差出人):)/i)[0];
+  var markers = fresh.match(/(?:Inquiry|Case|Ticket|お問い合わせ|問い合わせ|受付|照会)\s*(?:ID|番号|No\.?|#)?\s*[:：#\[（(]?\s*\d{16,22}(?!\d)/ig) || [];
+  return markers.some(function (s) { return token.test(s); });
+}
+function supportMailFlags_(message) {
+  return { draft:message.isDraft(), trash:message.isInTrash(), inbox:message.isInInbox(), unread:message.isUnread(), starred:message.isStarred() };
+}
+function supportMailReadOne_(p) {
+  var expected = 'gcsonlinestore631@gmail.com', caseId = String(p.case_id || ''), after = String(p.after || ''), before = String(p.before || ''), mid = String(p.message_id || '');
+  if (p.mailbox !== expected || !/^\d{16,22}$/.test(caseId)) throw new Error('物販メールボックスと受付番号を明示してください');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(after) || !/^\d{4}-\d{2}-\d{2}$/.test(before)) throw new Error('検索期間が不正です');
+  var fromMs = Date.parse(after + 'T00:00:00+09:00'), toMs = Date.parse(before + 'T00:00:00+09:00');
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs || toMs - fromMs > 32 * 86400000 || Utilities.formatDate(new Date(fromMs),'Asia/Tokyo','yyyy-MM-dd') !== after || Utilities.formatDate(new Date(toMs),'Asia/Tokyo','yyyy-MM-dd') !== before) throw new Error('検索期間は実在する日付で32日以内にしてください');
+  if (mid && !/^[a-f0-9]{12,32}$/.test(mid)) throw new Error('メール番号が不正です');
+  /* Sessionのuserinfo.emailは本体の既存8スコープに含まれる。別の台ではGmailに触る前に拒否。 */
+  var account = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
+  if (account !== expected) throw new Error('この処理は物販の主メールボックス専用です');
+  var messages = [], count = 0;
+  if (mid) { var one = GmailApp.getMessageById(mid); if (one) messages = [one]; }
+  else {
+    var threads = GmailApp.search('from:(help@support.shopee.jp OR logisupport.shopeejp@shopee.com) "' + caseId + '" after:' + (Math.floor(fromMs / 1000) - 1) + ' before:' + Math.ceil(toMs / 1000), 0, 1); // Gmailの日付文字列はPST。日本時間の境界を秒で渡す
+    if (threads.length) { count = threads[0].getMessageCount(); if (count > 20) throw new Error('対象スレッドが20通を超えるためメール番号を指定してください'); messages = threads[0].getMessages().slice().reverse(); }
+  }
+  var selected = null, plain = '', from = [], to = [], subject = '', flags;
+  for (var i = 0; i < messages.length && i < 20; i++) {
+    var m = messages[i], at = m.getDate().getTime();
+    if (at < fromMs || at >= toMs) continue;
+    var f = supportMailAddresses_(m.getFrom()), t = supportMailAddresses_(m.getTo());
+    if (f.length !== 1 || ['help@support.shopee.jp','logisupport.shopeejp@shopee.com'].indexOf(f[0]) < 0 || t.indexOf(expected) < 0) continue;
+    var state = supportMailFlags_(m); if (state.draft || state.trash) continue;
+    var s = String(m.getSubject() || ''), b = String(m.getPlainBody() || '');
+    if (!/SLS\+|SLS補償|補償/i.test(s + '\n' + b) || !supportMailCaseMatches_(s,b,caseId)) continue;
+    if (Utilities.newBlob(b).getBytes().length > 200000) throw new Error('返信本文が保存上限を超えています（切断しません）');
+    selected = m; plain = b; from = f; to = t; subject = s; flags = state; break;
+  }
+  if (!selected) return { ok:true, found:false, mailbox:account, caseId:caseId, searchedThreads:mid ? 0 : Math.min(count ? 1 : 0,1), scopeComplete:false, reason:'限定した範囲に照合可能な返信は見つかりませんでした。全Gmailの不在判定ではありません' };
+  var raw = String(selected.getRawContent() || ''), rawBytes = Utilities.newBlob(raw).getBytes();
+  if (!rawBytes.length || rawBytes.length > 1000000) throw new Error('原文が空または保存上限超過です（切断しません）');
+  var rfcId = String(selected.getHeader('Message-ID') || ''); if (!/^<[^<>\s]+@[^<>\s]+>$/.test(rfcId)) throw new Error('原文のメール識別子を確認できません');
+  selected.refresh(); var afterFlags = supportMailFlags_(selected);
+  if (JSON.stringify(flags) !== JSON.stringify(afterFlags)) throw new Error('確認中にメール状態が変わったため確定しません');
+  return { ok:true, found:true, action:'support_mail_read_one', src:SRC_VER, collectedAt:new Date().toISOString(),
+    mailbox:{business:'shopee',account:account,verifiedBeforeRead:true,verifiedAddresses:[account],bindingProof:{provider:'existing_shopee_gas',ref:'OpenAPI-main:Session.getEffectiveUser'}},
+    caseId:caseId, gmailMutations:0, inquiryWrites:0, urlFetchCalls:0,
+    message:{account:account,gmailId:selected.getId(),gmailThreadId:selected.getThread().getId(),from:from,to:to,subject:subject,
+      messageDate:selected.getDate().toISOString(),dateBasis:'GmailApp.getDate (Gmail API internalDateではない)',
+      rfcMessageId:rfcId,inReplyTo:String(selected.getHeader('In-Reply-To') || ''),references:String(selected.getHeader('References') || ''),autoSubmitted:String(selected.getHeader('Auto-Submitted') || ''),
+      body:plain,bodyComplete:true,metadataComplete:true,messageFlags:flags,messageFlagsAfter:afterFlags,messageFlagsComplete:true,
+      labelsComplete:false,rawMimeBase64:Utilities.base64Encode(rawBytes),rawMimeBytes:rawBytes.length,rawMimeCaptured:true,attachmentsDownloaded:false,
+      reviewRequired:true,formStatusChange:false,financialStatusChange:false}
+  };
 }
 function chatHash_(s) { var d = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, String(s)); return Utilities.base64EncodeWebSafe(d).replace(/=+$/, '').slice(0, 22); }
 function chatTryParse_(s) { try { return JSON.parse(s); } catch (e) { return { _unparsed: String(s).slice(0, 4000) }; } }
