@@ -2008,7 +2008,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261123-205959';
+  const APP_BUILD = '20261123-220300';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -6252,6 +6252,12 @@
     "日次": "Daily",
     "現地": "local",
     "速報が取れた店": "Shops with a snapshot",
+    "アクセスの最終取得（日本時間）": "Last traffic update (JST)",
+    "日次の抜け": "Daily gaps",
+    "日次の記録なし": "No daily records",
+    "日次の確認が必要な店": "Shops with daily data to check",
+    "速報": "Real-time",
+    "取得日時は日次と速報のうち新しい時刻です。日次は最初の保存日から確定済みの日まで照合します。": "The timestamp is the latest daily or real-time capture. Daily coverage is checked from the first saved date through the latest finalized date.",
     "今日（その国の日付）の途中の数です。Business Insights の今日の数を、各店の画面を1回ずつ開いて読みました（読んだ時刻を右に）。下のグラフ・表は前の日までの1日ごとの数です。取れなかった店は理由を出します（0ではありません）。": "Today's numbers so far (local date). Read once per shop from Business Insights (time on the right). The charts and tables below are daily numbers up to yesterday. Shops that could not be read show the reason (not 0).",
     "訪問者": "Visitors",
     "閲覧": "Views",
@@ -22511,6 +22517,18 @@
     if (cfg) window.__finCharts[boxId] = new Chart(cv, cfg);
   }
   const taYmd = (d) => new Date(d).toISOString().slice(0, 10);
+  function taDailyCoverage(rows, through) {
+    const saved = Object.keys(rows).filter(day => /^\d{4}-\d{2}-\d{2}$/.test(day) &&
+      rows[day]?.uv != null && rows[day].uv !== '' && Number.isFinite(Number(rows[day].uv))).sort();
+    const first = saved[0] || '', last = saved[saved.length - 1] || '';
+    const known = new Set(saved);
+    const missing = [];
+    for (let ms = Date.parse(first), end = Date.parse(through); ms <= end; ms += 86400000) {
+      const day = taYmd(ms);
+      if (!known.has(day)) missing.push(day);
+    }
+    return { first, last, missing };
+  }
   function taDays(n, endOffset) { const out = []; const base = Date.now() - (endOffset || 0) * 86400000; for (let i = n; i >= 1; i--) out.push(taYmd(base - i * 86400000)); return out; }
   function taBucket(ymd, gran) {
     if (gran === 'month') return ymd.slice(0, 7);
@@ -22657,16 +22675,11 @@
       return live;
     };
     const taLiveNum = v => v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v);
-    const taLiveFmt = v => taLiveNum(v)?.toLocaleString() ?? '—';
-    /* ★2026-11-21 05（00・本人「これもまじ見にくいわ」）：18店が1行に流れる帯 → 行＝国・列＝本店／2店舗目／第3 の表（記憶 portal-matrix-not-vertical-list）。
-       マス＝大きく「何日の分」・小さく「取得の時刻」・第3は「次は毎晩 21:40ごろ」・今日の途中の数（traffic_today）があれば「今日 ◯時時点」。
-       色＝緑：前の日の分まで入っている／黄：1日以上遅れ／赤：止まっている・一度も取れていない（理由つき）／灰：出品0。店の無いマスは「—」 */
     const taFetchHtml = () => {
       if (!shopIds.length) return '';
       const fams = [[1, famFull(1)], [2, famFull(2)], [3, famFull(3)]];   /* ★11/21 本人「だから、表現統一してって」＝第1（本店）・第2（2店舗目）・第3（3店舗目） */
       const famOf = id => { try { return famNoOfShop(id) || 0; } catch (_) { return 0; } };
       const ccs = allCc.filter(cc => shopIds.some(id => shopCcOf[id] === cc));
-      const ymd0 = taYmd(taLiveNow + 9 * 3600000 - 86400000);
       const cutoffByCountry = Object.fromEntries(ccs.map(cc => {
         const tz = taLiveZones[cc];
         if (!tz) return [cc, ''];
@@ -22674,45 +22687,57 @@
         const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hourCycle: 'h23' }).format(taLiveNow));
         return [cc, taYmd(Date.parse(localDate) - (hour < 10 ? 2 : 1) * 86400000)];
       }));
-      const targetLabel = ymd0.slice(5).replace('-', '/');
-      const counts = { ok: 0, wait: 0, yel: 0, red: 0, gray: 0 };
+      const checkedTime = at => {
+        const ms = Date.parse(at || '');
+        return Number.isFinite(ms) && ms <= taLiveNow ? ms : 0;
+      };
+      let dailyIssues = 0, liveCount = 0, shopCount = 0, stopped = 0;
       const cell = (cc, fn) => {
-        const ids = shopIds.filter(id => shopCcOf[id] === cc && famOf(id) === fn); if (!ids.length) return '<td style="padding:4px 8px;text-align:center;color:#bbb">—</td>';
+        const ids = shopIds.filter(id => shopCcOf[id] === cc && famOf(id) === fn);
+        if (!ids.length) return '<td style="padding:4px 8px;text-align:center;color:#bbb">—</td>';
         return '<td style="padding:3px 6px;vertical-align:top">' + ids.map(id => {
           const f = taFetchOf(id), td = taLiveOf(id);
-          const cutoff = cutoffByCountry[cc];
-          const hasDay = !!byShop[id]?.d?.[ymd0];
-          const awaiting = !!cutoff && cutoff < ymd0 && f.d >= cutoff;
-          const st = f.noList ? 'gray' : hasDay ? 'ok' : !f.at || f.stale ? 'red' : awaiting ? 'wait' : 'yel';
-          counts[st]++;
-          const col = { ok: ['#e8f5e9', '#1b5e20'], wait: ['#eef3fc', '#244578'], yel: ['#fff8e1', '#8a5a00'], red: ['#fdecea', '#b3261e'], gray: ['#f1f3f4', '#6b7280'] }[st];
-          const big = f.noList ? '出品0' : f.d ? esc(f.d.slice(5).replace('-', '/')) + ' の分' : 'まだ取れていない';
-          const why = st === 'wait' ? '確定待ち' : st === 'yel' || st === 'red' ? '未取得' : '';
-          const small = (f.at ? esc(taJst(f.at)) + ' 取得' : '') + (fn === 3 ? '<br><span>次は毎晩 21:40ごろ</span>' : '')
-            + (why ? '<br>' + esc(targetLabel) + ' <span>の分</span> <span>' + why + '</span>' : '');
-          const tdy = !td?.current
-            ? '<div class="smd-dim" style="font-size:10.5px"><span>今日の速報は未取得</span></div>'
-            : td.why
-              ? '<div style="color:#b3261e;font-size:10px"><span>' + esc(td.why) + '</span></div>'
-              : '<div style="font-size:10.5px;color:#1f3d7a"><span>今日（途中）</span> ' + esc(taJst(td.at)) + ' <span>時点</span>（' + esc(td.d.slice(5).replace('-', '/')) + ' <span>現地</span>）：<span>訪問者</span> ' + taLiveFmt(td.uv) + '・<span>注文</span> ' + taLiveFmt(td.orders) + '</div>';
-          const g = 'この店のアクセスを最後に取り込んだのは ' + (f.at ? taJst(f.at) : '（まだ無い）') + '、中身は ' + (f.d || '?') + ' の分まで。緑＝対象日を取得／青＝Shopeeの確定待ち／黄＝確定時刻を過ぎて未取得／赤＝取得が停止／灰＝出品0（訪問者0は Shopee の値どおり）。' + (fn === 3 ? '第3は毎晩 21:40ごろに1日1回取り込みます。' : '') + (td?.current && !td.why ? '「今日」は各店の現地日付の速報です。時刻は日本時間で表示します。' : '');
-          return `<div data-guide="${av(g)}" style="background:${col[0]};color:${col[1]};border-radius:6px;padding:3px 7px;margin:1px 0;min-width:120px"><div style="font-weight:700;font-size:12.5px">${big}</div><div style="font-size:10.5px;line-height:1.35">${small}</div>${tdy}</div>`;
+          if (f.noList) return '<div class="smd-dim" style="padding:3px 7px">出品0</div>';
+          const daily = taDailyCoverage(byShop[id]?.d || {}, cutoffByCountry[cc]);
+          const liveAt = td && !td.why && taLiveNum(td.uv) != null ? checkedTime(td.at) : 0;
+          const hasLive = !!(liveAt && td.current);
+          const lastAt = Math.max(checkedTime(f.at), liveAt);
+          const dailyIssue = !daily.first || daily.missing.length > 0;
+          const stale = !lastAt || (taLiveNow - lastAt) > TA_FETCH_STALE_H * 3600000;
+          shopCount++;
+          if (hasLive) liveCount++;
+          if (dailyIssue) dailyIssues++;
+          if (stale) stopped++;
+          const colors = stale ? ['#fdecea', '#b3261e'] : dailyIssue || !hasLive ? ['#fff8e1', '#8a5a00'] : ['#e8f5e9', '#1b5e20'];
+          const label = lastAt ? esc(taJst(new Date(lastAt).toISOString())) : '<span>まだ取れていない</span>';
+          const dailyNote = !daily.first ? '<span>日次の記録なし</span>' : daily.missing.length
+            ? '<span>日次の抜け</span> ' + (daily.missing.length === 1 ? esc(daily.missing[0].slice(5).replace('-', '/')) : '<span>' + daily.missing.length + '日抜け</span>') : '';
+          const notes = [dailyNote, hasLive ? '' : '<span>今日の速報は未取得</span>'].filter(Boolean);
+          const range = daily.first ? daily.first + ' ～ ' + daily.last : '—';
+          const gaps = [];
+          for (let i = 0; i < daily.missing.length; i++) {
+            const first = daily.missing[i];
+            while (Date.parse(daily.missing[i + 1]) - Date.parse(daily.missing[i]) === 86400000) i++;
+            gaps.push(first === daily.missing[i] ? first : first + ' ～ ' + daily.missing[i]);
+          }
+          const tip = [
+            i18nText('日次') + ' ' + range + (f.at ? '（' + taJst(f.at) + '）' : ''),
+            liveAt ? i18nText('速報') + ' ' + taJst(td.at) : '',
+            gaps.length ? i18nText('日次の抜け') + ' ' + gaps.join('、') : '',
+            td?.current && td.why ? td.why : '',
+          ].filter(Boolean).join('\n');
+          return `<div title="${av(tip)}" style="background:${colors[0]};color:${colors[1]};border-radius:6px;padding:3px 7px;margin:1px 0;min-width:112px"><div style="font-weight:700;white-space:nowrap">${label}</div>${notes.length ? '<div style="font-size:10.5px">' + notes.join(' ・ ') + '</div>' : ''}</div>`;
         }).join('') + '</td>';
       };
       const rows = ccs.map(cc => `<tr style="border-top:1px solid #eef1f5"><td style="padding:4px 8px;font-weight:700;white-space:nowrap">${(FLAG[cc] || '') + ' ' + cc}</td>${fams.map(([fn]) => cell(cc, fn)).join('')}</tr>`).join('');
       const head = `<tr class="smd-dim" style="font-size:11px;background:#f4f6fa"><th style="text-align:left;padding:3px 8px">国</th>${fams.map(([fn, lb]) => `<th style="text-align:left;padding:3px 8px">${lb}</th>`).join('')}</tr>`;
-      /* ★2026-11-21 05（00・本人「折り畳めるように」）：見出しを押すと開け閉め（▸／▾）。閉じた時は見出しの横に1行の要約。
-         開け閉めはこの端末に覚える（smdTaFetchOpen）。初めは閉じた形。黄（遅れ）か赤（止まっている）がある時は開いた形で出す（止まりを見落とさない） */
-      const tdVals = shopIds.map(taLiveOf).filter(x => x?.current && !x.why && taLiveNum(x.uv) != null);
-      const tdSum = tdVals.reduce((a, x) => a + taLiveNum(x.uv), 0);
-      const nAll = counts.ok + counts.wait + counts.yel + counts.red + counts.gray;
-      const sumTxt = `<span>全${nAll}店</span>　<span>日次</span> ${esc(targetLabel)} <span style="color:#1b5e20">${counts.ok}/${nAll - counts.gray}</span>・<span>確定待ち</span> ${counts.wait}・<span style="color:${counts.yel ? '#8a5a00' : '#6b7280'}">未取得</span> ${counts.yel}・<span style="color:${counts.red ? '#b3261e' : '#6b7280'}">止まっている</span> ${counts.red}・<span style="color:#6b7280">出品0 ${counts.gray}</span>`
-        + (tdVals.length ? `／<span>今日の訪問者 計 ${tdSum.toLocaleString()}人</span>（<span>速報が取れた店</span> ${tdVals.length}/${nAll}）` : '／<span>今日の速報は未取得</span>');
+      const sumTxt = (shopCount ? `<span>速報が取れた店</span> ${liveCount}/${shopCount}` : '')
+        + (dailyIssues ? `　<span style="color:#8a5a00">日次の確認が必要な店</span> ${dailyIssues}` : '');
       let saved = ''; try { saved = localStorage.getItem('smdTaFetchOpen') || ''; } catch (_) {}
-      const open = !!(counts.red || counts.yel || counts.wait) || saved === '1';
+      const open = !!(stopped || dailyIssues) || saved === '1';
       const tog = "const b=this.nextElementSibling;const o=b.style.display==='none';b.style.display=o?'':'none';const a=this.querySelector('.ta-fx-arw');if(a)a.textContent=o?'▾':'▸';try{localStorage.setItem('smdTaFetchOpen',o?'1':'0')}catch(_){}";
-      return `<div style="border:1px solid ${counts.red ? '#f0c4bd' : counts.yel ? '#ffd699' : '#e3e6ea'};background:#fafbfc;border-radius:8px;padding:6px 10px;margin:0 0 8px;font-size:11.5px">`
-        + `<div onclick="${tog}" style="cursor:pointer;user-select:none" data-guide="${av('押すと開け閉めします（この端末で覚えます）。閉じた時は要約の1行だけ出します。遅れ・止まっている店がある時は開いた形で出します。店ごとに、アクセスを最後に取り込んだ日と時刻（日本時間）を、国×店の表で出します。緑＝対象日を取得／青＝Shopeeの確定待ち／黄＝確定時刻を過ぎて未取得／赤＝取得が停止／灰＝出品0。')}"><span class="ta-fx-arw" style="display:inline-block;width:12px;color:#5f6b7a">${open ? '▾' : '▸'}</span><b>📥 <span>アクセスの最後の取得（日本時間）</span></b> <span style="margin-left:6px">${sumTxt}</span></div>`
+      return `<div style="border:1px solid ${stopped ? '#f0c4bd' : dailyIssues ? '#ffd699' : '#e3e6ea'};background:#fafbfc;border-radius:8px;padding:6px 10px;margin:0 0 8px;font-size:11.5px">`
+        + `<div onclick="${tog}" style="cursor:pointer;user-select:none" data-guide="${av('取得日時は日次と速報のうち新しい時刻です。日次は最初の保存日から確定済みの日まで照合します。')}"><span class="ta-fx-arw" style="display:inline-block;width:12px;color:#5f6b7a">${open ? '▾' : '▸'}</span><b>📥 <span>アクセスの最終取得（日本時間）</span></b> <span style="margin-left:6px">${sumTxt}</span></div>`
         + `<div style="overflow-x:auto;display:${open ? '' : 'none'}"><table style="border-collapse:collapse;margin-top:4px;font-size:11.5px">${head}${rows}</table></div></div>`;
     };
     const taBandHtml = () => {
@@ -23641,7 +23666,7 @@
       else if (b.dataset.tab === 'prod' && TA.pCart) { TA.pCart = false; taSave(); renderTrafficProd(); }
       if (b.dataset.tab === 'trend') { try { window.dispatchEvent(new Event('resize')); } catch (_) {} }   /* 隠れていたグラフの大きさを取り直す */
     }));
-    const rb = host.querySelector('#traffic-reload'); if (rb) rb.addEventListener('click', () => { TA._d = null; TA._prod = null; TA._statsForce = true; renderTraffic(); });
+    const rb = host.querySelector('#traffic-reload'); if (rb) rb.addEventListener('click', () => { TA._d = null; TA._prod = null; TA._tdAt = 0; TA._statsForce = true; renderTraffic(); });
     (async () => {   /* 取り込み状況 → カートの日ごと（同じ目印の控えを使う＝読みは1回）。どちらも renderTraffic を呼び返さない */
       try { await renderTrafficIng(); } catch (e) { console.warn('[取り込み状況]', e); }
       try { await renderTrafficCart(); } catch (e) { console.warn('[カートの日ごと]', e); }
@@ -32607,6 +32632,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-23', items: [
+      '📥 <b>アクセスの国別・店別の表示を最終取得日時に整理</b>。日次は最初の保存日から現地の確定日まで照合し、日次の抜けと当日速報の未取得を表示します',
       '📨 <b>SLS+の返信原文を非公開で保全</b>。通常の返品・補償データ更新時に、登録した受付番号の最新返信1通を照合します。担当PCのみ・6時間以上空けて確認し、保存済み原文は重複作成しません。同じメール番号の内容が変わった場合は上書きせず保留します。メールの既読状態や問い合わせ・補償の状態は変更しません',
       '<b>写真候補の取得を途中から再開</b>。開始から2時間以内は取得済みの区分を引き継ぎ、残りだけを取ります',
       '📦 <b>出品管理の上段に「出品枠」を追加</b>。国ごとの第1〜3の上限を見比べ、対象アカウントの公開数と残りを確認できます。枠空け候補と、出品一覧の削除記録にも直接進めます',
