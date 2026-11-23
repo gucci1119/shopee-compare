@@ -2008,7 +2008,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261123-124438';
+  const APP_BUILD = '20261123-191437';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -4453,6 +4453,9 @@
     opener.setAttribute('aria-expanded', 'true');
     const status = panel.querySelector('.tcg-export-status'), start = panel.querySelector('.tcg-export-start'), stop = panel.querySelector('.tcg-export-stop');
     const hws = ['pokeca','yugioh','onepiece','duema','weiss','vanguard','battlespirits','yugioh_rush','unionarena','dbh','wixoss','zx','shadowverse','mtg','digimon','gamba','gambale','acnh','moncolle','yokai','mezastar','frienda','gaole','tretta','battrio','kuji_choko','kuji_defo','kuji_chibi','kuji_mini','kuji_wcf','kuji_acsta','kuji_towel','kuji_rstrap','kuji_rcharm','goods_amiibo','dbs','gundam','fftcg','fecipher','smt'];
+    // 取得中の区分は同じ回として保持し、終わった回を次の取得に使う時間は短くする。
+    const freshFor = 30 * 60000;
+    const resumeFor = 2 * 60 * 60000;
     let cache = { at: Date.now(), out: {}, errors: {} }, running = false, cancelled = false, ac = null, db = null, storageFailed = false;
     const one = panel.querySelector('.tcg-export-one'); start.disabled = true; one.disabled = true;
     const openCache = () => new Promise((resolve, reject) => {
@@ -4462,18 +4465,21 @@
       req.onblocked = () => reject(new Error('候補の保存先が別のタブで使用中です'));
       req.onsuccess = () => resolve(req.result);
     });
-    const loadCache = () => new Promise((resolve, reject) => {
+    const loadCache = (forRetrieval = false) => new Promise((resolve, reject) => {
       const tx = db.transaction('parts', 'readonly'), store = tx.objectStore('parts'), meta = store.get('meta'), all = store.getAll();
       tx.onerror = () => reject(tx.error || new Error('途中の候補を読めません')); tx.onabort = tx.onerror;
       tx.oncomplete = () => {
         const now = Date.now(), m = meta.result;
         cache = { at: now, out: {}, errors: {} };
-        if (m && m.at && now - (m.updatedAt || m.at) < 30 * 60000) {
-          cache.at = m.at;
-          cache.errors = m.errors || {};
+        if (m && m.at && m.at <= now && now - m.at < resumeFor) {
+          const out = {};
           (all.result || []).forEach(r => {
-            if (r && r.hw && r.at === m.at && now - (r.fetchedAt || r.at) < 30 * 60000 && Array.isArray(r.data)) cache.out[r.hw] = r.data;
+            if (r && hws.includes(r.hw) && r.at === m.at && Array.isArray(r.data)) out[r.hw] = r.data;
           });
+          const complete = Object.keys(out).length === hws.length;
+          if (!forRetrieval || !complete || now - m.at < freshFor) {
+            cache = { at: m.at, out: out, errors: m.errors || {} };
+          }
         }
         resolve();
       };
@@ -4494,8 +4500,12 @@
       if (!lock) { describe('別のタブで取得中です'); return; }
       running = true; tcgExportBusy = true; cancelled = false; start.disabled = true; one.disabled = true; stop.disabled = false; describe('接続枠を確認中…');
       try {
-        await loadCache();
+        await loadCache(true);
         if (cancelled) return;
+        if (Object.keys(cache.out).length === hws.length) {
+          describe('取得終了。JSONを保存してください');
+          return;
+        }
         const urls = [settings.boshuUrl4, settings.boshuUrl3, settings.boshuUrl2, settings.boshuUrl].filter(Boolean); let chosen = '';
         for (const u of urls) { if (!gasUrlOk(u)) continue; const q = await ufFetchOne(u, 15000); await new Promise(r => setTimeout(r, 5000)); if (cancelled) break; const used = q && Number(q.used); if (q && Number.isFinite(used) && used < 12000 && q.bgAllowed === true && Number(q.stopLine) - used >= 2500 && !ufUrlBlocked(u)) { chosen = u; break; } }
         if (cancelled) return;
@@ -4504,6 +4514,7 @@
         for (const hw of hws) {
           if (count >= maxCategories) break;
           if (cancelled) break; if (Object.prototype.hasOwnProperty.call(cache.out, hw)) continue;
+          if (Date.now() - cache.at >= resumeFor) throw new Error(appUpdateText('最初の取得から2時間を過ぎました。続けると新しい回を開始します'));
           describe(hw + ' を取得中…');
           const quota = await ufFetchOne(chosen, 15000); if (!quota || quota.bgAllowed !== true || !Number.isFinite(Number(quota.used)) || Number(quota.used) >= 12000 || Number(quota.stopLine) - Number(quota.used) < 2500) throw new Error('接続枠の余裕を確認できないため中断');
           const healthAt = performance.now(); await sbGetAll('orders', 'select=sn&limit=1'); if (performance.now() - healthAt > 2000) throw new Error('DBの応答が2秒を超えたため中断');
@@ -4542,7 +4553,7 @@
       opener.setAttribute('aria-expanded', 'false');
       opener.focus();
     };
-    try { db = await openCache(); await loadCache(); start.disabled = false; one.disabled = false; describe('30分以内の取得済み区分は再取得しません。初回は次の1区分で確認できます'); } catch (e) { describe('保存先を使えないため取得は始めていません：' + String(e.message || e)); }
+    try { db = await openCache(); await loadCache(); start.disabled = false; one.disabled = false; describe(appUpdateText('途中の回は開始から2時間以内なら続きから取得できます。完了した回の再利用は開始から30分以内です')); } catch (e) { describe('保存先を使えないため取得は始めていません：' + String(e.message || e)); }
   }
   document.addEventListener('click', e => { const opener = e.target.closest && e.target.closest('#tcg-export-open'); if (opener) { e.preventDefault(); tcgExportUi(opener); } });
   try { window.__smdOaUpdate = async (action, shopId, itemId, modelId, val, expect) => {   /* 在庫・価格を model_id 指定で（名前で引かない＝取り違えない） */
@@ -6151,6 +6162,10 @@
     '。折りたたんでも取得が続き、ほかのページを操作できます': '. It continues when collapsed, so you can use other pages',
     '途中保存に失敗しました。「取得済みを保存」で保存してください。再読込すると未保存分が失われます。': 'Progress could not be saved. Select Save retrieved candidates. Reloading will discard unsaved results.',
     '中断しました。取得済みは保持しています': 'Stopped. Retrieved candidates have been kept.',
+    '途中の回は開始から2時間以内なら続きから取得できます。完了した回の再利用は開始から30分以内です': 'Resume an unfinished run within two hours of its start. Completed runs are reused for up to 30 minutes from their start.',
+    '最初の取得から2時間を過ぎました。続けると新しい回を開始します': 'Two hours have passed since retrieval started. Continuing will start a new run.',
+    '写真候補の取得を途中から再開': 'Resume interrupted photo candidate retrieval',
+    '。開始から2時間以内は取得済みの区分を引き継ぎ、残りだけを取ります': '. Retrieves only the remaining categories within two hours of the start',
     '取得・続きから再開': 'Get candidates / resume',
     '次の1区分を確認': 'Check the next category',
     '取得済みを保存': 'Save retrieved candidates',
@@ -32457,6 +32472,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-23', items: [
+      '<b>写真候補の取得を途中から再開</b>。開始から2時間以内は取得済みの区分を引き継ぎ、残りだけを取ります',
       '📦 <b>出品管理の上段に「出品枠」を追加</b>。国ごとの第1〜3の上限を見比べ、対象アカウントの公開数と残りを確認できます。枠空け候補と、出品一覧の削除記録にも直接進めます',
       '📨 <b>問い合わせ履歴に添付した画面の保存結果を表示</b>。保存先が画像を受け付けなかった場合に、失敗の理由を表示します',
       '<b>写真候補の取得を左メニューで表示</b>。折りたたんでも取得が続き、ほかのページを操作できます',
