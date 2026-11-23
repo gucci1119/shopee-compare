@@ -178,11 +178,12 @@ for _f in ['index.html'] + sorted(glob.glob('*.gs')):
 # ⑤ 属性名の食い違い（2026-09-19：ボタンは data-p・処理は dataset.sp を読んでいて、出品一覧の期間ボタンが効いていなかった）
 #    dataset.xxx を読んでいるのに、data-xxx を書いている所がどこにも無ければ止める
 _reads = set(_re.findall(r'\.dataset\.([A-Za-z0-9_]+)', _h))
+_sb_button_attributes = set(_re.findall(r"""\bsb\(\s*['"][\w-]+['"]\s*,\s*'(data-[a-z0-9-]+)'\s*,""", _h))
 def _kebab(c): return _re.sub(r'([A-Z])', lambda m: '-' + m.group(1).lower(), c)
 _allow = {'noZoom'}
 for _r in sorted(_reads - _allow):
     _k = 'data-' + _kebab(_r)
-    if (_k + '=' not in _h) and (_k + '"' not in _h) and ('dataset.' + _r + ' =' not in _h) and ('dataset.' + _r + '=' not in _h) and ("setAttribute('" + _k not in _h):
+    if (_k + '=' not in _h) and (_k + '"' not in _h) and ('dataset.' + _r + ' =' not in _h) and ('dataset.' + _r + '=' not in _h) and ("setAttribute('" + _k not in _h) and (_k not in _sb_button_attributes):
         print('')
         print('⛔ dataset.%s を読んでいますが、%s を書いている所がありません（属性名の食い違い）' % (_r, _k))
         ok = False
