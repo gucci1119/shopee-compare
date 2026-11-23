@@ -2008,7 +2008,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261124-002218';
+  const APP_BUILD = '20261124-003719';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -6180,6 +6180,8 @@
     "完了（90日）": "Completed (90 days)",
     "集計30日・実績 / 目安": "Last 30 days · actual / benchmark",
     "増枠の進捗を店舗ごとの枠の下に表示": "Show quota progress within each shop’s capacity cell",
+    "商品別の利益で複数商品注文の過去分を集計": "Include all item costs for older multi-item orders",
+    "利益管理表の入金は注文ごとに1回、仕入額は同じ注文の明細分を合わせて読み取ります": "Read each payout once and add up the item costs for the same order",
     "。今の実績と目安を同じマスで確認できます": ". Compare actual figures and benchmarks in the same cell",
     "次の段階の目安": "Next reference tier",
     "開店日数の下限": "Minimum shop age",
@@ -32774,6 +32776,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-24', items: [
+      '💹 <b>商品別の利益で複数商品注文の過去分を集計</b>。利益管理表の入金は注文ごとに1回、仕入額は同じ注文の明細分を合わせて読み取ります',
       '📦 <b>増枠の進捗を店舗ごとの枠の下に表示</b>。今の実績と目安を同じマスで確認できます',
       '📦 <b>出品枠に増枠の条件と進捗を表示</b>。公式の説明・公表された段階と、店ごとの購入者数・完了注文・売れたSKUの台帳集計を確認できます',
     ] },
@@ -64513,43 +64516,73 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   /* ★2026-11-05 事業本部・本人「売れた数や粗利の合計は全期間じゃないの？普通は」：全期間 1,988注文のうち入金が分からない 1,744件（古い月は入金明細の行が無い・利益管理表の写しは今月と先月だけ）。
      ①古い月の利益管理表（⭐ YYYYMM_shopee_利益管理表・{国}_p／{国}2_p）を、ボタンを押した時に月ごとに1回だけ読み、app_kv profit_sheet_old に控える（本番の costs には書かない）
      ②それでも無い物は価格計算と同じ式（priceProfitFor）で粗利を見込み、「見込み」の印を付ける。入金明細の取り直し（GAS の枠を食う）はしない。
-     見出しの行は上の8行から「Order ID」の行を探し、列は名前で当てる（古いシートで列がずれていても読める）。 */
+     見出しで11月様式を確認して読む。入金は注文ごとに最初の金額、仕入額は明細の数値を合計する。 */
+  const PR_OLD_READ_VERSION = 2;
   async function prOldLoad() {
     try { const r = await sbGet('app_kv', 'select=v&k=eq.profit_sheet_old'); PR.old = (r && r[0] && r[0].v) || { items: {}, months: {} }; } catch (_) { PR.old = PR.old || null; }
+  }
+  function prOldCollectTab(rows, country, ym) {
+    const orders = new Map();
+    for (const row of rows) {
+      const cells = row.c || [];
+      const orderId = String(cells[23]?.v ?? '').trim();
+      if (!orderId) continue;
+      const amount = index => Number.isFinite(cells[index]?.v) ? cells[index].v : null;
+      const deposit = amount(6), initial = amount(5), cost = amount(37);
+      if (deposit == null && initial == null && cost == null) continue;
+      const key = country + ':' + orderId;
+      const item = orders.get(key) || { d: null, di: null, c: null, ym };
+      item.d ??= deposit;
+      item.di ??= initial;
+      if (cost != null) item.c = (item.c ?? 0) + cost;
+      orders.set(key, item);
+    }
+    return orders;
   }
   async function prOldBuild(btn, say) {
     if (!settings.sbSecret) { alert('⚙️設定の書き込みキーが要ります'); return; }
     const r = await sbGet('app_kv', 'select=v&k=eq.profit_roll'); const u = r && r[0] && r[0].v && r[0].v.url; if (!u) { alert('月替わりの GAS の URL が読めません'); return; }
     const cur = jstYm(), prev = prevYm(cur);
     const need = new Set();
-    (PR.orders || []).forEach(o => { if (o.tab === 200 || o.tab === 600) return; if (pfDepInfo(o)) return; const ym = ordYmd(o).slice(0, 7); if (ym && ym !== cur && ym !== prev) need.add(ym); });
+    (PR.orders || []).forEach(o => { if (o.tab === 200 || o.tab === 600) return; if (pfDepInfo(o) && pfCost(o) != null) return; const ym = ordYmd(o).slice(0, 7); if (ym && ym !== cur && ym !== prev) need.add(ym); });
     const yms = [...need].sort();
-    const old = PR.old && PR.old.items ? PR.old : { items: {}, months: {} };
+    const old = { items: { ...PR.old?.items }, months: { ...PR.old?.months } };
     let seq = 0;
     const gv = (id, tab) => new Promise((res, rej) => { const cb = '__gvPr' + (++seq) + '_' + Date.now(); const sc = document.createElement('script'); const tm = setTimeout(() => { delete window[cb]; sc.remove(); rej(new Error('時間切れ')); }, 15000); window[cb] = d => { clearTimeout(tm); delete window[cb]; sc.remove(); (d && d.table) ? res(d.table) : rej(new Error('シートの返事が不正')); }; sc.src = 'https://docs.google.com/spreadsheets/d/' + id + '/gviz/tq?sheet=' + encodeURIComponent(tab) + '&headers=0&tqx=responseHandler:' + cb; sc.onerror = () => { clearTimeout(tm); rej(new Error('シートを読めない')); }; document.head.appendChild(sc); });
-    const L = { sn: 'Order ID', dep: 'Provisional deposit amount_after update', depI: 'Provisional deposit amount_before update', cost: 'Products purchase amount (tax included)' };
     let got = 0, mOk = 0, mNo = 0;
     for (let i = 0; i < yms.length; i++) {
       const ym = yms[i]; if (say) say('📄 ' + ym + ' の利益管理表を読んでいます（' + (i + 1) + '/' + yms.length + '）…');
-      if (old.months[ym] && old.months[ym].ok) { mOk++; continue; }   /* 月ごとに1回だけ */
+      const prior = old.months[ym];
+      if (prior?.ok && prior.readVersion === PR_OLD_READ_VERSION) { mOk++; continue; }
       let id = null; try { const j = await fetch(u + '?action=sheet_id&ym=' + ym, { credentials: 'omit' }).then(x => x.json()); if (j && j.ok && j.id) id = j.id; } catch (_) {}
-      if (!id) { old.months[ym] = { ok: false, why: 'シートが見つからない' }; mNo++; continue; }
-      let n = 0, tabs = 0, why = '';
+      if (!id) { old.months[ym] ??= { ok: false, why: 'シートが見つからない' }; mNo++; continue; }
+      const monthOrders = new Map();
+      let tabs = 0, why = '';
       for (const rg of REGIONS) for (const tab of [rg.cc.toLowerCase() + '_p', rg.cc.toLowerCase() + '2_p']) {
         let t; try { t = await gv(id, tab); } catch (_) { continue; }
-        const rows = t.rows || []; let hr = -1, col = {};
+        const rows = t.rows || [];
         /* 実物（11/5）：2025-04 と 2025-11 以降は1行目の X列が「Order ID」＝今の写しと同じ位置（F＝入金の暫定・G＝更新後の入金・AL＝仕入れ）。
            2025-05〜2025-10 は見出しが8行目で列の並びが月ごとに違い、入金の欄が「BRL72.75」のような文字の月もある＝取り違えるので読まない（見込みに回す） */
-        const c0 = ((rows[0] && rows[0].c) || []).map(x => x && x.v != null ? String(x.v).trim() : '');
-        if (c0[23] === L.sn) { hr = 0; col = { sn: 23, dep: 6, depI: 5, cost: 37 }; }
-        else { why = '見出しが今の形と違う（2025-05〜10 の形）'; continue; }
+        if (String(rows[0]?.c?.[23]?.v ?? '').trim() !== 'Order ID') {
+          why = '見出しが今の形と違う（2025-05〜10 の形）';
+          continue;
+        }
         tabs++;
-        rows.slice(hr + 1).forEach(row => { const c = row.c || []; const sn = c[col.sn] && c[col.sn].v; if (!sn) return; const num = (k) => (k >= 0 && c[k] && typeof c[k].v === 'number') ? c[k].v : null;
-          const dep = num(col.dep), di = num(col.depI), cost = num(col.cost); if (dep == null && cost == null) return;
-          old.items[rg.cc + ':' + String(sn).trim()] = { d: dep, di: di, c: cost, ym: ym }; n++; });
+        for (const [key, item] of prOldCollectTab(rows.slice(1), rg.cc, ym)) monthOrders.set(key, item);
       }
-      old.months[ym] = tabs ? { ok: true, n: n, tabs: tabs } : { ok: false, why: why || 'タブが無い' };
-      if (tabs) { mOk++; got += n; } else mNo++;
+      if (!tabs) {
+        old.months[ym] ??= { ok: false, why: why || 'タブが無い' };
+        mNo++;
+        continue;
+      }
+      for (const [key, item] of monthOrders) old.items[key] = item;
+      if (prior?.ok && (tabs < prior.tabs || (!monthOrders.size && prior.n > 0))) {
+        mNo++;
+        continue;
+      }
+      old.months[ym] = { ok: true, n: monthOrders.size, tabs, readVersion: PR_OLD_READ_VERSION };
+      mOk++;
+      got += monthOrders.size;
     }
     old.at = new Date().toISOString();
     await sbUpsert('app_kv', [{ k: 'profit_sheet_old', v: old, updated_at: old.at }]);
