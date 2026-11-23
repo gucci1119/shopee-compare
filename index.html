@@ -2008,7 +2008,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261123-200132';
+  const APP_BUILD = '20261123-204634';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -6135,6 +6135,32 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "返信の証拠を確認": "Check reply evidence",
+    "返信の証拠はまだ確認していません": "Reply evidence has not been checked yet",
+    "返信の証拠を確認中…": "Checking reply evidence…",
+    "返信の証拠を確認できません：": "Could not verify reply evidence: ",
+    "今回の限定範囲に照合できる返信はありません。全メールの不在判定ではありません。": "No matching reply was found in this limited search. This does not establish absence from the entire mailbox.",
+    "返信1通の保存済み原文を照合しました（重複保存なし）。": "Verified the archived original of one reply without creating a duplicate.",
+    "返信1通の原文を非公開で保存・照合しました。": "Privately archived and verified the original of one reply.",
+    "返信の接続先・原文・前後状態を照合できません": "Could not verify the mailbox, original message or unchanged mail state",
+    "返信の受付番号が一致しません": "The reply case number does not match",
+    "返信原文が不完全です": "The original reply is incomplete",
+    "返信原文の大きさが一致しません": "The original reply size does not match",
+    "担当・接続先が変わったため中止しました": "Stopped because the owner or connection changed",
+    "証拠の取得が2MBを超えています": "Evidence exceeds the 2 MB retrieval limit",
+    "DBの応答が遅いため20分後の通常更新で再確認します": "Database response was slow; a normal update may retry after 20 minutes",
+    "非公開の保存先を確認できません": "Could not verify private storage",
+    "返信の照合設定を読めません": "Could not read the reply matching configuration",
+    "返信の照合設定が上限を超えています": "Reply matching configuration exceeds the size limit",
+    "物販の照合設定が一致しません": "The Shopee mailbox configuration does not match",
+    "返信を取得できません": "Could not retrieve the reply",
+    "Gmailの読取を確認できません": "Could not verify the Gmail read operation",
+    "照会結果を検証できません": "Could not verify the search result",
+    "保存済み原文の控えが一致しません": "The archived original manifest does not match",
+    "保存済み原文を照合できません": "Could not verify the archived original",
+    "保存済み原文の有無を確認できません": "Could not establish whether the original was already archived",
+    "保存先の有無を確認できません": "Could not establish whether the evidence object exists",
+    "返信の保存結果を照合できません（再送せず次回読取で確認）": "Could not verify the saved reply; the next attempt will read before creating anything",
     "📦 出品枠": "📦 Listing capacity",
     "国ごとの第1〜3の出品枠と、読み込み済みの公開数・残りを見比べます。": "Compare capacity across shops 1–3 in each country, with live counts and remaining slots for loaded accounts.",
     "出品管理の上段に「出品枠」を追加": "Added Listing capacity to the top of Listing management",
@@ -29727,6 +29753,99 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     if (!Array.isArray(rows)) throw new Error('記録を読めませんでした'); return rows[0] ? rows[0].v : null;
   }
   async function jpSupportPut(key, value) { await sbUpsert('app_kv', [{ k: key, v: value, updated_at: new Date().toISOString() }], 'k'); }
+  // 既存の返品データ更新に相乗り。登録済み受付番号の最新返信1通を非公開保全（新しいタイマーなし）。
+  async function jpSupportMailHash(bytes) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).map(x => x.toString(16).padStart(2, '0')).join(''); }
+  function jpSupportMailValidate(r, cfg, caseId) {
+    const m = r && r.message, f = m && m.messageFlags, a = m && m.messageFlagsAfter;
+    if (!r || r.ok !== true || r.found !== true || r.action !== 'support_mail_read_one' || r.caseId !== caseId ||
+        r.mailbox?.account !== cfg.mailbox || r.mailbox?.business !== 'shopee' || r.mailbox?.verifiedBeforeRead !== true ||
+        r.mailbox?.bindingProof?.provider !== 'existing_shopee_gas' || r.mailbox?.bindingProof?.ref !== 'OpenAPI-main:fresh-Drive-root-owner' ||
+        r.gmailMutations !== 0 || r.inquiryWrites !== 0 || r.urlFetchCalls !== 0 || m?.account !== cfg.mailbox ||
+        m?.metadataComplete !== true || m?.bodyComplete !== true || m?.rawMimeCaptured !== true || m?.messageFlagsComplete !== true || m?.labelsComplete !== false ||
+        !/^[a-f0-9]{12,32}$/.test(m?.gmailId || '') || !/^[a-f0-9]{12,32}$/.test(m?.gmailThreadId || '') || !/^<[^<>\s]+@[^<>\s]+>$/.test(m?.rfcMessageId || '') ||
+        !Array.isArray(m?.from) || m.from.length !== 1 || !['help@support.shopee.jp','logisupport.shopeejp@shopee.com'].includes(m.from[0]) || !Array.isArray(m?.to) || !m.to.includes(cfg.mailbox) ||
+        typeof m?.body !== 'string' || new TextEncoder().encode(m.body).length > 200000 || !Number.isFinite(Date.parse(m?.messageDate)) ||
+        !f || !a || Object.keys(f).length !== 5 || Object.keys(a).length !== 5 || !['draft','trash','inbox','unread','starred'].every(k => typeof f[k] === 'boolean' && f[k] === a[k]) || f.draft || f.trash) throw new Error('返信の接続先・原文・前後状態を照合できません');
+    const fresh = m.body.split(/(?:^|\n)(?:\s*>|On .{1,200}wrote:|-----\s*Original Message\s*-----|[-─]{2,}\s*(?:元のメッセージ|転送メッセージ)|(?:From|差出人):)/i)[0];
+    if (!new RegExp('(?:^|[^A-Za-z0-9])' + caseId + '(?![A-Za-z0-9])').test(m.subject || '') && !new RegExp('(?:Inquiry|Case|Ticket|お問い合わせ|問い合わせ|受付|照会)\\s*(?:ID|番号|No\\.?|#)?\\s*[:：#\\[（(]?\\s*' + caseId + '(?!\\d)', 'i').test(fresh)) throw new Error('返信の受付番号が一致しません');
+    if (!/SLS\+|SLS補償|補償/i.test(m.subject + '\n' + m.body) || typeof m.rawMimeBase64 !== 'string' || m.rawMimeBase64.length > 1333336 || !/^[A-Za-z0-9+/]+={0,2}$/.test(m.rawMimeBase64)) throw new Error('返信原文が不完全です');
+    const raw = Uint8Array.from(atob(m.rawMimeBase64), c => c.charCodeAt(0));
+    if (!raw.length || raw.length > 1000000 || raw.length !== m.rawMimeBytes) throw new Error('返信原文の大きさが一致しません');
+    return { message:m, raw:raw };
+  }
+  function jpSupportMailStatus(text) {
+    jpSupportMailRemember._status = text;
+    const prefix = '返信の証拠を確認できません：';
+    const display = i18nOn() ? (I18N[text] || (text.startsWith(prefix) ? I18N[prefix] + (I18N[text.slice(prefix.length)] || text.slice(prefix.length)) : text)) : text;
+    document.querySelectorAll('.jp-mail-status').forEach(el => { el.textContent = display; });
+  }
+  async function jpSupportMailRemember(force = false) {
+    if (jpSupportMailRemember._running || demoOn() || !settings.sbSecret || !settings.writeToken || (!force && (!pcIsOwner() || !smdLeadTab()))) return;
+    const now = Date.now(); let mark = {}; try { mark = JSON.parse(localStorage.getItem('smdSupportMailCheck') || '{}'); } catch (_) {}
+    if (!force && (now - Number(mark.successAt || 0) < 21600000 || now - Number(jpSupportMailRemember._attemptAt || 0) < 300000)) return;
+    const key = settings.sbSecret, token = settings.writeToken, url = settings.openapiUrlMain || settings.openapiUrl;
+    if (!gasUrlOk(url) || url.includes('?')) return;
+    jpSupportMailRemember._running = true; jpSupportMailRemember._attemptAt = now;
+    const gate = () => { if (demoOn() || settings.sbSecret !== key || settings.writeToken !== token || (settings.openapiUrlMain || settings.openapiUrl) !== url || (!force && (!pcIsOwner() || !smdLeadTab()))) throw new Error('担当・接続先が変わったため中止しました'); };
+    const headers = { apikey:key, authorization:'Bearer ' + key };
+    let lastRequestAt = 0;
+    const request = async (path, options = {}) => {
+      const wait = 5000 - (Date.now() - lastRequestAt); if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait)); gate();
+      const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 30000);
+      try { const res = await fetch(SB_URL + path, { ...options, headers:{ ...headers, ...(options.headers || {}) }, signal:ctl.signal }); const bytes = new Uint8Array(await res.arrayBuffer()); if (bytes.length > 2000000) throw new Error('証拠の取得が2MBを超えています'); return { status:res.status, bytes:bytes }; }
+      finally { clearTimeout(timer); lastRequestAt = Date.now(); }
+    };
+    const json = r => JSON.parse(new TextDecoder().decode(r.bytes));
+    const missing = r => [400,404].includes(r.status) && String(json(r).statusCode) === '404';
+    const read = path => request('/storage/v1/object/authenticated/slsproof/' + path);
+    try {
+      jpSupportMailStatus('返信の証拠を確認中…');
+      const healthAt = Date.now(); let health;
+      try { health = await request('/rest/v1/orders?select=sn&limit=1'); }
+      catch (_) { jpSupportMailRemember._attemptAt = Date.now() + 15 * 60000; throw new Error('DBの応答が遅いため20分後の通常更新で再確認します'); }
+      if (health.status !== 200 || Date.now() - healthAt > 2000) { jpSupportMailRemember._attemptAt = Date.now() + 15 * 60000; throw new Error('DBの応答が遅いため20分後の通常更新で再確認します'); }
+      const bucket = await request('/storage/v1/bucket/slsproof'); if (bucket.status !== 200 || json(bucket).public !== false) throw new Error('非公開の保存先を確認できません');
+      const config = await read('support/mail-cases/watch.json'); if (config.status !== 200) throw new Error('返信の照合設定を読めません');
+      if (config.bytes.length > 10000) throw new Error('返信の照合設定が上限を超えています');
+      const cfg = json(config);
+      if (cfg.schema !== 1 || cfg.mailbox !== 'gcsonlinestore631@gmail.com' || cfg.endpoint !== url || !Array.isArray(cfg.cases) || !cfg.cases.length || cfg.cases.length > 5 || cfg.cases.some(c => !/^\d{16,22}$/.test(c.caseId || '') || !/^\d{4}-\d{2}-\d{2}$/.test(c.after || '') || !Number.isFinite(Date.parse(c.after + 'T00:00:00+09:00')))) throw new Error('物販の照合設定が一致しません');
+      const caseConfig = cfg.cases[(Number.isSafeInteger(mark.next) && mark.next >= 0 ? mark.next : 0) % cfg.cases.length];
+      const jstDay = ms => new Date(ms + 9 * 3600000).toISOString().slice(0,10), after = [caseConfig.after,jstDay(now - 30 * 86400000)].sort().pop(), before = jstDay(now + 86400000);
+      gate(); const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 60000); let r;
+      try { const res = await fetch(url, { method:'POST', credentials:'omit', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify({ action:'support_mail_read_one', token:token, mailbox:cfg.mailbox, case_id:caseConfig.caseId, after:after, before:before }), signal:ctl.signal }); const text = await res.text(); if (!res.ok || text.length > 1800000) throw new Error('返信を取得できません'); r = JSON.parse(text); } finally { clearTimeout(timer); }
+      gate(); if (r?.ok !== true) throw new Error('Gmailの読取を確認できません');
+      let status;
+      if (r.found === false) { if (r.mailbox !== cfg.mailbox || r.caseId !== caseConfig.caseId || r.scopeComplete !== false) throw new Error('照会結果を検証できません'); status = '今回の限定範囲に照合できる返信はありません。全メールの不在判定ではありません。'; }
+      else {
+        const { message:m, raw } = jpSupportMailValidate(r, cfg, caseConfig.caseId), rawHash = await jpSupportMailHash(raw);
+        const encode = s => new TextEncoder().encode(s), caseHash = (await jpSupportMailHash(encode(cfg.mailbox + '\0' + caseConfig.caseId))).slice(0,24), mailHash = await jpSupportMailHash(encode(cfg.mailbox + '\0' + m.rfcMessageId));
+        const base = 'support/mail-cases/' + caseHash + '/' + mailHash, native = base + '/native-v1/' + rawHash + '/';
+        const manifest = await read(native + 'manifest.json');
+        if (manifest.status === 200) {
+          const v = json(manifest), meta = v.files?.['original-native.eml'], entry = v.files?.['record.json'];
+          if (v.mailbox !== cfg.mailbox || v.supportCaseId !== caseConfig.caseId || meta?.sha256 !== rawHash || meta?.bytes !== raw.length || !/^[a-f0-9]{64}$/.test(entry?.sha256 || '')) throw new Error('保存済み原文の控えが一致しません');
+          const original = await read(native + 'original-native.eml'), record = await read(native + 'record.json');
+          if (original.status !== 200 || await jpSupportMailHash(original.bytes) !== rawHash || record.status !== 200 || await jpSupportMailHash(record.bytes) !== entry.sha256 || json(record).gmailId !== m.gmailId || json(record).rfcMessageId !== m.rfcMessageId || json(record).body !== m.body) throw new Error('保存済み原文を照合できません');
+          status = '返信1通の保存済み原文を照合しました（重複保存なし）。';
+        } else {
+          if (!missing(manifest)) throw new Error('保存済み原文の有無を確認できません');
+          const v = { schema:1, kind:'gmail_native_support_reply', mailbox:cfg.mailbox, supportCaseId:caseConfig.caseId, gmailId:m.gmailId, gmailThreadId:m.gmailThreadId, rfcMessageId:m.rfcMessageId, from:m.from, to:m.to, subject:m.subject, messageDate:m.messageDate, dateBasis:m.dateBasis, inReplyTo:m.inReplyTo, references:m.references, autoSubmitted:m.autoSubmitted, body:m.body, rawMimeSha256:rawHash, rawMimeBytes:raw.length, rawMimeBase64:m.rawMimeBase64, labelsComplete:false, messageFlagsUnchangedDuringRead:true, reviewRequired:true, formInquiryLinked:false, formStatusChange:false, financialStatusChange:false };
+          const bytes = encode(JSON.stringify(v) + '\n'), hash = await jpSupportMailHash(bytes), path = base + '/portal-v1/' + rawHash + '.json';
+          let saved = await read(path);
+          if (saved.status !== 200) {
+            if (!missing(saved)) throw new Error('保存先の有無を確認できません');
+            gate(); await request('/storage/v1/object/slsproof/' + path, { method:'POST', headers:{'Content-Type':'application/json', 'x-upsert':'false'}, body:bytes });
+            saved = await read(path); // 通信結果が曖昧でも再POSTせず、必ず読み戻す
+          }
+          if (saved.status !== 200 || await jpSupportMailHash(saved.bytes) !== hash) throw new Error('返信の保存結果を照合できません（再送せず次回読取で確認）');
+          status = '返信1通の原文を非公開で保存・照合しました。';
+        }
+      }
+      gate(); localStorage.setItem('smdSupportMailCheck', JSON.stringify({ successAt:Date.now(), next:((Number.isSafeInteger(mark.next) ? mark.next : 0) + 1) % cfg.cases.length }));
+      jpSupportMailStatus(status); return { ok:true, found:r.found, status:status };
+    } catch (e) { jpSupportMailStatus('返信の証拠を確認できません：' + String(e.message || e)); return { ok:false }; }
+    finally { jpSupportMailRemember._running = false; }
+  }
   function jpSupportPanel(id, title) {
     const old = document.getElementById(id); if (old) { old.remove(); return null; }
     const p = document.createElement('div'); p.id = id;
@@ -29778,7 +29897,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         '<div style="overflow:auto"><table class="pf-table"><thead><tr><th>状態</th><th>件数</th><th>計算可</th><th>不明</th><th>参考損失</th><th>補償見込み（推計）</th></tr></thead><tbody>' + Object.entries(s.statuses).map(([st,v]) => '<tr><td>' + esc(st) + '</td><td>' + v.total + '</td><td>' + v.calculable + '</td><td>' + v.unknown + '</td><td>' + yen(v.loss) + '</td><td>' + yen(v.estimate) + '</td></tr>').join('') + '</tbody></table></div>' +
         (snap.evidenceBundle ? '<p>既存の証拠：注文別JSON ' + esc(String(snap.evidenceBundle.orderJson)) + '件、計算CSV・API/DB控え等 ' + esc(String(snap.evidenceBundle.files)) + 'ファイル。画面の写し ' + esc(String(snap.evidenceBundle.screenFiles)) + '枚・PDF ' + esc(String(snap.evidenceBundle.pdfFiles)) + '件（メールの証拠は未取得）。 <button class="smd-btn jp-evidence-download">既存の証拠を保存</button></p>' : '<p>既存の証拠一覧は未登録です。</p>') +
         '<p>新しい対象は、担当PCが返品・補償データを読めた時に証拠データを別途保全します。損失の集計日以降の対象は、上の金額に含まれません。<span id="jp-sls-proof-status"></span></p>' +
+        '<p><button class="smd-btn jp-mail-check" data-l="返信の証拠を確認">返信の証拠を確認</button> <span class="jp-mail-status"></span></p>' +
         '<div style="overflow:auto;max-height:46vh"><table class="pf-table"><thead><tr><th>国・注文番号</th><th>状態</th><th>仕入れ</th><th>平均経費</th><th>受取</th><th>参考損失</th><th>返金額</th><th>補償見込み</th><th>根拠・取得日・不足</th></tr></thead><tbody>' + snap.rows.map(r => '<tr><td>' + esc(r.cc + ' ' + r.sn) + '</td><td>' + esc(r.status) + '</td><td>' + yen(r.cost) + '</td><td>' + yen(r.expense) + '</td><td>' + yen(r.receipt) + '</td><td>' + yen(r.loss) + '</td><td>' + yen(r.refund) + '</td><td>' + yen(r.estimate) + '</td><td style="min-width:240px;white-space:normal">' + esc([r.costSource,r.receiptSource,r.fxDate,r.missing].filter(Boolean).join(' ／ ')) + '</td></tr>').join('') + '</tbody></table></div>';
+      const mailButton = box.querySelector('.jp-mail-check');
+      jpSupportMailStatus(jpSupportMailRemember._status || '返信の証拠はまだ確認していません');
+      mailButton.onclick = async () => { mailButton.disabled = true; mailButton.textContent = i18nOn() ? I18N['返信の証拠を確認中…'] : '返信の証拠を確認中…'; try { await jpSupportMailRemember(true); } finally { mailButton.disabled = false; mailButton.textContent = i18nOn() ? I18N['返信の証拠を確認'] : '返信の証拠を確認'; } };
       const download = box.querySelector('.jp-evidence-download'); if (download) download.onclick = async () => { download.disabled = true; try { const path = snap.evidenceBundle.path; if (!/^support\/bundles\/SLS-evidence-\d{8}-[a-f0-9]{16}\.zip$/.test(path || '')) throw new Error('証拠の場所が不正です'); const r = await fetch(SB_URL + '/storage/v1/object/authenticated/slsproof/' + path, { headers:{apikey:settings.sbSecret,authorization:'Bearer '+settings.sbSecret} }); if(!r.ok)throw new Error('HTTP '+r.status);const bytes=await r.arrayBuffer();if(bytes.byteLength>2000000)throw new Error('証拠が2MBを超えています');const digest=await crypto.subtle.digest('SHA-256',bytes),hash=Array.from(new Uint8Array(digest)).map(x=>x.toString(16).padStart(2,'0')).join('');if(hash!==snap.evidenceBundle.sha256)throw new Error('証拠の照合に失敗しました');const u=URL.createObjectURL(new Blob([bytes],{type:'application/zip'})),a=document.createElement('a');a.href=u;a.download='SLS-evidence-'+snap.asOf+'.zip';a.click();setTimeout(()=>URL.revokeObjectURL(u),30000);toast('既存の証拠ZIPを保存しました');}catch(e){toast('証拠を保存できません：'+String(e.message||e),true)}finally{download.disabled=false} };
       const ev = await sbGet('app_kv', 'select=k&k=like.sls_evidence_*&limit=500'); const el = box.querySelector('#jp-sls-proof-status'); if (el && Array.isArray(ev)) el.textContent = ' 保存済みの証拠データ：' + ev.length + (ev.length >= 500 ? '件以上' : '件') + '。画面・メールの写しは問い合わせ履歴で取得状況を確認できます。';
     } catch (e) { box.textContent = '損失の集計を表示できません：' + String(e.message || e); }
@@ -29802,6 +29925,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
         try { localStorage.setItem('smdSlsEvidenceSig', JSON.stringify(old)); } catch (_) {} // DBに保存済み。端末の目印が失敗しても同じ鍵へ同じ内容を再保存するだけ
         if (i + 10 < add.length) await new Promise(r => setTimeout(r, 5000));
       }
+      await jpSupportMailRemember();
     } catch (e) { jpSlsEvidenceRemember._error = String(e.message || e); try { toast('SLS+の証拠データを保存できませんでした：' + jpSlsEvidenceRemember._error, true); } catch (_) {} }
     finally { jpSlsEvidenceRemember._running = false; }
   }
@@ -32472,7 +32596,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-23', items: [
-      '📨 <b>SLS+の返信を1通ずつ照合して証拠を保全</b>。物販の窓口・受付番号・メール番号を確認し、メールの既読状態や問い合わせの送信状態を変更せずに読み取ります',
+      '📨 <b>SLS+の返信原文を非公開で保全</b>。通常の返品・補償データ更新時に、登録した受付番号の最新返信1通を照合します。担当PCのみ・6時間以上空けて確認し、保存済み原文は重複作成しません。メールの既読状態や問い合わせ・補償の状態は変更しません',
       '<b>写真候補の取得を途中から再開</b>。開始から2時間以内は取得済みの区分を引き継ぎ、残りだけを取ります',
       '📦 <b>出品管理の上段に「出品枠」を追加</b>。国ごとの第1〜3の上限を見比べ、対象アカウントの公開数と残りを確認できます。枠空け候補と、出品一覧の削除記録にも直接進めます',
       '📨 <b>問い合わせ履歴に添付した画面の保存結果を表示</b>。保存先が画像を受け付けなかった場合に、失敗の理由を表示します',
