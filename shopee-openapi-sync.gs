@@ -8,7 +8,7 @@
 var HOST = 'https://partner.shopeemobile.com';
 /* ★2026-09-25 配備の版ズレ検知。3台（本体/2台目/3台目）の /exec が返す src をポータルが並べ、そろっていなければ警告する。
    このファイルを変えたら必ず上げる（chk.sh が HEAD と同じなら NG にする）。トリガーも /exec も【配備した版】で動くため、保存だけでは反映されない */
-var SRC_VER = '20261123-1958'
+var SRC_VER = '20261123-2015'
 var SHMSG_STEP_MIN = 30;   /* 発送のお知らせの見張り：SR が1回3件を取りに行く間隔（分）。SR の『3件ちょうどなら5分後に次』が入ったら 5 に */
 /* ★2026-11-07 01 商品部の調べ：出品を写した時に、写した元の出品番号が親SKUに残っている物がある（437件・BR Red Dead の親SKU が PH の GBC の出品番号 等）。出品は書き換えない（sold・いいね）。
    親SKUで品を束ねる所では「数字だけ・9〜12桁」の親SKUを品の印にしない（ポータルの pskuItemIdLike・pskuMark と同じ） */
@@ -2976,8 +2976,8 @@ function supportMailReadOne_(p) {
   var fromMs = Date.parse(after + 'T00:00:00+09:00'), toMs = Date.parse(before + 'T00:00:00+09:00');
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs || toMs - fromMs > 32 * 86400000 || Utilities.formatDate(new Date(fromMs),'Asia/Tokyo','yyyy-MM-dd') !== after || Utilities.formatDate(new Date(toMs),'Asia/Tokyo','yyyy-MM-dd') !== before) throw new Error('検索期間は実在する日付で32日以内にしてください');
   if (mid && !/^[a-f0-9]{12,32}$/.test(mid)) throw new Error('メール番号が不正です');
-  /* Sessionのuserinfo.emailは本体の既存8スコープに含まれる。別の台ではGmailに触る前に拒否。 */
-  var account = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
+  /* 既存Drive権限で毎回ルート所有者を照合。7日キャッシュacctEmail_や未承認のSession権限は使わない。 */
+  var account = String(DriveApp.getRootFolder().getOwner().getEmail() || '').toLowerCase();
   if (account !== expected) throw new Error('この処理は物販の主メールボックス専用です');
   var messages = [], count = 0;
   if (mid) { var one = GmailApp.getMessageById(mid); if (one) messages = [one]; }
@@ -3004,7 +3004,7 @@ function supportMailReadOne_(p) {
   selected.refresh(); var afterFlags = supportMailFlags_(selected);
   if (JSON.stringify(flags) !== JSON.stringify(afterFlags)) throw new Error('確認中にメール状態が変わったため確定しません');
   return { ok:true, found:true, action:'support_mail_read_one', src:SRC_VER, collectedAt:new Date().toISOString(),
-    mailbox:{business:'shopee',account:account,verifiedBeforeRead:true,verifiedAddresses:[account],bindingProof:{provider:'existing_shopee_gas',ref:'OpenAPI-main:Session.getEffectiveUser'}},
+    mailbox:{business:'shopee',account:account,verifiedBeforeRead:true,verifiedAddresses:[account],bindingProof:{provider:'existing_shopee_gas',ref:'OpenAPI-main:fresh-Drive-root-owner'}},
     caseId:caseId, gmailMutations:0, inquiryWrites:0, urlFetchCalls:0,
     message:{account:account,gmailId:selected.getId(),gmailThreadId:selected.getThread().getId(),from:from,to:to,subject:subject,
       messageDate:selected.getDate().toISOString(),dateBasis:'GmailApp.getDate (Gmail API internalDateではない)',
