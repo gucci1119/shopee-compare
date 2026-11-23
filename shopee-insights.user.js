@@ -2,7 +2,7 @@
 // @name         【Shopee】📈 アクセス（Business Insights）取り込み
 // @name:ja      【Shopee】📈 アクセス（Business Insights）取り込み
 // @namespace    shopee-os
-// @version      1.5.8
+// @version      1.5.9
 // @updateURL    https://gucci1119.github.io/shopee-compare/shopee-insights.meta.js
 // @downloadURL  https://gucci1119.github.io/shopee-compare/shopee-insights.user.js
 // @description  Seller Center の Business Insights（Traffic Overview）が読んだ日別の訪問者・ページビューを横取りしてポータル（app_kv traffic_daily）へ送る。深夜に Shopee 側で見られない時間帯でもポータルで見られるようにする。v1.4.0：転記のタブが1日1回ここへ来て、取り込んだら元の画面へ戻る。v1.3.0：商品パフォーマンス（カタログ・明細ごとのカート追加数など・直近30日）を1日1回読んで app_kv product_perf_<店> へ送る。
@@ -30,7 +30,7 @@
   const CC = (function () { const h = location.hostname; if (/\.ph$/.test(h)) return 'PH'; if (/\.sg$/.test(h)) return 'SG'; if (/\.com\.my$/.test(h)) return 'MY'; if (/\.com\.br$/.test(h)) return 'BR'; if (/\.vn$/.test(h)) return 'VN'; if (/\.co\.th$/.test(h)) return 'TH'; if (/\.tw$/.test(h)) return 'TW'; return ''; })();
   const TZ = { PH: 8, SG: 8, MY: 8, BR: -3, VN: 7, TH: 7, TW: 8 }[CC] || 8;
   const log = (...a) => { try { console.log('[SI]', ...a); } catch (_) {} };
-  const VERSION = '1.5.8';
+  const VERSION = '1.5.9';
   const sentKey = 'si_sent_' + CC;
   const DAY_SECONDS = 86400;
   const targetDay = () => ymdOf(Math.floor(Date.now() / 1000) - DAY_SECONDS);
@@ -39,22 +39,52 @@
   /* ★v1.1.0（2026-09-26 本人「アカウントごとに見れるようにもしておいて」）：どの店の数字かを一緒に送る（同じ国に店が2つある）。
      /api/selleraccount/shop_info/ はログイン中の店の shop_id と名前を返す（同じ origin・署名不要）。取れなければ店なしで送る＝国には入る */
   let _shop = null;
+  let shopCheckInProgress = null;
   /* ★v1.5.4（2026-11-20 05・00・本人「Chrome のアカウントごとで、第一・第二・第三アカウントって分けてるんですよ。混ざっちゃうから」）：
      2店舗目の Chrome で MY の店（URL の cnsc_shop_id=1863981586）を開いたのに、Shopee が本店 VN（gcsonlinestore.vn）の画面に戻し、そこで本店 VN の数字を送った。
      → URL が店を指している時（cnsc_shop_id・このタブで最後に見た物を sessionStorage に覚える）、shop_info の店がそれと違えば、どの口（訪問者・商品・カートの日ごと）も送らない */
   try { document.documentElement.setAttribute('data-si-ver', VERSION); } catch (_) {}   /* ★v1.5.5 入っている版を外から確かめる印 */
   const URL_SHOP = (function () { let v = ''; try { v = (new URLSearchParams(location.search).get('cnsc_shop_id') || '').replace(/\D/g, ''); if (v) sessionStorage.setItem('si_url_shop', v); else v = sessionStorage.getItem('si_url_shop') || ''; } catch (_) {} return v; })();
+  const PAGE_HAS_EXPLICIT_SHOP = new URLSearchParams(location.search).has('cnsc_shop_id');
   let SHOP_BAD = '';
+  function sameShopPage() {
+    const current = new URLSearchParams(location.search).get('cnsc_shop_id');
+    if (!SHOP_BAD && (current === URL_SHOP || (current === null && !PAGE_HAS_EXPLICIT_SHOP))) return true;
+    SHOP_BAD = SHOP_BAD || '取得中にURLの店舗が変わった';
+    badgeQuiet('店が切り替わったため、確認中だった数字は保存しません');
+    return false;
+  }
   async function shopInfo() {
-    if (_shop) { if (SHOP_BAD) { try { badgeQuiet('店違いのため送りません（見張りが戻します）'); } catch (_) {} return null; } return _shop; }   /* レビュー低6：待機中の表示に上書きされた警告を出し直す */
-    try { const r = await fetch('/api/selleraccount/shop_info/', { credentials: 'include' }); const j = await r.json(); const d = (j && j.data) || {}; if (d.shop_id) _shop = { id: String(d.shop_id), name: String(d.name || '') }; } catch (_) {}
-    if (_shop && URL_SHOP && _shop.id !== URL_SHOP) { SHOP_BAD = '開いている店（' + _shop.name + '）が URL の店（' + URL_SHOP + '）と違う'; log('shop mismatch', SHOP_BAD); try { badgeQuiet('店違いのため送りません（見張りが戻します）'); } catch (_) {} return null; }
+    if (!sameShopPage()) return null;
+    if (!shopCheckInProgress) {
+      shopCheckInProgress = readActiveShop().finally(() => { shopCheckInProgress = null; });
+    }
+    return shopCheckInProgress;
+  }
+  async function readActiveShop() {
+    let observedShop;
+    try {
+      const r = await fetch('/api/selleraccount/shop_info/', { credentials: 'include' });
+      if (r.status === 429) { SHOP_BAD = '店舗照会が回数制限に達した'; sameShopPage(); return null; }
+      const d = (await r.json())?.data;
+      if (!r.ok || !/^\d{1,15}$/.test(String(d?.shop_id || ''))) return null;
+      observedShop = { id: String(d.shop_id), name: String(d.name || '') };
+    } catch (_) { return null; }
+    if (!sameShopPage()) return null;
+    const expected = URL_SHOP || _shop?.id;
+    if (expected && observedShop.id !== expected) {
+      SHOP_BAD = '開いている店（' + observedShop.name + '）が確認対象の店（' + expected + '）と違う';
+      log('shop mismatch', SHOP_BAD);
+      sameShopPage();
+      return null;
+    }
+    _shop = observedShop;
     return _shop;
   }
   async function send(period, rows) {
     if (!CC || !rows.length) return;
     const sh = await shopInfo();
-    if (SHOP_BAD || !sh) return;
+    if (!sh || !sameShopPage()) return;
     const yesterday = targetDay();
     const confirmed = rows.some(row => row.d === yesterday);
     const payload = { action: 'traffic_ingest', cc: CC, period, rows, shop_id: sh.id, shop_name: sh.name };
@@ -96,6 +126,7 @@
   }
   function handle(url, text) {
     if (!/mydata\/traffic\/dashboard\/trend\//.test(url)) return;
+    if (!sameShopPage()) return;
     let result;
     try { result = JSON.parse(text)?.result; } catch (_) { return; }
     if (!result) return;
@@ -144,7 +175,7 @@
   const _siBusy = () => !document.hidden && Date.now() - _siAct < 120000;
   setInterval(() => {
     try {
-      if (SHOP_BAD) return;
+      if (!sameShopPage()) return;
       if (_siBusy()) return;   /* ★v1.5.4 レビュー低5：違う店の画面で読み直しを繰り返さない（止めた理由はバッジとコンソール） */
       if (localHour() < 665 || sentToday()) return;
       const shopId = _shop?.id || URL_SHOP;
@@ -200,10 +231,13 @@
        ③GAS 側で途中の分が別の取り込みに入れ替わっていたら（got が送った数より大きく少ない）、続きにせず最初からやり直す（前のページが抜けたまま確定させない） */
   const sleep = ms => new Promise(res => setTimeout(res, ms));
   async function postGas(payload) {
+    const shop = await shopInfo();
+    if (!shop || shop.id !== payload.shop_id || payload.cc !== CC || !sameShopPage()) return { ok: false, busy: false };
     try {
-      const t = await (await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: '1.5.7' })) })).text();
+      const t = await (await fetch(GAS, { method: 'POST', mode: 'cors', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify(Object.assign({}, payload, { ik: smdIk_(), ver: VERSION })) })).text();
       let j = null; try { j = JSON.parse(t); } catch (_) {}
-      return { t: t, j: j, ok: !!(j && j.ok === true), busy: !!(j && j.error === 'busy'), unknown: /WRITE_TOKEN/.test(t) };
+      const accepted = j?.ok === true && j.cc === payload.cc && String(j.shop || '') === shop.id;
+      return { t: t, j: j, ok: accepted, busy: j?.error === 'busy', unknown: /WRITE_TOKEN/.test(t) };
     } catch (e) { return { t: String(e), j: null, ok: false, busy: false, unknown: false }; }
   }
   /* okTest：ok:true だけでは信じない（GET に化けると doGet の ok が返る）＝その口が返す欄が入っているかで見る */
@@ -334,16 +368,33 @@
      訪問者（直近30日）を送り、商品の数字も済んだら元の画面へ戻す。人が触っている間は戻さない。最長8分で戻す（取れなくても注文画面を空けない） */
   function sentToday() {
     const shopId = _shop?.id || URL_SHOP;
-    if (!shopId || SHOP_BAD) return false;
+    if (!shopId || !sameShopPage()) return false;
     try { return !!localStorage.getItem(dayKey(shopId, targetDay())); } catch (_) { return false; }
   }
   function goBack(why) {
     let u = ''; try { u = sessionStorage.getItem('si_return') || ''; } catch (_) {}
     if (!u) return;
+    try {
+      const home = new URL(u);
+      const shop = home.searchParams.get('cnsc_shop_id');
+      const confirmed = URL_SHOP || _shop?.id;
+      if (home.origin !== location.origin || !/^\/portal\/sale\/order\/?$/.test(home.pathname) ||
+          (shop && shop !== confirmed)) {
+        sessionStorage.removeItem('si_return');
+        badgeQuiet('戻り先の国・店舗が違うため移動しません');
+        return;
+      }
+    } catch (_) { return; }
     if (document.hasFocus()) { setTimeout(() => goBack(why), 60000); return; }
-    try { sessionStorage.removeItem('si_return'); } catch (_) {}
     badge('↩︎ 元の画面に戻ります（' + why + '）'); log('return', why, u);
-    setTimeout(() => { location.href = u; }, 1500);
+    setTimeout(() => {
+      if (document.hasFocus()) { setTimeout(() => goBack(why), 60000); return; }
+      try {
+        if (sessionStorage.getItem('si_return') !== u) return;
+        sessionStorage.removeItem('si_return');
+      } catch (_) { return; }
+      location.href = u;
+    }, 1500);
   }
   function waitSentThenBack(t0) { if (sentToday()) return goBack('取り込み済み'); if (Date.now() - t0 > 3 * 60000) return goBack('訪問者が取れないまま3分'); setTimeout(() => waitSentThenBack(t0), 10000); }
   window.addEventListener('load', () => {

@@ -2774,8 +2774,18 @@ function aiActualIngest_(body) {
     return out;
   } finally { lock.releaseLock(); }
 }
+function requireTrafficShopCountry_(body, cc) {
+  var shop = String(body.shop_id || '');
+  if (!/^\d{1,15}$/.test(shop)) throw new Error('アクセスを取得した店舗IDが確認できません');
+  var registered = listTokens_().find(function (t) { return t && String(t.shop_id) === shop; });
+  if (!registered) throw new Error('登録していない店です');
+  if (String(registered.cc || '').toUpperCase() !== cc) throw new Error('取得した国と店舗の登録国が一致しません');
+  return shop;
+}
+
 function trafficIngest_(body) {
   var cc = String(body.cc || '').toUpperCase(); if (!/^(PH|SG|MY|BR|VN|TH|TW)$/.test(cc)) throw new Error('cc 不正');
+  var shop = requireTrafficShopCountry_(body, cc);
   var rows = body.rows; if (!rows || !rows.length) throw new Error('rows 空');
   if (rows.length > 400) rows = rows.slice(-400);
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
@@ -2786,31 +2796,30 @@ function trafficIngest_(body) {
     var num = function (v) { var x = Number(v); return isFinite(x) ? Math.round(x * 1000) / 1000 : null; };
     /* ★2026-09-26 本人「アカウントごとに見れるようにもしておいて」。userscript v1.1.0 から shop_id / shop_name が来る。
        店ごとに kv.byShop[shop_id] = { cc, name, d: { 'YYYY-MM-DD': {...} } } に入れ、国の数字（kv[cc]）はその国の店の【合計】に作り直す
-       （滞在・直帰は訪問者で重みをつけた平均）。店が来ない古い版はこれまでどおり国にそのまま入れる */
-    var shop = String(body.shop_id || '').replace(/\D/g, '').slice(0, 15), sname = String(body.shop_name || '').slice(0, 60);
-    if (shop && !listTokens_().some(function (t) { return String(t && t.shop_id) === shop; })) throw new Error('登録していない店です');   /* ★2026-09-28 レビュー：鍵なしの口に任意の店を足されて国の合計が狂わないように */
+       （滞在・直帰は訪問者で重みをつけた平均）。登録された店舗と国の組が確認できた行だけを追加する。 */
+    var sname = String(body.shop_name || '').slice(0, 60);
     var touched = {};
-    if (shop) { kv.byShop = kv.byShop || {}; var S = kv.byShop[shop] = kv.byShop[shop] || { cc: cc, name: sname, d: {} }; S.cc = cc; if (sname) S.name = sname; S.at = new Date().toISOString(); }
+    kv.byShop = kv.byShop || {};
+    var S = kv.byShop[shop] = kv.byShop[shop] || { cc: cc, name: sname, d: {} };
+    S.cc = cc; if (sname) S.name = sname; S.at = new Date().toISOString();
     rows.forEach(function (r) {
       var d = String(r.d || ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return;
       var o = { pv: num(r.pv), uv: num(r.uv), nv: num(r.nv), ev: num(r.ev), nf: num(r.nf), stay: num(r.stay), bounce: num(r.bounce), at: new Date().toISOString() };
-      if (shop) { kv.byShop[shop].d[d] = o; touched[d] = 1; } else kv[cc][d] = o;
+      S.d[d] = o; touched[d] = 1;
       n++;
     });
-    if (shop) {
-      var sk = Object.keys(kv.byShop[shop].d).sort(); while (sk.length > 400) { delete kv.byShop[shop].d[sk.shift()]; }
-      Object.keys(touched).forEach(function (d) {
-        var a = { pv: 0, uv: 0, nv: 0, ev: 0, nf: 0, st: 0, bo: 0, k: 0 };
-        Object.keys(kv.byShop).forEach(function (id) { var s2 = kv.byShop[id]; if (!s2 || s2.cc !== cc) return; var x = (s2.d || {})[d]; if (!x) return;
-          a.pv += x.pv || 0; a.uv += x.uv || 0; a.nv += x.nv || 0; a.ev += x.ev || 0; a.nf += x.nf || 0; a.st += (x.stay || 0) * (x.uv || 0); a.bo += (x.bounce || 0) * (x.uv || 0); a.k++; });
-        if (a.k) kv[cc][d] = { pv: a.pv, uv: a.uv, nv: a.nv, ev: a.ev, nf: a.nf, stay: a.uv ? Math.round(a.st / a.uv * 10) / 10 : null, bounce: a.uv ? Math.round(a.bo / a.uv * 1000) / 1000 : null, shops: a.k, at: new Date().toISOString() };
-      });
-    }
+    var sk = Object.keys(S.d).sort(); while (sk.length > 400) { delete S.d[sk.shift()]; }
+    Object.keys(touched).forEach(function (d) {
+      var a = { pv: 0, uv: 0, nv: 0, ev: 0, nf: 0, st: 0, bo: 0, k: 0 };
+      Object.keys(kv.byShop).forEach(function (id) { var s2 = kv.byShop[id]; if (!s2 || s2.cc !== cc) return; var x = (s2.d || {})[d]; if (!x) return;
+        a.pv += x.pv || 0; a.uv += x.uv || 0; a.nv += x.nv || 0; a.ev += x.ev || 0; a.nf += x.nf || 0; a.st += (x.stay || 0) * (x.uv || 0); a.bo += (x.bounce || 0) * (x.uv || 0); a.k++; });
+      if (a.k) kv[cc][d] = { pv: a.pv, uv: a.uv, nv: a.nv, ev: a.ev, nf: a.nf, stay: a.uv ? Math.round(a.st / a.uv * 10) / 10 : null, bounce: a.uv ? Math.round(a.bo / a.uv * 1000) / 1000 : null, shops: a.k, at: new Date().toISOString() };
+    });
     /* 400日より古い分は落とす（app_kv を太らせない） */
     var keys = Object.keys(kv[cc]).sort(); while (keys.length > 400) { delete kv[cc][keys.shift()]; }
     kv.upd = kv.upd || {}; kv.upd[cc] = new Date().toISOString();
     baKvSet_('traffic_daily', kv);
-    return { ok: true, cc: cc, shop: shop || null, n: n, days: Object.keys(kv[cc]).length };
+    return { ok: true, cc: cc, shop: shop, n: n, days: Object.keys(kv[cc]).length };
   } finally { try { lock.releaseLock(); } catch (e) {} }
 }
 /* ★2026-09-28 本人「明細ごとに、今までカートに入れられた回数みたいなのって出せる？」「そういう列追加できる？」。
@@ -2822,9 +2831,7 @@ function trafficIngest_(body) {
    件数を小さく保つため、明細は数字が1つでも0でないものだけ持つ */
 function productPerfIngest_(body) {
   var cc = String(body.cc || '').toUpperCase(); if (!/^(PH|SG|MY|BR|VN|TH|TW)$/.test(cc)) throw new Error('cc 不正');
-  var shop = String(body.shop_id || '').replace(/\D/g, '').slice(0, 15); if (!shop) throw new Error('shop_id がありません');
-  /* ★2026-09-28 レビュー（鍵なしの口）：登録している店だけ受け付ける。任意の数字で行を無限に作られない・他人に店の数字を消されない */
-  if (!listTokens_().some(function (t) { return String(t && t.shop_id) === shop; })) throw new Error('登録していない店です');
+  var shop = requireTrafficShopCountry_(body, cc);
   var run = String(body.run || '').slice(0, 40); if (!run) throw new Error('run がありません');
   var items = body.items; if (!items || !items.length) throw new Error('items 空');
   if (items.length > 200) throw new Error('1回200件まで');
@@ -2861,8 +2868,7 @@ function productPerfIngest_(body) {
    接続（urlfetch）は1回4回（合計を読む1・日の鍵を書く1・合計を書く1・目印 perf_d_meta を書く1）。同じ日を2回送っても丸ごと置き換えなので害はない */
 function perfDailyIngest_(body) {
   var cc = String(body.cc || '').toUpperCase(); if (!/^(PH|SG|MY|BR|VN|TH|TW)$/.test(cc)) throw new Error('cc 不正');
-  var shop = String(body.shop_id || '').replace(/\D/g, '').slice(0, 15); if (!shop) throw new Error('shop_id がありません');
-  if (!listTokens_().some(function (t) { return String(t && t.shop_id) === shop; })) throw new Error('登録していない店です');
+  var shop = requireTrafficShopCountry_(body, cc);
   var d = String(body.d || ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new Error('d 不正');
   var dt = Date.parse(d + 'T00:00:00Z'); if (!(dt > Date.now() - 40 * 86400000 && dt < Date.now() + 86400000)) throw new Error('d が範囲外');
   var items = body.items || []; if (Object.prototype.toString.call(items) !== '[object Array]') throw new Error('items 不正');
