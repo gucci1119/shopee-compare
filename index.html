@@ -2008,7 +2008,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261124-013116';
+  const APP_BUILD = '20261124-023458';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -6212,6 +6212,8 @@
     "商品別の利益で複数商品注文の過去分を集計": "Include all item costs for older multi-item orders",
     "利益管理表の入金は注文ごとに1回、仕入額は同じ注文の明細分を合わせて読み取ります": "Read each payout once and add up the item costs for the same order",
     "折りたたまれた利益管理表の明細も取得": "Include collapsed rows from profit sheets",
+    "商品別の利益の概算を注文日の為替で計算": "Estimate product profit using the order-date exchange rate",
+    "入金が未取得の注文は、注文日の為替と既定の梱包重量で概算します": "Orders without recorded payouts are estimated using the order-date exchange rate and default parcel weight",
     "。今の実績と目安を同じマスで確認できます": ". Compare actual figures and benchmarks in the same cell",
     "次の段階の目安": "Next reference tier",
     "開店日数の下限": "Minimum shop age",
@@ -32806,6 +32808,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
     { date: '2026-11-24', items: [
+      '💹 <b>商品別の利益の概算を注文日の為替で計算</b>。入金が未取得の注文は、注文日の為替と既定の梱包重量で概算します',
       '💹 <b>折りたたまれた利益管理表の明細も取得</b>。商品別の利益に使う過去月を、全行が入る形式で読み取ります',
       '📦 <b>増枠条件を国別に表示</b>。国ごとの資料と各店舗の公式条件を確認できます',
       '💹 <b>商品別の利益で複数商品注文の過去分を集計</b>。利益管理表の入金は注文ごとに1回、仕入額は同じ注文の明細分を合わせて読み取ります',
@@ -61346,6 +61349,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   function priceProfitFor(cc, costJpy, localPrice, opt) {
     const rg = regionByCc(cc); if (!rg) return { buyerJpy: 0, profit: 0, roi: 0 };
     opt = opt || {};
+    const rateJpy = opt.rateJpy ?? rg.rateJpy;
     const feeMult = feeKeep(cc, opt.at != null ? opt.at : feePriceAt_()); // 1 − 合計手数料%（加算方式）。opt.at＝その時点の率（注文の粗利は注文の時刻）・★11/21 渡さない＝値付け・見積もり＝30日先の率（中2）
     const weightG = (opt.weightG != null ? opt.weightG : (listState.weightG != null ? listState.weightG : settings.weightG)) || 0;
     const dW = opt.dimW != null ? opt.dimW : listState.dimW, dH = opt.dimH != null ? opt.dimH : listState.dimH, dD = opt.dimD != null ? opt.dimD : listState.dimD;
@@ -61354,18 +61358,18 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     //   買い手支払 = 出品価格×(1−想定値引き) → ×(1−手数料) → −SLS送料 → −固定控除 → ×(1−入金為替手数料) → −仕入
     //   ※価格そのものの計算式(priceLocalFor)はスプシと一致しているので触らない。ここは「見せる利益」だけ。
     const slsL = slsLocal(cc, Math.max(weightG, vol));       // 現地通貨
-    const slsJpy = slsL * rg.rateJpy;
+    const slsJpy = slsL * rateJpy;
     const disc = (opt.discountPct != null ? Number(opt.discountPct) : (Number(settings.priceDiscountPct) || 0)) / 100;
     const payFx = (Number(settings.pricePayoutFxPct) || 0) / 100;
     const fixedL = Number((settings.priceFixedFee || {})[cc]) || 0;   // 現地通貨の固定控除
     const buyerLocal = localPrice * (1 - disc);
     const netLocal = buyerLocal * feeMult - slsL - fixedL;
-    const payoutJpy = netLocal * (1 - payFx) * rg.rateJpy;    // 実際に入金される円
-    const buyerJpy = buyerLocal * rg.rateJpy;
+    const payoutJpy = netLocal * (1 - payFx) * rateJpy;    // 実際に入金される円
+    const buyerJpy = buyerLocal * rateJpy;
     const sellerJpy = buyerJpy * feeMult;
     const profit = payoutJpy - (Number(costJpy) || 0);
     return { buyerJpy: Math.round(buyerJpy), sellerJpy: Math.round(sellerJpy), feeJpy: Math.round(buyerJpy - sellerJpy), feePct: Math.round((1 - feeMult) * 1000) / 10, slsJpy: Math.round(slsJpy),
-      discJpy: Math.round(localPrice * disc * rg.rateJpy), fixedJpy: Math.round(fixedL * rg.rateJpy), payFxJpy: Math.round(netLocal * payFx * rg.rateJpy), payoutJpy: Math.round(payoutJpy),
+      discJpy: Math.round(localPrice * disc * rateJpy), fixedJpy: Math.round(fixedL * rateJpy), payFxJpy: Math.round(netLocal * payFx * rateJpy), payoutJpy: Math.round(payoutJpy),
       profit: Math.round(profit), roi: (Number(costJpy) > 0 ? profit / costJpy * 100 : 0) };
   }
   function fillTpl(tpl, map) {
@@ -64753,6 +64757,13 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       '<span>' + label + '</span> <b>' + reasons[key].toLocaleString() + '</b><span>点</span>'
     ).join(' ・ ');
   }
+  function prEstimateOrderProfit(cc, cost, sale, order, rateJpy) {
+    // 注文の概算に、出品編集中の梱包設定を持ち込まない。注文日の為替は実績と同じものを使う。
+    return priceProfitFor(cc, cost, sale, {
+      at: ordFeeAt(order), rateJpy, weightG: settings.weightG || 0,
+      dimW: 0, dimH: 0, dimD: 0,
+    });
+  }
   function prCompute() {
     const { start, end } = prPeriodRange();
     const now = Date.now(), d30 = jstDate(now - 30 * 86400000), d90 = jstDate(now - 90 * 86400000);
@@ -64846,7 +64857,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       let src = oldDep || oldCost ? 'sheet' : 'real';
       const rate = ordRate(o) || 0, salesL = pfSales(o), sales = salesL * rate;
       let est = null;
-      if (dep == null && cost != null && salesL > 0) { try { const pr = priceProfitFor(o.cc, cost, salesL, { at: ordFeeAt(o) }); if (pr && isFinite(pr.profit)) { est = pr.profit; src = 'est'; } } catch (_) {} }
+      if (dep == null && cost != null && salesL > 0) { try { const pr = prEstimateOrderProfit(o.cc, cost, salesL, o, rate); if (pr && isFinite(pr.profit)) { est = pr.profit; src = 'est'; } } catch (_) {} }
       const paypal = pfPaypal(o);
       const known = (dep != null || est != null) && cost != null && !paypal.pending;
       const confirmed = known && !!(depInfo && depInfo.fixed);
@@ -64903,7 +64914,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         if (!known) {
           if (paypal.pending) skipProfit(gr, 'paypal', q);
           else if (cost != null || (dep == null && !(salesL > 0))) skipProfit(gr, 'payout', q);
-          else (gr.pend || (gr.pend = [])).push({ q, depY: dep != null ? dep * rate * sh : null, pp: pp * sh, sales: sales * sh, salesL: salesL * sh, cc: o.cc, d, sn: o.sn, vari: V * sh, oldDep: !!oldDep, depFixed: !!(depInfo && depInfo.fixed) });
+          else (gr.pend || (gr.pend = [])).push({ q, depY: dep != null ? dep * rate * sh : null, pp: pp * sh, sales: sales * sh, salesL: salesL * sh, cc: o.cc, d, sn: o.sn, rate, order_ts: o.order_ts, vari: V * sh, oldDep: !!oldDep, depFixed: !!(depInfo && depInfo.fixed) });
           return;
         }
         if (!(salesL > 0)) { tot.noSales = (tot.noSales || 0) + 1; }
@@ -64926,7 +64937,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         const uc = gr.cAllS / gr.cAllN, costE = uc * p.q;
         let g2 = null;
         if (p.depY != null) g2 = p.depY + p.pp - costE;
-        else if (p.salesL > 0) { try { const pr = priceProfitFor(p.cc, uc, p.salesL / p.q, { at: ordFeeAt(p) }); if (pr && isFinite(pr.profit)) g2 = pr.profit * p.q + p.pp; } catch (_) {} }
+        else if (p.salesL > 0) { try { const pr = prEstimateOrderProfit(p.cc, uc, p.salesL / p.q, p, p.rate); if (pr && isFinite(pr.profit)) g2 = pr.profit * p.q + p.pp; } catch (_) {} }
         if (g2 == null) { skipProfit(gr, 'payout', p.q); return; }
         const ded2 = p.sales - (g2 - p.pp + costE) - p.pp;
         gr.n += p.q; gr.sales += p.sales; gr.gross += g2; gr.cost += costE; gr.ded += ded2; gr.est = (gr.est || 0) + p.q; gr.vari = (gr.vari || 0) + p.vari;
