@@ -2008,7 +2008,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261124-023458';
+  const APP_BUILD = '20261125-022729';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -6135,6 +6135,7 @@
   //  ・全文（1万語超）を訳すのは非現実的なので、頻出する画面用語から埋める。辞書に無い語は日本語のまま残る＝壊れない
   //  ・既定はOFF。ONの時だけ動く（走査コストを普段は一切払わない）
   const I18N = {
+    "再読み込みしても自動転記の予定時刻を保持": "Automatic transfers keep their scheduled time after a reload",
     "返信の証拠を確認": "Check reply evidence",
     "返信の証拠はまだ確認していません": "Reply evidence has not been checked yet",
     "返信の証拠を確認中…": "Checking reply evidence…",
@@ -21223,7 +21224,7 @@
     const minD = jstDate(Math.min(...cand.map(r => Number(r.at))) - 86400000);
     const ors = []; cand.forEach(r => { const b = 'REQ_' + r.ref; ors.push('items.cs.' + JSON.stringify([{ sku: b.slice(0, 40) }])); ors.push('items.cs.' + JSON.stringify([{ sku: b.slice(0, 37) + '-1' }])); });
     const qs = 'select=cc,sn,order_date,items&order_date=gte.' + minD + '&or=(' + encodeURIComponent(ors.join(',')) + ')&limit=100';
-    const got = readOnly ? await readOnly('orders', qs) : await sbGet('orders', qs).catch(() => null);
+    const got = readOnly ? await readOnly('orders', qs) : await sbGet('orders', qs).catch(() => null); // どちらの経路も上の qs の limit=100 を使う
     if (!Array.isArray(got) || got.length >= 100) {
       if (readOnly) throw new Error('見積もりと注文の照合を完了できませんでした');
       return 0;
@@ -32810,6 +32811,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-25', items: [
+      '🔁 <b>再読み込みしても自動転記の予定時刻を保持</b>。新しい端末の初回でも、保存済みの時刻で入金予定額と商品画像の転記を始めます',
+    ], itemsEn: [
+      `🔁 <b>${I18N['再読み込みしても自動転記の予定時刻を保持']}</b>. A new device also keeps the saved time for its first payout and product image transfer.`,
+    ] },
     { date: '2026-11-24', items: [
       '💹 <b>商品別の利益の概算を注文日の為替で計算</b>。入金が未取得の注文は、注文日の為替と既定の梱包重量で概算します',
       '💹 <b>折りたたまれた利益管理表の明細も取得</b>。商品別の利益に使う過去月を、全行が入る形式で読み取ります',
@@ -34986,7 +34992,7 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     body.innerHTML = matrix +
       `<div class="tool-card" data-ui-dup-ok data-ui-scroll-ok style="margin:0;max-width:1150px;font-size:13px;line-height:1.8">` +
       CHANGELOG.map(g => `<div style="margin-bottom:14px"><b style="color:#ee4d2d">${esc(g.date)}</b><button class="cl-copy" data-d="${av(g.date)}" title="この日ぶんをDiscordに貼れる形でコピーします（自動投稿はしません）" style="margin-left:8px;border:1px solid #5865F2;background:#f5f6ff;color:#5865F2;border-radius:10px;padding:1px 9px;font-size:10.5px;font-weight:700;cursor:pointer">📋 この日をコピー</button><ul data-noi18n style="margin:4px 0 0 18px;padding:0">` +
-        g.items.map(i => `<li style="margin:2px 0">${i}</li>`).join('') + `</ul></div>`).join('') +
+        (i18nOn() && g.itemsEn ? g.itemsEn : g.items).map(i => `<li style="margin:2px 0">${i}</li>`).join('') + `</ul></div>`).join('') +
       `</div>`;
     body.querySelectorAll('a[href]:not([title])').forEach(a => { a.title = 'リンク先を新しいタブで開きます'; });   /* ★2026-11-14 点検：本文のリンクにかざす説明 */
     // 📋 その日ぶんをDiscord用テキストにしてコピー（貼るのは手動。自動投稿はしない）
@@ -66575,11 +66581,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   30秒おきの見張り＋タブに戻った瞬間の見張りで「時刻を過ぎていたら走る」に変え、予約時刻は localStorage にも残す。
   let depAutoRunning = false;
   function depAutoStop() { if (depAutoT) { clearInterval(depAutoT); depAutoT = null; } depAutoNextLabel(0); try { localStorage.removeItem('smdDepAutoNext'); } catch (_) {} }
-  function depAutoArm(ms) {
+  function depAutoArm(at = Date.now() + DEP_AUTO_MS) {
     depAutoStop();
     if (!depAutoOn()) return;
-    const wait = ms == null ? DEP_AUTO_MS : ms;
-    depAutoNextLabel(wait);
+    depAutoNextAt = at;
+    depAutoNextLabel();
     try { localStorage.setItem('smdDepAutoNext', String(depAutoNextAt)); } catch (_) {}
     depAutoT = setInterval(depAutoCheck, 30 * 1000);
   }
@@ -66598,12 +66604,12 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       /* ★2026-11-15 05（全面改修・型E/A）：担当のPCが替わると黙って止まっていた＝「見送り：担当でない」を記録する（同じ見送りが続く間は1行だけ＝記録の枠を埋めない） */
       try { const a0 = JSON.parse(localStorage.getItem('smdDepRuns') || '[]'); const top = Array.isArray(a0) ? a0[0] : null; if (!(top && /^見送り: 担当でない/.test(String(top.note || '')))) depRunsSave(depRecordRow('自動', null, '見送り: 担当でない（自動の転記は担当のPC「' + ((PC.owner && PC.owner.label) || 'もう1台') + '」だけで動きます。担当のPCでも「自動実行する」を ON にしてください）')); } catch (_) {}
       try { renderDepRuns(); } catch (_) {}
-      depAutoArm(DEP_AUTO_MS); return; }
-    if (!depAutoClaim_()) { depAutoArm(DEP_AUTO_MS); return; }   // 別タブが直前に走らせた＝こちらは次回へ
+      depAutoArm(); return; }
+    if (!depAutoClaim_()) { depAutoArm(); return; }   // 別タブが直前に走らせた＝こちらは次回へ
     depAutoRunning = true;
     if (depAutoT) { clearInterval(depAutoT); depAutoT = null; }
     Promise.resolve().then(depAutoRun).catch(e => { try { depRunsSave(depRecordRow('自動', null, '失敗: ' + ((e && e.message) || e))); } catch (_) {} })
-      .then(() => { depAutoRunning = false; if (depAutoOn() && !depAutoT) depAutoArm(DEP_AUTO_MS); });
+      .then(() => { depAutoRunning = false; if (depAutoOn() && !depAutoT) depAutoArm(); });
   }
   document.addEventListener('visibilitychange', () => { if (!document.hidden) depAutoCheck(); });
   window.addEventListener('focus', depAutoCheck);
@@ -66641,7 +66647,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           return;
         }
       }
-      depAutoArm(30 * 60 * 1000);   // 30分後にもう一度みる
+      depAutoArm(Date.now() + 30 * 60 * 1000);   // 30分後にもう一度みる
       return;
     }
     // ★順番に。F/G が終わってから画像。
@@ -66666,12 +66672,14 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (irEl && irPrev != null) irEl.value = irPrev;
     try { renderDepRuns(); } catch (_) {}
     try { localStorage.setItem('smdDepAutoLast', String(Date.now())); } catch (_) {}
-    depAutoArm(DEP_AUTO_MS);
+    depAutoArm();
   }
-  // ★前回いつ走ったかを覚えておき、読み込み直後は「3時間−経過ぶん」で予約する（2026-09-10）。
-  //   前は読み込みのたびに「3時間後」に予約し直していたので、タブを開き直す・自動更新で再読込されるたびに
-  //   次回が先送りされ、いつまでも走らないことがあった（実測：次回 06:15 → 07:49 に伸びていた）。
-  function depAutoInitialWait() {
+  // 初回の履歴が空でも保存した予約時刻で再開する。古い端末に予約の保存がなければ前回の実行から求める。
+  function depAutoInitialAt() {
+    try {
+      const savedAt = Number(localStorage.getItem('smdDepAutoNext'));
+      if (Number.isSafeInteger(savedAt) && savedAt > 0) return savedAt;
+    } catch (_) {}
     let last = 0;
     try { last = Number(localStorage.getItem('smdDepAutoLast') || 0); } catch (_) {}
     if (!last) {
@@ -66680,8 +66688,8 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         (Array.isArray(arr) ? arr : []).forEach(r => { const t = Date.parse(r && r.at); if (t && /^(明細|入金F\/G|画像)/.test(String(r.kind || '')) && t > last) last = t; });
       } catch (_) {}
     }
-    if (!last) return DEP_AUTO_MS;
-    return Math.max(60 * 1000, DEP_AUTO_MS - (Date.now() - last));
+    const now = Date.now();
+    return last > 0 ? Math.max(now + 60 * 1000, last + DEP_AUTO_MS) : now + DEP_AUTO_MS;
   }
   function depRunsSave(row) {
     try {
@@ -67396,10 +67404,10 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (ca) { ca.checked = depAutoOn();
       ca.addEventListener('change', () => {
         try { localStorage.setItem('smdDepAuto', ca.checked ? '1' : '0'); } catch (_) {}
-        if (ca.checked) { toast('🔁 3時間おきの自動実行をONにしました（この端末だけ）'); depAutoArm(DEP_AUTO_MS); }
+        if (ca.checked) { toast('🔁 3時間おきの自動実行をONにしました（この端末だけ）'); depAutoArm(); }
         else { toast('🔁 自動実行をOFFにしました'); depAutoStop(); }
       });
-      if (depAutoOn()) depAutoArm(depAutoInitialWait());   // 読み込み直後は「3時間−前回からの経過」（最短1分）
+      if (depAutoOn()) depAutoArm(depAutoInitialAt());
     } }
   document.getElementById('dep-run').addEventListener('click', async () => {
     const btn = document.getElementById('dep-run');
