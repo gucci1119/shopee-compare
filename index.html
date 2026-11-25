@@ -2008,7 +2008,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261125-022729';
+  const APP_BUILD = '20261126-085100';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -4448,7 +4448,7 @@
       return;
     }
     panel = document.createElement('div'); panel.id = 'tcg-export-panel';
-    panel.innerHTML = '<div class="tcg-export-status" role="status">待機中</div><div class="tcg-export-actions"><button class="smd-btn b-read tcg-export-one">次の1区分を確認</button><button class="smd-btn b-read tcg-export-start">取得・続きから再開</button><button class="smd-btn tcg-export-stop" disabled>中断</button><button class="smd-btn tcg-export-save">取得済みを保存</button><button class="smd-btn tcg-export-close">折りたたむ</button></div>';
+    panel.innerHTML = '<div class="tcg-export-status" role="status">待機中</div><div class="tcg-export-actions"><button class="smd-btn b-read tcg-export-one">次の1区分を確認</button><button class="smd-btn b-read tcg-export-start">取得・続きから再開</button><button class="smd-btn tcg-export-stop" disabled>中断</button><button class="smd-btn tcg-export-save">取得済みを保存</button><button class="smd-btn tcg-export-close">折りたたむ</button></div><div class="tcg-export-actions"><button class="smd-btn b-read game-export-start">ゲームの候補を取得・再開</button><button class="smd-btn game-export-stop" disabled>ゲームの取得を中断</button><button class="smd-btn game-export-save" disabled>ゲームの候補を保存</button><div class="game-export-status" aria-live="polite"></div></div>';
     opener.after(panel);
     opener.setAttribute('aria-expanded', 'true');
     const status = panel.querySelector('.tcg-export-status'), start = panel.querySelector('.tcg-export-start'), stop = panel.querySelector('.tcg-export-stop');
@@ -4496,6 +4496,7 @@
       if (storageFailed && !running) tcgExportBusy = false;
     };
     const readLimited = async r => { if (!r.ok) throw new Error('HTTP ' + r.status); const reader = r.body.getReader(), chunks = []; let total = 0; try { while (true) { const x = await reader.read(); if (x.done) break; total += x.value.byteLength; if (total > 2000000) throw new Error('返事が2MBを超えたため中断'); chunks.push(x.value); } } catch (e) { await reader.cancel().catch(() => {}); throw e; } const a = new Uint8Array(total); let n = 0; chunks.forEach(x => { a.set(x, n); n += x.length; }); const t = new TextDecoder().decode(a), m = /^\s*cb\(([\s\S]*)\)\s*;?\s*$/.exec(t); return JSON.parse(m ? m[1] : t); };
+    setupGameCandidateExport(panel, readLimited);
     const work = async (lock, maxCategories) => {
       if (!lock) { describe('別のタブで取得中です'); return; }
       running = true; tcgExportBusy = true; cancelled = false; start.disabled = true; one.disabled = true; stop.disabled = false; describe('接続枠を確認中…');
@@ -4554,6 +4555,121 @@
       opener.focus();
     };
     try { db = await openCache(); await loadCache(); start.disabled = false; one.disabled = false; describe(appUpdateText('途中の回は開始から2時間以内なら続きから取得できます。完了した回の再利用は開始から30分以内です')); } catch (e) { describe('保存先を使えないため取得は始めていません：' + String(e.message || e)); }
+  }
+  /* Same read-only page sequence as the Mac game review job. The shared lock keeps it out of the card export slot. */
+  function setupGameCandidateExport(panel, readLimited) {
+    const start = panel.querySelector('.game-export-start');
+    const stop = panel.querySelector('.game-export-stop');
+    const save = panel.querySelector('.game-export-save');
+    const status = panel.querySelector('.game-export-status');
+    const progress = { cands: [], extra: [], skipped: Object.create(null), next: 0, hws: [], done: [] };
+    const seen = new Set();
+    let stopped = false;
+    const say = key => { status.textContent = appUpdateText(key) + (seen.size ? ` (${seen.size})` : ''); };
+
+    async function fetchPage(base, token) {
+      const q = await ufFetchOne(base, 15000);
+      const used = Number(q && q.used);
+      const margin = Number(q && q.stopLine) - used;
+      if (!q || q.runner !== 'child3' || q.bgAllowed !== true || !Number.isFinite(used)
+          || !Number.isFinite(margin) || used >= 12000 || margin < 2500 || ufUrlBlocked(base)) {
+        throw new Error('ゲームの候補を取得できる接続枠がありません');
+      }
+      const started = performance.now();
+      const health = await sbGetAll('orders', 'select=sn&limit=1').catch(() => null);
+      if (!Array.isArray(health) || health.length !== 1 || performance.now() - started > 2000) {
+        throw new Error('ゲーム候補の取得前にDBの応答を確認できませんでした');
+      }
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      if (stopped) return null;
+      const url = new URL(base);
+      const expected = { action: 'game_judge_cands', token, hws: 'all', n: '40', start: String(progress.next), callback: 'cb' };
+      Object.entries(expected).forEach(([key, value]) => url.searchParams.set(key, value));
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 330000);
+      try {
+        return await readLimited(await fetch(url.href, { credentials: 'omit', signal: controller.signal }));
+      } catch (_) {
+        throw new Error('ゲーム候補の取得に失敗しました。取得済みの分は保存できます');
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function addPage(page) {
+      const platformNames = page.hws;
+      const next = page.next;
+      if (page.ok !== true || page.start !== progress.next || !Array.isArray(platformNames) || !platformNames.length
+          || !Array.isArray(page.done) || !Array.isArray(page.list) || !Array.isArray(page.extra)
+          || !page.skipped || Array.isArray(page.skipped) || typeof page.skipped !== 'object'
+          || (next !== null && (!Number.isInteger(next) || next <= progress.next || next >= platformNames.length))
+          || (progress.hws.length && JSON.stringify(progress.hws) !== JSON.stringify(platformNames))
+          || page.done.some(hw => !platformNames.includes(hw) || progress.done.includes(hw))) {
+        throw new Error('ゲーム候補の応答と取得位置が一致しません');
+      }
+      const pageKeys = new Set();
+      for (const game of page.list) {
+        const key = JSON.stringify([game.hw, game.key]);
+        if (typeof game.key !== 'string' || !game.key || !page.done.includes(game.hw)
+            || !Array.isArray(game.imgs) || !game.imgs.length || game.imgs.length > 2
+            || seen.has(key) || pageKeys.has(key)) {
+          throw new Error('ゲーム候補の応答と取得位置が一致しません');
+        }
+        pageKeys.add(key);
+      }
+      pageKeys.forEach(key => seen.add(key));
+      progress.cands.push(...page.list);
+      progress.done.push(...page.done);
+      progress.hws = platformNames;
+      Object.assign(progress.skipped, page.skipped);
+      if (page.extra.length) progress.extra = page.extra;
+      progress.next = next;
+    }
+
+    start.onclick = async () => {
+      if (start.disabled) return;
+      if (!navigator.locks) { say('二重起動を防ぐ機能が無いため、このブラウザでは取得しません'); return; }
+      const configured = settings.boshuUrl3;
+      const token = settings.writeToken;
+      if (!gasUrlOk(configured) || !token) { say('4台目の既存接続を確認してください'); return; }
+      const base = configured.split('?')[0];
+      start.disabled = true;
+      try {
+        await navigator.locks.request('smd-photo-candidates-export', { ifAvailable: true }, async lock => {
+          if (!lock || tcgExportBusy) { say('別のタブで取得中です'); return; }
+          stopped = false;
+          stop.disabled = false;
+          for (let page = 0; page < 8 && progress.next !== null && !stopped; page++) {
+            say('ゲームの候補を取得中…');
+            const result = await fetchPage(base, token);
+            if (result === null) break;
+            addPage(result);
+            save.disabled = false;
+            if (progress.next !== null && !stopped) await new Promise(resolve => setTimeout(resolve, 5000));
+          }
+          const complete = progress.next === null && progress.hws.every(hw => progress.done.includes(hw)
+              || ['nofam', 'noccs'].includes(progress.skipped[hw]));
+          say(complete ? 'ゲーム候補の取得が完了しました' : 'ゲーム候補の途中までを保持しました');
+        });
+      } catch (error) {
+        const message = error.message || '';
+        say(stopped ? 'ゲーム候補の途中までを保持しました' : Object.hasOwn(I18N, message)
+          ? message : 'ゲーム候補の取得に失敗しました。取得済みの分は保存できます');
+      } finally {
+        stop.disabled = true;
+        start.disabled = progress.next === null;
+      }
+    };
+    stop.onclick = () => { stopped = true; };
+    save.onclick = () => {
+      const blob = new Blob([JSON.stringify(progress)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'game-candidates-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    };
   }
   document.addEventListener('click', e => { const opener = e.target.closest && e.target.closest('#tcg-export-open'); if (opener) { e.preventDefault(); tcgExportUi(opener); } });
   try { window.__smdOaUpdate = async (action, shopId, itemId, modelId, val, expect) => {   /* 在庫・価格を model_id 指定で（名前で引かない＝取り違えない） */
@@ -6269,6 +6385,19 @@
     '取得・続きから再開': 'Get candidates / resume',
     '次の1区分を確認': 'Check the next category',
     '取得済みを保存': 'Save retrieved candidates',
+    'ゲームの候補を取得・再開': 'Get game candidates / resume',
+    'ゲームの取得を中断': 'Stop retrieving games',
+    'ゲームの候補を保存': 'Save game candidates',
+    'ゲームの候補を取得中…': 'Retrieving game candidates…',
+    'ゲーム候補の取得が完了しました': 'Game candidates are ready',
+    'ゲーム候補の途中までを保持しました': 'Kept the game candidates retrieved so far',
+    'ゲームの候補を取得できる接続枠がありません': 'No capacity available for game candidate retrieval',
+    'ゲーム候補の取得前にDBの応答を確認できませんでした': 'Could not verify the database response before retrieving games',
+    'ゲーム候補の取得に失敗しました。取得済みの分は保存できます': 'Game candidate retrieval failed. You can save the results already retrieved.',
+    'ゲーム候補の応答と取得位置が一致しません': 'Game candidate results did not match the requested page',
+    '4台目の既存接続を確認してください': 'Check the existing connection to worker 4',
+    '二重起動を防ぐ機能が無いため、このブラウザでは取得しません': 'This browser cannot prevent duplicate retrievals',
+    '別のタブで取得中です': 'Retrieval is running in another tab',
     '中断': 'Stop',
     '待機中': 'Waiting',
     '写真判定の候補を、通常のボタンで保存': 'Save photo-review candidates using a normal button',
@@ -32811,6 +32940,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-26', items: [
+      '🎮 <b>ゲームの写真判定候補をポータルから保存</b>。既存の4台目から候補を読み、途中までのJSONも保存できます',
+    ], itemsEn: [
+      '🎮 <b>Save game photo review candidates from the portal</b>. Retrieves candidates from the existing worker 4 and can save partial JSON results.',
+    ] },
     { date: '2026-11-25', items: [
       '🔁 <b>再読み込みしても自動転記の予定時刻を保持</b>。新しい端末の初回でも、保存済みの時刻で入金予定額と商品画像の転記を始めます',
     ], itemsEn: [
