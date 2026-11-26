@@ -2009,7 +2009,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261126-095500';
+  const APP_BUILD = '20261126-115600';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -2740,6 +2740,64 @@
       + (blk ? '<div style="font-size:10.5px;color:#b3261e;margin-top:3px">' + ufResetJst() + ' まで戻りません</div>' : '')
       + '</div>';
   }
+  let shop3PublisherStatusBusy = false;
+  async function readShop3PublisherStatus(button, output) {
+    if (shop3PublisherStatusBusy) return;
+    const token = settings.writeToken;
+    const workers = [
+      ['4', 'child3', settings.boshuUrl3],
+      ['5', 'child4', settings.boshuUrl4],
+      ['6', 'child5', settings.boshuUrl5]
+    ];
+    const urls = workers.map(([, , url]) => gasUrlOk(url) ? url.split('?')[0] : '');
+    const english = i18nOn();
+    const message = (ja, en) => english ? en : ja;
+    if (!token || urls.includes('') || new Set(urls).size !== workers.length) {
+      output.textContent = message('4〜6台目の接続先と既存の認証設定を確認してください。', 'Check the three configured connections and the existing authorization.');
+      return;
+    }
+
+    shop3PublisherStatusBusy = true;
+    button.disabled = true;
+    output.textContent = message('4〜6台目を確認中…', 'Checking workers 4–6…');
+    const observations = [];
+    try {
+      for (const [index, [label, runner]] of workers.entries()) {
+        if (index) await new Promise(resolve => setTimeout(resolve, 5000));
+        const query = new URLSearchParams({ action: 'shop3_pub_status', token, callback: 'cb' });
+        let result;
+        try {
+          const response = await fetch(urls[index] + '?' + query, {
+            credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(20000)
+          });
+          result = await readPortalSmallJsonp(response);
+        } catch (_) {
+          result = null;
+        }
+        const valid = result?.ok === true && result.runner === runner
+          && typeof result.here === 'boolean' && typeof result.ackPending === 'boolean'
+          && /^\d{8}-\d{4}$/.test(result.src);
+        observations.push(valid ? { label, here: result.here, pending: result.ackPending, src: result.src } : { label });
+      }
+      const owners = observations.filter(row => row.here === true);
+      const complete = observations.every(row => row.src && !row.pending);
+      const heading = complete && owners.length === 1
+        ? message('確認時の公開担当は' + owners[0].label + '台目です。', 'Publishing owner at the time of the check: worker ' + owners[0].label + '.')
+        : message('公開担当が1台に確定していることを確認できません。', 'A single publishing owner could not be verified.');
+      const lines = observations.map(row => {
+        const label = message(row.label + '台目', 'Worker ' + row.label);
+        if (!row.src) return label + '  ' + message('応答未確認', 'Unverified');
+        const state = row.here ? message('担当', 'Owner') : message('担当外', 'Not assigned');
+        const pending = row.pending ? message('・引き継ぎ確認待ち', ' · Handoff acknowledgment pending') : '';
+        return label + '  ' + state + pending + '  ' + row.src;
+      });
+      output.textContent = [heading, ...lines].join('\n');
+    } finally {
+      shop3PublisherStatusBusy = false;
+      button.disabled = false;
+    }
+  }
+
   async function ufQuotaDetail() {
     const r = window.__ufLast;
     if (!r) { alert('まだ枠の状態を取れていません。上の🔄更新を押してから、もう一度開いてください。'); return; }
@@ -2844,6 +2902,9 @@
     })();
     const html = '<div style="font-size:12px">'
       + acctHtml
+      + '<div style="margin:0 0 12px"><button type="button" id="uf-shop3-publisher" class="smd-btn">'
+      + (i18nOn() ? 'Check third-shop publishing owner' : '第3店の公開担当を確認') + '</button>'
+      + '<div id="uf-shop3-publisher-status" role="status" style="margin-top:5px;white-space:pre-line"></div></div>'
       + acctTable
       /* ★2026-09-22 上にアカウントごとのカードを出したので、ここは【いま見ているGAS】の内訳だけにする。
          前は「今日つかった／残り」をもう一度出していて、どちらのアカウントの話か分からず、
@@ -2876,6 +2937,8 @@
       + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><b style="font-size:15px;flex:1">🔌 Shopee接続枠の内訳</b>'
       + '<button id="uf-quota-close" class="smd-btn" style="font-size:11px;padding:3px 11px">閉じる</button></div>' + html + '</div>';
     wrap.addEventListener('click', (e) => { if (e.target === wrap || e.target.id === 'uf-quota-close') wrap.remove(); });
+    const publisherStatus = wrap.querySelector('#uf-shop3-publisher');
+    publisherStatus.addEventListener('click', () => readShop3PublisherStatus(publisherStatus, wrap.querySelector('#uf-shop3-publisher-status')));
     document.body.appendChild(wrap);
   }
   function aiCostDetail() {
@@ -33246,9 +33309,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
     { date: '2026-11-26', items: [
       '🎮 <b>ゲームの写真判定候補をポータルから保存</b>。既存の4台目から候補を読み、途中までのJSONも保存できます',
       '<b>出品違反の読み取り</b>。第4の既存窓口で、対象店の出品状況と違反理由を確認し、結果を保存して続きから再開できます。',
+      '<b>第3店の公開担当の確認</b>。接続枠の内訳から4〜6台目の担当状態を読み取れます。',
     ], itemsEn: [
       '🎮 <b>Save game photo review candidates from the portal</b>. Retrieves candidates from the existing worker 4 and can save partial JSON results.',
       '<b>Review listing violations</b>. Reads status and reasons for the selected shops through the existing fourth worker and resumes from saved results.',
+      '<b>Check the third-shop publishing owner</b>. The quota details can read the publishing status from workers 4–6.',
     ] },
     { date: '2026-11-25', items: [
       '🔁 <b>再読み込みしても自動転記の予定時刻を保持</b>。新しい端末の初回でも、保存済みの時刻で入金予定額と商品画像の転記を始めます',
