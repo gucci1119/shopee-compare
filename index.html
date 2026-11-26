@@ -2009,7 +2009,7 @@
   })();
   /* ★2026-11-15 05（全面改修・型B）：この窓が読んだ index.html の版の印。公開のたびに 05 が書き換える（書式は 年月日-時分 の数字12桁）。
      前は最初に見た ETag を「この窓の版」と覚えていたので、キャッシュの古い版で開いた窓は自分が古いと気づけなかった。比べる相手は公開中の index.html の中のこの印 */
-  const APP_BUILD = '20261126-094500';
+  const APP_BUILD = '20261126-095500';
 
   // rateJpy: 現地通貨→円の概算レート。ズレてきたらここを直す
   // VNは seller.shopee.vn だとPOSTがリダイレクトで壊れるため banhang 直結
@@ -4701,10 +4701,20 @@
       return id;
     };
     if (step.kind === 'listing') {
-      if (!Array.isArray(page.item) || page.item.length > 100 || typeof page.has_next_page !== 'boolean') bad();
+      const total = page.total_count ?? page.total;
+      const missingButEmpty = page.item == null && page.has_next_page !== true
+        && (total === 0 || (total == null && page.has_next_page === false));
+      const rows = missingButEmpty ? [] : page.item;
+      if (!Array.isArray(rows) || rows.length > 100 || (typeof page.has_next_page !== 'boolean' && !missingButEmpty)) {
+        const error = new Error('違反巡回の応答を照合できませんでした');
+        error.review = { item: Array.isArray(page.item) ? 'array' : typeof page.item,
+          hasNext: typeof page.has_next_page === 'boolean' ? page.has_next_page : null,
+          total: Number.isInteger(total) ? total : null };
+        throw error;
+      }
       const next = page.next_offset ?? step.query.offset + 100;
-      if (page.has_next_page && (!page.item.length || !Number.isInteger(next) || next <= step.query.offset)) bad();
-      const ids = page.item.map(row => numberId(row.item_id));
+      if (page.has_next_page && (!rows.length || !Number.isInteger(next) || next <= step.query.offset)) bad();
+      const ids = rows.map(row => numberId(row.item_id));
       for (const id of ids) {
         if (store.ids[id] && store.ids[id] !== step.query.item_status) store.statusChanged++;
         store.ids[id] = step.query.item_status;
@@ -4765,6 +4775,8 @@
       + '<button class="smd-btn b-read violation-review-start">違反巡回を続ける</button>'
       + '<button class="smd-btn violation-review-stop" disabled>中断</button>'
       + '<button class="smd-btn violation-review-save" disabled>巡回結果を保存</button>'
+      + '<button class="smd-btn violation-review-load">巡回の続きのファイルを開く</button>'
+      + '<input type="file" class="violation-review-file" accept=".json,application/json" hidden>'
       + '<div class="violation-review-status" aria-live="polite"></div>';
     opener.after(panel);
     opener.setAttribute('aria-expanded', 'true');
@@ -4774,10 +4786,12 @@
     const start = panel.querySelector('.violation-review-start');
     const stop = panel.querySelector('.violation-review-stop');
     const save = panel.querySelector('.violation-review-save');
+    const load = panel.querySelector('.violation-review-load');
+    const file = panel.querySelector('.violation-review-file');
     const say = key => { status.textContent = appUpdateText(key); };
     say('先に巡回する店を選んでください');
     const pause = () => new Promise(resolve => setTimeout(resolve, 5000));
-    const run = { startedAt: null, calls: 0, stores: {} };
+    let run = { startedAt: null, calls: 0, stores: {} };
     let stopping = false;
     const single = document.createElement('option');
     single.value = '';
@@ -4802,6 +4816,42 @@
       });
       return out;
     };
+    load.onclick = () => file.click();
+    file.onchange = async () => {
+      const input = file.files?.[0];
+      file.value = '';
+      if (!input || run.calls || one.disabled) return;
+      let verify = null;
+      try {
+        if (input.size > 2000000) throw new Error();
+        const saved = JSON.parse(await input.text());
+        const age = Date.now() - Date.parse(saved.startedAt);
+        if (!Number.isFinite(age) || age < 0 || age > 6 * 3600000 || !Number.isInteger(saved.calls)
+            || saved.calls < 1 || saved.calls > 1000) throw new Error();
+        if (!state.accounts) await loadAccounts();
+        const accounts = accountMap();
+        const entries = Object.entries(saved.stores);
+        if (!entries.length || entries.some(([code, row]) => {
+          const ids = Object.entries(row.ids);
+          return !violationReviewStores.includes(code) || row.shopId !== accounts[code]
+            || !Number.isInteger(row.phase) || row.phase < 0 || row.phase > violationReviewStates.length
+            || !Number.isInteger(row.offset) || row.offset < 0
+            || !Number.isInteger(row.pages) || row.pages < row.phase
+            || !Number.isInteger(row.detailsAt) || row.detailsAt < 0 || row.detailsAt > ids.length
+            || ids.some(([id, state]) => !/^[1-9][0-9]{0,19}$/.test(id) || !violationReviewStates.includes(state))
+            || !Array.isArray(row.unread) || row.unread.some(id => !Object.hasOwn(row.ids, id))
+            || typeof row.health !== 'object' || !row.health
+            || typeof row.violations !== 'object' || !row.violations;
+        })) throw new Error();
+        verify = { startedAt: saved.startedAt, calls: saved.calls, stores: Object.fromEntries(entries) };
+      } catch (_) { say('巡回の続きのファイルを照合できませんでした'); return; }
+      if (run.calls || one.disabled) return;
+      run = verify;
+      save.disabled = true;
+      load.disabled = true;
+      shop.value = Object.keys(run.stores).length === 1 ? Object.keys(run.stores)[0] : 'all';
+      say('巡回の続きのファイルを読み込みました');
+    };
     const readPage = async (base, token, sid, step) => {
       const query = new URLSearchParams({ action: 'api_probe', token, shop_id: sid,
         path: violationReviewRoutes[step.kind], q: JSON.stringify(step.query), callback: 'cb' });
@@ -4814,6 +4864,7 @@
       return response.data.response;
     };
     const work = async (limit) => {
+      let pending = null;
       const target = shop.value;
       if (!target || !options.includes(target)) { say('先に巡回する店を選んでください'); return; }
       if (one.disabled) return;
@@ -4822,7 +4873,7 @@
       const token = settings.writeToken;
       if (!gasUrlOk(configured) || !token) { say('4台目の既存接続を確認してください'); return; }
       const base = configured.split('?')[0];
-      shop.disabled = one.disabled = start.disabled = true;
+      shop.disabled = one.disabled = start.disabled = load.disabled = true;
       try {
         await navigator.locks.request('smd-photo-candidates-export', { ifAvailable: true }, async lock => {
           if (!lock) { say('別のタブで取得中です'); return; }
@@ -4861,9 +4912,12 @@
             await pause();
             if (stopping) break;
             run.startedAt ||= new Date().toISOString();
+            pending = { shop: code, kind: step.kind, status: step.query.item_status ?? null, offset: step.query.offset ?? null };
             const results = await readPage(base, token, store.shopId, step);
             applyViolationReviewPage(store, step, results);
+            pending = null;
             run.calls++;
+            delete run.lastReadError;
             save.disabled = false;
           }
           completed ||= selected.every(code => run.stores[code] && !violationReviewStep(run.stores[code]));
@@ -4874,9 +4928,14 @@
           status.textContent = target + ' · ' + appUpdateText(complete ? '違反巡回の読取が完了しました' : '違反巡回の途中結果を保持しました') + ' (' + run.calls + ')';
         });
       } catch (err) {
+        if (pending) {
+          run.lastReadError = { ...pending, responseShape: err.review ?? null };
+          if (run.calls) save.disabled = false;
+        }
         say(Object.hasOwn(I18N, err.message) ? err.message : '違反巡回の応答を照合できませんでした');
       } finally {
         shop.disabled = one.disabled = start.disabled = false;
+        load.disabled = !!run.calls;
         stop.disabled = true;
       }
     };
@@ -6621,6 +6680,9 @@
     '次の1回を読む': 'Read next page',
     '違反巡回を続ける': 'Continue violation review',
     '巡回結果を保存': 'Save review results',
+    '巡回の続きのファイルを開く': 'Open a saved review checkpoint',
+    '巡回の続きのファイルを照合できませんでした': 'Could not verify the saved review checkpoint',
+    '巡回の続きのファイルを読み込みました': 'Review checkpoint loaded',
     '巡回する店': 'Shop to review',
     '先に巡回する店を選んでください': 'Choose a shop first',
     '巡回する店の登録を照合できませんでした': 'Could not verify the shop registry',
@@ -33183,10 +33245,10 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   const CHANGELOG = [
     { date: '2026-11-26', items: [
       '🎮 <b>ゲームの写真判定候補をポータルから保存</b>。既存の4台目から候補を読み、途中までのJSONも保存できます',
-      '<b>出品違反の読み取り</b>。第4の既存窓口で、対象店の出品状況と違反理由を確認し、結果を保存できます。',
+      '<b>出品違反の読み取り</b>。第4の既存窓口で、対象店の出品状況と違反理由を確認し、結果を保存して続きから再開できます。',
     ], itemsEn: [
       '🎮 <b>Save game photo review candidates from the portal</b>. Retrieves candidates from the existing worker 4 and can save partial JSON results.',
-      '<b>Review listing violations</b>. Reads status and reasons for the selected shops through the existing fourth worker and saves the results.',
+      '<b>Review listing violations</b>. Reads status and reasons for the selected shops through the existing fourth worker and resumes from saved results.',
     ] },
     { date: '2026-11-25', items: [
       '🔁 <b>再読み込みしても自動転記の予定時刻を保持</b>。新しい端末の初回でも、保存済みの時刻で入金予定額と商品画像の転記を始めます',
