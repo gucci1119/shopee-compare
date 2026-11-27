@@ -10830,6 +10830,13 @@
     "最終同期の時刻は進めていません": "The last-sync time was not updated",   /* ★2026-11-15 05（全面改修） */
     "読めなかった国": "Countries that could not be loaded",   /* ★2026-11-15 05（全面改修） */
     "見送り: 担当でない": "Skipped: not the assigned PC",   /* ★2026-11-15 05（全面改修） */
+    "確認し直し: 担当の確認が古いので確かめ直して3分後にもう一度みます": "Re-checking: the owner check was stale, so it is checked again and retried in 3 minutes",   /* ★2026-11-27 05 */
+    "2店舗目の注文": "Second-shop orders",   /* ★2026-11-27 05 */
+    "件は2店舗目の表（{国}2_p）の AC に送りました": " were sent to column AC of the second-shop sheet ({cc}2_p)",   /* ★2026-11-27 05 */
+    "3店舗目など本店・2店舗目以外の注文": "Orders from shops other than the main and second shop (e.g. third shop)",   /* ★2026-11-27 05 */
+    "2店舗目の表に書けなかった分": "Could not write to the second-shop sheet",   /* ★2026-11-27 05 */
+    "2店舗目の送信に失敗": "Sending second-shop images failed",   /* ★2026-11-27 05 */
+    "件は利益管理表に表が無いので「未マッチ」に入っています": " have no sheet in the profit table, so they are counted as unmatched",   /* ★2026-11-27 05 */
     "約束した額なのでそのまま出しました。打ち間違いでないか確かめてください": "Listed as agreed. Please check it is not a typo.",   /* ★2026-11-15 05（全面改修） */
     "下書き・目標・🤖の控えを読めませんでした": "Could not load drafts, goal and 🤖 records",   /* ★2026-11-15 05（全面改修） */
     "下書きから公開した分を除けていないので、件数が多めに出ている恐れがあります。開き直すと読み直します": "Items published from drafts are not excluded, so counts may be too high. Reopen to reload.",   /* ★2026-11-15 05（全面改修） */
@@ -33306,6 +33313,11 @@ grant all on public.tasks to anon, authenticated, service_role;`;
   }
   // ---------------- 🛠 改修履歴 ----------------
   const CHANGELOG = [
+    { date: '2026-11-27', items: [
+      '🖼️ <b>利益管理表の画像（AC列）が新しい行だけ最大3時間空く件を直しました</b>（00 事業本部・02 業務部の調べ）。①3時間おきの自動転記は、担当の確認が古いだけの時（裏のタブ）に「担当でない」で3時間飛ばしていました→確かめ直して3分後にもう一度みます（最大30分。本当に別のPCが担当なら今までどおり）②「🖼️商品画像→AC列」は2店舗目の注文を2店舗目の表（{国}2_p）の AC に書きます（前は本店の表に送って未マッチになっていました）',
+    ], itemsEn: [
+      '🖼️ <b>Fixed new rows in the profit sheet waiting up to 3 hours for images (column AC)</b>. ① The 3-hourly auto transfer skipped for 3 hours as "not the assigned PC" when only the owner check was stale (background tab) → it now re-checks and tries again in 3 minutes (up to 30 minutes; if another PC really is the owner, behaviour is unchanged). ② "Product images → AC" now writes second-shop orders to the second-shop sheet ({cc}2_p) instead of counting them as unmatched on the main sheet.',
+    ] },
     { date: '2026-11-26', items: [
       '🎮 <b>ゲームの写真判定候補をポータルから保存</b>。既存の4台目から候補を読み、途中までのJSONも保存できます',
       '<b>出品違反の読み取り</b>。第4の既存窓口で、対象店の出品状況と違反理由を確認し、結果を保存して続きから再開できます。',
@@ -67084,6 +67096,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
   //   一度も発火しなかった（Chromeが裏タブの長いタイマーを止める／タブを凍結する）。
   //   30秒おきの見張り＋タブに戻った瞬間の見張りで「時刻を過ぎていたら走る」に変え、予約時刻は localStorage にも残す。
   let depAutoRunning = false;
+  let depAutoRecheckN = 0;   /* ★2026-11-27 05 担当の確認が古い時に確かめ直した回数（depAutoCheck） */
   function depAutoStop() { if (depAutoT) { clearInterval(depAutoT); depAutoT = null; } depAutoNextLabel(0); try { localStorage.removeItem('smdDepAutoNext'); } catch (_) {} }
   function depAutoArm(at = Date.now() + DEP_AUTO_MS) {
     depAutoStop();
@@ -67105,10 +67118,22 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
     if (!depAutoOn() || depAutoRunning || !depAutoNextAt) return;
     if (Date.now() < depAutoNextAt) return;
     if (!pcIsOwner()) {   // 🖥 担当のPCだけ（2台で同じ転記を走らせない）
+      /* ★2026-11-27 05（00 事業本部・02 の調べ）：11/27 14:21 の回は担当の登録がこのPCのままなのに、担当の確認（pcBeat）が5分以上古い裏タブだったので
+         「担当でない」として3時間先まで飛ばし、新しい行の画像 AC が空いた。確認が古い／まだ取れていないだけの時は、ここで確認し直して3分後にもう一度みる
+         （最大10回＝30分。確認が取れて本当に別のPCが担当なら、今までどおり3時間後）。2台で同時に動かない作り（pcIsOwner）はそのまま */
+      const _stale = !!settings.sbSecret && (!PC.known || (PC.last && Date.now() - PC.last > 5 * 60000));
+      if (_stale && depAutoRecheckN < 10) {
+        depAutoRecheckN++;
+        if (depAutoRecheckN === 1) { try { const a1 = JSON.parse(localStorage.getItem('smdDepRuns') || '[]'); const t1 = Array.isArray(a1) && a1[0] ? String(a1[0].note || '') : ''; if (!/^(確認し直し|見送り: 担当でない)/.test(t1)) depRunsSave(   /* レビュー2：担当でないPCで3時間ごとに2行ずつ積まない */depRecordRow('自動', null, '確認し直し: 担当の確認が古いので確かめ直して3分後にもう一度みます')); renderDepRuns(); } catch (_) {} }
+        try { pcBeat(false).catch(() => {}); } catch (_) {}
+        depAutoArm(Date.now() + 3 * 60 * 1000); return;
+      }
+      depAutoRecheckN = 0;
       /* ★2026-11-15 05（全面改修・型E/A）：担当のPCが替わると黙って止まっていた＝「見送り：担当でない」を記録する（同じ見送りが続く間は1行だけ＝記録の枠を埋めない） */
       try { const a0 = JSON.parse(localStorage.getItem('smdDepRuns') || '[]'); const top = Array.isArray(a0) ? a0[0] : null; if (!(top && /^見送り: 担当でない/.test(String(top.note || '')))) depRunsSave(depRecordRow('自動', null, '見送り: 担当でない（自動の転記は担当のPC「' + ((PC.owner && PC.owner.label) || 'もう1台') + '」だけで動きます。担当のPCでも「自動実行する」を ON にしてください）')); } catch (_) {}
       try { renderDepRuns(); } catch (_) {}
       depAutoArm(); return; }
+    depAutoRecheckN = 0;
     if (!depAutoClaim_()) { depAutoArm(); return; }   // 別タブが直前に走らせた＝こちらは次回へ
     depAutoRunning = true;
     if (depAutoT) { clearInterval(depAutoT); depAutoT = null; }
@@ -68022,7 +68047,7 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
         (imgDbRows || []).forEach(o => { if (o && o.cc && o.sn) (imgByCc[o.cc] = imgByCc[o.cc] || []).push({ cc: o.cc, sn: o.sn, items: o.items || [], shopId: o.shop_id || null }); });
       } catch (e) { imgByCc = null; st.textContent = '⚠ 注文の読み直しに失敗したので、いま持っている一覧で続けます: ' + (e && e.message); }
       const data = {};
-      let orderCount = 0, imgNoPic = 0, imgSkipOrd = 0, imgSub = 0;
+      let orderCount = 0, imgNoPic = 0, imgSkipOrd = 0, imgSub = 0, imgShop2 = 0;
       const imgAmbig = [], imgOneLeft = [];
       /* ★2026-10-24 レビュー#7：第二アカウントの注文は本店の表（{国}_p）に無い＝未マッチに入る。件数を出して「書けなかった」と区別する */
       if (!state.accounts) await loadAccounts().catch(() => {});
@@ -68060,8 +68085,11 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
           if (!use.length) { imgSkipOrd++; return; }
           /* ★2026-10-24 レビュー#6：明細が2つ以上あるのに画像のある明細が1つだけ → 送らない（GAS が全部の行に同じ画像を書いてしまう）。件数と注文番号を出す */
           if (items.length > 1 && use.length === 1) { imgOneLeft.push(r.cc + ' ' + r.sn); return; }
-          if (r.shopId && imgSubShops.has(String(r.shopId))) imgSub++;
-          data[cc][r.sn] = use.map(it => ({ name: it.name, variation: it.variation, img: IMG_CDN + it.image }));
+          /* ★2026-11-27 05（00 事業本部）：2店舗目（gs_japan_select）の注文は {国}2 の鍵で送る＝転記GAS が {国}2_p の AC に書く（前は本店の表に送って「未マッチ」になり、{国}2_p の画像を書く物が無かった）。3店舗目は表が無いので今までどおり */
+          let ccKey = cc;
+          if (r.shopId && imgSubShops.has(String(r.shopId))) { if (famNoOfShop(r.shopId) === 2 && cc !== 'vn') { ccKey = cc + '2'; imgShop2++; } else imgSub++; }
+          if (!data[ccKey]) data[ccKey] = {};
+          data[ccKey][r.sn] = use.map(it => ({ name: it.name, variation: it.variation, img: IMG_CDN + it.image }));
           orderCount++;
         });
       });
@@ -68072,11 +68100,25 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (!sidsImg.length) throw new Error('シートID未設定（⚙️設定に「YYYY-MM: ID」を入力）');
       st.textContent += '\n📄 書き込み先: ' + sheetPlanLabel(planImg);
       const aggImg = {};
+      /* ★2026-11-27 05 レビュー3・4：2店舗目（{国}2）は本店と別の要求で送る＝{国}2_p が無い表・GAS が受け付けない時も本店の AC は止めない。返事に無い鍵は「⚠ 返事が無い」と出す */
+      const dataMain = {}, data2 = {};
+      Object.keys(data).forEach(k => { if (/2$/.test(k)) data2[k] = data[k]; else dataMain[k] = data[k]; });
+      const img2Warn = [];
+      const addAgg = res => Object.keys(res || {}).forEach(cc => { const a = aggImg[cc] = aggImg[cc] || { wrote: 0, nomatch: 0, skip: 0 }; a.wrote += (res[cc].wrote || 0); a.nomatch += (res[cc].nomatch || 0); a.skip += (res[cc].skip || 0); });
       for (const sid of sidsImg) {
         st.textContent = `画像: ${orderCount}注文 → GASへ送信中... (シート${sidsImg.indexOf(sid) + 1}/${sidsImg.length})`;
-        const resp = await depPostChecked({ token: settings.depToken, action: 'images', data, sheetId: sid }, r => r.action === 'images' && r.result != null, '画像');
+        const resp = await depPostChecked({ token: settings.depToken, action: 'images', data: dataMain, sheetId: sid }, r => r.action === 'images' && r.result != null, '画像');
         if (!resp.ok) throw new Error(resp.error || 'GAS応答エラー');
-        Object.keys(resp.result || {}).forEach(cc => { const a = aggImg[cc] = aggImg[cc] || { wrote: 0, nomatch: 0, skip: 0 }; a.wrote += (resp.result[cc].wrote || 0); a.nomatch += (resp.result[cc].nomatch || 0); a.skip += (resp.result[cc].skip || 0); });
+        addAgg(resp.result);
+        const k2 = Object.keys(data2).filter(k => Object.keys(data2[k] || {}).length);
+        if (k2.length) {
+          try {
+            const resp2 = await depPostChecked({ token: settings.depToken, action: 'images', data: data2, sheetId: sid }, r => r.action === 'images' && r.result != null, '画像（2店舗目）');
+            if (!resp2.ok) throw new Error(resp2.error || 'GAS応答エラー');
+            addAgg(resp2.result);
+            k2.forEach(k => { if (!(resp2.result || {})[k]) img2Warn.push(k.toUpperCase() + '_p（返事が無い）'); });
+          } catch (e2) { img2Warn.push('2店舗目の送信に失敗: ' + ((e2 && e2.message) || e2)); }
+        }
       }
       st.textContent = `✅ 画像転記 完了（${orderCount}注文・${sheetPlanLabel(planImg)}）\n` + Object.keys(aggImg).map(cc =>
         `${cc.toUpperCase()}_p AC列: 記入=${aggImg[cc].wrote} / 既に画像あり=${aggImg[cc].skip || 0} / 未マッチ=${aggImg[cc].nomatch}`).join('\n');
@@ -68087,7 +68129,9 @@ grant select,insert,update,delete on listing_catalog to anon, authenticated;</pr
       if (imgNoPic) st.textContent += `\n⚠ 画像を持っていない明細 ${imgNoPic}件は送っていません（壊れたURLを書かないため）`;
       if (imgSkipOrd) st.textContent += `\n⚠ 明細の画像が1枚も無い注文 ${imgSkipOrd}件は丸ごと送っていません`;
       if (imgOneLeft.length) st.textContent += `\n⚠ まとめ買いで画像のある明細が1つだけの注文 ${imgOneLeft.length}件は送っていません（送ると画像の無い明細の行にも同じ画像が入るため・手で入れてください）\n　 ${imgOneLeft.slice(0, 8).join('\n　 ')}${imgOneLeft.length > 8 ? '\n　 …ほか' + (imgOneLeft.length - 8) + '件' : ''}`;
-      if (imgSub) st.textContent += `\nℹ 本店以外の店（2店舗目・第3）の注文 ${imgSub}件は本店の表（{国}_p）に無いので「未マッチ」に入っています（このボタンは本店の表だけに書きます）`;
+      if (imgShop2) st.textContent += `\nℹ 2店舗目の注文 ${imgShop2}件は2店舗目の表（{国}2_p）の AC に送りました`;
+      if (img2Warn.length) st.textContent += `\n⚠ 2店舗目の表に書けなかった分: ${[...new Set(img2Warn)].join(' ／ ')}`;
+      if (imgSub) st.textContent += `\nℹ 3店舗目など本店・2店舗目以外の注文 ${imgSub}件は利益管理表に表が無いので「未マッチ」に入っています`;
       if (imgAmbig.length) st.textContent += `\n⚠ まとめ買いで同じ明細が複数ある注文 ${imgAmbig.length}件は、どの行に入れるか決められません（手で確認してください）\n　 ${imgAmbig.slice(0, 8).join('\n　 ')}${imgAmbig.length > 8 ? '\n　 …ほか' + (imgAmbig.length - 8) + '件' : ''}`;
     } catch (e) {
       st.textContent = `❌ ${e.message}`;
